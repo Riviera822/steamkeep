@@ -77,6 +77,26 @@ catch {
     exit 1
 }
 
+# lancache-heartbeat check (WP 0.4): SteamPrefill (and any real LanCache-
+# aware client) auto-detects a cache by GETting /lancache-heartbeat and
+# requiring an X-LanCache-Processed-By response header - see
+# poc/steamprefill/PROTOCOL.md section 0 and LancacheIpResolver.cs. This
+# must return 200 (or 204) AND carry that header on both nginx.conf and
+# nginx-passthrough.conf.
+try {
+    $heartbeat = Invoke-WebRequest -Uri "$BaseUrl/lancache-heartbeat" -UseBasicParsing -TimeoutSec 10
+    if ($heartbeat.StatusCode -ne 200 -and $heartbeat.StatusCode -ne 204) {
+        Fail "$BaseUrl/lancache-heartbeat returned HTTP $($heartbeat.StatusCode), expected 200 or 204"
+    } elseif (-not $heartbeat.Headers['X-LanCache-Processed-By']) {
+        Fail "$BaseUrl/lancache-heartbeat did not carry an X-LanCache-Processed-By header (required by SteamPrefill/LanCache-client auto-detection)"
+    } else {
+        Pass "nginx responds on $BaseUrl/lancache-heartbeat with X-LanCache-Processed-By: $($heartbeat.Headers['X-LanCache-Processed-By'])"
+    }
+}
+catch {
+    Fail "nginx did not respond on $BaseUrl/lancache-heartbeat : $_"
+}
+
 # --- 1. reset: remove any previously cached copy of the test object --------
 if (Test-Path $CacheFile) {
     Remove-Item -Force $CacheFile

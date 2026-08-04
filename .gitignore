@@ -9,8 +9,11 @@ poc/nginx/
 poc/cache/
 poc/logs/
 poc/*.zip
+poc/steamprefill/bin/
 
 
 # Claude Code harness artifacts
 .claude/scheduled_tasks.lock
+
+.claude/settings.local.json
 

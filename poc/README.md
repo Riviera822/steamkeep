@@ -15,7 +15,8 @@ happens at the end of Phase 1, per the project's working agreement).
 
 Range-request behavior is explicitly **out of scope here** — see WP 0.2.
 Testing against the real Steam client is explicitly **out of scope here** —
-see WP 0.3. SteamPrefill is explicitly **out of scope here** — see WP 0.4.
+see WP 0.3. SteamPrefill is explicitly **out of scope here** — see WP 0.4
+([`steamprefill/PROTOCOL.md`](steamprefill/PROTOCOL.md)).
 
 ## What's in this folder
 
@@ -23,7 +24,7 @@ see WP 0.3. SteamPrefill is explicitly **out of scope here** — see WP 0.4.
 |---|---|
 | `setup.ps1` | Downloads + extracts official nginx-for-Windows into `nginx/`. Idempotent. |
 | `start.ps1` / `stop.ps1` | Start/stop nginx. `start.ps1` accepts `-Config <name>` (default `nginx.conf`). |
-| `conf/nginx.conf` | The purpose-built PoC config, WP 0.1 baseline: synchronous store-on-miss (`proxy_store`). Frozen — not modified after WP 0.1. |
+| `conf/nginx.conf` | The purpose-built PoC config, WP 0.1 baseline: synchronous store-on-miss (`proxy_store`). Was frozen through WP 0.1/0.2/0.3/0.5 (whose measurements are complete and committed); the freeze was lifted for WP 0.4 to add the `/lancache-heartbeat` endpoint (see below) — otherwise unchanged. |
 | `conf/nginx-passthrough.conf` | WP 0.5: transparent-passthrough variant — same HIT path (`try_files`, so a prefill-filled cache still serves as a HIT), but a MISS is proxied straight through with **no `proxy_store`**, no disk write. |
 | `test-smoke.ps1` | Automated proof: MISS then HIT against a real Steam CDN chunk (store config). |
 | `test-range.ps1` | WP 0.2: Range-request test suite (cold/warm cache, suffix/mid/multi-range, concurrent downloads). See `RANGE-FINDINGS.md`. |
@@ -31,6 +32,7 @@ see WP 0.3. SteamPrefill is explicitly **out of scope here** — see WP 0.4.
 | `test-misshandling.ps1` | WP 0.5: correctness + latency/throughput measurement suite comparing `nginx.conf` (store) vs. `nginx-passthrough.conf` (passthrough) on cache miss. See `MISS-HANDLING-FINDINGS.md`. |
 | `MISS-HANDLING-FINDINGS.md` | WP 0.5 evidence write-up for the "Miss-handling decision" checkbox (`docs/PROJECT_PLAN.md` §7) — synchronous store vs. transparent passthrough, correctness + measured latency/throughput, preliminary Phase-0-gate recommendation. |
 | `steam-client-test/` | WP 0.3: real-Steam-client test kit — `PROTOCOL.md` (step-by-step protocol for the human-run test), `analyze.ps1` (mines `logs/access.log` and answers the Phase-0 checkboxes automatically), `test-analyze.ps1` (proves the analysis script itself against a synthetic fixture log). See below. |
+| `steamprefill/` | WP 0.4: SteamPrefill test kit — `setup.ps1` (downloads the latest `tpill90/steam-lancache-prefill` Windows x64 release into `steamprefill/bin/`, gitignored), `PROTOCOL.md` (protocol for the human-run login/select-apps/prefill test — **read section 0 first**, it explains the `/lancache-heartbeat` + `X-LanCache-Processed-By` contract SteamPrefill's auto-detection requires, now implemented in both nginx configs), `verify.ps1` (mines `logs/access.log` + `cache/depot/` and answers the Phase-0 checkboxes), `test-verify.ps1` (proves `verify.ps1` against a synthetic fixture log + fake cache dir). See `steamprefill/PROTOCOL.md`. |
 | `nginx/` | Extracted nginx binary (gitignored, recreated by `setup.ps1`). |
 | `cache/` | The cache store, `cache/depot/<id>/...` (gitignored). |
 | `logs/` | nginx access/error log + pid (gitignored). |
@@ -248,7 +250,16 @@ no upstream was ever contacted). Logged to `poc/logs/access.log`.
   exercised for real) — but running it still requires a human to actually
   execute the protocol (admin rights for the hosts file, a real download);
   it had not been run as of this writing.
-- **SteamPrefill** — not installed or run against this cache. That's WP 0.4.
+- **SteamPrefill** — WP 0.4 (`steamprefill/`) builds the test kit and confirms
+  (via the binary's own source, `LancacheIpResolver.cs`, and an empirical
+  `curl` check against the running PoC) that SteamPrefill's cache
+  auto-detection requires a `/lancache-heartbeat` endpoint returning an
+  `X-LanCache-Processed-By` header — a real LanCache-project contract.
+  Both `conf/nginx.conf` and `conf/nginx-passthrough.conf` now implement
+  it (a minimal `add_header` + `return 200` location, confirmed via a live
+  `curl` check and asserted automatically by `test-smoke.ps1`). The
+  interactive login/select-apps/prefill run itself (see
+  `steamprefill/PROTOCOL.md`) is still the user's part to execute.
 - **Non-200 upstream responses** (404/403/etc.) — `proxy_store` behavior on
   error responses was not exercised or asserted here.
 - **Miss-handling performance (store vs. passthrough)** — this package (0.1)
