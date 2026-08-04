@@ -1,0 +1,359 @@
+# SteamVault — Project Plan
+
+A Steam game cache with true per-game management — self-hosted, Docker-first.
+
+Status: PLANNING · License: Apache-2.0
+
+> SteamVault is a community project and is not affiliated with Valve Corporation.
+> "Steam" is a trademark of Valve Corporation.
+
+---
+
+## 1. Vision & Problem Statement
+
+LanCache is the de-facto standard for LAN caching of game downloads, but it has
+a well-known structural limitation: the cache is a generic nginx HTTP cache
+(files stored under hashed cache keys), which makes **deleting individual games
+from the cache impossible**. Community tools like lancache-manager reconstruct
+the game-to-file mapping after the fact by parsing access logs — clever, but
+error-prone and maintenance-heavy.
+
+SteamVault inverts the approach: the **depot ID is already part of the Steam
+CDN URL** (`/depot/<depotid>/chunk/<hash>`). By storing the cache path-faithfully
+(nginx `proxy_store` instead of `proxy_cache`), the game mapping becomes part of
+the directory structure from the start. Deleting a game = deleting its depot
+folders. No log parsing, no key reconstruction, no heuristics.
+
+**Target audience:** Homelab operators and LAN party organizers who want to know
+which game occupies how much space — and want to clean up selectively.
+
+**Deliberate scope cut:** Steam only. No Epic/Battle.net/Riot multi-service
+support like LanCache — this keeps the URL-schema problem manageable and the
+project focused. (Extensibility via a plugin architecture is kept open, but not
+for v1.)
+
+---
+
+## 2. Requirements
+
+| # | Requirement | Component |
+|---|---|---|
+| A1 | Prefill Steam games onto the server remotely | Backend + Prefill |
+| A2 | Serve downloads at LAN speed from the cache at home | Cache Core |
+| A3 | Browse the Steam library visually in an Android app (covers, names) | Android App |
+| A4 | Per-game cache status badge (cached / running / not cached) | Backend + App |
+| A5 | Per-game download trigger from the app (start → done status) | Backend + App |
+| A6 | App "homecall" works over Tailscale (embedded tsnet), Twingate, or a public domain — user-selectable connectivity profile | Android App |
+| A7 | Prefill updates automatically during the day (cron) | Scheduler |
+| A8 | Cron criterion: games actually installed on the gaming PC | PC Agent |
+| A9 | Delete individual games from the cache to free up space | Cache Core + Backend |
+| A10 | Per-game size overview | Backend |
+| A11 | Community-ready: Docker-first, documented, licensed, CI | Project Infra |
+| A12 | Detect clients silently bypassing the cache (DoH/DoT, IPv6, Linux client quirks) and surface it | Backend |
+| A13 | Reclaim space from outdated chunks per game (manifest-based garbage collection) | Backend |
+| A14 | Works without a pre-existing local DNS server (bundled optional DNS container, or DNS-free hosts-file mode) | vault-dns / PC Agent |
+
+---
+
+## 3. Architecture
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │            Cache Server                 │
+   Android App      │                                         │
+  ┌────────────┐    │  ┌─────────────┐    ┌───────────────┐   │
+  │ Compose UI │    │  │ vault-core   │    │ vault-api     │   │
+  │ Steam Lib  │────┼─▶│ nginx        │    │ FastAPI       │◀──┼── PC Agent
+  │ tsnet      │    │  │ proxy_store  │◀───│ SQLite        │   │   (gaming PC,
+  └────────────┘    │  │ /cache/depot/│    │ prefill ctrl  │   │    reports
+        │           │  └─────────────┘    └───────┬───────┘   │    installed
+        │           │         ▲                   │           │    games)
+        ▼           │         │           ┌───────▼───────┐   │
+  Steam Web API     │   DNS rewrite       │ SteamPrefill  │   │
+  (library+covers,  │   *.steamcontent    │ (subprocess/  │   │
+   regular internet)│   .com → server     │  container)   │   │
+                    └─────────────────────────────────────────┘
+```
+
+### Components
+
+**vault-core** — the cache itself
+- nginx container with `proxy_store`: Steam CDN responses are stored
+  path-faithfully under `/cache/depot/<depotid>/...`
+- No LRU, no automatic eviction — cleanup is deliberately explicit
+  (that's the feature, not the flaw)
+- A lean, purpose-built nginx config set; NOT a LanCache fork — only the
+  DNS-redirection principle is shared (rewrite `*.steamcontent.com` to the
+  cache server via any local DNS: AdGuard Home, Pi-hole, dnsmasq, ...)
+
+**vault-dns** — optional bundled DNS (for users without a local DNS server)
+- dnsmasq container, enabled via a Compose profile (`--profile dns`)
+- Answers `*.steamcontent.com` with the cache IP, forwards everything else
+  to a configurable upstream; dnsmasq's `address=` directive returns NODATA
+  for AAAA queries on matched domains, closing the IPv6 bypass by default
+- Not needed if the user already runs AdGuard Home, Pi-hole, dnsmasq or
+  Unbound — a rewrite there does the same job (recommended for homelabs)
+
+**vault-api** — brain & API
+- FastAPI + SQLite (single file, no DB container — deliberately simple
+  for easy adoption)
+- Responsible for:
+  - Depot→app mapping (from SteamPrefill data / Steam PICS)
+  - Prefill orchestration (SteamPrefill as subprocess/sidecar, job queue)
+  - Per-app status tracking (idle / running / done / error / stale)
+  - Per-game size calculation (du over depot folders, cached)
+  - Per-game deletion (remove the app's depot folders)
+  - Scheduler (configurable daytime window, runs over the installed list)
+- REST API (see section 5)
+
+**vault-agent** — PC listener
+- Small Python or Go binary on the gaming PC (Windows)
+- Reads `steamapps/appmanifest_*.acf` from all library folders
+  (parses `libraryfolders.vdf` for multiple drives)
+- Reports the list of installed app IDs periodically (e.g. every 30 min)
+  via HTTP POST to vault-api — over Tailscale
+- Runs as a scheduled task / optional tray icon; config: one URL + API key
+- Deliberately dumb: read + report only, no control logic
+- **Optional hosts-file mode (opt-in, requires admin rights):** writes a
+  `lancache.steamcontent.com → cache IP` entry into the Windows hosts file.
+  The Windows Steam client checks this hostname itself and uses it as a
+  cache when it resolves — no DNS server needed at all. Windows-only
+  (the Linux/Steam Deck client does not perform this lookup).
+  *Note: this hostname is hardcoded by Valve in the Steam client and lives
+  on Valve's own `steamcontent.com` domain — it is the client's built-in
+  cache-discovery interface, not a LanCache-project dependency. It cannot
+  be renamed.*
+
+**vault-app** — Android app
+- Kotlin + Jetpack Compose
+- Steam Web API (`GetOwnedGames`) for library + covers (regular internet)
+- **Connectivity profiles** (user-selectable, abstracted behind one API-client
+  interface — the server never knows or cares which one is used):
+  - **Embedded Tailscale (tsnet):** Go Mobile `.aar` bridge, auth-key based.
+    Zero-config for the user beyond pasting an auth key. Tailscale only.
+  - **System VPN:** plain HTTPS to an internal hostname/IP; works with the
+    Tailscale app, Twingate client, WireGuard, or any other VPN the OS
+    provides. (Twingate has no embeddable SDK — this profile covers it.)
+  - **Public domain:** plain HTTPS to a public URL fronted by the user's
+    reverse proxy (Traefik, Caddy, Nginx Proxy Manager, Cloudflare Tunnel).
+    Requires TLS; strongly recommends forward-auth/OIDC in front of the API
+    in addition to the API key.
+- Grid view with status badges, multi-select, trigger, polling until "done",
+  delete function with size display ("Game X occupies 43 GB — delete?")
+
+---
+
+## 4. Cache Design (Core Innovation)
+
+### Storage layout
+```
+/cache/
+└── depot/
+    ├── 441/                    ← depot ID (belongs to app 440, TF2)
+    │   └── chunk/
+    │       ├── <sha>...
+    │       └── <sha>...
+    ├── 442/
+    └── manifest/               ← manifest responses stored separately
+```
+
+### Depot→app mapping
+- A game consists of multiple depots (content, languages, DLC)
+- Source: Steam PICS via SteamKit — SteamPrefill already uses this;
+  vault-api keeps its own mapping table in SQLite and updates it during
+  prefill (SteamPrefill knows the mapping at download time anyway)
+- Fallback: manual mapping via the API (edge cases / delisted games)
+
+### Deletion
+```
+DELETE /cache/{appid}
+  → mapping: appid → [depotids]
+  → rm -rf /cache/depot/<each depotid>
+  → reset status to "idle"
+```
+Shared depots (redistributables, shared content): before deleting, check
+whether a depot ID is mapped to multiple tracked apps → skip those and
+report them in the result ("2 depots shared with game Y, not deleted").
+
+### Staleness / updates
+- vault-api stores the manifest ID of the last prefill per app
+- The scheduler periodically compares against the current manifest ID
+  (Steam API) → if it differs: status "stale", an update prefill fetches
+  only the changed chunks
+- App badge logic: green=current, yellow=running, orange=stale, gray=not cached
+
+---
+
+## 5. Known LanCache Pain Points SteamVault Addresses
+
+Documented community issues (GitHub issues, Steam forums, LanCache docs) that a
+Steam-only, prefill-first design can solve better:
+
+| Pain point | How SteamVault addresses it |
+|---|---|
+| **No per-game visibility or deletion** — cache is opaque hashed storage | Core design: path-faithful depot storage, per-game size, per-game delete |
+| **Slow cache-miss downloads** — nginx slice mechanics + CDN back-off behave poorly with the Steam client; users resort to multi-IP workarounds | **Prefill-first philosophy:** a cache miss triggers an async prefill job (SteamPrefill downloads far faster than the Steam client) instead of relying on synchronous slice-fetching being fast. Miss path = transparent passthrough, cache gets filled by prefill. Design decision to validate in Phase 0/1 |
+| **Clients silently bypassing the cache** — Linux/Steam Deck clients not honoring `lancache.steamcontent.com`, DoH/DoT ignoring local DNS, ISP DNS hijacking | **Bypass detection:** vault-api tracks per-client hit statistics; a client that reports installed games (agent) but never appears in cache logs triggers a visible warning in app/API. Setup docs cover the Linux-client and DoH caveats explicitly |
+| **IPv6 undermines DNS redirection** — clients resolve AAAA records of the real CDN and bypass the cache | Documented stance + setup guidance (block/rewrite AAAA for `*.steamcontent.com` in the local DNS); bypass detection catches the failure case |
+| **Stale chunks waste space forever** — a generic HTTP cache never learns that a game update obsoleted old chunks | **Manifest-based garbage collection:** per depot, diff cached chunks against the current manifest and delete orphans — only possible because storage is depot-structured |
+| **No insight without extra tooling** (Grafana/ELK stacks or lancache-manager needed) | Stats are first-class API citizens: summary, per-game, per-client — the app is the dashboard |
+
+---
+
+## 6. API Design (vault-api)
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | /v1/games | All tracked games: status, size, last prefill |
+| GET | /v1/games/{appid} | Detail incl. depot list |
+| POST | /v1/prefill | Body: `{appids: [..]}` → create jobs |
+| GET | /v1/jobs/{id} | Job status (for app polling) |
+| DELETE | /v1/cache/{appid} | Delete a game from the cache |
+| POST | /v1/cache/{appid}/gc | Garbage-collect orphaned chunks (manifest diff) |
+| GET | /v1/cache/summary | Total usage, top consumers, free space |
+| GET | /v1/clients | Per-client hit stats incl. bypass warnings |
+| POST | /v1/agent/installed | PC agent reports installed app IDs |
+| GET | /v1/health | Liveness (for external monitoring) |
+
+Auth: static API key in a header (v1). Since everything is only reachable
+over the tailnet, this is sufficient; OIDC/forward-auth is a later option
+for users who expose the API differently.
+
+---
+
+## 7. Phase Plan
+
+### Phase 0 — Feasibility PoC (CRITICAL, before anything else)
+**Goal: verify the central assumption before writing product code.**
+- [ ] Test container: nginx with `proxy_store` + DNS rewrite on a test device
+- [ ] Route a real Steam download through it and verify:
+  - [ ] Does Steam consistently use the `/depot/<id>/chunk/<hash>` scheme?
+  - [ ] Do range requests work cleanly with `proxy_store`?
+    (known risk: `proxy_store` only stores complete responses —
+    may need the `slice` module, or chunks may be small enough)
+  - [ ] Cache hit on second download? Speed LAN-limited?
+  - [ ] **Miss-handling decision:** synchronous store vs. transparent
+    passthrough + async prefill (see pain-points section) — measure both
+- [ ] Run SteamPrefill against the PoC cache — does it fill correctly?
+- [ ] Verify behavior of the Linux/Steam Deck client (known upstream quirk:
+      does not perform the `lancache.steamcontent.com` lookup like Windows)
+- **Abort criterion:** If `proxy_store` fails on range requests with no clean
+  workaround → fall back to Plan A (unmodified LanCache + a manager layer in
+  the spirit of lancache-manager; the rest of the project stays usable as-is)
+
+### Phase 1 — vault-core + vault-api (server MVP)
+- [ ] Production-ready nginx config (log rotation, healthcheck)
+- [ ] FastAPI skeleton, SQLite schema, depot mapping import
+- [ ] Prefill orchestration (SteamPrefill subprocess, job queue, one job at a time)
+- [ ] Size calculation + deletion incl. shared-depot protection
+- [ ] Docker Compose (2 services + volume), .env convention, pinned image tags
+- [ ] Optional vault-dns container behind a Compose profile (`--profile dns`)
+- [ ] **MVP test: prefill a game via curl, query its size, delete it — no app**
+
+### Phase 2 — vault-agent (PC listener)
+- [ ] ACF/VDF parser (appmanifest + libraryfolders, multiple drives)
+- [ ] HTTP reporter with retry (tolerate VPN/network outages)
+- [ ] Optional hosts-file mode (opt-in, admin rights, clean uninstall path)
+- [ ] Document Windows scheduled-task setup, optional installer script
+- [ ] vault-api: scheduler uses the installed list as the prefill set
+
+### Phase 3 — Scheduler & Update Logic
+- [ ] Manifest comparison (stale detection)
+- [ ] Configurable cron window (e.g. 09:00–17:00, every 3 h)
+- [ ] Manifest-based garbage collection (`/v1/cache/{appid}/gc`, optional
+      auto-GC after successful update prefill)
+- [ ] Per-client hit statistics + bypass detection (`/v1/clients`)
+- [ ] Optional generic webhook notifications (Discord/Slack/ntfy-compatible;
+      built as a generic webhook feature, not vendor-specific)
+
+### Phase 4 — Android App
+- [ ] Kotlin/Compose project, Steam Web API integration (library + covers)
+- [ ] Connectivity-profile abstraction (one API-client interface, three
+      implementations: tsnet / system VPN / public domain)
+- [ ] tsnet Go module + gomobile build (`.aar`), auth-key handling
+- [ ] Grid + badges + multi-select + trigger + polling
+- [ ] Delete flow with size display and confirmation; GC action per game
+- [ ] Bypass warnings surfaced in the UI
+- [ ] Document APK build (no Play Store requirement; F-Droid as a long-term goal)
+
+### Phase 5 — Community Release
+- [ ] README with architecture diagram, quickstart (compose up in 5 minutes)
+- [ ] License: Apache-2.0 (permissive for maximum adoption, includes patent
+      grant; AGPL deliberately rejected as it deters contributors and
+      companies in the early phase)
+- [ ] CI: GitHub Actions — lint, tests, multi-arch image build (amd64/arm64),
+      publish to ghcr.io with pinned version tags
+- [ ] CONTRIBUTING.md, issue templates, example configs
+- [ ] Announcement: r/selfhosted, r/homelab, LanCache Discord (stay fair:
+      frame as a complement/alternative, not a "LanCache killer")
+
+---
+
+## 8. Repository Structure (Monorepo)
+
+```
+steamvault/
+├── core/            # nginx config, Dockerfile
+├── dns/             # optional dnsmasq container (Compose profile)
+├── api/             # FastAPI, SQLite schema, scheduler
+├── agent/           # PC listener (Windows)
+├── app/             # Android (Kotlin + Go tsnet module)
+├── deploy/          # compose.yaml, example .env, DNS mode docs
+├── docs/            # architecture, ADRs, setup guides
+└── .github/         # CI, templates
+```
+
+---
+
+## 9. Risks & Open Questions
+
+| Risk | Severity | Mitigation |
+|---|---|---|
+| `proxy_store` incompatible with range requests | HIGH | Phase 0 resolves this; Plan A fallback defined |
+| Steam changes its CDN URL scheme | MEDIUM | Log schema anomalies with alerts; abstract the mapping layer |
+| Public-domain profile exposes the API to the internet | MEDIUM | TLS mandatory, strong bearer token, docs strongly recommend forward-auth/OIDC + rate limiting in the reverse proxy; API designed with no unauthenticated endpoints |
+| Shared depots → incomplete deletion | LOW | Shared detection + transparent reporting |
+| tsnet gomobile build complexity | MEDIUM | Profile abstraction means tsnet can ship later; system-VPN profile works day one |
+| Single-maintainer risk | MEDIUM | Small scope (Steam only), good docs, permissive license lower the contribution barrier |
+| SteamPrefill upstream dependency | LOW | Used only as a CLI subprocess, replaceable |
+
+**Deliberately OUT of scope (v1):** multi-service (Epic etc.), multi-tenant
+setups, a web UI (the Android app IS the UI; a web UI is welcome as a
+community contribution), iOS.
+
+---
+
+## 10. Deployment Notes (generic)
+
+- vault-core needs to answer on **port 80** (Steam CDN traffic is plain HTTP).
+  If another service occupies port 80 on the host, use a dedicated IP
+  (IP alias, macvlan, or a dedicated VLAN interface).
+- **DNS redirection — three modes, pick one:**
+  1. **Existing local DNS** (recommended for homelabs): rewrite
+     `*.steamcontent.com` → cache server IP in AdGuard Home, Pi-hole,
+     dnsmasq or Unbound. Block/rewrite AAAA records too — IPv6 fallback
+     silently bypasses the cache.
+  2. **Bundled vault-dns** (no local DNS server required): enable the
+     optional dnsmasq container and point your router's DHCP DNS at it.
+     AAAA handling is covered by default.
+  3. **DNS-free hosts mode** (single Windows gaming PC, simplest setup):
+     a `lancache.steamcontent.com` hosts entry — manually or automated by
+     vault-agent (opt-in). Windows Steam client only.
+- **Remote access (vault-api only — never expose vault-core/port 80):**
+  - Tailscale: reusable auth key for the app's embedded tsnet node, or the
+    regular Tailscale client app
+  - Twingate: define vault-api as a Twingate resource; the app uses the
+    system-VPN profile
+  - Public domain: front vault-api with your reverse proxy (Traefik, Caddy,
+    NPM, Cloudflare Tunnel); TLS required, forward-auth/OIDC strongly
+    recommended on top of the API key
+- `/v1/health` is designed to be polled by any external monitoring system.
+
+---
+
+## 11. Next Steps
+
+1. [ ] **Build the Phase 0 PoC**: test nginx + DNS rewrite + one real Steam
+   download. The result decides Plan A vs. Plan B.
+2. [ ] Create the public repository.
+3. [ ] Only then: start implementation of Phase 1.
