@@ -22,11 +22,14 @@ see WP 0.3. SteamPrefill is explicitly **out of scope here** — see WP 0.4.
 | Path | Purpose |
 |---|---|
 | `setup.ps1` | Downloads + extracts official nginx-for-Windows into `nginx/`. Idempotent. |
-| `start.ps1` / `stop.ps1` | Start/stop nginx with `conf/nginx.conf`. |
-| `conf/nginx.conf` | The purpose-built PoC config (see below). |
-| `test-smoke.ps1` | Automated proof: MISS then HIT against a real Steam CDN chunk. |
+| `start.ps1` / `stop.ps1` | Start/stop nginx. `start.ps1` accepts `-Config <name>` (default `nginx.conf`). |
+| `conf/nginx.conf` | The purpose-built PoC config, WP 0.1 baseline: synchronous store-on-miss (`proxy_store`). Frozen — not modified after WP 0.1. |
+| `conf/nginx-passthrough.conf` | WP 0.5: transparent-passthrough variant — same HIT path (`try_files`, so a prefill-filled cache still serves as a HIT), but a MISS is proxied straight through with **no `proxy_store`**, no disk write. |
+| `test-smoke.ps1` | Automated proof: MISS then HIT against a real Steam CDN chunk (store config). |
 | `test-range.ps1` | WP 0.2: Range-request test suite (cold/warm cache, suffix/mid/multi-range, concurrent downloads). See `RANGE-FINDINGS.md`. |
 | `RANGE-FINDINGS.md` | WP 0.2 evidence write-up answering the Phase 0 critical question on `proxy_store` + Range requests. |
+| `test-misshandling.ps1` | WP 0.5: correctness + latency/throughput measurement suite comparing `nginx.conf` (store) vs. `nginx-passthrough.conf` (passthrough) on cache miss. See `MISS-HANDLING-FINDINGS.md`. |
+| `MISS-HANDLING-FINDINGS.md` | WP 0.5 evidence write-up for the "Miss-handling decision" checkbox (`docs/PROJECT_PLAN.md` §7) — synchronous store vs. transparent passthrough, correctness + measured latency/throughput, preliminary Phase-0-gate recommendation. |
 | `steam-client-test/` | WP 0.3: real-Steam-client test kit — `PROTOCOL.md` (step-by-step protocol for the human-run test), `analyze.ps1` (mines `logs/access.log` and answers the Phase-0 checkboxes automatically), `test-analyze.ps1` (proves the analysis script itself against a synthetic fixture log). See below. |
 | `nginx/` | Extracted nginx binary (gitignored, recreated by `setup.ps1`). |
 | `cache/` | The cache store, `cache/depot/<id>/...` (gitignored). |
@@ -47,11 +50,12 @@ nginx needs at startup). Safe to re-run — skips the download if
 ## Start / stop
 
 ```powershell
-.\start.ps1   # listens on http://127.0.0.1:80
-.\stop.ps1    # graceful `nginx -s stop`
+.\start.ps1                                    # store config (nginx.conf), unchanged default
+.\start.ps1 -Config nginx-passthrough.conf     # WP 0.5 passthrough variant
+.\stop.ps1                                     # graceful `nginx -s stop` (works for either config)
 ```
 
-`start.ps1` launches `nginx.exe -p <poc> -c conf/nginx.conf`; all relative
+`start.ps1` launches `nginx.exe -p <poc> -c conf/<Config>`; all relative
 paths inside `nginx.conf` (root, logs, temp dirs) resolve against that `-p`
 prefix, so the config doesn't hardcode this machine's checkout path.
 
@@ -105,6 +109,24 @@ override it:
 ```powershell
 .\test-smoke.ps1 -DepotId <id> -ChunkHash <sha1>
 ```
+
+For the miss-handling design decision — synchronous store (`nginx.conf`) vs.
+transparent passthrough (`nginx-passthrough.conf`), the `docs/PROJECT_PLAN.md`
+§7 "Miss-handling decision" checkbox — see:
+
+```powershell
+.\test-misshandling.ps1
+```
+
+This starts/stops nginx itself, switching between both configs, and runs:
+correctness checks (passthrough stores nothing on a cold miss, including on a
+Range request; a pre-seeded/prefill-filled object still serves as a HIT under
+passthrough; the store config's WP 0.1/0.2 MISS→store→HIT behavior is
+unchanged), plus a latency/throughput measurement (N=5 iterations, cold miss
+and warm HIT, against both configs). Exit code reflects only the correctness
+checks — the measurement is written up, with the full numbers and a
+preliminary Phase-0-gate recommendation, in
+[`MISS-HANDLING-FINDINGS.md`](MISS-HANDLING-FINDINGS.md).
 
 For the real Steam client (WP 0.3 — a Windows hosts-file redirect + an
 actual game download, not synthetic curl requests), see
@@ -229,6 +251,11 @@ no upstream was ever contacted). Logged to `poc/logs/access.log`.
 - **SteamPrefill** — not installed or run against this cache. That's WP 0.4.
 - **Non-200 upstream responses** (404/403/etc.) — `proxy_store` behavior on
   error responses was not exercised or asserted here.
+- **Miss-handling performance (store vs. passthrough)** — this package (0.1)
+  only proves store-mode correctness, not whether synchronous store-on-miss
+  is fast enough vs. the plan's prefill-first alternative. Covered by WP 0.5
+  (`test-misshandling.ps1` / `MISS-HANDLING-FINDINGS.md`), also preliminary
+  pending WP 0.3's real-client evidence.
 - **Docker/production hardening** — no log rotation, no healthcheck
   container, no multi-worker tuning. Deliberately out of scope per the
   project's Phase 0 charter ("no production code before Phase 0").
