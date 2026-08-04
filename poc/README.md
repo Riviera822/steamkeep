@@ -27,6 +27,7 @@ see WP 0.3. SteamPrefill is explicitly **out of scope here** — see WP 0.4.
 | `test-smoke.ps1` | Automated proof: MISS then HIT against a real Steam CDN chunk. |
 | `test-range.ps1` | WP 0.2: Range-request test suite (cold/warm cache, suffix/mid/multi-range, concurrent downloads). See `RANGE-FINDINGS.md`. |
 | `RANGE-FINDINGS.md` | WP 0.2 evidence write-up answering the Phase 0 critical question on `proxy_store` + Range requests. |
+| `steam-client-test/` | WP 0.3: real-Steam-client test kit — `PROTOCOL.md` (step-by-step protocol for the human-run test), `analyze.ps1` (mines `logs/access.log` and answers the Phase-0 checkboxes automatically), `test-analyze.ps1` (proves the analysis script itself against a synthetic fixture log). See below. |
 | `nginx/` | Extracted nginx binary (gitignored, recreated by `setup.ps1`). |
 | `cache/` | The cache store, `cache/depot/<id>/...` (gitignored). |
 | `logs/` | nginx access/error log + pid (gitignored). |
@@ -104,6 +105,18 @@ override it:
 ```powershell
 .\test-smoke.ps1 -DepotId <id> -ChunkHash <sha1>
 ```
+
+For the real Steam client (WP 0.3 — a Windows hosts-file redirect + an
+actual game download, not synthetic curl requests), see
+[`steam-client-test/PROTOCOL.md`](steam-client-test/PROTOCOL.md) for the
+step-by-step protocol and
+[`steam-client-test/analyze.ps1`](steam-client-test/analyze.ps1) for the
+script that mines `poc/logs/access.log` afterwards and answers the Phase-0
+checkboxes (URI-scheme conformance, real-client Range usage, hit/miss
+split + throughput, per-depot counts) automatically, writing a
+`RESULTS-<timestamp>.md` alongside it. The analysis script has its own
+test (`steam-client-test/test-analyze.ps1`, a synthetic fixture log) that
+passes independently of the real-client run.
 
 ## Result: the central assumption holds (for non-Range GET)
 
@@ -205,11 +218,14 @@ no upstream was ever contacted). Logged to `poc/logs/access.log`.
   WP 0.2 (`test-range.ps1` / `RANGE-FINDINGS.md`), with a preliminary
   (not yet final — see that file) answer to the `docs/PROJECT_PLAN.md` §9
   risk.
-- **The real Steam client** — this PoC was tested with `curl.exe`/
+- **The real Steam client** — this PoC (0.1) was tested with `curl.exe`/
   `Invoke-WebRequest` directly against depot chunk URLs, not by running
-  Steam with a hosts-file redirect and downloading a real game. That's
-  WP 0.3 (also where the loop-risk mitigation above gets exercised for
-  real).
+  Steam with a hosts-file redirect and downloading a real game. WP 0.3
+  (`steam-client-test/`) provides the protocol and the automated log
+  analysis for that test (also where the loop-risk mitigation above gets
+  exercised for real) — but running it still requires a human to actually
+  execute the protocol (admin rights for the hosts file, a real download);
+  it had not been run as of this writing.
 - **SteamPrefill** — not installed or run against this cache. That's WP 0.4.
 - **Non-200 upstream responses** (404/403/etc.) — `proxy_store` behavior on
   error responses was not exercised or asserted here.

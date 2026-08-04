@@ -10,3 +10,7 @@ poc/cache/
 poc/logs/
 poc/*.zip
 
+
+# Claude Code harness artifacts
+.claude/scheduled_tasks.lock
+
