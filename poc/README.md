@@ -33,6 +33,7 @@ see WP 0.3. SteamPrefill is explicitly **out of scope here** — see WP 0.4
 | `MISS-HANDLING-FINDINGS.md` | WP 0.5 evidence write-up for the "Miss-handling decision" checkbox (`docs/PROJECT_PLAN.md` §7) — synchronous store vs. transparent passthrough, correctness + measured latency/throughput, preliminary Phase-0-gate recommendation. |
 | `steam-client-test/` | WP 0.3: real-Steam-client test kit — `PROTOCOL.md` (step-by-step protocol for the human-run test), `analyze.ps1` (mines `logs/access.log` and answers the Phase-0 checkboxes automatically), `test-analyze.ps1` (proves the analysis script itself against a synthetic fixture log). See below. |
 | `steamprefill/` | WP 0.4: SteamPrefill test kit — `setup.ps1` (downloads the latest `tpill90/steam-lancache-prefill` Windows x64 release into `steamprefill/bin/`, gitignored), `PROTOCOL.md` (protocol for the human-run login/select-apps/prefill test — **read section 0 first**, it explains the `/lancache-heartbeat` + `X-LanCache-Processed-By` contract SteamPrefill's auto-detection requires, now implemented in both nginx configs), `verify.ps1` (mines `logs/access.log` + `cache/depot/` and answers the Phase-0 checkboxes), `test-verify.ps1` (proves `verify.ps1` against a synthetic fixture log + fake cache dir). See `steamprefill/PROTOCOL.md`. |
+| `linux-client-test/` | WP 0.6: Linux-Steam-client (WSL2) test kit — **pre-built, awaiting WSL2 setup** (see below). |
 | `nginx/` | Extracted nginx binary (gitignored, recreated by `setup.ps1`). |
 | `cache/` | The cache store, `cache/depot/<id>/...` (gitignored). |
 | `logs/` | nginx access/error log + pid (gitignored). |
@@ -141,6 +142,22 @@ split + throughput, per-depot counts) automatically, writing a
 `RESULTS-<timestamp>.md` alongside it. The analysis script has its own
 test (`steam-client-test/test-analyze.ps1`, a synthetic fixture log) that
 passes independently of the real-client run.
+
+For the Linux desktop Steam client (WP 0.6 — verifying the known upstream
+quirk that it does **not** perform the `lancache.steamcontent.com` lookup,
+and validating the `vault-dns` wildcard-rewrite approach as the Linux/Steam
+Deck-compatible alternative), see
+[`linux-client-test/PROTOCOL.md`](linux-client-test/PROTOCOL.md). **Status:
+pre-built, awaiting WSL2 setup** — WSL2 is not available on this machine yet
+(SVM must first be enabled in BIOS, then Ubuntu installed — see that
+document's section 0), so the WSL-side scripts
+(`linux-client-test/wsl-setup.sh`, `scenario-a.sh`, `scenario-b.sh`) have
+not been run for real yet. What *is* testable today —
+`linux-client-test/analyze-windows.ps1` (a thin wrapper around this
+folder's own `analyze.ps1`, see above) against a synthetic fixture, plus a
+bash syntax check of the three shell scripts — is proven by
+`linux-client-test/test-kit.ps1`, which passes independently of WSL2
+existing.
 
 ## Result: the central assumption holds (for non-Range GET)
 

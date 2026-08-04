@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+#
+# SteamVault Phase 0 PoC -- WP 0.6, Scenario B: DNS-rewrite mode (dnsmasq
+# inside WSL2) for the Linux-Steam-client test. Run this INSIDE WSL2
+# Ubuntu, after wsl-setup.sh has run at least once (see PROTOCOL.md
+# section 5).
+#
+# What this does: writes a dnsmasq config that rewrites *.steamcontent.com
+# (wildcard, not just the single lancache.steamcontent.com name) to the
+# cache's IP, points WSL2's own /etc/resolv.conf at that dnsmasq instance,
+# and verifies -- before you touch Steam -- that the wildcard resolves
+# correctly AND that AAAA queries for the same names come back NODATA
+# (docs/PROJECT_PLAN.md section 3: dnsmasq's address= directive returns
+# NODATA for AAAA on matched domains, closing the IPv6 bypass). This is the
+# first real evidence for the vault-dns approach working for Linux/Steam
+# Deck-class clients specifically.
+#
+# Usage:
+#   ./scenario-b.sh              set up (idempotent -- safe to re-run)
+#   ./scenario-b.sh --rollback   undo everything (dnsmasq, resolv.conf, wsl.conf)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/wsl-env"
+DNSMASQ_CONF="/etc/dnsmasq.d/steamvault-scenario-b.conf"
+RESOLV_CONF="/etc/resolv.conf"
+RESOLV_BACKUP="/etc/resolv.conf.steamvault-backup"
+WSL_CONF="/etc/wsl.conf"
+
+usage() {
+    echo "Usage: $0 [--rollback]" >&2
+    exit 1
+}
+
+MODE="setup"
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        --rollback) MODE="rollback" ;;
+        -h|--help)  usage ;;
+        *) echo "Unknown argument: $1" >&2; usage ;;
+    esac
+fi
+
+using_systemd() {
+    command -v systemctl >/dev/null 2>&1 && [[ "$(ps -p 1 -o comm= 2>/dev/null || true)" == "systemd" ]]
+}
+
+stop_dnsmasq() {
+    if using_systemd; then
+        sudo systemctl disable --now dnsmasq >/dev/null 2>&1 || true
+        sudo systemctl mask dnsmasq >/dev/null 2>&1 || true
+    else
+        sudo service dnsmasq stop >/dev/null 2>&1 || true
+    fi
+}
+
+start_dnsmasq() {
+    if using_systemd; then
+        sudo systemctl unmask dnsmasq >/dev/null 2>&1 || true
+        sudo systemctl enable --now dnsmasq
+    else
+        sudo service dnsmasq restart
+    fi
+}
+
+if [[ "$MODE" == "rollback" ]]; then
+    echo "Rolling back Scenario B..."
+
+    stop_dnsmasq
+    sudo rm -f "$DNSMASQ_CONF"
+    echo "dnsmasq stopped/masked again, $DNSMASQ_CONF removed."
+
+    if [[ -f "$RESOLV_BACKUP" ]]; then
+        sudo rm -f "$RESOLV_CONF"
+        sudo cp "$RESOLV_BACKUP" "$RESOLV_CONF"
+        sudo rm -f "$RESOLV_BACKUP"
+        echo "Restored $RESOLV_CONF from backup."
+    else
+        echo "No resolv.conf backup found at $RESOLV_BACKUP -- leaving $RESOLV_CONF as-is."
+        echo "If it still points at 127.0.0.1, either run 'wsl --shutdown' from a"
+        echo "Windows PowerShell (WSL regenerates resolv.conf on next start, unless"
+        echo "generateResolvConf=false is still set below) or edit it back manually."
+    fi
+
+    if grep -q "generateResolvConf" "$WSL_CONF" 2>/dev/null; then
+        sudo sed -i '/generateResolvConf/d' "$WSL_CONF"
+        echo "Removed the generateResolvConf override from $WSL_CONF -- WSL2's"
+        echo "default (auto-regenerate resolv.conf on start) is restored on next start."
+    fi
+
+    echo ""
+    echo "Rollback complete. Verify:"
+    echo "  cat /etc/resolv.conf                    (should no longer say 127.0.0.1)"
+    echo "  systemctl status dnsmasq  (or: service dnsmasq status)   (should show stopped)"
+    exit 0
+fi
+
+# --- setup path --------------------------------------------------------------
+
+if [[ ! -f "$ENV_FILE" ]]; then
+    echo "ERROR: $ENV_FILE not found -- run ./wsl-setup.sh first." >&2
+    exit 1
+fi
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+: "${WSL_LINUX_TEST_HOST_IP:?WSL_LINUX_TEST_HOST_IP missing from wsl-env -- re-run ./wsl-setup.sh}"
+
+if ! command -v dnsmasq >/dev/null 2>&1; then
+    echo "ERROR: dnsmasq not installed -- run ./wsl-setup.sh first." >&2
+    exit 1
+fi
+
+# --- 1. dnsmasq config: wildcard-rewrite *.steamcontent.com -> cache IP -----
+# address=/DOMAIN/IP rewrites DOMAIN and all its subdomains to IP for A
+# queries, and returns NODATA (not NXDOMAIN, not a real IPv6 address) for
+# AAAA queries on the same names -- this is exactly what closes the IPv6
+# bypass per docs/PROJECT_PLAN.md section 3.
+#
+# `no-resolv` + explicit `server=` lines: without this, dnsmasq's own
+# upstream lookups would go through /etc/resolv.conf by default -- the very
+# file we're about to point at dnsmasq itself (step 2 below). That would be
+# a resolution loop (dnsmasq asking dnsmasq for everything, forever). Same
+# category of loop-risk poc/conf/nginx.conf already had to avoid on the
+# Windows side (see poc/README.md "Upstream choice and the loop-risk it
+# avoids") -- this is the WSL2/dnsmasq equivalent of that same problem.
+sudo mkdir -p "$(dirname "$DNSMASQ_CONF")"
+sudo tee "$DNSMASQ_CONF" >/dev/null <<EOF
+# Auto-generated by scenario-b.sh -- safe to delete, or run 'scenario-b.sh --rollback'.
+no-resolv
+server=1.1.1.1
+server=8.8.8.8
+address=/steamcontent.com/$WSL_LINUX_TEST_HOST_IP
+listen-address=127.0.0.1
+bind-interfaces
+EOF
+echo "Wrote dnsmasq config: $DNSMASQ_CONF"
+
+start_dnsmasq
+echo "dnsmasq (re)started."
+
+# --- 2. point resolv.conf at the local dnsmasq -------------------------------
+# WSL2 normally auto-regenerates /etc/resolv.conf (pointing at the Windows
+# host's own resolver) on every WSL start / network change. Back the
+# original up once (not on every re-run), then point it at our local
+# dnsmasq and disable auto-regeneration for this distro so it sticks for
+# the rest of this WSL session.
+if [[ ! -f "$RESOLV_BACKUP" ]]; then
+    sudo cp "$RESOLV_CONF" "$RESOLV_BACKUP"
+    echo "Backed up original $RESOLV_CONF -> $RESOLV_BACKUP"
+fi
+
+# resolv.conf is often a symlink (WSL-managed) -- replace it with a plain file.
+if [[ -L "$RESOLV_CONF" ]]; then
+    sudo rm -f "$RESOLV_CONF"
+fi
+echo "nameserver 127.0.0.1" | sudo tee "$RESOLV_CONF" >/dev/null
+echo "Pointed $RESOLV_CONF at 127.0.0.1 (local dnsmasq)."
+
+if ! grep -q "generateResolvConf" "$WSL_CONF" 2>/dev/null; then
+    printf '\n[network]\ngenerateResolvConf = false\n' | sudo tee -a "$WSL_CONF" >/dev/null
+    echo "Set generateResolvConf=false in $WSL_CONF (prevents WSL2 from overwriting"
+    echo "our resolv.conf on the next network event / WSL restart)."
+fi
+
+# --- 3. verify resolution before handing over to Steam -----------------------
+echo ""
+echo "Verifying resolution state..."
+sleep 1   # give dnsmasq a moment after (re)start
+
+RESOLVED_EXACT="$(getent ahostsv4 lancache.steamcontent.com 2>/dev/null | awk '{print $1; exit}' || true)"
+RESOLVED_WILDCARD="$(getent ahostsv4 anything-random-xyz123.steamcontent.com 2>/dev/null | awk '{print $1; exit}' || true)"
+
+CHECKS_OK=1
+
+if [[ "$RESOLVED_EXACT" == "$WSL_LINUX_TEST_HOST_IP" ]]; then
+    echo "[ OK ] lancache.steamcontent.com -> $RESOLVED_EXACT"
+else
+    echo "[FAIL] lancache.steamcontent.com -> '${RESOLVED_EXACT:-<no result>}', expected $WSL_LINUX_TEST_HOST_IP" >&2
+    CHECKS_OK=0
+fi
+
+if [[ "$RESOLVED_WILDCARD" == "$WSL_LINUX_TEST_HOST_IP" ]]; then
+    echo "[ OK ] wildcard confirmed: anything-random-xyz123.steamcontent.com -> $RESOLVED_WILDCARD"
+else
+    echo "[FAIL] wildcard rewrite did not apply to an arbitrary *.steamcontent.com subdomain" >&2
+    CHECKS_OK=0
+fi
+
+# AAAA note (plan section 3): address= should yield NODATA -- NOERROR status,
+# zero answers -- not a real address and not NXDOMAIN.
+if command -v dig >/dev/null 2>&1; then
+    AAAA_OUT="$(dig +noall +comments AAAA lancache.steamcontent.com 2>/dev/null || true)"
+    if echo "$AAAA_OUT" | grep -q "status: NOERROR" && echo "$AAAA_OUT" | grep -qE "ANSWER: 0"; then
+        echo "[ OK ] AAAA query for lancache.steamcontent.com returns NODATA (NOERROR/ANSWER: 0) -- IPv6 bypass closed"
+    else
+        echo "[WARN] could not confirm NODATA-for-AAAA via dig -- check manually: dig AAAA lancache.steamcontent.com" >&2
+    fi
+else
+    echo "[WARN] 'dig' not found (should have been installed by wsl-setup.sh) -- skipping AAAA check" >&2
+fi
+
+if [[ "$CHECKS_OK" -ne 1 ]]; then
+    echo "" >&2
+    echo "Resolution verification FAILED -- fix before starting Steam. See" >&2
+    echo "PROTOCOL.md section 8 (Scenario B troubleshooting)." >&2
+    exit 1
+fi
+
+echo ""
+echo "Scenario B is set up. Timestamp marker (note this down for"
+echo "analyze-windows.ps1 -From):"
+date -Is
+echo ""
+echo "Next (see PROTOCOL.md section 5.1):"
+echo "  1. Fully quit Steam if it's already running, then relaunch it."
+echo "  2. Install/download the test game (Spacewar, AppID 480, is recommended --"
+echo "     see PROTOCOL.md section 5.3 for a note on cache reuse if you pick the"
+echo "     same game WP 0.3 already downloaded on the Windows client)."
+echo "  3. Once done, run 'date -Is' again for the -To marker."
+echo "  4. On the Windows side:"
+echo "       poc\\linux-client-test\\analyze-windows.ps1 -Scenario B -From <start> -To <end>"
