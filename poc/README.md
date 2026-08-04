@@ -25,6 +25,8 @@ see WP 0.3. SteamPrefill is explicitly **out of scope here** — see WP 0.4.
 | `start.ps1` / `stop.ps1` | Start/stop nginx with `conf/nginx.conf`. |
 | `conf/nginx.conf` | The purpose-built PoC config (see below). |
 | `test-smoke.ps1` | Automated proof: MISS then HIT against a real Steam CDN chunk. |
+| `test-range.ps1` | WP 0.2: Range-request test suite (cold/warm cache, suffix/mid/multi-range, concurrent downloads). See `RANGE-FINDINGS.md`. |
+| `RANGE-FINDINGS.md` | WP 0.2 evidence write-up answering the Phase 0 critical question on `proxy_store` + Range requests. |
 | `nginx/` | Extracted nginx binary (gitignored, recreated by `setup.ps1`). |
 | `cache/` | The cache store, `cache/depot/<id>/...` (gitignored). |
 | `logs/` | nginx access/error log + pid (gitignored). |
@@ -64,9 +66,24 @@ curl.exe -i http://127.0.0.1/health
 .\test-smoke.ps1
 ```
 
-Starts nginx if needed, clears any previously cached copy of the test
-object, fetches a real Steam CDN depot chunk twice through the proxy, and
-asserts:
+For Range-request behavior (WP 0.2 — the §7/§9 critical question), see:
+
+```powershell
+.\test-range.ps1
+```
+
+This covers cold-cache Range requests, warm-cache Range requests (simple,
+suffix, mid-file, multi-range), and concurrent cold-cache downloads,
+verifying stored-file integrity (size + SHA256) at every step. Same
+`-DepotId`/`-ChunkHash`/`-BaseUrl` overrides as `test-smoke.ps1`. Full
+results and the Plan A/B recommendation are written up in
+[`RANGE-FINDINGS.md`](RANGE-FINDINGS.md) — **read that file for the actual
+Phase 0 verdict**, the console PASS/FAIL exit code alone does not capture
+it (see the file's own header for why).
+
+`test-smoke.ps1` starts nginx if needed, clears any previously cached copy
+of the test object, fetches a real Steam CDN depot chunk twice through the
+proxy, and asserts:
 
 1. First request → HTTP 200, and the file appears under
    `poc/cache/depot/<depotid>/chunk/<hash>`.
@@ -184,9 +201,10 @@ no upstream was ever contacted). Logged to `poc/logs/access.log`.
 
 - **Range requests** (`Range:` header handling, partial-content behavior,
   whether `proxy_store` can even represent a partial response correctly) —
-  this is WP 0.2. The known risk from `docs/PROJECT_PLAN.md` §9
-  (`proxy_store` incompatible with range requests) is **not yet resolved**;
-  this package only proves the happy path (full-body GET).
+  this package (0.1) only proves the happy path (full-body GET). Covered by
+  WP 0.2 (`test-range.ps1` / `RANGE-FINDINGS.md`), with a preliminary
+  (not yet final — see that file) answer to the `docs/PROJECT_PLAN.md` §9
+  risk.
 - **The real Steam client** — this PoC was tested with `curl.exe`/
   `Invoke-WebRequest` directly against depot chunk URLs, not by running
   Steam with a hosts-file redirect and downloading a real game. That's
