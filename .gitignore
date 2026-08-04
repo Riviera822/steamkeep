@@ -4,3 +4,9 @@ steamvault_projektplan.md
 # local env
 .env
 
+# Phase 0 PoC (poc/) — throwaway artifacts, never committed
+poc/nginx/
+poc/cache/
+poc/logs/
+poc/*.zip
+
