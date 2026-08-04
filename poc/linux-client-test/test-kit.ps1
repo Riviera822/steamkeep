@@ -25,6 +25,16 @@
          reads "0 requests -> OK") and the with-traffic path (Scenario B
          reads "N requests, M of them HIT"), plus the two "unexpected"
          cross-checks (Scenario A sees traffic; Scenario B sees none).
+      6. Regression check for a real bug found on the first live WSL run:
+         wsl-setup.sh's detect_host_ip() used to leak its "probing
+         candidate..." progress line onto STDOUT, so
+         HOST_IP="$(detect_host_ip)" captured a multi-line garbage value
+         instead of a bare IP. This extracts the ACTUAL log()/
+         detect_host_ip() source from wsl-setup.sh (not a paraphrase),
+         runs it under git-bash with a mocked `curl`, and asserts the
+         captured result is exactly one line and exactly the mocked IP -
+         so a future re-introduction of this bug fails here instead of on
+         the next live WSL run.
 
     Exit code 0 = all checks passed. 1 = at least one failed (see the
     itemized [FAIL] list).
@@ -271,6 +281,133 @@ if (-not (Test-Path $GitAttributesPath)) {
     } else {
         Fail ".gitattributes exists but does not appear to cover poc/linux-client-test/*.sh with eol=lf"
     }
+}
+Write-Host ""
+
+# =============================================================================
+# 6. Regression check: wsl-setup.sh's detect_host_ip() must never leak
+#    progress/log output onto stdout - that's exactly what corrupted a live
+#    HOST_IP="$(detect_host_ip)" capture on the first real WSL run (log()
+#    used to `echo` to stdout instead of stderr). This runs the ACTUAL
+#    log()/detect_host_ip() source extracted from wsl-setup.sh (not a
+#    hand-copied paraphrase, which could "pass" while the real file stays
+#    broken) under a mocked curl, so the exact shipped code is exercised.
+# =============================================================================
+Write-Host "-- 6: wsl-setup.sh detect_host_ip() stdout-purity check (mocked curl) --" -ForegroundColor Cyan
+
+$WslSetupScript = Join-Path $KitDir "wsl-setup.sh"
+if (-not $bashPath) {
+    Skip "no git-bash available - cannot run the mocked detect_host_ip() check"
+} elseif (-not (Test-Path $WslSetupScript)) {
+    Fail "wsl-setup.sh not found at $WslSetupScript"
+} else {
+    $RegressionTmpDir = Join-Path $KitDir "_testkit_tmp_detect"
+    if (Test-Path $RegressionTmpDir) { Remove-Item -Recurse -Force $RegressionTmpDir }
+    New-Item -ItemType Directory -Path $RegressionTmpDir -Force | Out-Null
+    $HarnessPath = Join-Path $RegressionTmpDir "mock-detect-host-ip.sh"
+
+    # Mocks curl (only the exact expected /health URL "succeeds"), sets
+    # WSL_HOST_IP so detect_host_ip()'s first candidate is deterministic and
+    # never touches the real network, then captures its output exactly the
+    # way wsl-setup.sh itself does (HOST_IP="$(detect_host_ip)").
+    $harnessTemplate = @'
+#!/usr/bin/env bash
+set -euo pipefail
+
+WSL_SETUP="$1"
+
+# Extract the REAL log() one-liner and detect_host_ip() function body from
+# the shipped script - proves the actual file, not a copy of its logic.
+extracted="$(sed -n '/^log() { /p' "$WSL_SETUP")"
+extracted="$extracted
+$(sed -n '/^detect_host_ip() {/,/^}/p' "$WSL_SETUP")"
+
+if [[ -z "$extracted" ]]; then
+    echo "HARNESS_ERROR=extraction produced nothing - log() or detect_host_ip() not found in wsl-setup.sh" >&2
+    exit 2
+fi
+
+eval "$extracted"
+
+NGINX_PORT="80"
+MOCK_IP="203.0.113.42"
+
+# Mock curl: only the exact expected /health URL for MOCK_IP "succeeds"
+# (nginx's real body would be "ok"); anything else fails, same as a real
+# unreachable candidate would via --max-time.
+curl() {
+    local url=""
+    for arg in "$@"; do
+        case "$arg" in
+            http://*) url="$arg" ;;
+        esac
+    done
+    if [[ "$url" == "http://$MOCK_IP:$NGINX_PORT/health" ]]; then
+        echo "ok"
+        return 0
+    fi
+    return 7
+}
+
+WSL_HOST_IP="$MOCK_IP"
+
+if RESULT="$(detect_host_ip)"; then
+    STATUS=0
+else
+    STATUS=$?
+fi
+
+LINES="$(printf '%s' "$RESULT" | wc -l)"
+echo "STATUS=$STATUS"
+echo "LINES=$LINES"
+echo "RESULT=[$RESULT]"
+echo "EXPECTED_IP=$MOCK_IP"
+'@
+    # Force LF-only regardless of how PowerShell materializes the here-string
+    # on this platform (Write/Set-Content have previously been observed to
+    # introduce CRLF here, which breaks bash parsing of the harness itself).
+    $harnessContent = $harnessTemplate -replace "`r`n", "`n"
+    [System.IO.File]::WriteAllText($HarnessPath, $harnessContent)
+
+    # Deliberately do NOT redirect the native process's stderr through
+    # PowerShell (no `2>&1` / `2>$null` here): in Windows PowerShell 5.1,
+    # redirecting a native command's stderr wraps each line in a
+    # NativeCommandError and sets $? to $false even on exit code 0 - which
+    # would turn the harness's own (correctly stderr-routed, expected)
+    # log() output into a spurious terminating error under
+    # $ErrorActionPreference = "Stop". Only stdout is needed for the
+    # assertions below; stderr passes straight through to the console.
+    $harnessOut = & $bashPath $HarnessPath $WslSetupScript
+    $harnessOutStr = $harnessOut -join "`n"
+
+    if ($harnessOutStr -match 'STATUS=(\d+)' -and $harnessOutStr -match 'LINES=(\d+)' -and $harnessOutStr -match 'RESULT=\[([^\]]*)\]' -and $harnessOutStr -match 'EXPECTED_IP=(\S+)') {
+        $hStatus = [int]([regex]::Match($harnessOutStr, 'STATUS=(\d+)').Groups[1].Value)
+        $hLines  = [int]([regex]::Match($harnessOutStr, 'LINES=(\d+)').Groups[1].Value)
+        $hResult = [regex]::Match($harnessOutStr, 'RESULT=\[([^\]]*)\]').Groups[1].Value
+        $hExpected = [regex]::Match($harnessOutStr, 'EXPECTED_IP=(\S+)').Groups[1].Value
+
+        if ($hStatus -eq 0) {
+            Pass "detect_host_ip() returned success (exit 0) for the mocked reachable IP"
+        } else {
+            Fail "detect_host_ip() returned non-zero ($hStatus) for a mocked reachable IP. Full output:`n$harnessOutStr"
+        }
+
+        if ($hLines -eq 0) {
+            Pass "detect_host_ip()'s captured output is single-line (0 embedded newlines) - progress output stayed on stderr"
+        } else {
+            Fail "detect_host_ip()'s captured output has $hLines embedded newline(s) - a log()/echo call is leaking onto stdout again. Full output:`n$harnessOutStr"
+        }
+
+        if ($hResult -eq $hExpected) {
+            Pass "detect_host_ip() captured value is exactly the mocked IP ($hResult), no stray prefix/log text"
+        } else {
+            Fail "detect_host_ip() captured value was '$hResult', expected exactly '$hExpected'. Full output:`n$harnessOutStr"
+        }
+    } else {
+        Fail "mocked detect_host_ip() harness did not produce the expected STATUS/LINES/RESULT markers. Full output:`n$harnessOutStr"
+    }
+
+    Remove-Item -Recurse -Force $RegressionTmpDir -ErrorAction SilentlyContinue
 }
 Write-Host ""
 

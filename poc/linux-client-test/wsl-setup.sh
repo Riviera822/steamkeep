@@ -36,7 +36,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/wsl-env"
 NGINX_PORT="80"
 
-log() { echo ">> $*"; }
+log() { echo ">> $*" >&2; }
 
 # --- 0. sanity: this is meant to run inside WSL, not plain Linux/macOS ------
 if [[ ! -f /proc/version ]] || ! grep -qi "microsoft" /proc/version; then

@@ -12,6 +12,7 @@ poc/*.zip
 poc/steamprefill/bin/
 poc/linux-client-test/wsl-env
 poc/linux-client-test/_testkit_tmp/
+poc/linux-client-test/_testkit_tmp_detect/
 
 
 # Claude Code harness artifacts
