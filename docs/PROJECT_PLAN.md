@@ -249,7 +249,13 @@ for users who expose the API differently.
     *(measured in `poc/MISS-HANDLING-FINDINGS.md`: perf difference within
     noise at ~1 MiB objects, passthrough structurally safer — final call
     in the Phase 0 gate / ADR)*
-- [ ] Run SteamPrefill against the PoC cache — does it fill correctly?
+- [x] Run SteamPrefill against the PoC cache — does it fill correctly?
+      *(2026-08-04: SteamPrefill v3.7.1 auto-detected the cache via the
+      lancache-heartbeat contract and prefilled path-faithfully — layout
+      cross-check PASS, repeat requests served as HITs. Notable: 0 manifest
+      requests through the cache, and `?nocache=1` speed probes that
+      production vault-core should honor as a cache bypass — see
+      `poc/steamprefill/RESULTS-STEAMPREFILL-*.md`)*
 - [ ] Verify behavior of the Linux/Steam Deck client (known upstream quirk:
       does not perform the `lancache.steamcontent.com` lookup like Windows)
       *(no Steam Deck available — will verify the Linux desktop client via
