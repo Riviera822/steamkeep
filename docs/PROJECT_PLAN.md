@@ -225,18 +225,35 @@ for users who expose the API differently.
 
 ### Phase 0 — Feasibility PoC (CRITICAL, before anything else)
 **Goal: verify the central assumption before writing product code.**
-- [ ] Test container: nginx with `proxy_store` + DNS rewrite on a test device
-- [ ] Route a real Steam download through it and verify:
-  - [ ] Does Steam consistently use the `/depot/<id>/chunk/<hash>` scheme?
-  - [ ] Do range requests work cleanly with `proxy_store`?
+- [x] Test setup: nginx with `proxy_store` + hosts-file redirect
+      *(run natively on Windows instead of a container — deliberate decision:
+      develop natively first, containerize at end of Phase 1; see `poc/`)*
+- [x] Route a real Steam download through it and verify:
+  - [x] Does Steam consistently use the `/depot/<id>/chunk/<hash>` scheme?
+        *(2026-08-04: 187 real-client requests, 100% chunk/manifest
+        conformance, zero non-conforming URIs — see
+        `poc/steam-client-test/RESULTS-*.md`)*
+  - [x] Do range requests work cleanly with `proxy_store`?
     (known risk: `proxy_store` only stores complete responses —
     may need the `slice` module, or chunks may be small enough)
-  - [ ] Cache hit on second download? Speed LAN-limited?
+    *(2026-08-04: the real Windows client sent ZERO Range headers
+    (~1 MiB chunks, full-body GETs); the CDN edge tested ignores Range
+    on miss and always returns full 200; warm-cache ranges served
+    natively. Production follow-up: strip client Range upstream +
+    store-only-200 guard — see `poc/RANGE-FINDINGS.md`)*
+  - [x] Cache hit on second download? Speed LAN-limited?
+        *(2026-08-04: 93/93 HIT after uninstall/reinstall, zero upstream
+        contact, disk-limited — 81.8 MiB served in ~1 s)*
   - [ ] **Miss-handling decision:** synchronous store vs. transparent
     passthrough + async prefill (see pain-points section) — measure both
+    *(measured in `poc/MISS-HANDLING-FINDINGS.md`: perf difference within
+    noise at ~1 MiB objects, passthrough structurally safer — final call
+    in the Phase 0 gate / ADR)*
 - [ ] Run SteamPrefill against the PoC cache — does it fill correctly?
 - [ ] Verify behavior of the Linux/Steam Deck client (known upstream quirk:
       does not perform the `lancache.steamcontent.com` lookup like Windows)
+      *(no Steam Deck available — will verify the Linux desktop client via
+      WSL2 + Ubuntu incl. DNS-rewrite capture, pending BIOS/WSL setup)*
 - **Abort criterion:** If `proxy_store` fails on range requests with no clean
   workaround → fall back to Plan A (unmodified LanCache + a manager layer in
   the spirit of lancache-manager; the rest of the project stays usable as-is)
