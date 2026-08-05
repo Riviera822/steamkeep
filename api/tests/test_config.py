@@ -101,6 +101,73 @@ def test_agent_report_keep_default_and_override(monkeypatch: pytest.MonkeyPatch)
     assert Settings.from_env().agent_report_keep == 5
 
 
+def test_manifest_archive_dir_defaults_next_to_the_db_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    import os
+
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.delenv("VAULT_MANIFEST_ARCHIVE_DIR", raising=False)
+    db_path = str(tmp_path / "sub" / "vault.db")
+    monkeypatch.setenv("VAULT_DB_PATH", db_path)
+
+    settings = Settings.from_env()
+
+    assert settings.manifest_archive_dir == os.path.join(
+        os.path.dirname(os.path.abspath(db_path)), "manifests"
+    )
+
+
+def test_manifest_archive_dir_override(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    override = str(tmp_path / "custom-manifests")
+    monkeypatch.setenv("VAULT_MANIFEST_ARCHIVE_DIR", override)
+
+    assert Settings.from_env().manifest_archive_dir == override
+
+
+def test_manifest_keep_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.delenv("VAULT_MANIFEST_KEEP", raising=False)
+    assert Settings.from_env().manifest_keep == 3
+
+    monkeypatch.setenv("VAULT_MANIFEST_KEEP", "5")
+    assert Settings.from_env().manifest_keep == 5
+
+
+def test_manifest_keep_below_one_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+
+    for bad in ("0", "-1"):
+        monkeypatch.setenv("VAULT_MANIFEST_KEEP", bad)
+        # minimum=1 phrases as "> 0" (_env_int's existing wording rule, same
+        # as VAULT_PREFILL_TIMEOUT_SECONDS/VAULT_WORKER_POLL_SECONDS above).
+        with pytest.raises(RuntimeError, match=r"must be > 0"):
+            Settings.from_env()
+
+
+def test_steamprefill_cache_dir_has_a_platform_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.delenv("VAULT_STEAMPREFILL_CACHE_DIR", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.steamprefill_cache_dir  # never blank
+    assert settings.steamprefill_cache_dir.endswith(
+        os.path.join("SteamPrefill", "v1")
+    )
+
+
+def test_steamprefill_cache_dir_override(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    override = str(tmp_path / "custom-cache")
+    monkeypatch.setenv("VAULT_STEAMPREFILL_CACHE_DIR", override)
+
+    assert Settings.from_env().steamprefill_cache_dir == override
+
+
 def test_agent_report_keep_below_two_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
     """The diff needs the previous snapshot AND the new one — 1 is not a value.
 

@@ -10,6 +10,7 @@ EXPECTED_TABLES = {
     "depot_app_map",
     "jobs",
     "agent_reports",
+    "depot_manifests",
 }
 
 
@@ -182,6 +183,105 @@ def test_init_db_upgrades_a_v1_database_in_place(tmp_path) -> None:
 
     assert version == SCHEMA_VERSION
     assert {"idx_jobs_status_id", "idx_jobs_appid_status"} <= index_names
+
+
+def test_depot_manifests_has_the_expected_columns_and_depotid_index(tmp_path) -> None:
+    # Schema v3 (WP 3.2): last-known manifest state per (appid, depotid);
+    # GC (ADR-0007, later) needs "every app's current manifest for a given
+    # depot", which the PK (appid, depotid) alone doesn't serve efficiently.
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(depot_manifests)")}
+        index_names = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'depot_manifests'"
+            )
+        }
+    finally:
+        conn.close()
+
+    assert columns == {
+        "appid",
+        "containing_appid",
+        "depotid",
+        "manifestid",
+        "chunk_count",
+        "total_bytes",
+        "recorded_at",
+        "source",
+    }
+    assert "idx_depot_manifests_depotid" in index_names
+
+
+def test_depot_manifests_primary_key_is_appid_depotid(tmp_path) -> None:
+    """Latest-per-(appid, depotid) with replace semantics (ADR-0006 decision
+    3), not a history table -- a second INSERT for the same pair must be
+    rejected by the PK unless it explicitly replaces (see
+    vault_api/depot_manifests.py's ON CONFLICT upsert)."""
+    import sqlite3
+
+    import pytest
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO depot_manifests
+                (appid, containing_appid, depotid, manifestid, chunk_count,
+                 total_bytes, recorded_at, source)
+            VALUES (440, NULL, 441, '123', 1, 100, '2026-08-06T00:00:00Z', 'prefill_bin')
+            """
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO depot_manifests
+                    (appid, containing_appid, depotid, manifestid, chunk_count,
+                     total_bytes, recorded_at, source)
+                VALUES (440, NULL, 441, '999', 2, 200, '2026-08-06T01:00:00Z', 'prefill_bin')
+                """
+            )
+    finally:
+        conn.close()
+
+
+def test_init_db_upgrades_a_v2_database_to_v3_in_place(tmp_path) -> None:
+    """v2 -> v3 is additive (one new table + its index), so running the
+    current DDL and bumping the marker is the whole migration. Simulate a v2
+    file by dropping depot_manifests and resetting the recorded version."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("DROP TABLE depot_manifests")
+        conn.execute("UPDATE schema_version SET version = 2")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        (version,) = conn.execute("SELECT version FROM schema_version").fetchone()
+        table_names = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        conn.close()
+
+    assert version == SCHEMA_VERSION
+    assert "depot_manifests" in table_names
 
 
 def test_init_db_refuses_a_database_from_a_newer_vault_api(tmp_path) -> None:

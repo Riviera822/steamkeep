@@ -8,7 +8,7 @@ settings this project needs.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 try:
     # Optional convenience for local/native dev: load a .env file if present.
@@ -48,6 +48,65 @@ DEFAULT_AGENT_REPORT_KEEP = 20
 
 #: Hard floor for VAULT_AGENT_REPORT_KEEP — see above.
 MIN_AGENT_REPORT_KEEP = 2
+
+#: How many archived manifest ``.bin`` files ``prune_archive`` keeps per
+#: depot (WP 3.2, ADR-0006 decision 3 / research risk 4: "the archive needs
+#: its own retention"). **Decision, stated plainly:** this is the TOTAL count
+#: kept per depot (the current manifest plus its predecessors), the same
+#: "keep the last N" semantics as ``VAULT_AGENT_REPORT_KEEP`` above — not "N
+#: previous in addition to the current one". 3 is enough to look back across
+#: a couple of game updates without the archive growing unbounded.
+DEFAULT_MANIFEST_KEEP = 3
+
+#: Hard floor for VAULT_MANIFEST_KEEP — 0 would mean "keep nothing", which
+#: defeats the point of archiving at all.
+MIN_MANIFEST_KEEP = 1
+
+
+def _default_steamprefill_cache_dir() -> str:
+    """Platform default for SteamPrefill's manifest temp-cache directory
+    (docs/research/phase3-manifests.md §1a): ``%LOCALAPPDATA%\\SteamPrefill\\v1``
+    on Windows, ``$HOME/.cache/SteamPrefill/v1`` everywhere else (the path
+    inside the container, volume-backed — wiring that volume into deploy/'s
+    compose file is explicitly NOT this work package's scope, see
+    api/README.md's WP 3.2 note).
+
+    Falls back to ``~/AppData/Local`` if ``LOCALAPPDATA`` is unset on Windows
+    (matches how Windows itself derives the variable), so this never raises —
+    a wrong guess here only means a job's manifest ingestion finds nothing to
+    ingest (warn-and-skip, never a startup failure), not a crash.
+    """
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA", "").strip()
+        if not base:
+            base = os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        return os.path.join(base, "SteamPrefill", "v1")
+    return os.path.join(os.path.expanduser("~"), ".cache", "SteamPrefill", "v1")
+
+
+def _default_manifest_archive_dir(db_path: str) -> str:
+    """Default archive location: a ``manifests`` sibling of the database file.
+
+    WP 3.2 scope note: consistent with a single-volume deployment (db +
+    archive on the same persistent volume) is the intent, but wiring a
+    dedicated volume/mount for it in ``deploy/`` is explicitly NOT this work
+    package's scope — a follow-up on top of WP 1.9's Compose file.
+
+    **``db_path`` is resolved as a plain filesystem path (WP 3.2 review
+    note), not with any sqlite-specific awareness.** ``os.path.abspath``
+    doesn't know sqlite's special ``":memory:"`` URI, so
+    ``VAULT_DB_PATH=":memory:"`` would resolve to a literal (and harmless,
+    if slightly odd-looking) sibling directory ``.../:memory:/manifests``
+    under the current working directory — this project never sets
+    ``VAULT_DB_PATH`` that way (every test and deployment uses a real file
+    path), so this is a documented quirk, not a bug worth guarding against. A
+    relative ``db_path`` (the ``"./vault.db"`` default) resolves against the
+    process's current working directory, same as ``db_path`` itself already
+    does everywhere else in this codebase (``db.init_db``,
+    ``deletion.resolve_depot_root``).
+    """
+    parent = os.path.dirname(os.path.abspath(db_path)) or "."
+    return os.path.join(parent, "manifests")
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -101,6 +160,21 @@ class Settings:
     size_cache_ttl_seconds: float = DEFAULT_SIZE_CACHE_TTL_SECONDS
     # WP 2.4. Snapshots kept per client in agent_reports (retention).
     agent_report_keep: int = DEFAULT_AGENT_REPORT_KEEP
+    # WP 3.2. Where archived manifest .bin files are copied durably (they do
+    # NOT survive SteamPrefill's own `clear-temp`). Literal default here is
+    # deliberately dumb ("./manifests", mirroring db_path/cache_root's own
+    # plain literal defaults) — `from_env()` computes the smarter
+    # db-relative default (see `_default_manifest_archive_dir`) when the env
+    # var is unset, since only `from_env()` knows the real `db_path`.
+    manifest_archive_dir: str = "./manifests"
+    # WP 3.2. How many archived manifests `prune_archive` keeps per depot.
+    manifest_keep: int = DEFAULT_MANIFEST_KEEP
+    # WP 3.2. SteamPrefill's own manifest temp-cache directory to scan after a
+    # successful prefill job (docs/research/phase3-manifests.md §1a).
+    # `default_factory` (not a class-body literal) so each direct
+    # construction re-reads LOCALAPPDATA/HOME at call time, same as
+    # `from_env()` does when the env var is unset.
+    steamprefill_cache_dir: str = field(default_factory=_default_steamprefill_cache_dir)
 
     @staticmethod
     def from_env() -> "Settings":
@@ -118,9 +192,13 @@ class Settings:
                 "(copy api/.env.example to api/.env and fill it in)."
             )
 
+        db_path = os.environ.get("VAULT_DB_PATH", "./vault.db")
+        manifest_archive_dir = os.environ.get("VAULT_MANIFEST_ARCHIVE_DIR", "").strip()
+        steamprefill_cache_dir = os.environ.get("VAULT_STEAMPREFILL_CACHE_DIR", "").strip()
+
         return Settings(
             vault_api_key=api_key,
-            db_path=os.environ.get("VAULT_DB_PATH", "./vault.db"),
+            db_path=db_path,
             cache_root=os.environ.get("VAULT_CACHE_ROOT", "./cache"),
             log_level=os.environ.get("VAULT_LOG_LEVEL", "INFO"),
             steamprefill_path=os.environ.get("VAULT_STEAMPREFILL_PATH", "").strip(),
@@ -138,4 +216,11 @@ class Settings:
                 DEFAULT_AGENT_REPORT_KEEP,
                 minimum=MIN_AGENT_REPORT_KEEP,
             ),
+            manifest_archive_dir=manifest_archive_dir
+            or _default_manifest_archive_dir(db_path),
+            manifest_keep=_env_int(
+                "VAULT_MANIFEST_KEEP", DEFAULT_MANIFEST_KEEP, minimum=MIN_MANIFEST_KEEP
+            ),
+            steamprefill_cache_dir=steamprefill_cache_dir
+            or _default_steamprefill_cache_dir(),
         )

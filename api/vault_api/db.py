@@ -16,7 +16,10 @@ import sqlite3
 #: v2 (WP 1.4): added the two ``jobs`` indexes below. Purely additive
 #: (``CREATE INDEX IF NOT EXISTS``), so upgrading a v1 file is just running
 #: the current DDL and recording the new version — see ``init_db``.
-SCHEMA_VERSION = 2
+#: v3 (WP 3.2): added ``depot_manifests`` (ADR-0006 decision 3: last-known
+#: manifest state per (appid, depotid), recorded from SteamPrefill's
+#: temp-cache filenames) plus its ``depotid`` index. Also purely additive.
+SCHEMA_VERSION = 3
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -71,6 +74,40 @@ CREATE TABLE IF NOT EXISTS agent_reports (
 
 CREATE INDEX IF NOT EXISTS idx_agent_reports_client_time
     ON agent_reports (client_id, reported_at DESC);
+
+-- WP 3.2 / ADR-0006 decision 3: LATEST manifest state per (appid, depotid),
+-- not a history table -- GC (ADR-0007) and the future staleness comparison
+-- only ever need "what does vault-api currently believe this app's depot
+-- manifest is", so a newer ingest for the same pair REPLACES the row
+-- (vault_api/depot_manifests.py's upsert) rather than adding a new one.
+--
+-- appid: the app this row is attributed to for THIS mapping (usually the
+-- job's own appid, i.e. the .bin filename's originalAppId).
+-- containing_appid: the .bin filename's containingAppId -- the shared-depot
+-- signal (research doc: e.g. 107100_228980_229002_...bin = app 107100
+-- pulling a depot that "belongs" to app 228980). NULL for a cache-stored
+-- manifest, which carries no such distinction.
+-- manifestid is TEXT, not INTEGER, on purpose: SQLite's INTEGER storage is a
+-- signed 64-bit value, and Steam manifest ids are u64 -- a real id CAN
+-- exceed 2^63-1 even though every id observed during this project's research
+-- (e.g. 3040704736299968944, ~3e18) stayed under it. TEXT never overflows
+-- and this column is never used for arithmetic, only equality/lookup.
+CREATE TABLE IF NOT EXISTS depot_manifests (
+    appid            INTEGER NOT NULL,
+    containing_appid INTEGER,
+    depotid          INTEGER NOT NULL,
+    manifestid       TEXT NOT NULL,
+    chunk_count      INTEGER NOT NULL,
+    total_bytes      INTEGER NOT NULL,
+    recorded_at      TEXT NOT NULL,
+    source           TEXT NOT NULL,
+    PRIMARY KEY (appid, depotid)
+);
+
+-- Future GC (ADR-0007) needs "every app's current manifest for this depot"
+-- (the shared-depot keep-set is a UNION across apps) -- the PK above only
+-- indexes appid-first.
+CREATE INDEX IF NOT EXISTS idx_depot_manifests_depotid ON depot_manifests (depotid);
 """
 
 

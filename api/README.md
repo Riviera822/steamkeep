@@ -16,10 +16,16 @@ full-list snapshots, the server-side diff that surfaces removals, snapshot
 retention, plus a minimal `GET /v1/clients`; WP 3.1 adds **manifest parsers**
 (`vault_api/manifests.py`) — pure functions that turn the two on-disk Steam
 manifest formats into one common shape, the foundation for staleness
-detection (ADR-0006) and manifest-diff garbage collection (ADR-0007). The
-scheduler, the schema/ingestion that will store what these parsers produce,
-GC itself, bypass detection and the miss trigger remain scope for later work
-packages.
+detection (ADR-0006) and manifest-diff garbage collection (ADR-0007); WP 3.2
+adds **schema v3, a durable manifest archive, and worker ingestion**
+(`vault_api/depot_manifests.py`, `vault_api/manifest_archive.py`,
+`vault_api/manifest_ingest.py`) — after a successful prefill job, the worker
+scans SteamPrefill's own manifest temp-cache directory for this app's `.bin`
+files, records the latest manifest state per `(appid, depotid)`, archives the
+source file durably (SteamPrefill's temp cache does not survive its own
+`clear-temp`), and additively maps a shared depot to its "containing" app.
+The scheduler, summary parsing, GC itself, bypass detection and the miss
+trigger remain scope for later work packages.
 
 ## Layout
 
@@ -39,6 +45,9 @@ api/
 │   ├── deletion.py       # per-game deletion: path/link guards, shared-depot plan
 │   ├── agent_reports.py  # agent snapshots: store, ADR-0002 diff, retention
 │   ├── manifests.py      # manifest parsers (.bin / cache-stored), pure functions
+│   ├── depot_manifests.py # depot_manifests table writes/reads (WP 3.2)
+│   ├── manifest_archive.py # durable .bin archive + retention (WP 3.2)
+│   ├── manifest_ingest.py  # scan temp-cache -> parse -> store -> archive (WP 3.2)
 │   ├── validation.py     # shared request types (AppId) — one coercion rule
 │   └── routers/
 │       ├── health.py     # GET /v1/health — the ONE public router
@@ -71,6 +80,9 @@ Copy `.env.example` to `.env` and adjust:
 | `VAULT_WORKER_POLL_SECONDS`     | no       | `1.0`        | Worker sleep between polls of an empty queue                        |
 | `VAULT_SIZE_CACHE_TTL`          | no       | `60`         | TTL (seconds) for the in-process per-game size cache; **must be > 0** (see below) |
 | `VAULT_AGENT_REPORT_KEEP`       | no       | `20`         | Agent report snapshots kept per `client_id`; **must be >= 2** (see "Agent reports") |
+| `VAULT_STEAMPREFILL_CACHE_DIR`  | no       | platform default (see below) | SteamPrefill's own manifest temp-cache directory, scanned after a successful prefill job (see "Manifest ingestion") |
+| `VAULT_MANIFEST_ARCHIVE_DIR`    | no       | `<dir of VAULT_DB_PATH>/manifests` | Where archived manifest `.bin` files are copied durably |
+| `VAULT_MANIFEST_KEEP`           | no       | `3`          | Archived manifests kept per depot (total, current included); **must be >= 1** |
 
 `VAULT_API_KEY` has no default. Starting the app without it raises
 `RuntimeError` immediately (`Settings.from_env`) — this is the "fail loudly"
@@ -91,7 +103,18 @@ want near-live numbers; note the cache is invalidated explicitly after a
 successful prefill and after a deletion anyway, so a long TTL does not make
 those two events look stale.
 
-## Database schema (v2)
+`VAULT_STEAMPREFILL_CACHE_DIR`'s platform default (WP 3.2,
+`config._default_steamprefill_cache_dir`, `docs/research/phase3-manifests.md`
+§1a): `%LOCALAPPDATA%\SteamPrefill\v1` on Windows (falling back to
+`~\AppData\Local` if `LOCALAPPDATA` is unset), `$HOME/.cache/SteamPrefill/v1`
+everywhere else — the path inside the container, which will need volume/env
+wiring in `deploy/`'s Compose file (explicitly **not** this work package's
+scope — a follow-up on top of WP 1.9). `VAULT_MANIFEST_ARCHIVE_DIR`'s default
+is a `manifests` sibling of `VAULT_DB_PATH`'s directory (`config._default_manifest_archive_dir`)
+— consistent with a single persistent volume holding both the database and
+the archive, same caveat about `deploy/` wiring.
+
+## Database schema (v3)
 
 Created idempotently at startup by `vault_api/db.py::init_db` (safe to call
 on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
@@ -104,25 +127,31 @@ on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
 | `depot_app_map`  | `depotid`, `appid`, PK `(depotid, appid)`                                                   | Depot→app mapping; a depot can map to multiple apps (shared depots, plan §4) |
 | `jobs`           | `id` (PK autoincrement), `appid`, `type`, `status`, `created_at`, `started_at`, `finished_at`, `log_excerpt` | Prefill/GC job queue (plan §3, §6) |
 | `agent_reports`  | `client_id`, `reported_at`, `appids` (JSON array of ints)                                    | One row per agent report — a full installed-app-ID snapshot at that timestamp (ADR-0002: the agent is stateless/dumb, always reports the complete list). vault-api derives additions/removals by diffing the two most recent rows per `client_id` |
+| `depot_manifests` | `appid`, `containing_appid`, `depotid`, `manifestid` (TEXT), `chunk_count`, `total_bytes`, `recorded_at`, `source`, PK `(appid, depotid)` | **Latest**-known manifest state per (app, depot) — WP 3.2, ADR-0006 decision 3. See "Manifest ingestion" below |
 
 Indexes beyond the primary keys: `idx_depot_app_map_appid` on
 `depot_app_map(appid)` (plan §4's main lookup direction is appid → depots,
 e.g. for delete/size-by-game), `idx_agent_reports_client_time` on
 `agent_reports(client_id, reported_at DESC)` (fetch the latest report(s) per
-client for the diff), and — new in **v2 (WP 1.4)** — `idx_jobs_status_id` on
-`jobs(status, id)` plus `idx_jobs_appid_status` on `jobs(appid, status)`. The
-worker asks "oldest queued job?" on every poll tick and `POST /v1/prefill` asks
-"does this app already have a queued/running job?" on every request; without
-those two indexes both scan the whole append-only `jobs` table.
+client for the diff), `idx_jobs_status_id` on `jobs(status, id)` plus
+`idx_jobs_appid_status` on `jobs(appid, status)` (**v2**, WP 1.4 — the worker
+asks "oldest queued job?" on every poll tick and `POST /v1/prefill` asks "does
+this app already have a queued/running job?" on every request; without those
+two indexes both scan the whole append-only `jobs` table), and
+`idx_depot_manifests_depotid` on `depot_manifests(depotid)` (**v3**, WP 3.2 —
+a future GC pass needs "every app's current manifest for this depot", which
+the `(appid, depotid)` primary key alone doesn't serve efficiently).
 
 **Migration story.** Every statement in `db.py`'s DDL is
-`CREATE ... IF NOT EXISTS`, and v1 → v2 is purely additive (two indexes), so
-`init_db` upgrades an existing v1 file by running the current DDL and then
-recording the new `schema_version`. A stored version *higher* than
+`CREATE ... IF NOT EXISTS`, and every version bump so far has been purely
+additive: v1 → v2 added two `jobs` indexes, v2 → v3 added `depot_manifests`
+and its one index. `init_db` upgrades an existing older file by running the
+current DDL and then recording the new `schema_version` — no per-version
+data migration has been needed yet. A stored version *higher* than
 `SCHEMA_VERSION` raises `RuntimeError` instead of silently operating on a
 schema this code doesn't know (downgrade guard). The first non-additive change
 will need a real per-version step list — that's called out in `init_db`'s
-docstring. Both paths are covered in `tests/test_db.py`.
+docstring. Both upgrade paths are covered in `tests/test_db.py`.
 
 **Ordering fix (WP 1.5 carry-over from the WP 1.4 review):** `init_db` now
 creates only the `schema_version` table, reads the stored version, and checks
@@ -137,10 +166,10 @@ row per client per report interval forever. `POST /v1/agent/installed` prunes
 to the newest `VAULT_AGENT_REPORT_KEEP` snapshots per `client_id` **inside the
 same transaction that inserts the new one** — see "Agent reports" below.
 
-No foreign keys enforced between `depot_app_map`/`jobs`/`agent_reports` and
-`apps.appid` — depot mappings and agent reports may arrive before an
-app row exists (e.g. first prefill of a new title). Revisit if this becomes
-a data-integrity problem in practice.
+No foreign keys enforced between `depot_app_map`/`jobs`/`agent_reports`/
+`depot_manifests` and `apps.appid` — depot mappings, agent reports and
+manifest rows may arrive before an app row exists (e.g. first prefill of a
+new title). Revisit if this becomes a data-integrity problem in practice.
 
 **Connection pragmas** (`db.py::get_connection`): `journal_mode=WAL` and
 `busy_timeout=5000` (ms) on every connection, so HTTP request handlers
@@ -1014,9 +1043,10 @@ client that reads only the fields it knows keeps working.
 detection) and ADR-0007 (manifest-diff garbage collection):
 `docs/research/phase3-manifests.md` established that both Steam manifest
 formats are parseable with ~60 lines of stdlib code, and this package turns
-that research into pure functions plus a test suite. **Nothing here is wired
-up yet** — no schema, no ingestion, no GC logic, no HTTP endpoint. That is
-explicitly Phase 3.2 (schema + ingestion) and Phase 3.6 (GC core).
+that research into pure functions plus a test suite. **This module itself
+stays pure parsing** — no schema, no filesystem archive, no GC logic, no HTTP
+endpoint. WP 3.2 (see "Manifest ingestion" below) is what stores and archives
+what these functions produce; GC itself remains Phase 3.6.
 
 ### Two formats, one shared result shape
 
@@ -1145,6 +1175,145 @@ and disabling the cache manifest `unique_chunks` self-check, each made exactly
 one test fail (`test_bin_depot_id_mismatch_between_filename_and_payload_is_rejected`,
 `test_cache_manifest_unique_chunks_mismatch_is_rejected`) — confirming those
 tests are genuine regression guards, not incidental passes.
+
+## Manifest ingestion (WP 3.2)
+
+`vault_api/manifest_ingest.py` wires up what WP 3.1's parsers produce: after
+every **successful** prefill job, the worker (`vault_api/worker.py`) calls
+`ingest_after_prefill(conn, appid=<job's appid>, settings=...)`, which:
+
+1. Scans `VAULT_STEAMPREFILL_CACHE_DIR` for files named `{appid}_*.bin` —
+   only this job's own app, never every file in the (shared) directory.
+2. Parses each candidate with `manifests.parse_bin_filename` (recovers
+   `containing_appid`) and `manifests.parse_steamprefill_bin` (the validated
+   payload, which independently re-checks the filename against the payload).
+3. Upserts a `depot_manifests` row (`vault_api/depot_manifests.py`) —
+   **latest-per-`(appid, depotid)`, replacing any older row** (ADR-0006
+   decision 3; this is not a manifest history table).
+4. **Additive shared-depot mapping (WP 3.2 item 4):** if `containing_appid !=
+   appid`, the depot is *also* mapped to `containing_appid`
+   (`mapping.upsert_mapping`, additive per ADR-0003) — on top of, not instead
+   of, the job's own replace-set mapping
+   (`vault_api.prefill.apply_observed_mapping`, unchanged by this work
+   package, still driven by the before/after depot-directory diff).
+5. Archives the source `.bin` file durably (`vault_api/manifest_archive.py`)
+   and prunes older archives for that depot down to `VAULT_MANIFEST_KEEP`.
+
+**A file that fails to parse is warned about and skipped — it never fails the
+job.** Two kinds of "skip" are tracked *separately*, not conflated
+(`IngestResult.parse_failures` vs. `IngestResult.vanished_during_scan`,
+review nitpick): a file still on disk that is genuinely corrupt/malformed is
+a parse failure (WARNING); a file that disappeared *between* the directory
+listing and the parse attempt — SteamPrefill's own `clear-temp` running
+concurrently, or an operator clearing the directory by hand — is an I/O race
+(INFO), not a data-quality problem, and reads that way in the job log.
+Neither ever fails the job, and neither does a bug anywhere in this whole
+ingestion step: `worker.py` wraps the call in its own `try`/`except`, *local*
+to the success branch and separate from the job's outer exception handler,
+specifically so a crash in ingestion can never flip an already-successful
+prefill job to `'error'`
+(`tests/test_worker.py::test_ingestion_failure_never_flips_a_successful_job_to_error`).
+A missing/unreadable cache directory (the common case: SteamPrefill has never
+run, or `VAULT_STEAMPREFILL_CACHE_DIR` isn't set up yet) is the same kind of
+non-event, logged at INFO, not a warning.
+
+### The reverse direction of ADR-0003 (measured) — which table is authoritative
+
+Step 4's additive mapping can later be **undone** by the containing app's own
+next prefill: `apply_observed_mapping` is "replace within the app" — any
+depot mapped to `containing_appid` that is NOT in *that app's own* next job's
+observed set gets deleted. If the shared depot is already fully cached from
+`containing_appid`'s point of view, its own next prefill writes nothing new
+for it, never "observes" it, and that job's replace step removes the very
+row this function added. **This is not a regression and it self-heals**: the
+next time the *original* app (the one actually pulling the shared depot) is
+re-prefilled and re-ingested, the additive mapping is written again — the
+mapping can flicker, it does not disappear for good.
+
+Two tables can therefore legitimately disagree about a shared depot's owners
+at a given moment, and that is by design, not a bug to reconcile:
+
+- **`depot_app_map`** is what **today's** shared-depot deletion protection
+  reads (`DELETE /v1/cache/{appid}`, WP 1.6) — and it is exactly the table
+  subject to the flicker above.
+- **`depot_manifests.containing_appid`** is the **durable** record of "which
+  app this depot's manifest said it belongs to", rewritten fresh on every
+  ingest of the *original* app and never touched by any *other* app's
+  prefill job. This is what ADR-0007's future GC keep-set is expected to
+  read for shared-depot attribution, precisely because it doesn't flicker.
+
+### Why `.bin` files are archived at all
+
+SteamPrefill's manifest temp cache does **not** survive its own `clear-temp`
+command (research doc, Q1) — the only durable record of a manifest vault-api
+ever saw is a copy it makes itself. `manifest_archive.archive_manifest` copies
+(never moves — the temp cache isn't vault-api's to delete from) the source
+file into `VAULT_MANIFEST_ARCHIVE_DIR` as `{depotid}_{manifestid}.bin`,
+**atomically**: written to a same-directory tempfile, then `os.replace`d into
+place (the same pattern as `vault_api.prefill.write_selected_apps`), so a
+reader never observes a partially-written file and a re-archive of an
+already-current manifest safely overwrites rather than corrupting it.
+
+**Retention (`VAULT_MANIFEST_KEEP`, default `3`):** `prune_archive` keeps only
+the newest `VAULT_MANIFEST_KEEP` archived files **per depot** — this is a
+**total** count including the current manifest, the same "keep the last N"
+semantics as `VAULT_AGENT_REPORT_KEEP`, not "N previous *in addition to* the
+current one" (a plausible alternative reading of "current + N previous" —
+stated explicitly here since the wording is genuinely ambiguous).
+"Newest" is decided by the archived file's own mtime (set at the moment this
+module wrote it — i.e. ingestion order), not by parsing `manifestid` as a
+number: `manifestid` is stored as opaque TEXT (see below) precisely because it
+is not guaranteed sortable across every source.
+
+### Why `manifestid` is TEXT, not INTEGER
+
+Steam manifest ids are unsigned 64-bit values; SQLite's `INTEGER` storage is
+signed 64-bit. Every manifest id observed during this project's research
+stayed under `2**63 - 1` (e.g. `3040704736299968944`, ≈3×10¹⁸, comfortably
+under ≈9.2×10¹⁸) — but a u64 value **can** legitimately exceed that ceiling,
+and this column is a durable, load-bearing record, not a scratch value. TEXT
+never overflows and the column is never used for arithmetic, only
+equality/lookup, so there is no cost to being safe here.
+Pinned by `tests/test_depot_manifests.py::test_manifestid_stores_a_value_beyond_sqlite_int64_range_as_text`.
+
+### Coupling canary (research doc risk 6)
+
+Reading SteamPrefill's own temp-cache directory couples vault-api to its
+internal layout — version-pinned at 3.7.1 (same pin as the rest of the
+prefill orchestration, WP 1.4). `manifest_ingest.log_cache_dir_canary` runs
+once at startup (`main.py`'s lifespan, right after stale-job recovery) and
+logs a **WARNING, never a failure**, if `VAULT_STEAMPREFILL_CACHE_DIR` exists
+and contains a **`.bin`** file that doesn't match the
+`{originalAppId}_{containingAppId}_{depotId}_{manifestId}.bin` filename
+pattern — bounded to the first 10 offending names plus a total count (the WP
+3.1 review's namelist-truncation lesson, applied here proactively rather than
+waited out for a second report). This is a coupling *canary*, not a
+validation gate: it never stops vault-api from starting and never fails a
+job — a per-file parse failure during ingestion is still just "warn and skip
+that one file". The canary is the only signal an operator gets that a future
+SteamPrefill version may have changed its cache layout underneath this code.
+
+**Restricted to `.bin` files (WP 3.2 review fix).** SteamPrefill's real
+temp-cache directory also holds non-manifest sidecar files — observed on a
+live host: `cellId.txt` (its cached Steam cell/region id) and
+`lastUpdateCheck.txt` (a timestamp). The first version of this canary flagged
+both of those on **every single boot** of a real deployment, which trains an
+operator to ignore the warning — the one failure mode a canary must not
+have. Non-`.bin` files are now ignored entirely, whatever their name; only a
+`.bin` file that fails the filename contract counts as a real mismatch.
+Pinned by `tests/test_manifest_ingest.py::test_canary_ignores_known_non_bin_sidecar_files`
+and `::test_log_cache_dir_canary_is_silent_for_known_sidecar_files`.
+
+### What this work package deliberately did NOT do
+
+- No HTTP endpoint reads `depot_manifests` — nothing in plan §6 asks for one
+  yet, and none of the later Phase 3 items (`3.3`–`3.8`) need one added here.
+- No garbage collection (`3.6`/`3.7`) — this package only *records* manifest
+  state; nothing deletes a chunk because of it.
+- No `deploy/` changes — `VAULT_STEAMPREFILL_CACHE_DIR`'s container-side
+  volume mount and `VAULT_MANIFEST_ARCHIVE_DIR`'s persistent-volume wiring are
+  explicitly a follow-up on top of WP 1.9's Compose file, not this package's
+  scope.
 
 ## Auth
 

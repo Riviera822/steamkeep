@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from vault_api.config import Settings
 from vault_api.db import get_connection, init_db
 from vault_api.jobs import recover_stale_jobs
+from vault_api.manifest_ingest import log_cache_dir_canary
 from vault_api.routers import agent, cache, clients, games, health, jobs, mapping
 from vault_api.sizes import SizeCache
 from vault_api.worker import PrefillWorker
@@ -53,6 +54,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             "marked them as 'error'.",
             recovered,
         )
+
+    # WP 3.2 coupling canary (research doc risk 6): warn once at startup if
+    # SteamPrefill's temp-cache directory holds files that don't match the
+    # filename contract manifest ingestion depends on. Never fails startup —
+    # see manifest_ingest.log_cache_dir_canary's docstring.
+    log_cache_dir_canary(settings.steamprefill_cache_dir)
 
     worker = PrefillWorker(settings, size_cache=app.state.size_cache)
     app.state.worker = worker

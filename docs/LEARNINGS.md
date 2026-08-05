@@ -101,6 +101,18 @@ These are not style preferences; each entry cost a review round to learn.
   image needs at least a credential-free smoke RUN in the verify suite
   (WP 1.9).
 
+## Go / CLI
+- Never register a secret env value as a flag DEFAULT — Go's
+  flag.PrintDefaults() prints non-empty defaults verbatim on -h and every
+  parse error, leaking the secret to stderr on the recommended
+  operational path. Register empty, apply env fallback after parsing
+  (WP 2.2 blocker).
+- Python str.isprintable() rejects Cf/Zs/Co/Cn — Go parity needs
+  !unicode.IsPrint, not IsControl+Zl/Zp (WP 2.2).
+- time.Sleep in retry loops is not ctx-cancellable — select on
+  ctx.Done() vs time.After (WP 2.2). CGO_ENABLED=0 explicitly or
+  "static binary" claims are false on the native target (WP 2.2).
+
 ## Testing discipline
 - Flake-hunt concurrency tests: run the module isolated in a 20-40x loop —
   full-suite green means nothing for timing bugs (WP 1.6 Fable).

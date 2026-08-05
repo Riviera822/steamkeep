@@ -23,7 +23,7 @@ import sqlite3
 import threading
 import traceback
 
-from vault_api import jobs, prefill
+from vault_api import jobs, manifest_ingest, prefill
 from vault_api.config import Settings
 from vault_api.db import get_connection
 from vault_api.sizes import SizeCache
@@ -124,6 +124,29 @@ class PrefillWorker:
                 observed = prefill.diff_depots(before, after)
                 change = prefill.apply_observed_mapping(conn, appid, observed)
                 log_parts.append(change.summary())
+
+                # WP 3.2: learn what SteamPrefill just wrote (manifest state
+                # for staleness/GC, ADR-0006/0007) from its temp-cache .bin
+                # files. Wrapped in its own try/except, deliberately LOCAL to
+                # this block: the job has already succeeded at this point,
+                # and a bug in ingestion must never flip a genuinely
+                # successful prefill to 'error' (the outer except below would
+                # do exactly that if this were allowed to propagate).
+                try:
+                    ingest_result = manifest_ingest.ingest_after_prefill(
+                        conn, appid=appid, settings=self._settings
+                    )
+                    log_parts.append(ingest_result.summary())
+                except Exception:
+                    logger.exception(
+                        "Manifest ingestion crashed for appid %s (job %s); the "
+                        "prefill job itself still succeeded.",
+                        appid, job_id,
+                    )
+                    log_parts.append(
+                        "[vault-api] Manifest ingestion crashed; see server logs "
+                        "(the prefill job itself still succeeded)."
+                    )
 
                 jobs.set_app_status(
                     conn, appid, jobs.STATUS_DONE, last_prefill_at=jobs.utcnow_iso()

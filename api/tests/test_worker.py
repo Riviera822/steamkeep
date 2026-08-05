@@ -37,6 +37,9 @@ def make_settings(
     cache_root: Path,
     steamprefill_path: str = "",
     prefill_timeout_seconds: int = 60,
+    steamprefill_cache_dir: str | None = None,
+    manifest_archive_dir: str | None = None,
+    manifest_keep: int = 3,
 ) -> Settings:
     return Settings(
         vault_api_key=TEST_API_KEY,
@@ -47,6 +50,16 @@ def make_settings(
         prefill_timeout_seconds=prefill_timeout_seconds,
         # Fast polling so the tests don't sit around waiting for a tick.
         worker_poll_seconds=0.02,
+        # WP 3.2: unless a test wires up a real manifest temp-cache dir, this
+        # deliberately points at a directory that never exists -- manifest
+        # ingestion then safely no-ops (cache_dir_unavailable), which is
+        # exactly the production behavior on a host that hasn't set
+        # VAULT_STEAMPREFILL_CACHE_DIR up yet, and keeps every pre-3.2 test
+        # in this module unaffected by ingestion.
+        steamprefill_cache_dir=steamprefill_cache_dir
+        or str(tmp_path / "unused-steamprefill-cache"),
+        manifest_archive_dir=manifest_archive_dir or str(tmp_path / "manifest-archive"),
+        manifest_keep=manifest_keep,
     )
 
 
@@ -178,6 +191,92 @@ def test_successful_job_invalidates_the_size_cache(
         after = client.get("/v1/games/440", headers=AUTH).json()
         assert after["size_bytes"] is not None
         assert after["size_bytes"] > 0
+
+
+# -- manifest ingestion (WP 3.2) --------------------------------------------
+
+
+def test_successful_job_ingests_a_dropped_manifest_bin_end_to_end(
+    tmp_path: Path, bindir: Path, cache_root: Path
+) -> None:
+    """Full stack: HTTP enqueue -> worker runs the stub -> stub drops a
+    synthetic SteamPrefill manifest .bin into a fake temp-cache dir -> the
+    worker's post-success ingestion step parses it, records depot_manifests,
+    and archives it -- exactly what a real SteamPrefill run would trigger."""
+    from tests.test_manifests import _bin_manifest_bytes, _chunk_id
+    from vault_api.db import get_connection
+    from vault_api.depot_manifests import get_depot_manifest
+
+    steamprefill_cache_dir = tmp_path / "steamprefill-cache"
+    manifest_archive_dir = tmp_path / "manifest-archive"
+
+    manifest_bytes = _bin_manifest_bytes(
+        depot_id=441, manifest_id=555, files=[[(_chunk_id(1), 1000)]]
+    )
+    executable = stub_prefill.make_stub(
+        bindir,
+        cache_root=str(cache_root),
+        depots_by_app={440: [441]},
+        manifest_bins=[
+            {
+                "dir": str(steamprefill_cache_dir),
+                "filename": "440_440_441_555.bin",
+                "data": manifest_bytes,
+            }
+        ],
+    )
+    settings = make_settings(
+        tmp_path,
+        cache_root,
+        executable,
+        steamprefill_cache_dir=str(steamprefill_cache_dir),
+        manifest_archive_dir=str(manifest_archive_dir),
+    )
+    app = create_app(settings)
+
+    with TestClient(app) as client:
+        (job_id,) = enqueue(client, 440)
+        job = wait_for_job(client, job_id)
+
+        assert job["status"] == "done"
+        assert "Manifest ingestion: recorded 1 manifest" in job["log_excerpt"]
+
+    conn = get_connection(settings.db_path)
+    try:
+        row = get_depot_manifest(conn, appid=440, depotid=441)
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["manifestid"] == "555"
+    assert row["chunk_count"] == 1
+    assert (manifest_archive_dir / "441_555.bin").exists()
+
+
+def test_ingestion_failure_never_flips_a_successful_job_to_error(
+    tmp_path: Path, bindir: Path, cache_root: Path, monkeypatch
+) -> None:
+    """A crash inside manifest ingestion must not undo a successful prefill
+    (worker.py's local try/except around ingest_after_prefill)."""
+    import vault_api.worker as worker_module
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("simulated ingestion bug")
+
+    monkeypatch.setattr(worker_module.manifest_ingest, "ingest_after_prefill", boom)
+
+    executable = stub_prefill.make_stub(
+        bindir, cache_root=str(cache_root), depots_by_app={440: [441]}
+    )
+    app = create_app(make_settings(tmp_path, cache_root, executable))
+
+    with TestClient(app) as client:
+        (job_id,) = enqueue(client, 440)
+        job = wait_for_job(client, job_id)
+
+        assert job["status"] == "done"
+        assert "Manifest ingestion crashed" in job["log_excerpt"]
+        assert client.get("/v1/games/440", headers=AUTH).json()["status"] == "done"
 
 
 # -- one at a time ---------------------------------------------------------

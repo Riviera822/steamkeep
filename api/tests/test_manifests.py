@@ -357,6 +357,36 @@ def test_bin_max_message_size_bound_is_enforced(tmp_path: Path, monkeypatch) -> 
         parse_steamprefill_bin(path)
 
 
+def test_bin_duplicate_chunk_id_conflicting_sizes_last_one_wins(tmp_path: Path) -> None:
+    """WP 3.2 review carry-over (from WP 3.1): pin the dict-assignment
+    semantics documented on ``ParsedManifest.chunks`` — a manifest that lists
+    the same chunk id twice with different sizes must not raise, and must not
+    silently keep the FIRST value either."""
+    cid = _chunk_id(1)
+    files = [[(cid, 1000), (cid, 9999)]]
+    data = _bin_manifest_bytes(depot_id=441, manifest_id=1, files=files)
+    path = _write_bin(tmp_path, "440_440_441_1.bin", data)
+
+    manifest = parse_steamprefill_bin(path)
+
+    assert manifest.chunks == {cid: 9999}
+
+
+def test_bin_uppercase_hex_chunk_id_is_normalized_to_lowercase(tmp_path: Path) -> None:
+    """WP 3.2 review carry-over (from WP 3.1): lowercase normalization is
+    load-bearing for a future GC pass, which compares chunk ids against
+    lowercase on-disk chunk filenames."""
+    lower = _chunk_id(7)
+    data = _bin_manifest_bytes(
+        depot_id=441, manifest_id=1, files=[[(lower.upper(), 42)]]
+    )
+    path = _write_bin(tmp_path, "440_440_441_1.bin", data)
+
+    manifest = parse_steamprefill_bin(path)
+
+    assert manifest.chunks == {lower: 42}
+
+
 # ==========================================================================
 # parse_cache_manifest
 # ==========================================================================
@@ -434,6 +464,29 @@ def test_cache_manifest_duplicate_sha_across_file_mappings_collapses_to_one(
     assert manifest.chunks == {shared.hex(): 111}
 
 
+def test_cache_manifest_duplicate_metadata_section_last_one_wins(tmp_path: Path) -> None:
+    """WP 3.2 review carry-over (from WP 3.1): pin ``_read_sections``' plain
+    dict-assignment semantics — a stream with two METADATA sections must
+    resolve to the LAST one, not the first and not an error."""
+    file_mappings = [[(_chunk_sha20(1), 10)]]
+    stream = _section(_MAGIC_PAYLOAD, _cache_payload_bytes(file_mappings))
+    stream += _section(
+        _MAGIC_METADATA,
+        _cache_metadata_bytes(depot_id=111, manifest_id=222, unique_chunks=99),  # stale/wrong
+    )
+    stream += _section(
+        _MAGIC_METADATA,
+        _cache_metadata_bytes(depot_id=481, manifest_id=999, unique_chunks=1),  # the real one
+    )
+    stream += struct.pack("<I", _MAGIC_END)
+    path = _write_cache_manifest_zip(tmp_path, "manifest.zip", stream)
+
+    manifest = parse_cache_manifest(path)
+
+    assert manifest.depot_id == 481
+    assert manifest.manifest_id == 999
+
+
 def test_cache_manifest_missing_metadata_section_is_rejected(tmp_path: Path) -> None:
     stream = _section(_MAGIC_PAYLOAD, _cache_payload_bytes([])) + struct.pack(
         "<I", _MAGIC_END
@@ -502,6 +555,26 @@ def test_cache_manifest_wrong_zip_entry_name_is_rejected(tmp_path: Path) -> None
 
     with pytest.raises(ManifestParseError, match="no 'z' entry"):
         parse_cache_manifest(path)
+
+
+def test_cache_manifest_wrong_zip_entry_error_truncates_a_huge_namelist(
+    tmp_path: Path,
+) -> None:
+    """WP 3.2 review carry-over (from WP 3.1): a zip with tens of thousands of
+    entries used to embed the FULL namelist in the exception message — this
+    module's caller (WP 3.2's ingestion) logs that message per bad file it
+    encounters. Bounded to the first 10 names plus a total count."""
+    path = tmp_path / "manifest.zip"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index in range(50):
+            archive.writestr(f"not-z-{index:03d}", b"x")
+    path.write_bytes(buf.getvalue())
+
+    with pytest.raises(ManifestParseError, match=r"50 entries, first 10") as excinfo:
+        parse_cache_manifest(path)
+
+    assert "not-z-049" not in str(excinfo.value)
 
 
 def test_cache_manifest_empty_zip_entry_is_rejected(tmp_path: Path) -> None:

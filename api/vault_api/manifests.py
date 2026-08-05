@@ -1,7 +1,8 @@
 """Manifest parsers: pure functions turning on-disk Steam manifest bytes into
 a common depot/manifest/chunks shape (WP 3.1) — the foundation for
 staleness detection (ADR-0006) and manifest-diff garbage collection
-(ADR-0007). Neither of those is wired up here; this module only parses.
+(ADR-0007). This module only parses; ``vault_api.manifest_ingest`` (WP 3.2)
+is what stores what these functions produce and archives the source files.
 
 Two independent on-disk formats exist, both handled with stdlib only (no
 protobuf/zip dependency beyond ``struct``/``zipfile`` — plan §9, and
@@ -72,7 +73,12 @@ throughout, never ``eval``, never unbounded:
 
 - Every buffer this module parses (the whole ``.bin`` file, one section of
   the sectioned stream, one submessage) is checked against
-  ``MAX_MESSAGE_SIZE`` before being parsed.
+  ``MAX_MESSAGE_SIZE`` before being parsed. **Honestly stated: peak memory
+  for one parse is therefore roughly 2x ``MAX_MESSAGE_SIZE``, not 1x** — the
+  raw read buffer and the slices/dict built from it (chunk map, decoded
+  sections) are both live in memory at once during parsing, and the bound
+  is generous enough to absorb that (WP 3.2 review carry-over: a docstring
+  that implied a hard 1x ceiling would be misleading).
 - Every accumulated chunk map is checked against ``MAX_CHUNK_COUNT``.
 - The field reader (``_read_fields``) is **iterative, not recursive** — a
   nested submessage is parsed by calling it again on a byte slice, not by
@@ -150,6 +156,23 @@ class ParsedManifest:
     (``docs/research/phase3-manifests.md``) established is byte-exact
     against the real cached chunk file size, so this map alone is enough
     for GC's reclaim-size reporting without touching the filesystem again.
+
+    **Chunk ids are always lowercase hex, and this is load-bearing for GC**
+    (WP 3.2): a future garbage-collection pass compares these ids directly
+    against on-disk chunk filenames, which are themselves lowercase, so a
+    parser that preserved a manifest's original casing would silently never
+    match anything and delete nothing (or, worse, everything it shouldn't).
+    Both parsers normalize to lowercase before a chunk id ever reaches this
+    map — see ``_validate_hex_chunk_id`` (``.bin``) and ``bytes.hex()``,
+    which is lowercase by construction (cache manifest).
+
+    **Duplicate chunk ids within one manifest: last one wins**, plain ``dict``
+    assignment semantics (``_add_chunk``) — a manifest that (legitimately or
+    via a hostile/corrupt encoder) lists the same chunk id twice with
+    different sizes ends up with whichever size was parsed last, not an
+    error and not the first value. Pinned by
+    ``test_bin_duplicate_chunk_id_conflicting_sizes_last_one_wins`` /
+    ``test_cache_manifest_duplicate_sha_across_file_mappings_collapses_to_one``.
     """
 
     depot_id: int
@@ -358,10 +381,19 @@ def _add_chunk(chunks: dict[str, int], chunk_id: str, size: int, *, context: str
 _BIN_FILENAME_SEGMENTS = ("originalAppId", "containingAppId", "depotId", "manifestId")
 
 
-def _parse_bin_filename(path: str) -> tuple[int, int, int, int]:
+def parse_bin_filename(path: str) -> tuple[int, int, int, int]:
     """Parse a SteamPrefill temp-cache filename into its four ids.
 
     Returns ``(original_app_id, containing_app_id, depot_id, manifest_id)``.
+
+    **Public (WP 3.2):** ``parse_steamprefill_bin`` below discards
+    ``original_app_id``/``containing_app_id`` after using them for the
+    corruption cross-check, because they aren't part of the common
+    ``ParsedManifest`` shape GC needs. ``vault_api.manifest_ingest`` calls
+    this function directly to recover ``containing_app_id`` — the
+    shared-depot attribution signal (research doc: e.g.
+    ``107100_228980_229002_...bin`` = app 107100 pulling a depot that
+    "belongs" to app 228980) — without duplicating the filename contract.
 
     **Strict ASCII-digit parsing (``docs/LEARNINGS.md``): every segment
     must be exactly ``isascii() and isdigit()``, not "whatever ``int()``
@@ -418,7 +450,7 @@ def parse_steamprefill_bin(path: str) -> "PrefillManifest":
     more chunks than ``MAX_CHUNK_COUNT``. No other exception escapes.
     """
     original_app_id, containing_app_id, filename_depot_id, filename_manifest_id = (
-        _parse_bin_filename(path)
+        parse_bin_filename(path)
     )
     del original_app_id, containing_app_id  # not part of the common GC shape (item 4)
 
@@ -482,6 +514,10 @@ def parse_steamprefill_bin(path: str) -> "PrefillManifest":
 
 _ZIP_ENTRY_NAME = "z"
 
+#: How many names to show in the "no 'z' entry" error before truncating (WP
+#: 3.2 review carry-over — see ``_read_zip_entry``'s caller).
+_NAMELIST_ERROR_PREVIEW = 10
+
 _MAGIC_PAYLOAD = 0x71F617D0
 _MAGIC_METADATA = 0x1F4812BE
 _MAGIC_SIGNATURE = 0x1B81B817
@@ -506,6 +542,13 @@ def _read_sections(data: bytes, *, context: str) -> dict[int, bytes]:
     Truncated input (missing END marker, a section whose declared length
     runs past the end of the buffer, a dangling 1-3 byte magic) raises
     ``ManifestParseError`` rather than returning a partial result.
+
+    **A repeated section magic (e.g. two METADATA sections): last one wins.**
+    ``sections[magic] = ...`` is a plain dict assignment executed once per
+    section encountered, in stream order, so a later section with the same
+    magic silently overwrites an earlier one rather than raising or keeping
+    the first. Pinned by
+    ``test_cache_manifest_duplicate_metadata_section_last_one_wins``.
     """
     sections: dict[int, bytes] = {}
     pos = 0
@@ -557,9 +600,19 @@ def _read_zip_entry(path: str) -> bytes:
             try:
                 info = archive.getinfo(_ZIP_ENTRY_NAME)
             except KeyError as exc:
+                # WP 3.2 review carry-over (from the WP 3.1 review): a real
+                # zip can list tens of thousands of names, and this exception
+                # message used to embed the FULL namelist — a 50k-entry zip
+                # produced a ~2 MB exception message, and WP 3.2's ingestion
+                # logs this per bad file it encounters. Bounded to 10 names +
+                # the total count instead.
+                names = archive.namelist()
+                shown = names[:_NAMELIST_ERROR_PREVIEW]
+                omitted = len(names) - len(shown)
+                suffix = "" if omitted <= 0 else f", ... ({omitted} more)"
                 raise ManifestParseError(
                     f"{path!r}: zip has no {_ZIP_ENTRY_NAME!r} entry "
-                    f"(found {archive.namelist()!r})"
+                    f"(found {len(names)} entries, first {len(shown)}: {shown!r}{suffix})"
                 ) from exc
             with archive.open(info) as entry:
                 data = entry.read(MAX_MESSAGE_SIZE + 1)

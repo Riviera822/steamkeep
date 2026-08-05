@@ -9,6 +9,10 @@ behaves like it in the ways the runner depends on:
   ``vault_api/prefill.py``), so the tests prove the runner actually uses it;
 - it writes fake depot chunk files into a cache root, so the depot-diff
   attribution has something real to observe;
+- it can optionally drop a synthetic SteamPrefill manifest ``.bin`` file into
+  a configured directory (WP 3.2's worker-ingestion end-to-end test), using
+  caller-supplied raw bytes (hex-encoded in the control file) rather than a
+  second protobuf encoder — the one in ``tests/test_manifests.py`` is reused;
 - it can reproduce the failure modes that matter: a non-zero exit, the verbatim
   not-logged-in output, and a hang.
 
@@ -133,6 +137,18 @@ def main():
                     handle.write(b"fake-chunk" * 16)
                 written.append(depotid)
 
+    # WP 3.2: optionally drop synthetic SteamPrefill manifest .bin files, so
+    # the worker-ingestion end-to-end test can observe real ingestion
+    # (parse -> depot_manifests row -> archive) through the full stack. Bytes
+    # travel through the JSON control file as hex (JSON has no bytes type);
+    # tests/test_manifests.py's protobuf encoder builds them, this stub just
+    # writes them out verbatim -- it has no opinion on their contents.
+    for spec in control.get("manifest_bins", []):
+        target_dir = spec["dir"]
+        os.makedirs(target_dir, exist_ok=True)
+        with open(os.path.join(target_dir, spec["filename"]), "wb") as handle:
+            handle.write(bytes.fromhex(spec["hex"]))
+
     log("[stub] wrote depots=%s" % written)
     log("[stub] Prefill complete!")
     _record(runs_path, selected, started, 0)
@@ -155,6 +171,22 @@ if __name__ == "__main__":
 '''
 
 
+def _encode_manifest_bins(
+    manifest_bins: list[dict[str, object]] | None,
+) -> list[dict[str, str]]:
+    """``[{"dir": str, "filename": str, "data": bytes}, ...]`` -> JSON-safe hex."""
+    encoded = []
+    for spec in manifest_bins or []:
+        encoded.append(
+            {
+                "dir": str(spec["dir"]),
+                "filename": str(spec["filename"]),
+                "hex": bytes(spec["data"]).hex(),  # type: ignore[arg-type]
+            }
+        )
+    return encoded
+
+
 def make_stub(
     directory: Path,
     *,
@@ -163,11 +195,18 @@ def make_stub(
     depots_by_app: dict[int, list[int]] | None = None,
     exit_code: int = 3,
     sleep_seconds: float = 0.0,
+    manifest_bins: list[dict[str, object]] | None = None,
 ) -> str:
     """Create a fake SteamPrefill in ``directory``; returns the launcher path.
 
     ``directory`` plays the role of the real ``bin/`` folder: the runner writes
     ``Config/selectedAppsToPrefill.json`` into it and the stub reads it back.
+
+    ``manifest_bins`` (WP 3.2): a list of ``{"dir": str, "filename": str,
+    "data": bytes}`` — the stub writes ``data`` verbatim to
+    ``os.path.join(dir, filename)`` on a successful run, so a test can point
+    ``dir`` at a fake SteamPrefill temp-cache directory and observe
+    ``ingest_after_prefill`` pick it up through the real worker.
     """
     directory.mkdir(parents=True, exist_ok=True)
     script = directory / "steamprefill_stub.py"
@@ -180,6 +219,7 @@ def make_stub(
         "exit_code": exit_code,
         "sleep_seconds": sleep_seconds,
         "not_logged_in_output": NOT_LOGGED_IN_OUTPUT,
+        "manifest_bins": _encode_manifest_bins(manifest_bins),
     }
     (directory / CONTROL_FILENAME).write_text(
         json.dumps(control, indent=2), encoding="utf-8"
@@ -210,6 +250,8 @@ def set_mode(directory: Path, **updates: object) -> None:
     for key, value in updates.items():
         if key == "depots_by_app":
             value = {str(k): v for k, v in value.items()}  # type: ignore[union-attr]
+        elif key == "manifest_bins":
+            value = _encode_manifest_bins(value)  # type: ignore[arg-type]
         control[key] = value
     path.write_text(json.dumps(control, indent=2), encoding="utf-8")
 
