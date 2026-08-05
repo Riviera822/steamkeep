@@ -1,0 +1,208 @@
+# SteamVault -- Docker Compose deployment (Phase 1, WP 1.9).
+#
+#   cd deploy
+#   cp .env.example .env      # then set VAULT_API_KEY
+#   docker compose up -d
+#
+# Everything configurable lives in deploy/.env (Compose reads it automatically
+# from this directory). NO SECRETS IN THIS FILE -- VAULT_API_KEY is referenced,
+# never defaulted: `${VAULT_API_KEY:?...}` makes Compose refuse to run at all if
+# it is unset or empty, which is the intended behaviour for the one value that
+# guards every non-health endpoint.
+#
+# Full walkthrough, including the one-time interactive SteamPrefill login and the
+# port-80 / dedicated-IP story: deploy/README.md.
+
+name: steamvault
+
+# --- Log rotation ------------------------------------------------------------
+# Applied to every service below. This is what closes core/README.md's open "log
+# rotation" caveat from WP 1.1: all three containers log to stdout/stderr, and
+# the json-file driver caps what that costs on disk -- 10 MB per file, 5 files,
+# so at most ~50 MB per service, ~150 MB total, enforced by the daemon with no
+# logrotate, no cron and no SIGUSR1 reopen dance. Raise VAULT_LOG_MAX_SIZE /
+# VAULT_LOG_MAX_FILE in .env if you want longer history (vault-core logs one line
+# per depot request, so a busy prefill can churn through 10 MB quickly).
+x-vault-logging: &vault-logging
+  driver: json-file
+  options:
+    max-size: "${VAULT_LOG_MAX_SIZE:-10m}"
+    max-file: "${VAULT_LOG_MAX_FILE:-5}"
+
+services:
+
+  # ===========================================================================
+  # vault-core -- the cache. Plain HTTP on port 80, LAN only.
+  # ===========================================================================
+  vault-core:
+    build:
+      context: ../core
+      dockerfile: Dockerfile
+    image: steamvault/vault-core:${VAULT_IMAGE_TAG:-0.1.0}
+    restart: unless-stopped
+    environment:
+      # Upstream DNS resolver nginx uses to resolve Steam CDN hostnames at
+      # request time (ADR-0001 req 4). MUST NOT point at vault-dns: vault-dns
+      # answers *.steamcontent.com with vault-core's own address, which would
+      # make every cache miss proxy back into this container forever.
+      VAULT_RESOLVER: ${VAULT_RESOLVER:-1.1.1.1}
+    ports:
+      # PORT 80 IS NOT NEGOTIABLE FOR REAL CLIENTS. Steam CDN traffic is plain
+      # HTTP and the Steam client will only ever ask for port 80 -- a cache on
+      # another port simply never gets used (docs/PROJECT_PLAN.md §10).
+      #
+      # If something else on this host already owns port 80, do NOT move
+      # SteamVault to another port -- give it its own address instead (§10):
+      #   * an IP alias on the existing NIC:
+      #       ip addr add 192.168.1.50/24 dev eth0
+      #       VAULT_CORE_BIND=192.168.1.50   in .env
+      #   * or a macvlan / dedicated VLAN interface for the container.
+      # Then point your DNS rewrite (or vault-dns's CACHE_IP) at that address.
+      #
+      # Default 0.0.0.0 is deliberate and correct HERE and only here: every LAN
+      # client must be able to reach the cache. It is still a LAN-only service --
+      # never port-forward it, never put it behind a public reverse proxy
+      # (§10: "never expose vault-core/port 80"). It has no authentication, by
+      # design: the Steam client cannot present any.
+      - "${VAULT_CORE_BIND:-0.0.0.0}:${VAULT_CORE_PORT:-80}:80"
+    volumes:
+      # ONE volume, mounted at /vault, containing BOTH cache/ and tmp/.
+      # This is a correctness requirement, not tidiness: proxy_store completes
+      # every cached object by rename()-ing it out of tmp/ into cache/depot/...,
+      # which is atomic only within a single filesystem (core/README.md
+      # "Same-filesystem requirement"). Do not split these into two mounts --
+      # the container's preflight compares st_dev and refuses to start if you do.
+      - vault-cache:/vault
+    security_opt:
+      # nginx's master drops privileges to uid 101 for its workers; nothing here
+      # ever needs to gain privileges via a setuid binary.
+      - no-new-privileges:true
+    logging: *vault-logging
+
+  # ===========================================================================
+  # vault-api -- control plane + SteamPrefill host. API-key authenticated.
+  # ===========================================================================
+  vault-api:
+    build:
+      context: ../api
+      dockerfile: Dockerfile
+    image: steamvault/vault-api:${VAULT_IMAGE_TAG:-0.1.0}
+    restart: unless-stopped
+    environment:
+      # Required. No default anywhere in the stack: Compose refuses to start
+      # without it, and vault-api itself refuses to boot without it.
+      VAULT_API_KEY: ${VAULT_API_KEY:?set VAULT_API_KEY in deploy/.env (see .env.example)}
+      VAULT_LOG_LEVEL: ${VAULT_LOG_LEVEL:-INFO}
+      VAULT_PREFILL_TIMEOUT_SECONDS: ${VAULT_PREFILL_TIMEOUT_SECONDS:-14400}
+      VAULT_WORKER_POLL_SECONDS: ${VAULT_WORKER_POLL_SECONDS:-1.0}
+      VAULT_SIZE_CACHE_TTL: ${VAULT_SIZE_CACHE_TTL:-60}
+      VAULT_AGENT_REPORT_KEEP: ${VAULT_AGENT_REPORT_KEEP:-20}
+      # VAULT_DB_PATH, VAULT_CACHE_ROOT and VAULT_STEAMPREFILL_PATH are baked
+      # into the image (they describe the image's own layout, not a deployment
+      # choice) -- see api/Dockerfile.
+    ports:
+      # LAN-only, like everything else here. This is the interface the Android
+      # app and vault-agent talk to. For access from outside the LAN do NOT
+      # port-forward this: put it on Tailscale/Twingate, or behind your own
+      # TLS reverse proxy with forward-auth on top of the API key
+      # (docs/PROJECT_PLAN.md §10 "Remote access").
+      - "${VAULT_API_BIND:-0.0.0.0}:${VAULT_API_PORT:-8080}:8080"
+    volumes:
+      # The same cache volume vault-core writes: vault-api reads it for per-game
+      # sizes and deletes depot directories from it. Both containers use uid 101
+      # so this works without loosening permissions.
+      - vault-cache:/vault
+      # SQLite database (mapping, jobs, agent reports). Small; back this up.
+      - vault-db:/data
+      # SteamPrefill's Config/ -- the Steam SESSION lives here after the one-time
+      # interactive login (deploy/README.md "First run"). Treat it as sensitive:
+      # it is a logged-in Steam session. vault-api itself never sees credentials
+      # (ADR-0004).
+      - vault-steamprefill:/opt/steamprefill/Config
+      # HOME for the container user. NOT optional plumbing: SteamPrefill's
+      # AppConfig static constructor creates a directory under HOME before it
+      # parses a single argument, so an unwritable HOME kills every SteamPrefill
+      # invocation with a TypeInitializationException (WP 1.9 review blocker,
+      # see api/Dockerfile). Volume-backed so the manifest cache it builds there
+      # survives restarts instead of being rebuilt into the container layer.
+      - vault-steamprefill-home:/opt/steamprefill/home
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      # Runs as uid 101 on an unprivileged port and touches nothing but its own
+      # volumes -- it needs no Linux capabilities at all.
+      - ALL
+    logging: *vault-logging
+
+  # ===========================================================================
+  # vault-dns -- OPTIONAL. Only for LANs with no existing DNS server.
+  #   docker compose --profile dns up -d
+  # If you already run AdGuard Home / Pi-hole / dnsmasq / Unbound, use that
+  # instead (dns/README.md, "When NOT to use vault-dns") -- one less container
+  # and no second thing fighting over port 53.
+  # ===========================================================================
+  vault-dns:
+    profiles: ["dns"]
+    build:
+      context: ../dns
+      dockerfile: Dockerfile
+    image: steamvault/vault-dns:${VAULT_IMAGE_TAG:-0.1.0}
+    restart: unless-stopped
+    environment:
+      # REQUIRED when this profile is enabled: the LAN IPv4 address of the host
+      # running vault-core. No default -- the entrypoint fails fast with an
+      # explanation if it is empty. (It is not written as `${CACHE_IP:?...}`
+      # because Compose interpolates this whole file for EVERY command, which
+      # would make a plain `docker compose up` fail for people who never enable
+      # this profile.)
+      CACHE_IP: ${CACHE_IP:-}
+      UPSTREAM_DNS_1: ${UPSTREAM_DNS_1:-1.1.1.1}
+      UPSTREAM_DNS_2: ${UPSTREAM_DNS_2:-8.8.8.8}
+    ports:
+      # *** OPEN-RESOLVER WARNING -- THE MOST DANGEROUS TWO LINES IN THIS FILE ***
+      # vault-dns forwards arbitrary queries upstream and has NO source-address
+      # ACL (dns/README.md "Exposure"). Published on a WAN-reachable interface it
+      # is an open recursive resolver: a DNS amplification/reflection weapon
+      # aimed at third parties, using your bandwidth and your IP's reputation.
+      #
+      # Publish it on ONE specific LAN address. In production that looks like:
+      #
+      #     - "192.168.1.50:53:53/udp"
+      #     - "192.168.1.50:53:53/tcp"
+      #
+      # NEVER like this:
+      #
+      #     - "53:53/udp"            # <-- Docker binds 0.0.0.0: EVERY interface,
+      #     - "53:53/tcp"            #     including any WAN-facing one.
+      #
+      # Set VAULT_DNS_BIND=<your LAN IP> in .env to get the safe form above.
+      # The 127.0.0.1 fallback below is intentional: if the variable is unset or
+      # empty this fails CLOSED (no client can reach it, you notice immediately)
+      # rather than silently publishing to the world.
+      - "${VAULT_DNS_BIND:-127.0.0.1}:${VAULT_DNS_PORT:-53}:53/udp"
+      - "${VAULT_DNS_BIND:-127.0.0.1}:${VAULT_DNS_PORT:-53}:53/tcp"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # dnsmasq binds the privileged port 53 and then drops to the unprivileged
+      # 'dnsmasq' account; that is the complete list of what it needs. It is
+      # explicitly NOT granted NET_ADMIN (DHCP server duties) -- vault-dns does
+      # DNS only.
+      - NET_BIND_SERVICE
+      - SETUID
+      - SETGID
+      - CHOWN
+    logging: *vault-logging
+
+volumes:
+  # Named volumes (not bind mounts) are the default because Docker creates them
+  # with the right ownership for uid 101 automatically. If you prefer bind mounts
+  # -- e.g. to put the cache on a specific big disk -- see deploy/README.md
+  # "Using a bind mount for the cache": you must chown the host directory to
+  # 101:101 yourself, and keep cache/ and tmp/ under ONE mount.
+  vault-cache:
+  vault-db:
+  vault-steamprefill:
+  vault-steamprefill-home:

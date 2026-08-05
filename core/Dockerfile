@@ -1,0 +1,120 @@
+# SteamVault vault-core -- the path-faithful Steam depot cache (Phase 1, WP 1.9).
+#
+# Build from the repo's core/ directory:
+#     docker build -t steamvault/vault-core:0.1.0 core/
+# or, normally, via deploy/compose.yaml.
+#
+# --- Base image pin ----------------------------------------------------------
+# Pinned by BOTH an exact version tag and its digest (docs/PROJECT_PLAN.md §9 /
+# CLAUDE.md: pinned tags only, never latest/release). The tag documents WHAT this
+# is for a human; the digest is what actually makes the build reproducible, since
+# a tag can be re-pointed upstream at any time.
+#
+#   nginx:1.29.8-alpine3.23
+#   digest resolved 2026-08-05 via `docker pull` + `docker inspect --format
+#   '{{index .RepoDigests 0}}'` (26.0 MB base image).
+#
+# Alpine (not the Debian variant) because vault-core is a single-purpose static
+# file server + reverse proxy: nothing here needs glibc, and the smaller base is
+# less to keep patched. Bump both the tag and the digest together.
+FROM nginx:1.29.8-alpine3.23@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
+
+LABEL org.opencontainers.image.title="SteamVault vault-core" \
+      org.opencontainers.image.description="nginx proxy_store cache with path-faithful Steam depot storage" \
+      org.opencontainers.image.source="https://github.com/steamvault/steamvault" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="0.1.0"
+
+# --- Config -------------------------------------------------------------------
+# The config is baked into the image, not mounted: it is reviewed, test-covered
+# code (core/tests/test-core.ps1), not a knob. The single deployment-specific
+# value -- the upstream DNS resolver (ADR-0001 req 4) -- is an env placeholder
+# rendered at start; see core/docker/nginx.conf.template's header for the
+# mechanism and core/docker/check-config-drift.sh for the contract that keeps
+# this template in sync with core/nginx/nginx.conf.
+COPY docker/nginx.conf.template /etc/nginx/templates/nginx.conf.template
+COPY docker/40-vault-preflight.sh /docker-entrypoint.d/40-vault-preflight.sh
+
+# Shipped for auditability: the running image can prove its own config matches
+# the reviewed native one (`docker run --rm --entrypoint sh <image> -c
+# 'sh /opt/vault/check-config-drift.sh'` needs core/nginx/nginx.conf mounted, so
+# this is primarily a repo-side tool -- it is included so the check travels with
+# the artifact rather than only existing in a checkout).
+COPY docker/check-config-drift.sh /opt/vault/check-config-drift.sh
+
+RUN set -eux; \
+    chmod 0755 /docker-entrypoint.d/40-vault-preflight.sh /opt/vault/check-config-drift.sh; \
+    # The stock image's demo vhost would otherwise be rendered pointless anyway
+    # (our nginx.conf does not include conf.d/*), but removing it keeps the
+    # image honest about what it serves.
+    rm -f /etc/nginx/conf.d/default.conf; \
+    # --- The one volume ------------------------------------------------------
+    # cache/ and tmp/ are created HERE, inside one directory, so that a fresh
+    # named volume mounted at /vault is seeded with both -- with the right
+    # ownership -- and therefore automatically satisfies the binding
+    # same-filesystem requirement (core/README.md): proxy_store completes each
+    # object by rename()-ing from tmp/ into cache/depot/..., which is atomic only
+    # within one filesystem.
+    #   cache/depot/ is pre-created because vault-api's deletion guard
+    #   (DELETE /v1/cache/{appid}) refuses a cache root that has no depot/ dir,
+    #   and vault-api mounts this same volume.
+    mkdir -p /vault/cache/depot /vault/tmp; \
+    # uid/gid 101 = the stock nginx image's `nginx` user, which the workers run
+    # as. vault-api's container user is created with the SAME numeric uid/gid so
+    # both services can write this shared volume -- see api/Dockerfile.
+    chown -R nginx:nginx /vault; \
+    chmod 0755 /vault /vault/cache /vault/cache/depot /vault/tmp; \
+    # Fail the BUILD, not the first deployment, if the template ever loses its
+    # placeholder or gains an unexpected one.
+    grep -q '\${VAULT_RESOLVER}' /etc/nginx/templates/nginx.conf.template
+
+# Declared so that a plain `docker run` without -v cannot silently fill the
+# container's writable layer with depot chunks, and so that the default is one
+# mount covering both cache/ and tmp/. A deployment that still splits them is
+# caught at boot by 40-vault-preflight.sh.
+VOLUME ["/vault"]
+
+ENV NGINX_ENVSUBST_TEMPLATE_DIR=/etc/nginx/templates \
+    NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx \
+    # Restricts envsubst to ${VAULT_*} placeholders.
+    #
+    # MEASURED, so nobody "simplifies" this away on the strength of a green test:
+    # with this image's stock environment the filter changes NOTHING today --
+    # rendering with and without it produces a byte-identical nginx.conf. The
+    # official entrypoint builds its envsubst allowlist from environment
+    # variables that actually EXIST, and none of them is named like an nginx
+    # runtime variable. envsubst is case-sensitive and nginx's variables are
+    # lowercase ($host, $uri, $document_root, $upstream_status, ...), while
+    # environment variables are conventionally uppercase -- which is exactly why
+    # there is no collision at the moment.
+    #
+    # The filter is a guard against a FUTURE collision: a base-image update, an
+    # orchestrator, or an operator introducing a lowercase env var named e.g.
+    # `host` or `uri` (legal, just unusual). Unfiltered, envsubst would then
+    # replace that nginx variable with the env var's VALUE -- not blank it -- so
+    # the config would still be syntactically valid, `nginx -t` would still pass,
+    # and the server would quietly proxy/store against the wrong value. Nothing
+    # else in this stack catches that; the filter does, by never substituting
+    # anything that is not a ${VAULT_*} placeholder in the first place.
+    NGINX_ENVSUBST_FILTER=^VAULT_ \
+    # ADR-0001 req 4. Overridable per deployment (deploy/.env). Must be a real
+    # upstream resolver -- never vault-dns, which would answer *.steamcontent.com
+    # with vault-core's own address and loop every miss back into this server.
+    VAULT_RESOLVER=1.1.1.1
+
+WORKDIR /vault
+
+# Steam CDN traffic is plain HTTP (docs/PROJECT_PLAN.md §10). No TLS here, ever.
+EXPOSE 80
+
+# /health is a local, non-proxying location (see the config): it needs no Host
+# allowlist entry and never touches the network, so it is a true liveness probe
+# for "nginx is up and serving", not for "the internet works".
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1/health || exit 1
+
+# ENTRYPOINT stays the base image's /docker-entrypoint.sh, which renders the
+# template and runs /docker-entrypoint.d/*.sh (including our preflight) before
+# exec'ing this command. `-p /vault` is what makes the config's relative paths
+# ("root cache", "tmp/proxy") resolve inside the volume.
+CMD ["nginx", "-g", "daemon off;", "-p", "/vault", "-c", "/etc/nginx/nginx.conf"]

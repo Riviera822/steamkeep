@@ -91,6 +91,16 @@ These are not style preferences; each entry cost a review round to learn.
   variables with its value (not blanks) and `nginx -t` still passes —
   always restrict with an allowlist filter (WP 1.9).
 
+## Containers
+- A non-root container user needs a real, writable HOME — tools that
+  write caches (SteamPrefill: $HOME/.cache) crash on /nonexistent before
+  printing anything, so error-pattern matching never fires. Set both the
+  passwd home-dir AND ENV HOME; compose run vs docker exec derive HOME
+  differently (WP 1.9 Fable blocker).
+- "Verified by inspection" is not verified: every binary that ships in an
+  image needs at least a credential-free smoke RUN in the verify suite
+  (WP 1.9).
+
 ## Testing discipline
 - Flake-hunt concurrency tests: run the module isolated in a 20-40x loop —
   full-suite green means nothing for timing bugs (WP 1.6 Fable).

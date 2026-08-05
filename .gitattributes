@@ -12,3 +12,27 @@ poc/linux-client-test/*.sh eol=lf
 # does not tolerate and would fail to start on, not just a cosmetic issue.
 dns/tests/*.sh eol=lf
 dns/*.template eol=lf
+
+# WP 1.9 (Docker packaging). Everything below is read by a Linux container
+# runtime or shell, from a repository that is normally checked out on Windows.
+# CRLF is not cosmetic here, it breaks things outright:
+#   - .sh: a CRLF shebang line makes the kernel look for an interpreter named
+#     "/bin/sh\r", which does not exist -> "no such file or directory" on a file
+#     that visibly exists. Also silently appends \r to every string a script
+#     compares or passes on.
+#   - Dockerfile: a trailing \r ends up inside RUN commands and ENV values, so
+#     e.g. VAULT_RESOLVER becomes "1.1.1.1\r" in the built image.
+#   - nginx.conf.template: envsubst copies bytes verbatim, so \r would land in
+#     the rendered nginx.conf; nginx treats it as part of the directive value.
+core/docker/*.sh eol=lf
+core/docker/*.template eol=lf
+dns/*.sh eol=lf
+deploy/tests/*.sh eol=lf
+**/Dockerfile eol=lf
+deploy/compose.yaml eol=lf
+# .dockerignore: patterns are matched verbatim, so a trailing \r makes a pattern
+# match nothing (silently shipping what it was meant to exclude).
+**/.dockerignore eol=lf
+# .env.example is copied to .env and parsed by Compose; a trailing \r ends up
+# inside the VALUE (e.g. an API key that never matches).
+**/.env.example eol=lf

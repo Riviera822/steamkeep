@@ -6,9 +6,14 @@ run AdGuard Home, Pi-hole, or plain dnsmasq, you almost certainly want mode 1
 instead -- skip to ["When NOT to use vault-dns"](#when-not-to-use-vault-dns-mode-1-instead)
 below.
 
-This work package ships the **config template and docs only**. There is no
-container yet -- that's WP 1.9 (Dockerfile + Compose service behind
-`--profile dns`). Nothing here runs standalone.
+This work package (WP 1.8) shipped the **config template and docs only**.
+The container arrived with WP 1.9: `dns/Dockerfile` +
+`dns/docker-entrypoint.sh` (which implements the placeholder contract at the
+bottom of this file) and the `vault-dns` service behind `--profile dns` in
+`deploy/compose.yaml`. **The binding open-resolver requirement below is
+honoured there**: port 53 is published on `${VAULT_DNS_BIND}` with a
+`127.0.0.1` fallback so an unset value fails closed, never on `0.0.0.0`.
+Deployment instructions: `deploy/README.md`.
 
 ## Files
 

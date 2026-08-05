@@ -310,8 +310,14 @@ for users who expose the API differently.
       link-safe removal, execute-time shared recheck closing the
       TOCTOU, settle-and-recheck against racing deletes; mapping rows
       survive deletion by design. Opus + Fable double review)*
-- [ ] Docker Compose (2 services + volume), .env convention, pinned image tags
-- [ ] Optional vault-dns container behind a Compose profile (`--profile dns`)
+- [x] Docker Compose (2 services + volume), .env convention, pinned image tags
+      *(WP 1.9: tag+digest-pinned images, preflight guards, json-file log
+      rotation, SteamPrefill v3.7.1 with TOFU checksum and a dedicated
+      HOME volume, 62-check container verification incl. real CDN
+      MISS/HIT through the Linux container. Opus + Fable double review)*
+- [x] Optional vault-dns container behind a Compose profile (`--profile dns`)
+      *(WP 1.9: envsubst entrypoint with IPv4 validation and address=/
+      local= re-assertion, fail-closed loopback default binding)*
 - [x] **MVP test: prefill a game via curl, query its size, delete it — no app**
       *(2026-08-05, WP 1.7: full HTTP-only cycle against the real Steam
       CDN through the resident vault-core — prefill 79.7 MiB via job

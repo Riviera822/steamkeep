@@ -334,27 +334,21 @@ are both plain files nginx keeps open for the lifetime of the worker
 process -- nothing here rotates them automatically, same as any nginx
 install.
 
-**In the container (WP 1.9):** standard logrotate pattern, using nginx's
-own graceful log-reopen via `SIGUSR1` (or `nginx -s reopen`) so no requests
-are dropped mid-rotation:
+**In the container (WP 1.9): RESOLVED, and not with logrotate.** An earlier
+revision of this section sketched a `/etc/logrotate.d/steamvault-core` file
+plus `nginx -s reopen`. That was superseded during WP 1.9 by a simpler
+answer with strictly fewer moving parts: the container writes
+`access_log /dev/stdout` and `error_log /dev/stderr`, and **rotation is the
+Docker json-file driver's job** -- `max-size: 10m`, `max-file: 5` on every
+service in `deploy/compose.yaml`, enforced by the daemon.
 
-```
-# /etc/logrotate.d/steamvault-core (Docker image)
-/cache/../logs/*.log {
-    daily
-    rotate 14
-    compress
-    delaycompress
-    missingok
-    notifempty
-    postrotate
-        nginx -s reopen
-    endscript
-}
-```
-
-(Exact path depends on the volume layout finalized in WP 1.9 --
-placeholder path shown; the mechanism, not the path, is the point here.)
+No logrotate binary in the image, no cron, no `SIGUSR1` dance, no log
+volume, no risk of an unrotated file filling a container filesystem -- and
+`docker logs` becomes the one place all three services' logs appear. The
+limits are tunable per deployment (`VAULT_LOG_MAX_SIZE` /
+`VAULT_LOG_MAX_FILE` in `deploy/.env`); see `deploy/README.md`
+("Logs and rotation"). Verified applied to the running containers in
+`deploy/VERIFICATION-*.md` (step 5h).
 
 **Windows-native (dev):** no logrotate equivalent is set up for local
 development -- logs simply accumulate under `core/logs/`. Since this mode
@@ -363,25 +357,59 @@ is for development/testing only (never the deployed target), delete
 large; they are gitignored and carry no state that needs to survive a
 restart.
 
-## What moves into the Docker image (WP 1.9)
+## The Docker image (WP 1.9 -- implemented)
 
-- The nginx binary itself (Linux build, not the Windows one reused here)
-- `core/nginx/nginx.conf` unchanged in content -- only the `-p` prefix
-  argument changes (container WORKDIR instead of `core/`), so `root cache`
-  resolves to the container's `/cache` volume mount and the path-faithful
-  `/cache/depot/...` layout falls out with no config edits
-- `access_log`/`error_log` paths likely redirected to stdout/stderr or a
-  mounted log volume, per whatever the Compose/logging convention lands on
-  in WP 1.9 -- not decided here
-- The logrotate example above, wired into the image or the host, whichever
-  the Compose design in WP 1.9 prefers
-- **Binding requirement, not optional:** `tmp/` and `cache/` must be part
-  of the *same* mounted volume -- see "Temp files must never be
-  web-reachable" above for why (rename() atomicity for `proxy_store`)
+```
+core/
+├── Dockerfile                       # nginx:1.29.8-alpine3.23, pinned by digest
+└── docker/
+    ├── nginx.conf.template          # what actually runs in the container
+    ├── 40-vault-preflight.sh        # boot-time guards (see below)
+    └── check-config-drift.sh        # keeps the template honest
+```
+
+**The container does NOT run `core/nginx/nginx.conf`.** Five directives
+cannot be shared with the native dev config -- the log destinations, the
+pid path, an explicit worker user, and the resolver becoming an env
+placeholder -- so `core/docker/nginx.conf.template` is a near-verbatim copy
+carrying exactly those five deltas. Everything else (every map, the store
+guard, the Host allowlist, the Range/Accept-Encoding stripping, the nocache
+bypass, the log format) is byte-identical, and that is **machine-checked**
+by `core/docker/check-config-drift.sh`: it normalises both files, un-applies
+the five deltas, and diffs. 83 normalised directive lines, verified
+identical -- and verified to actually catch an injected difference (a
+negative test in `deploy/tests/verify-stack.sh`, step 1b). Run it after
+touching either file.
+
+- `-p /vault` is the prefix, so `root cache` -> `/vault/cache` and
+  `proxy_temp_path tmp/proxy` -> `/vault/tmp/proxy`, path-faithful layout
+  unchanged as predicted.
+- **The same-filesystem requirement is now enforced, not just documented:**
+  `cache/` and `tmp/` live under ONE volume mounted at `/vault`, and
+  `40-vault-preflight.sh` compares their `st_dev` at every start. A split
+  mount is a loud boot failure instead of a silent fallback from `rename()`
+  to a full copy.
+- **The resolver (ADR req 4) is configurable** via `VAULT_RESOLVER`
+  (default `1.1.1.1`), rendered by the official image's
+  `/etc/nginx/templates` envsubst mechanism with
+  `NGINX_ENVSUBST_FILTER=^VAULT_`. Measured caveat for anyone tempted to drop
+  that filter: today it changes nothing (filtered and unfiltered renders are
+  byte-identical, because no existing env var is named like an nginx runtime
+  variable). It guards a *future* lowercase env var colliding with `$host`,
+  `$uri` and friends -- unfiltered, envsubst would replace the nginx variable
+  with that env var's **value**, `nginx -t` would still pass, and the cache
+  would silently misbehave. See the comment in `core/Dockerfile`.
+- Other preflight guards, all exercised in `deploy/VERIFICATION-*.md`
+  (step 8): an unrendered `${VAULT_...}` placeholder, an empty resolver, a
+  resolver value containing nginx-config-injection characters, and a cache
+  directory the worker user (uid 101) cannot write.
+- Deployment, volumes, ports and the port-80/dedicated-IP guidance:
+  `deploy/README.md`.
 
 ## What this work package does NOT cover
 
-- Docker/Dockerfile/Compose (WP 1.9)
+- Docker/Dockerfile/Compose -- delivered later by WP 1.9, see
+  "The Docker image" above
 - vault-api or any API code (WP 1.2+)
 - Miss-triggered prefill completion (Phase 3, hybrid decision in ADR-0001)
 - Manifest-based garbage collection (Phase 3)
