@@ -1,0 +1,30 @@
+"libraryfolders"
+{
+	"0"
+	{
+		"path"		"C:\\VaultTest\\SteamMain"
+		"label"		""
+		"contentid"		"1000000000000000001"
+		"totalsize"		"0"
+		"update_clean_bytes_tally"		"0"
+		"time_last_update_verified"		"1785341030"
+		"apps"
+		{
+			"999001"		"1234567890"
+			"999004"		"1"
+		}
+	}
+	"1"
+	{
+		"path"		"D:\\VaultTest\\SteamLibrary2"
+		"label"		"bulk"
+		"contentid"		"1000000000000000002"
+		"totalsize"		"0"
+		"update_clean_bytes_tally"		"0"
+		"time_last_update_verified"		"1785341031"
+		"apps"
+		{
+			"999002"		"9876543210"
+		}
+	}
+}

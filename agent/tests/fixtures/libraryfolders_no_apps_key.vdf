@@ -1,0 +1,10 @@
+// Sanity fixture: a library entry that only carries a path, no apps block.
+// Real files always include "apps", but discover_installed only needs
+// "path", so tolerate its absence too.
+"libraryfolders"
+{
+	"0"
+	{
+		"path"		"C:\\VaultTest\\SteamMain"
+	}
+}

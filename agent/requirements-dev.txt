@@ -1,0 +1,5 @@
+# Test-only dependencies. Runtime (vault_agent/) is stdlib only by design
+# (PROJECT_PLAN.md section 9 — keep the VDF/ACF parser small, no third-party
+# parser deps). Install with:
+#   pip install -r requirements-dev.txt
+pytest==8.3.4

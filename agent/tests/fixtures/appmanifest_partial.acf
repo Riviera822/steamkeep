@@ -1,0 +1,14 @@
+"AppState"
+{
+	"appid"		"999003"
+	"universe"		"1"
+	"name"		"Vault Test Game C"
+	"StateFlags"		"2"
+	"installdir"		"VaultTestGameC"
+	"LastUpdated"		"1785859300"
+	"LastPlayed"		"0"
+	"SizeOnDisk"		"512000"
+	"buildid"		"0"
+	"BytesToDownload"		"5000000000"
+	"BytesDownloaded"		"512000"
+}

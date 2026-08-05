@@ -1,0 +1,21 @@
+"AppState"
+{
+	"appid"		"999002"
+	"universe"		"1"
+	"name"		"Vault Test Game B"
+	"StateFlags"		"6"
+	"installdir"		"VaultTestGameB"
+	"LastUpdated"		"1785859200"
+	"LastPlayed"		"1785800000"
+	"SizeOnDisk"		"9876543210"
+	"buildid"		"1000002"
+	"TargetBuildID"		"1000003"
+	"InstalledDepots"
+	{
+		"999012"
+		{
+			"manifest"		"2222222222222222222"
+			"size"		"9876543210"
+		}
+	}
+}
