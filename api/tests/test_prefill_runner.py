@@ -92,6 +92,37 @@ def test_selection_file_is_rewritten_for_every_job(tmp_path: Path) -> None:
     assert stub_prefill.read_selection(bindir) == [730]
 
 
+def test_write_selected_apps_is_atomic_and_leaves_no_tmp_file_behind(
+    tmp_path: Path,
+) -> None:
+    """WP 1.5 carry-over fix: written via tempfile + os.replace, not a
+    truncating open() — a reader must never observe a half-written file, and
+    the tempfile must not linger afterwards."""
+    bindir = tmp_path / "bin"
+    executable = stub_prefill.make_stub(bindir, cache_root=str(tmp_path / "cache"))
+
+    error = prefill.write_selected_apps(executable, 12345)
+
+    assert error is None
+    config_dir = Path(executable).parent / "Config"
+    assert [p.name for p in config_dir.iterdir()] == ["selectedAppsToPrefill.json"]
+    assert stub_prefill.read_selection(bindir) == [12345]
+
+
+def test_write_selected_apps_overwrites_atomically_on_repeated_calls(
+    tmp_path: Path,
+) -> None:
+    bindir = tmp_path / "bin"
+    executable = stub_prefill.make_stub(bindir, cache_root=str(tmp_path / "cache"))
+
+    prefill.write_selected_apps(executable, 111)
+    prefill.write_selected_apps(executable, 222)
+
+    config_dir = Path(executable).parent / "Config"
+    assert [p.name for p in config_dir.iterdir()] == ["selectedAppsToPrefill.json"]
+    assert stub_prefill.read_selection(bindir) == [222]
+
+
 # -- failure modes ---------------------------------------------------------
 
 

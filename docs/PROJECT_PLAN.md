@@ -224,7 +224,7 @@ Steam-only, prefill-first design can solve better:
 | GET | /v1/jobs/{id} | Job status (for app polling) |
 | DELETE | /v1/cache/{appid} | Delete a game from the cache |
 | POST | /v1/cache/{appid}/gc | Garbage-collect orphaned chunks (manifest diff) |
-| GET | /v1/cache/summary | Total usage, top consumers, free space |
+| GET | /v1/cache/summary | Total usage, top consumers, unmapped depots, free space |
 | GET | /v1/clients | Per-client hit stats incl. bypass warnings |
 | POST | /v1/agent/installed | PC agent reports installed app IDs |
 | PUT | /v1/mapping/{depotid} | Manual depot→app mapping fallback (additive, see ADR-0003) |
@@ -300,7 +300,9 @@ for users who expose the API differently.
       *(WP 1.2/1.3: skeleton with secure-by-default auth, schema v1,
       manual mapping endpoints per ADR-0003; the prefill-driven mapping
       import lands with the orchestration in the next package)*
-- [ ] Prefill orchestration (SteamPrefill subprocess, job queue, one job at a time)
+- [x] Prefill orchestration (SteamPrefill subprocess, job queue, one job at a time)
+      *(WP 1.4: selection-file driven — SteamPrefill has no app-id CLI;
+      hybrid miss-trigger itself remains Phase 3 per ADR-0001)*
 - [ ] Size calculation + deletion incl. shared-depot protection
 - [ ] Docker Compose (2 services + volume), .env convention, pinned image tags
 - [ ] Optional vault-dns container behind a Compose profile (`--profile dns`)

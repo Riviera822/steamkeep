@@ -30,6 +30,12 @@ DEFAULT_PREFILL_TIMEOUT_SECONDS = 14400  # 4 hours
 #: How long the job worker sleeps between polls of an empty queue.
 DEFAULT_WORKER_POLL_SECONDS = 1.0
 
+#: Default TTL for the in-process per-game size cache (plan §3: "du over
+#: depot folders, cached", WP 1.5). A disk walk over the whole depot/ tree is
+#: not free, so repeated GET /v1/games / /v1/cache/summary calls within this
+#: window reuse the last scan instead of re-walking.
+DEFAULT_SIZE_CACHE_TTL_SECONDS = 60.0
+
 
 def _env_int(name: str, default: int) -> int:
     """Read a positive integer env var, falling back to ``default``."""
@@ -75,6 +81,8 @@ class Settings:
     steamprefill_path: str = ""
     prefill_timeout_seconds: int = DEFAULT_PREFILL_TIMEOUT_SECONDS
     worker_poll_seconds: float = DEFAULT_WORKER_POLL_SECONDS
+    # WP 1.5. TTL (seconds) for the in-process per-game size cache.
+    size_cache_ttl_seconds: float = DEFAULT_SIZE_CACHE_TTL_SECONDS
 
     @staticmethod
     def from_env() -> "Settings":
@@ -103,5 +111,8 @@ class Settings:
             ),
             worker_poll_seconds=_env_float(
                 "VAULT_WORKER_POLL_SECONDS", DEFAULT_WORKER_POLL_SECONDS
+            ),
+            size_cache_ttl_seconds=_env_float(
+                "VAULT_SIZE_CACHE_TTL", DEFAULT_SIZE_CACHE_TTL_SECONDS
             ),
         )

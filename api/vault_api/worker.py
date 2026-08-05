@@ -26,6 +26,7 @@ import traceback
 from vault_api import jobs, prefill
 from vault_api.config import Settings
 from vault_api.db import get_connection
+from vault_api.sizes import SizeCache
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +39,14 @@ SHUTDOWN_JOIN_TIMEOUT_SECONDS = 30.0
 class PrefillWorker:
     """Runs queued prefill jobs, strictly one at a time, in FIFO order."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, size_cache: SizeCache | None = None) -> None:
         self._settings = settings
+        #: Invalidated after a successful prefill job (WP 1.5: plan §3's "du
+        #: over depot folders, cached" needs an explicit invalidation hook,
+        #: not polling). None in tests that don't care about size caching.
+        self._size_cache = size_cache
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        #: Set once the loop has exited; lets tests wait deterministically.
-        self._finished = threading.Event()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -97,7 +100,6 @@ class PrefillWorker:
                 self._execute(conn, job)
         finally:
             conn.close()
-            self._finished.set()
 
     def _execute(self, conn: sqlite3.Connection, job: dict[str, object]) -> None:
         job_id = int(job["id"])  # type: ignore[arg-type]
@@ -127,6 +129,15 @@ class PrefillWorker:
                     conn, appid, jobs.STATUS_DONE, last_prefill_at=jobs.utcnow_iso()
                 )
                 jobs.finish_job(conn, job_id, jobs.STATUS_DONE, "\n".join(log_parts))
+
+                # Disk content just changed (plan §3: size calculation is
+                # "cached" — explicit invalidation, not polling). A prefill
+                # that observed nothing still ran --force and may have
+                # rewritten existing chunks, so invalidate unconditionally
+                # rather than only when `observed` is non-empty.
+                if self._size_cache is not None:
+                    self._size_cache.invalidate()
+
                 logger.info(
                     "Prefill job %s for appid %s done (%d depots observed)",
                     job_id, appid, len(observed),

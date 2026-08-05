@@ -75,6 +75,10 @@ def test_concurrent_mixed_requests_do_not_500(tmp_path) -> None:
                 )
                 return response.status_code
 
+            async def cache_summary() -> int:
+                response = await client.get("/v1/cache/summary", headers=AUTH)
+                return response.status_code
+
             tasks = []
             for i in range(10):
                 tasks.append(games_list())
@@ -87,12 +91,17 @@ def test_concurrent_mixed_requests_do_not_500(tmp_path) -> None:
                 # appid, so they race on the dedupe transaction too.
                 tasks.append(jobs_list())
                 tasks.append(prefill_post(440 + (i % 3)))
+                # WP 1.5: SizeCache.get() takes its own lock and, on a miss,
+                # walks the depot tree — make sure that races cleanly against
+                # the same-request games_list()/games_detail() calls that also
+                # hit it, instead of each other, without a 500.
+                tasks.append(cache_summary())
 
             return await asyncio.gather(*tasks)
 
     statuses = asyncio.run(run())
 
-    assert len(statuses) == 50
+    assert len(statuses) == 60
     assert all(status_code < 500 for status_code in statuses), statuses
 
 
@@ -150,6 +159,11 @@ def test_http_reads_survive_a_worker_writing_in_the_background(tmp_path) -> None
                     tasks.append(get("/v1/games"))
                     tasks.append(get(f"/v1/games/{index}"))
                     tasks.append(get("/v1/mapping"))
+                    # WP 1.5: reads through the size cache while the worker
+                    # writes chunk files into the SAME cache_root tree the
+                    # cache scans — a disk-level analogue of the sqlite
+                    # WAL/busy_timeout regression this test already pins.
+                    tasks.append(get("/v1/cache/summary"))
                 return await asyncio.gather(*tasks)
 
         # Hammer it repeatedly so reads overlap several job boundaries.

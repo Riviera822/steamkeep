@@ -112,6 +112,16 @@ def init_db(db_path: str) -> None:
     function needs a real per-version step list — the ``stored > SCHEMA_VERSION``
     guard below exists so a downgrade is caught loudly instead of silently
     operating on a schema this code doesn't understand.
+
+    **Ordering (WP 1.5 carry-over fix from the WP 1.4 review):** the stored
+    version is read and checked BEFORE the rest of ``_DDL`` runs, not after.
+    The previous ordering ran the full DDL unconditionally and only checked
+    the version afterwards — harmless so far because every statement so far
+    has been additive, but it read as a downgrade *gate* without being one:
+    a future non-additive statement would already have executed against a
+    newer-than-understood schema by the time the guard fired. Only the
+    ``schema_version`` table itself (a single, always-safe ``CREATE TABLE IF
+    NOT EXISTS``) runs before the check.
     """
     parent = os.path.dirname(db_path)
     if parent:
@@ -119,18 +129,26 @@ def init_db(db_path: str) -> None:
 
     conn = get_connection(db_path)
     try:
-        conn.executescript(_DDL)
-
+        # Only the version marker table — cheap and always additive — before
+        # the guard runs. The rest of _DDL (which also (re)creates this same
+        # table, harmlessly, via IF NOT EXISTS) follows only once we know this
+        # code understands the stored version.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)"
+        )
         row = conn.execute("SELECT version FROM schema_version").fetchone()
-        if row is None:
-            conn.execute(
-                "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
-            )
-        elif row["version"] > SCHEMA_VERSION:
+        if row is not None and row["version"] > SCHEMA_VERSION:
             raise RuntimeError(
                 f"Database {db_path} has schema version {row['version']}, but this "
                 f"vault-api only understands up to {SCHEMA_VERSION}. It was written "
                 "by a newer version — upgrade vault-api instead of downgrading."
+            )
+
+        conn.executescript(_DDL)
+
+        if row is None:
+            conn.execute(
+                "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
             )
         elif row["version"] < SCHEMA_VERSION:
             conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))

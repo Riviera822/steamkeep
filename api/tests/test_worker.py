@@ -148,6 +148,38 @@ def test_nothing_new_observed_leaves_the_mapping_untouched(
         assert detail["status"] == "done"
 
 
+def test_successful_job_invalidates_the_size_cache(
+    tmp_path: Path, bindir: Path, cache_root: Path
+) -> None:
+    """WP 1.5: plan §3's size calculation is "cached" — a successful prefill
+    must invalidate it, or GET /v1/games would keep reporting a game's
+    pre-prefill (null/stale) size for up to VAULT_SIZE_CACHE_TTL seconds.
+
+    Uses the default 60s TTL (make_settings doesn't override it) so this only
+    passes if the worker actively invalidates — a passive TTL expiry could
+    never make it through in the test's runtime.
+    """
+    executable = stub_prefill.make_stub(
+        bindir, cache_root=str(cache_root), depots_by_app={440: [441]}
+    )
+    app = create_app(make_settings(tmp_path, cache_root, executable))
+
+    with TestClient(app) as client:
+        client.put("/v1/mapping/441", json={"appid": 440}, headers=AUTH)
+
+        # Populate the size cache with a "nothing on disk yet" snapshot,
+        # exactly like a real app poll would before the first prefill.
+        before = client.get("/v1/games/440", headers=AUTH).json()
+        assert before["size_bytes"] is None
+
+        (job_id,) = enqueue(client, 440)
+        assert wait_for_job(client, job_id)["status"] == "done"
+
+        after = client.get("/v1/games/440", headers=AUTH).json()
+        assert after["size_bytes"] is not None
+        assert after["size_bytes"] > 0
+
+
 # -- one at a time ---------------------------------------------------------
 
 

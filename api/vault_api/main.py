@@ -20,7 +20,8 @@ from fastapi import FastAPI
 from vault_api.config import Settings
 from vault_api.db import get_connection, init_db
 from vault_api.jobs import recover_stale_jobs
-from vault_api.routers import games, health, jobs, mapping
+from vault_api.routers import cache, games, health, jobs, mapping
+from vault_api.sizes import SizeCache
 from vault_api.worker import PrefillWorker
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             recovered,
         )
 
-    worker = PrefillWorker(settings)
+    worker = PrefillWorker(settings, size_cache=app.state.size_cache)
     app.state.worker = worker
     worker.start()
     try:
@@ -79,8 +80,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title="vault-api", version="0.1.0", openapi_url=None, lifespan=_lifespan
     )
     app.state.settings = settings
+    # Created here (not inside the lifespan) so it exists for a plain
+    # TestClient() too, the same reasoning as app.state.settings above —
+    # size-reporting endpoints don't need the worker running to be testable.
+    app.state.size_cache = SizeCache(ttl_seconds=settings.size_cache_ttl_seconds)
     app.include_router(health.router)
     app.include_router(games.router)
     app.include_router(mapping.router)
     app.include_router(jobs.router)
+    app.include_router(cache.router)
     return app

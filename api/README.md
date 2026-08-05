@@ -3,10 +3,12 @@
 FastAPI + SQLite backend for SteamVault. Plain `sqlite3` with small helper
 functions — no ORM. WP 1.2 shipped the project skeleton (config, DB schema,
 auth dependency, `GET /v1/health`); WP 1.3 added depot→app mapping storage and
-the games endpoints; WP 1.4 adds **prefill orchestration** — a job queue, the
-SteamPrefill subprocess runner, and the prefill-driven mapping import
-(`docs/PROJECT_PLAN.md` §3, §4, §6). Size calculation, deletion, the scheduler
-and the miss trigger remain scope for later work packages.
+the games endpoints; WP 1.4 added **prefill orchestration** — a job queue, the
+SteamPrefill subprocess runner, and the prefill-driven mapping import; WP 1.5
+adds **per-game size calculation** (`vault_api/sizes.py`) — a cached "du over
+depot folders" (`docs/PROJECT_PLAN.md` §3), wired into `GET /v1/games`/
+`GET /v1/games/{appid}`, plus the new `GET /v1/cache/summary` (§6). Deletion,
+the scheduler and the miss trigger remain scope for later work packages.
 
 ## Layout
 
@@ -22,11 +24,13 @@ api/
 │   ├── jobs.py           # job queue + apps.status transitions
 │   ├── prefill.py        # SteamPrefill runner + depot attribution
 │   ├── worker.py         # the single background job worker thread
+│   ├── sizes.py          # depot disk walk, TTL size cache, summary aggregation
 │   └── routers/
 │       ├── health.py     # GET /v1/health — the ONE public router
 │       ├── games.py      # GET /v1/games, GET /v1/games/{appid}
 │       ├── mapping.py    # PUT /v1/mapping/{depotid}, GET /v1/mapping
-│       └── jobs.py       # POST /v1/prefill, GET /v1/jobs[/{id}]
+│       ├── jobs.py       # POST /v1/prefill, GET /v1/jobs[/{id}]
+│       └── cache.py      # GET /v1/cache/summary
 ├── tests/                # pytest (incl. tests/stub_prefill.py — fake CLI)
 ├── requirements.txt      # pinned, runtime only
 ├── requirements-dev.txt  # pinned, adds test-only deps (pytest, httpx)
@@ -48,6 +52,7 @@ Copy `.env.example` to `.env` and adjust:
 | `VAULT_STEAMPREFILL_PATH`       | no*      | *(empty)*    | Path to the SteamPrefill executable; *required to run prefill jobs* |
 | `VAULT_PREFILL_TIMEOUT_SECONDS` | no       | `14400`      | Hard time budget for one SteamPrefill run (hang backstop)           |
 | `VAULT_WORKER_POLL_SECONDS`     | no       | `1.0`        | Worker sleep between polls of an empty queue                        |
+| `VAULT_SIZE_CACHE_TTL`          | no       | `60`         | TTL (seconds) for the in-process per-game size cache (see below)     |
 
 `VAULT_API_KEY` has no default. Starting the app without it raises
 `RuntimeError` immediately (`Settings.from_env`) — this is the "fail loudly"
@@ -93,6 +98,14 @@ recording the new `schema_version`. A stored version *higher* than
 schema this code doesn't know (downgrade guard). The first non-additive change
 will need a real per-version step list — that's called out in `init_db`'s
 docstring. Both paths are covered in `tests/test_db.py`.
+
+**Ordering fix (WP 1.5 carry-over from the WP 1.4 review):** `init_db` now
+creates only the `schema_version` table, reads the stored version, and checks
+the downgrade guard *before* running the rest of `_DDL` — previously the full
+DDL ran unconditionally first and the guard was checked afterwards, so it read
+as a gate without functioning as one (harmless so far since every change has
+been additive, but a future non-additive statement would already have run
+against a newer-than-understood schema by the time the check fired).
 
 **Retention (not yet implemented):** `agent_reports` grows one row per
 client per report interval indefinitely. A simple policy — e.g. keep only
@@ -171,22 +184,23 @@ appid both saw "no row" and both inserted; the loser got
 is now `INSERT OR IGNORE` plus a conditional name `UPDATE`, pinned by
 `tests/test_mapping.py::test_concurrent_upsert_of_the_same_new_appid_does_not_500`.
 
-## Endpoints (WP 1.3 + 1.4)
+## Endpoints (WP 1.3 + 1.4 + 1.5)
 
 All routes below require `X-Api-Key` (see "Auth"). Full API table:
-`docs/PROJECT_PLAN.md` §6; the games, mapping, prefill and jobs rows are
-implemented so far.
+`docs/PROJECT_PLAN.md` §6; the games, mapping, prefill, jobs and cache rows
+are implemented so far.
 
 | Method | Endpoint                          | Purpose |
 |--------|-------------------------------------|---------|
-| GET    | `/v1/games`                        | All tracked apps: `appid`, `name`, `status`, `last_prefill_at`, `depot_count`, `size_bytes` (always `null` until WP 1.5 adds the per-app size calculation) |
-| GET    | `/v1/games/{appid}`                | Detail for one app: same fields plus `depots` (list of `{depotid, shared}`); `404` for an unknown `appid` |
+| GET    | `/v1/games`                        | All tracked apps: `appid`, `name`, `status`, `last_prefill_at`, `depot_count`, `size_bytes` (sum of the app's mapped depots' bytes on disk; `null` if unmapped or not yet cached — see "Per-game size calculation" below) |
+| GET    | `/v1/games/{appid}`                | Detail for one app: same fields plus `depots` (list of `{depotid, shared, size_bytes}`); `404` for an unknown `appid` |
 | PUT    | `/v1/mapping/{depotid}`            | Body `{"appid": int, "app_name": str \| null}` — **additively** upsert one depot→app mapping fact (manual fallback, see below); `422` for `depotid <= 0`, `appid <= 0`, or an unrecognized body field |
 | GET    | `/v1/mapping`                      | Full depot→app mapping table: list of `{depotid, appid}` |
 | DELETE | `/v1/mapping/{depotid}/{appid}`    | Remove one mapping pair (correction path for the additive `PUT`, see below); `204` on success, `404` if the pair doesn't exist, `422` for non-positive ids |
 | POST   | `/v1/prefill`                      | Body `{"appids": [int, ...]}` — queue one prefill job per app id. `202` with a list of `{appid, job_id, status, deduplicated}`. `422` for an empty list, an appid `< 1`, a non-list, or an unrecognized body field |
 | GET    | `/v1/jobs`                         | Recent jobs, newest first. `?limit=` 1–200, default 20 (`422` outside that range). Omits `log_excerpt` on purpose — this is the polling list |
 | GET    | `/v1/jobs/{id}`                    | One job incl. `log_excerpt`; `404` for an unknown id |
+| GET    | `/v1/cache/summary`                | `total_bytes` (disk usage of `depot/`, each depot counted once), `top_consumers` (top 10 `{appid, name, size_bytes}`, largest first), `unmapped_depots` (`{count, size_bytes}` for depot dirs on disk with no mapping row for any app), `free_disk_bytes` (free space on the cache filesystem, `null` if undeterminable) |
 
 ## Prefill orchestration (WP 1.4)
 
@@ -236,6 +250,14 @@ One background thread, started by the FastAPI lifespan
    grace period) — otherwise `docker stop` would block for as long as the
    download takes. The aborted job is recorded as `error` with a clear reason.
    A hard `SIGKILL` still leaves a `running` row, which step 1 cleans up.
+4. **On success only:** the shared `SizeCache` (WP 1.5, see "Per-game size
+   calculation" below) is invalidated so `GET /v1/games` reflects the new
+   disk content immediately instead of waiting out `VAULT_SIZE_CACHE_TTL`.
+
+`PrefillWorker` previously carried a `_finished` event that was set on exit
+but never read anywhere (WP 1.4 review carry-over) — removed in WP 1.5 rather
+than kept as unused state; `stop()`'s `thread.join()` already provides the
+deterministic wait tests need.
 
 ### SteamPrefill invocation — verified, not assumed
 
@@ -273,6 +295,13 @@ run   <exe> prefill --force --no-ansi     (cwd = exe dir, stdin = DEVNULL)
   every job. A manual `select-apps` selection on the same SteamPrefill
   installation will be replaced. That is the trade-off of the only
   non-interactive selection mechanism v3.7.1 offers.
+- **The write is atomic (WP 1.5 carry-over fix from the WP 1.4 review):**
+  `write_selected_apps` writes to a tempfile in the same `Config/` directory,
+  then `os.replace`s it over the real path — a same-directory tempfile keeps
+  the replace a same-filesystem rename (atomic on both POSIX and Windows), so
+  nothing that reads the file (SteamPrefill itself, mid-write) can ever
+  observe a half-written selection. The previous `open(path, "w")` truncated
+  the file in place first, with no such guarantee.
 - OS selection is left at SteamPrefill's default (Windows). Prefilling Linux
   depots for Steam Deck clients (ADR-0002) would need `--os linux` and is not
   in this package's scope.
@@ -405,6 +434,96 @@ fallback endpoint (typos are the expected failure mode, not malice):
   an unrecognized body field (e.g. a typo'd `appId`) `422`s instead of
   silently upserting with `app_name` defaulting to `None`.
 
+## Per-game size calculation and cache summary (WP 1.5)
+
+`vault_api/sizes.py` implements plan §3's "per-game size calculation (du over
+depot folders, cached)" and feeds `GET /v1/games`, `GET /v1/games/{appid}` and
+the new `GET /v1/cache/summary` (plan §6).
+
+### The disk walk — shared with the prefill attribution diff
+
+`sizes.scan_depot_signatures(cache_root)` walks `<cache_root>/depot/<depotid>/`
+and returns `(file_count, total_bytes, newest_mtime_ns)` per depot id. This is
+the **same** function `vault_api.prefill.scan_depots` uses for its
+before/after attribution diff (WP 1.4) — `prefill.scan_depots` is now a thin
+wrapper around it (WP 1.5 carry-over fix from the WP 1.4 review: the walk used
+to be duplicated, `os.walk` + a separate `os.stat()` per file in both places).
+The walk itself (`sizes.walk_file_stats`) uses `os.scandir` +
+`DirEntry.stat()` instead — measured 17x faster on a 21k-file depot tree
+(0.922s → 0.055s) because `DirEntry.stat()` is answered from data the
+directory listing already returned rather than a second filesystem round
+trip per file. `sizes.scan_depot_dir_bytes` is just the byte totals out of
+the same signatures.
+
+### The TTL cache
+
+`sizes.SizeCache` is deliberately the simplest thing that could work (plan
+§9): one `threading.Lock`, one cached `SizeSnapshot` (`{depot_bytes,
+total_bytes, computed_at}`), no background thread, no second table. A cache
+miss (TTL expired, or never computed) walks the whole `depot/` tree once
+**while holding the lock**, so concurrent callers that arrive during that walk
+wait for and reuse the one fresh result instead of each re-walking the tree —
+the lock doubles as request coalescing. One `SizeCache` instance lives on
+`app.state.size_cache` (created in `main.create_app`, alongside
+`app.state.settings`) and is shared by every request via the
+`deps.get_size_cache` dependency — the whole point of the cache is that
+concurrent requests share one scan.
+
+TTL default: 60s, tunable via `VAULT_SIZE_CACHE_TTL`. **Invalidation is
+explicit, not polled** — plan §3 says "cached", not "polled every N seconds":
+`vault_api/worker.py` calls `size_cache.invalidate()` right after a
+**successful** prefill job (unconditionally — even a "nothing new observed"
+`--force` run may have rewritten existing chunks), so a game's size is never
+more than `VAULT_SIZE_CACHE_TTL` seconds stale for an otherwise-idle cache,
+and is fresh immediately after a fill. `SizeCache.invalidate()` is exported
+for exactly this pattern — WP 1.6's deletion endpoint will call it the same
+way after removing an app's depot folders.
+
+### Per-app sizes: shared depots counted into every app that maps them
+
+`sizes.app_size_bytes(depotids, depot_bytes)` sums an app's mapped depots'
+bytes. A depot shared with another tracked app (plan §4: redistributables)
+counts its **full** size into **every** app that maps it — this answers "how
+much would deleting just this game free up if its depots weren't shared",
+which is what an operator deciding what to delete wants to know. The
+consequence, stated plainly and pinned by `tests/test_sizes.py`: **per-app
+sizes may sum to more than the cache's actual disk usage.**
+`GET /v1/cache/summary`'s `total_bytes` is the other number — each depot
+counted exactly once — precisely so both questions can be answered.
+
+Returns `None` (not `0`) in two distinct cases the API must not confuse:
+- **unmapped** — the app has no depot rows at all (`depot_count == 0`).
+- **uncached** — depots are mapped, but none have ever been written to disk
+  (mapped before the first successful prefill, or a `--force` re-run that
+  wrote nothing new — see the prefill mapping semantics above).
+
+A *partially*-cached app (some depots on disk, others not yet) returns the sum
+of what IS on disk — a missing depot there contributes `0` correctly, it just
+hasn't been filled yet.
+
+### `GET /v1/cache/summary`
+
+`sizes.build_cache_summary` assembles the whole response from one `SizeCache`
+snapshot plus two small queries against the already-open connection (`depot_app_map`
+for per-app depot membership + `apps` for names) — a summary request inside
+the TTL window costs no filesystem access at all.
+
+- **`total_bytes`** — real disk usage of `depot/`, each depot id counted once
+  (see above).
+- **`top_consumers`** — top 10 apps by `size_bytes` (ties broken by `appid`
+  for a deterministic order), using the same `app_size_bytes` per-app sums
+  `GET /v1/games` reports.
+- **`unmapped_depots`** — `{count, size_bytes}` for depot directories present
+  on disk with **no** `depot_app_map` row for *any* app. This is real operator
+  information (plan §6): either a mapping was deleted/never created, or
+  vault-core's store-on-miss wrote a depot that hasn't been attributed to an
+  app by a prefill run yet (see the "concurrent cache writes" caveat under
+  Mapping import above).
+- **`free_disk_bytes`** — `shutil.disk_usage()` on `VAULT_CACHE_ROOT`, walking
+  up to the nearest existing ancestor directory first (a fresh install may not
+  have created it yet); `null` if no ancestor exists at all (defensive, should
+  not happen on a real filesystem).
+
 ## Auth
 
 Every endpoint requires the header `X-Api-Key: <VAULT_API_KEY>`, checked
@@ -492,7 +611,10 @@ curl -H "X-Api-Key: <your key>" http://localhost:8000/v1/games
 # [{"appid":440,"name":"Team Fortress 2","status":"idle","last_prefill_at":null,"depot_count":1,"size_bytes":null}]
 
 curl -H "X-Api-Key: <your key>" http://localhost:8000/v1/games/440
-# {"appid":440,"name":"Team Fortress 2","status":"idle","last_prefill_at":null,"depots":[{"depotid":441,"shared":false}],"size_bytes":null}
+# {"appid":440,"name":"Team Fortress 2","status":"idle","last_prefill_at":null,
+#  "depots":[{"depotid":441,"shared":false,"size_bytes":null}],"size_bytes":null}
+# (size_bytes fields added in WP 1.5; null here because nothing has been
+# written to VAULT_CACHE_ROOT yet in this walkthrough)
 
 curl -H "X-Api-Key: <your key>" http://localhost:8000/v1/games/999999
 # 404
@@ -557,6 +679,49 @@ directories, the shared-depot flag for the depot both apps filled, and the
 `Config/selectedAppsToPrefill.json` content were all checked on disk
 afterwards. `401` without a key and `404` for `/docs` still hold.
 
+### WP 1.5: sizes and cache summary via curl (live-verified)
+
+Against a live `uvicorn` instance with `VAULT_CACHE_ROOT` pointed at a
+directory seeded by hand with depot files (441: 1,000,000 bytes, mapped only
+to appid 440; 900: 5,000,000 bytes, mapped to both 440 and 730 — the shared
+case; 555: 250,000 bytes, deliberately left unmapped) and mappings created via
+the existing `PUT /v1/mapping/{depotid}`:
+
+```
+curl -H "X-Api-Key: <your key>" http://localhost:8000/v1/games
+# [{"appid":440,"name":"Team Fortress 2","status":"idle","last_prefill_at":null,
+#   "depot_count":2,"size_bytes":6000000},
+#  {"appid":730,"name":"Counter-Strike 2","status":"idle","last_prefill_at":null,
+#   "depot_count":1,"size_bytes":5000000}]
+
+curl -H "X-Api-Key: <your key>" http://localhost:8000/v1/games/440
+# {"appid":440,"name":"Team Fortress 2","status":"idle","last_prefill_at":null,
+#  "depots":[{"depotid":441,"shared":false,"size_bytes":1000000},
+#            {"depotid":900,"shared":true,"size_bytes":5000000}],
+#  "size_bytes":6000000}
+
+curl -H "X-Api-Key: <your key>" http://localhost:8000/v1/games/730
+# {"appid":730,...,"depots":[{"depotid":900,"shared":true,"size_bytes":5000000}],
+#  "size_bytes":5000000}
+
+curl -H "X-Api-Key: <your key>" http://localhost:8000/v1/cache/summary
+# {"total_bytes":6250000,
+#  "top_consumers":[{"appid":440,"name":"Team Fortress 2","size_bytes":6000000},
+#                    {"appid":730,"name":"Counter-Strike 2","size_bytes":5000000}],
+#  "unmapped_depots":{"count":1,"size_bytes":250000},
+#  "free_disk_bytes":119640584192}
+
+curl http://localhost:8000/v1/cache/summary
+# 401 - missing X-Api-Key header (router-level auth, no route added here forgets it)
+```
+
+`total_bytes` (6,250,000 = 1,000,000 + 5,000,000 + 250,000) counts depot 900
+exactly once; `size_bytes` on the two games (6,000,000 + 5,000,000 =
+11,000,000) sums to MORE than that, because the shared depot is counted fully
+into both — exactly the documented asymmetry (see "Per-game size calculation"
+above). `unmapped_depots` correctly picked up depot 555, which has no mapping
+row at all.
+
 ## Tests
 
 ```powershell
@@ -565,7 +730,7 @@ cd api
 .venv\Scripts\python -m pytest
 ```
 
-107 tests, no network and no Steam login required.
+133 tests, no network and no Steam login required.
 
 Covers: health returns `ok` without a key and leaks nothing else; every
 registered route requires `require_api_key` except `/v1/health` (route-walk
@@ -666,3 +831,50 @@ WP 1.4 additions:
 - `test_db.py` / `test_config.py`: the two new `jobs` indexes, the v1 → v2
   in-place upgrade, the newer-database downgrade guard, thread-confinement of
   connections, and the three new settings incl. their loud validation.
+
+WP 1.5 additions:
+
+- `test_sizes.py`: the disk walk (`walk_file_stats` finds nested files, a
+  missing path yields nothing) and `scan_depot_dir_bytes`/
+  `scan_depot_signatures` (per-depot byte sums, non-numeric/empty dirs
+  ignored, **pinned equal to `prefill.scan_depots`'s output** — the shared-walk
+  carry-over fix, not just "both happen to work"); `app_size_bytes`'s four
+  cases (unmapped → `None`, uncached → `None`, partially cached → sum of what
+  exists, a shared depot counted fully into two different apps' sums);
+  `SizeCache` TTL behavior with an injected clock (stale within the window,
+  recomputes after expiry, `invalidate()` forces a recompute regardless of
+  TTL) and that `total_bytes` counts a depot once even though two apps map it;
+  `free_disk_bytes` on both an existing path and one that needs to walk up to
+  an existing ancestor; `build_cache_summary`'s total/top-consumers/unmapped
+  shape, the top-10 cap and sort order, and that it goes through the injected
+  `SizeCache` (a second call inside the TTL sees stale data; after
+  `invalidate()` it doesn't).
+- `test_games.py`: three new tests with real files under a real
+  `VAULT_CACHE_ROOT` (a fresh `TestClient`/`Settings` per test, not the shared
+  `client` fixture, since the cache root path matters here) — `GET /v1/games`
+  reports a real non-null size once depots are on disk; `GET /v1/games/{appid}`
+  reports per-depot `size_bytes` (null for a depot that's mapped but not yet
+  written) alongside the app total; a depot shared between two apps counts its
+  full size into both.
+- `test_cache_summary.py`: 401 without a key; an empty cache reports
+  `total_bytes: 0`, `top_consumers: []`, `unmapped_depots: {0, 0}`, and a real
+  positive `free_disk_bytes`; a seeded cache (two apps, one shared depot, one
+  unmapped depot) reports the correct total, per-app top consumers, and the
+  unmapped depot's count/bytes.
+- `test_prefill_runner.py`: two new tests for `write_selected_apps`'s atomic
+  write (carry-over fix) — exactly one file (never a stray `.tmp`) is left in
+  `Config/` after a write, and after two successive writes.
+- `test_worker.py`: a successful job invalidates the shared `SizeCache` — with
+  the *default* 60s TTL (not shortened for the test), so this only passes if
+  the worker actively calls `invalidate()`; a passive TTL expiry could never
+  complete inside the test's runtime.
+- `test_concurrency.py`: `GET /v1/cache/summary` (which takes `SizeCache`'s
+  own lock and, on a miss, walks the depot tree) joined both existing hammers
+  — the mixed-endpoint gather (60 requests, up from 50) and the
+  worker-writing-into-the-same-cache-root-while-HTTP-reads test.
+- `test_db.py` / `test_mapping.py` / `test_games.py`: updated, not added —
+  `init_db`'s reordered downgrade-guard check (WP 1.5 carry-over fix) doesn't
+  change any DB test's observable behavior, so the existing tests continue to
+  pin it unchanged; the depot list now always carries `size_bytes` (`null` in
+  these fixtures, since none of them write real cache files), so three
+  existing assertions were updated to include it.

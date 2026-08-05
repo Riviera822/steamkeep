@@ -45,9 +45,32 @@ from typing import Callable, ContextManager
 from fastapi import Request
 
 from vault_api.db import get_connection
+from vault_api.sizes import SizeCache
 
 #: What routers receive: call it to get a context-managed connection.
 DbOpener = Callable[[], ContextManager[sqlite3.Connection]]
+
+
+def get_cache_root(request: Request) -> str:
+    """FastAPI dependency returning the configured ``VAULT_CACHE_ROOT`` (WP 1.5).
+
+    Endpoints that need to read the size cache (``games.py``, ``cache.py``)
+    pass this straight through to ``SizeCache.get()`` — mirrors ``db_opener``
+    pulling the db path off the same ``app.state.settings``.
+    """
+    return request.app.state.settings.cache_root
+
+
+def get_size_cache(request: Request) -> SizeCache:
+    """FastAPI dependency returning the app-wide ``SizeCache`` (WP 1.5).
+
+    One instance per app, created in ``main.create_app`` (not inside the
+    lifespan) and stored on ``app.state`` — mirrors ``db_opener`` pulling the
+    configured db path off ``app.state.settings``. A single shared instance
+    is the point: the whole reason for the cache is that concurrent requests
+    reuse one disk scan instead of each doing their own.
+    """
+    return request.app.state.size_cache
 
 
 def db_opener(request: Request) -> DbOpener:

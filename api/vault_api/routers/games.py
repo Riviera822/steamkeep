@@ -11,7 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from vault_api.auth import require_api_key
-from vault_api.deps import DbOpener, db_opener
+from vault_api.deps import DbOpener, db_opener, get_cache_root, get_size_cache
+from vault_api.sizes import SizeCache, app_size_bytes
 
 router = APIRouter(dependencies=[Depends(require_api_key)], tags=["games"])
 
@@ -22,9 +23,10 @@ class GameSummary(BaseModel):
     status: str
     last_prefill_at: str | None
     depot_count: int
-    # TODO(WP 1.5): populate from the per-app size calculation (du over
-    # depot folders, cached). Always null until then — documented gap,
-    # not a guessed value.
+    # Per-app size (WP 1.5): sum of this app's mapped depots' bytes on disk,
+    # from the cached scan (vault_api/sizes.py). Null if unmapped
+    # (depot_count == 0) or uncached (mapped but never written to disk yet)
+    # — see app_size_bytes for why those two cases are both "unknown", not 0.
     size_bytes: int | None = None
 
 
@@ -33,6 +35,8 @@ class DepotEntry(BaseModel):
     # True if this depot is also mapped to at least one other app (plan
     # §4 shared-depot semantics: shared depots are skipped on deletion).
     shared: bool
+    # Bytes on disk for this one depot (WP 1.5), null if never written yet.
+    size_bytes: int | None = None
 
 
 class GameDetail(BaseModel):
@@ -41,13 +45,17 @@ class GameDetail(BaseModel):
     status: str
     last_prefill_at: str | None
     depots: list[DepotEntry]
-    # TODO(WP 1.5): see GameSummary.size_bytes.
+    # See GameSummary.size_bytes.
     size_bytes: int | None = None
 
 
 @router.get("/v1/games", response_model=list[GameSummary])
-def list_games(open_db: DbOpener = Depends(db_opener)) -> list[GameSummary]:
-    """All tracked apps with their depot count (plan §6)."""
+def list_games(
+    open_db: DbOpener = Depends(db_opener),
+    size_cache: SizeCache = Depends(get_size_cache),
+    cache_root: str = Depends(get_cache_root),
+) -> list[GameSummary]:
+    """All tracked apps with their depot count and size (plan §6)."""
     with open_db() as conn:
         rows = conn.execute(
             """
@@ -59,6 +67,16 @@ def list_games(open_db: DbOpener = Depends(db_opener)) -> list[GameSummary]:
             ORDER BY a.appid
             """
         ).fetchall()
+        depot_rows = conn.execute(
+            "SELECT appid, depotid FROM depot_app_map"
+        ).fetchall()
+
+    app_depotids: dict[int, list[int]] = {}
+    for row in depot_rows:
+        app_depotids.setdefault(int(row["appid"]), []).append(int(row["depotid"]))
+
+    depot_bytes = size_cache.get(cache_root).depot_bytes
+
     return [
         GameSummary(
             appid=row["appid"],
@@ -66,14 +84,20 @@ def list_games(open_db: DbOpener = Depends(db_opener)) -> list[GameSummary]:
             status=row["status"],
             last_prefill_at=row["last_prefill_at"],
             depot_count=row["depot_count"],
+            size_bytes=app_size_bytes(app_depotids.get(row["appid"], []), depot_bytes),
         )
         for row in rows
     ]
 
 
 @router.get("/v1/games/{appid}", response_model=GameDetail)
-def get_game(appid: int, open_db: DbOpener = Depends(db_opener)) -> GameDetail:
-    """Detail for one app, incl. its depot list with shared-depot flags.
+def get_game(
+    appid: int,
+    open_db: DbOpener = Depends(db_opener),
+    size_cache: SizeCache = Depends(get_size_cache),
+    cache_root: str = Depends(get_cache_root),
+) -> GameDetail:
+    """Detail for one app, incl. its depot list with shared-depot flags and sizes.
 
     404 if the appid has no row in ``apps`` (plan §4: apps are created by
     a mapping upsert, either from a prefill run or the manual fallback —
@@ -107,8 +131,14 @@ def get_game(appid: int, open_db: DbOpener = Depends(db_opener)) -> GameDetail:
             (appid,),
         ).fetchall()
 
+    depot_bytes = size_cache.get(cache_root).depot_bytes
+
     depots = [
-        DepotEntry(depotid=row["depotid"], shared=bool(row["shared"]))
+        DepotEntry(
+            depotid=row["depotid"],
+            shared=bool(row["shared"]),
+            size_bytes=depot_bytes.get(row["depotid"]),
+        )
         for row in depot_rows
     ]
 
@@ -118,4 +148,5 @@ def get_game(appid: int, open_db: DbOpener = Depends(db_opener)) -> GameDetail:
         status=app_row["status"],
         last_prefill_at=app_row["last_prefill_at"],
         depots=depots,
+        size_bytes=app_size_bytes([row["depotid"] for row in depot_rows], depot_bytes),
     )

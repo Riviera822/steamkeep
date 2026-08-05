@@ -141,8 +141,8 @@ def test_put_same_depot_different_appids_adds_both_and_flags_shared(
 
     tf2_detail = client.get("/v1/games/440", headers=AUTH).json()
     cs2_detail = client.get("/v1/games/730", headers=AUTH).json()
-    assert {"depotid": 999, "shared": True} in tf2_detail["depots"]
-    assert {"depotid": 999, "shared": True} in cs2_detail["depots"]
+    assert {"depotid": 999, "shared": True, "size_bytes": None} in tf2_detail["depots"]
+    assert {"depotid": 999, "shared": True, "size_bytes": None} in cs2_detail["depots"]
 
 
 def test_delete_mapping_without_key_is_rejected(client: TestClient) -> None:
