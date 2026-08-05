@@ -202,7 +202,7 @@ Steam-only, prefill-first design can solve better:
 | Pain point | How SteamVault addresses it |
 |---|---|
 | **No per-game visibility or deletion** — cache is opaque hashed storage | Core design: path-faithful depot storage, per-game size, per-game delete |
-| **Slow cache-miss downloads** — nginx slice mechanics + CDN back-off behave poorly with the Steam client; users resort to multi-IP workarounds | **Prefill-first philosophy:** a cache miss triggers an async prefill job (SteamPrefill downloads far faster than the Steam client) instead of relying on synchronous slice-fetching being fast. Miss path = transparent passthrough, cache gets filled by prefill. Design decision to validate in Phase 0/1 |
+| **Slow cache-miss downloads** — nginx slice mechanics + CDN back-off behave poorly with the Steam client; users resort to multi-IP workarounds | **Prefill-first philosophy, hybrid miss path (Phase 0 decision, ADR-0001):** misses are stored synchronously (`proxy_store`, no slice mechanics — measured overhead within noise) AND trigger an async prefill job that completes the affected app. Prefill remains the primary fill mechanism |
 | **Clients silently bypassing the cache** — Linux/Steam Deck clients not honoring `lancache.steamcontent.com`, DoH/DoT ignoring local DNS, ISP DNS hijacking | **Bypass detection:** vault-api tracks per-client hit statistics; a client that reports installed games (agent) but never appears in cache logs triggers a visible warning in app/API. Setup docs cover the Linux-client and DoH caveats explicitly |
 | **IPv6 undermines DNS redirection** — clients resolve AAAA records of the real CDN and bypass the cache | Documented stance + setup guidance (block/rewrite AAAA for `*.steamcontent.com` in the local DNS); bypass detection catches the failure case |
 | **Stale chunks waste space forever** — a generic HTTP cache never learns that a game update obsoleted old chunks | **Manifest-based garbage collection:** per depot, diff cached chunks against the current manifest and delete orphans — only possible because storage is depot-structured |
@@ -254,11 +254,11 @@ for users who expose the API differently.
   - [x] Cache hit on second download? Speed LAN-limited?
         *(2026-08-04: 93/93 HIT after uninstall/reinstall, zero upstream
         contact, disk-limited — 81.8 MiB served in ~1 s)*
-  - [ ] **Miss-handling decision:** synchronous store vs. transparent
+  - [x] **Miss-handling decision:** synchronous store vs. transparent
     passthrough + async prefill (see pain-points section) — measure both
     *(measured in `poc/MISS-HANDLING-FINDINGS.md`: perf difference within
-    noise at ~1 MiB objects, passthrough structurally safer — final call
-    in the Phase 0 gate / ADR)*
+    noise. 2026-08-05 gate decision: HYBRID — store-on-miss (Phase 1)
+    plus miss-triggered prefill completion (Phase 3). See ADR-0001)*
 - [x] Run SteamPrefill against the PoC cache — does it fill correctly?
       *(2026-08-04: SteamPrefill v3.7.1 auto-detected the cache via the
       lancache-heartbeat contract and prefilled path-faithfully — layout
@@ -282,7 +282,10 @@ for users who expose the API differently.
   the spirit of lancache-manager; the rest of the project stays usable as-is)
 
 ### Phase 1 — vault-core + vault-api (server MVP)
-- [ ] Production-ready nginx config (log rotation, healthcheck)
+- [ ] Production-ready nginx config (log rotation, healthcheck) —
+      implements the Phase-0 requirements from ADR-0001: lancache
+      heartbeat, Range-strip + 200-only store guards, nocache=1 bypass,
+      client-Host upstream with short timeouts/retry, store-on-miss
 - [ ] FastAPI skeleton, SQLite schema, depot mapping import
 - [ ] Prefill orchestration (SteamPrefill subprocess, job queue, one job at a time)
 - [ ] Size calculation + deletion incl. shared-depot protection
@@ -304,6 +307,8 @@ for users who expose the API differently.
       titles (status update / optional cleanup hint, see ADR-0002)
 
 ### Phase 3 — Scheduler & Update Logic
+- [ ] Miss-triggered prefill completion: a cache miss on an unknown/partial
+      app queues a prefill job for that app (hybrid decision, ADR-0001)
 - [ ] Manifest comparison (stale detection)
 - [ ] Configurable cron window (e.g. 09:00–17:00, every 3 h)
 - [ ] Manifest-based garbage collection (`/v1/cache/{appid}/gc`, optional
