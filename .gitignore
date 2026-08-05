@@ -15,9 +15,31 @@ poc/linux-client-test/wsl-env
 poc/linux-client-test/_testkit_tmp/
 poc/linux-client-test/_testkit_tmp_detect/
 
+# vault-core (core/) — runtime artifacts of running nginx natively for dev/
+# test (WP 1.1). The nginx binary itself is reused from poc/nginx/ (already
+# gitignored above), never duplicated here.
+core/cache/
+core/logs/
+core/tmp/
+core/*.pid
+core/_testcore_tmp/
+
 
 # Claude Code harness artifacts
 .claude/scheduled_tasks.lock
 
 .claude/settings.local.json
+
+# vault-api (api/) — Python virtualenv and runtime artifacts (WP 1.2)
+api/.venv/
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+.pytest_cache/
+
+# vault-dns (dns/) — rendered test config, created and cleaned up by
+# dns/tests/test-dnsmasq-config.ps1 (WP 1.8); only survives a crashed run.
+dns/tests/_tmp/
 
