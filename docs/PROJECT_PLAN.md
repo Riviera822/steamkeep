@@ -262,10 +262,17 @@ for users who expose the API differently.
       requests through the cache, and `?nocache=1` speed probes that
       production vault-core should honor as a cache bypass — see
       `poc/steamprefill/RESULTS-STEAMPREFILL-*.md`)*
-- [ ] Verify behavior of the Linux/Steam Deck client (known upstream quirk:
+- [x] Verify behavior of the Linux/Steam Deck client (known upstream quirk:
       does not perform the `lancache.steamcontent.com` lookup like Windows)
-      *(no Steam Deck available — will verify the Linux desktop client via
-      WSL2 + Ubuntu incl. DNS-rewrite capture, pending BIOS/WSL setup)*
+      *(2026-08-05, Ubuntu 26.04/WSL2, current stable client: the quirk is
+      OUTDATED — the Linux client DOES perform lancache discovery and sent
+      3574 requests through the cache with real CDN Host headers, zero
+      Range headers. Cross-client sharing confirmed: chunks cached by the
+      Windows client served to the Linux client as HITs. A transient
+      upstream-IP outage also produced 502/stall evidence motivating
+      production upstream design (honor client Host header, short
+      connect timeouts, retry) — see
+      `poc/linux-client-test/RESULTS-20260805-083353.md`)*
 - **Abort criterion:** If `proxy_store` fails on range requests with no clean
   workaround → fall back to Plan A (unmodified LanCache + a manager layer in
   the spirit of lancache-manager; the rest of the project stays usable as-is)
