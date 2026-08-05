@@ -324,13 +324,42 @@ and verifies — before you touch Steam — that:
 1. `lancache.steamcontent.com` resolves to the host IP.
 2. An arbitrary made-up `*.steamcontent.com` subdomain **also** resolves to
    the host IP (proves the wildcard, not just a lucky exact-name match).
-3. **AAAA note (`docs/PROJECT_PLAN.md` §3):** an `AAAA` query for the same
-   name returns `NODATA` (`NOERROR`, zero answers) rather than a real IPv6
-   address or `NXDOMAIN` — this is `dnsmasq`'s `address=` directive
-   behavior and is exactly what **closes the IPv6 bypass** the plan calls
-   out: a client that falls back to `AAAA` when it doesn't like the `A`
-   answer gets nothing usable, instead of silently reaching the real CDN
-   over IPv6 and skipping the cache.
+3. **AAAA check — corrected during the WP 0.6 follow-up fix:** an `AAAA`
+   query for the same name (checked against both `lancache.steamcontent.com`
+   and a realistic CDN-style name, `cache2-ams1.steamcontent.com`) returns
+   `NODATA` (`NOERROR`, zero answers) rather than a real, routable IPv6
+   address or `NXDOMAIN`. **The original claim in an earlier draft of this
+   doc and of `docs/PROJECT_PLAN.md` §3 — that `dnsmasq`'s `address=`
+   directive alone returns NODATA for AAAA on matched domains — is outdated
+   and was verified WRONG live** against `dnsmasq` 2.92 (Ubuntu 26.04,
+   WSL2): `address=/steamcontent.com/<ipv4>` only intercepts the RR type it
+   was given a literal for (A, since the target is an IPv4 address).
+   Every *other* query type for a name in that zone, including AAAA, still
+   gets **forwarded upstream** via the configured `server=` lines and comes
+   back as Valve's real CDN address — e.g. a live
+   `dig AAAA cache2-ams1.steamcontent.com` returned
+   `2a01:bc80:7:100::9b85:f80d`, a fully routable address. An IPv6-capable
+   client resolving that name would silently reach the real CDN over IPv6
+   and skip the cache entirely, exactly the failure mode
+   `docs/PROJECT_PLAN.md` §9 calls the "IPv6 risk".
+   >
+   > **Required fix — and a REQUIRED design element for the production
+   > `vault-dns` container, not just this PoC kit:** the rewritten zone must
+   > also be declared `local=/steamcontent.com/` (dnsmasq becomes
+   > authoritative for the zone — answers from its own data for every RR
+   > type and never forwards zone queries upstream at all). Paired with
+   > `address=`, this makes AAAA (and any other RR type) resolve to NODATA
+   > locally instead of leaking upstream. `address=` alone is an IPv6
+   > bypass; `address=` + `local=` on the same zone is the combination that
+   > actually closes it. Whatever DNS server production `vault-dns` ends up
+   > using must replicate this pairing (or equivalent zone-authoritative
+   > behavior) — see `scenario-b.sh`'s dnsmasq-config comment for the full
+   > writeup and live verification evidence.
+
+`scenario-b.sh` itself treats this as a hard gate, not advisory output: it
+fails loudly (non-zero exit, explicit `[FAIL]` lines) if a routable AAAA
+address is observed for either checked name, rather than printing a `WARN`
+and continuing.
 
 It then prints a timestamp marker, same as Scenario A.
 

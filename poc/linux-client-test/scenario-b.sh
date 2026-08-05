@@ -9,9 +9,15 @@
 # (wildcard, not just the single lancache.steamcontent.com name) to the
 # cache's IP, points WSL2's own /etc/resolv.conf at that dnsmasq instance,
 # and verifies -- before you touch Steam -- that the wildcard resolves
-# correctly AND that AAAA queries for the same names come back NODATA
-# (docs/PROJECT_PLAN.md section 3: dnsmasq's address= directive returns
-# NODATA for AAAA on matched domains, closing the IPv6 bypass). This is the
+# correctly AND that AAAA queries for the same names come back NODATA. Note
+# (corrected during the WP 0.6 follow-up fix): on modern dnsmasq (verified
+# on 2.92), address= alone does NOT do this -- it only intercepts the RR
+# type it was given a literal for (A, for an IPv4 target) and forwards
+# every other query type, including AAAA, upstream to the real answer. The
+# zone must additionally be made `local=/steamcontent.com/` (authoritative,
+# no forwarding) for AAAA to come back NODATA instead of leaking Valve's
+# real IPv6 address -- see the comment above the dnsmasq config block below
+# and PROTOCOL.md's IPv6/AAAA section for the live evidence. This is the
 # first real evidence for the vault-dns approach working for Linux/Steam
 # Deck-class clients specifically.
 #
@@ -113,9 +119,29 @@ fi
 
 # --- 1. dnsmasq config: wildcard-rewrite *.steamcontent.com -> cache IP -----
 # address=/DOMAIN/IP rewrites DOMAIN and all its subdomains to IP for A
-# queries, and returns NODATA (not NXDOMAIN, not a real IPv6 address) for
-# AAAA queries on the same names -- this is exactly what closes the IPv6
-# bypass per docs/PROJECT_PLAN.md section 3.
+# queries. IMPORTANT CORRECTION (found live on dnsmasq 2.92 / Ubuntu 26.04
+# WSL2 during WP 0.6 follow-up): on modern dnsmasq, address= does NOT make
+# AAAA (or any other RR type) return NODATA by itself -- it only intercepts
+# the RR type(s) it was given an address for (here: A, because
+# $WSL_LINUX_TEST_HOST_IP is an IPv4 literal). Every OTHER query type for
+# that name, including AAAA, still gets forwarded upstream via `server=`
+# and comes back as the REAL Valve CDN address -- silently defeating the
+# whole rewrite for any IPv6-capable client. Verified live: a bare
+# address=/steamcontent.com/<ipv4> config let
+# `dig AAAA cache2-ams1.steamcontent.com` return Valve's real
+# 2a01:bc80:7:100::9b85:f80d. docs/PROJECT_PLAN.md section 3's original
+# claim ("address= returns NODATA for AAAA") is outdated and has been
+# corrected there and in PROTOCOL.md.
+#
+# The fix: `local=/DOMAIN/` makes dnsmasq authoritative for the whole zone
+# -- it answers from its own data for every RR type and never forwards
+# zone queries upstream at all. Combined with address= (which still
+# supplies the A answer), this makes AAAA (and any other RR type) resolve
+# to NODATA (NOERROR, zero answers) locally instead of leaking upstream.
+# This is a REQUIRED pairing, not optional hardening -- address= alone is
+# an IPv6 bypass. Verified live: with local=/steamcontent.com/ added,
+# AAAA for the same name comes back NOERROR/ANSWER: 0, A/wildcard/getent
+# behavior is unaffected, and unrelated domains still forward normally.
 #
 # `no-resolv` + explicit `server=` lines: without this, dnsmasq's own
 # upstream lookups would go through /etc/resolv.conf by default -- the very
@@ -131,6 +157,7 @@ no-resolv
 server=1.1.1.1
 server=8.8.8.8
 address=/steamcontent.com/$WSL_LINUX_TEST_HOST_IP
+local=/steamcontent.com/
 listen-address=127.0.0.1
 bind-interfaces
 EOF
@@ -187,17 +214,56 @@ else
     CHECKS_OK=0
 fi
 
-# AAAA note (plan section 3): address= should yield NODATA -- NOERROR status,
-# zero answers -- not a real address and not NXDOMAIN.
-if command -v dig >/dev/null 2>&1; then
-    AAAA_OUT="$(dig +noall +comments AAAA lancache.steamcontent.com 2>/dev/null || true)"
-    if echo "$AAAA_OUT" | grep -q "status: NOERROR" && echo "$AAAA_OUT" | grep -qE "ANSWER: 0"; then
-        echo "[ OK ] AAAA query for lancache.steamcontent.com returns NODATA (NOERROR/ANSWER: 0) -- IPv6 bypass closed"
-    else
-        echo "[WARN] could not confirm NODATA-for-AAAA via dig -- check manually: dig AAAA lancache.steamcontent.com" >&2
+# AAAA check (plan section 3, corrected): local=/steamcontent.com/ paired
+# with address= should yield NODATA -- NOERROR status, zero answers -- not
+# a real (routable) address and not NXDOMAIN. This is a HARD requirement,
+# not advisory: a routable AAAA leaking through here means an IPv6-capable
+# client silently bypasses the cache (see the comment above the dnsmasq
+# config block). Check both the exact name and an arbitrary wildcard
+# subdomain, and check them against a REAL Steam CDN-style hostname
+# (cache2-ams1), not just lancache.steamcontent.com, since that's the class
+# of name real clients actually query for AAAA.
+if ! command -v dig >/dev/null 2>&1; then
+    echo "[FAIL] 'dig' not found (should have been installed by wsl-setup.sh) -- cannot verify the IPv6 bypass is closed" >&2
+    exit 1
+fi
+
+check_aaaa_nodata() {
+    local name="$1"
+    local out status answers routable_leak
+    out="$(dig +noall +comments +answer AAAA "$name" 2>/dev/null || true)"
+    status="$(echo "$out" | grep -oE 'status: [A-Z]+' || true)"
+    answers="$(echo "$out" | grep -oE 'ANSWER: [0-9]+' || true)"
+    # A routable leak = any AAAA record actually present in the answer
+    # section (anything other than "no answer at all").
+    routable_leak="$(echo "$out" | grep -E '^[^;].*[[:space:]]AAAA[[:space:]]' || true)"
+
+    if [[ -n "$routable_leak" ]]; then
+        echo "[FAIL] AAAA query for $name returned a ROUTABLE address -- IPv6 bypass is OPEN:" >&2
+        echo "       $routable_leak" >&2
+        return 1
     fi
-else
-    echo "[WARN] 'dig' not found (should have been installed by wsl-setup.sh) -- skipping AAAA check" >&2
+
+    if [[ "$status" == "status: NOERROR" && "$answers" == "ANSWER: 0" ]]; then
+        echo "[ OK ] AAAA query for $name returns NODATA (NOERROR/ANSWER: 0) -- IPv6 bypass closed"
+        return 0
+    fi
+
+    echo "[FAIL] AAAA query for $name did not return clean NODATA (got '$status' / '$answers') -- cannot confirm the IPv6 bypass is closed" >&2
+    return 1
+}
+
+AAAA_OK=1
+check_aaaa_nodata "lancache.steamcontent.com" || AAAA_OK=0
+check_aaaa_nodata "cache2-ams1.steamcontent.com" || AAAA_OK=0
+
+if [[ "$AAAA_OK" -ne 1 ]]; then
+    echo "" >&2
+    echo "IPv6 bypass verification FAILED -- a Linux/Steam Deck-class client with" >&2
+    echo "IPv6 connectivity would silently skip the cache. Fix the dnsmasq config" >&2
+    echo "(local=/steamcontent.com/ must be present alongside address=/steamcontent.com/...)" >&2
+    echo "before starting Steam. See PROTOCOL.md section 8." >&2
+    exit 1
 fi
 
 if [[ "$CHECKS_OK" -ne 1 ]]; then

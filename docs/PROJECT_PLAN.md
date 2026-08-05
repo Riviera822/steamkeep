@@ -89,8 +89,12 @@ for v1.)
 **vault-dns** — optional bundled DNS (for users without a local DNS server)
 - dnsmasq container, enabled via a Compose profile (`--profile dns`)
 - Answers `*.steamcontent.com` with the cache IP, forwards everything else
-  to a configurable upstream; dnsmasq's `address=` directive returns NODATA
-  for AAAA queries on matched domains, closing the IPv6 bypass by default
+  to a configurable upstream. IMPORTANT (verified in Phase 0): modern
+  dnsmasq (2.9x) FORWARDS non-matched record types upstream, so `address=`
+  alone leaks AAAA answers and IPv6-capable clients silently bypass the
+  cache — the zone must additionally be declared `local=/steamcontent.com/`
+  so AAAA queries get a local NODATA answer. Required design element for
+  vault-dns.
 - Not needed if the user already runs AdGuard Home, Pi-hole, dnsmasq or
   Unbound — a rewrite there does the same job (recommended for homelabs)
 
@@ -377,7 +381,8 @@ community contribution), iOS.
      silently bypasses the cache.
   2. **Bundled vault-dns** (no local DNS server required): enable the
      optional dnsmasq container and point your router's DHCP DNS at it.
-     AAAA handling is covered by default.
+     AAAA handling is covered by vault-dns's config (`address=` +
+     `local=` pairing — see the vault-dns component note in §3).
   3. **DNS-free hosts mode** (single Windows gaming PC, simplest setup):
      a `lancache.steamcontent.com` hosts entry — manually or automated by
      vault-agent (opt-in). Windows Steam client only.
