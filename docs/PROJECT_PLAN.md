@@ -136,7 +136,10 @@ for v1.)
 
 **vault-app** — Android app
 - Kotlin + Jetpack Compose
-- Steam Web API (`GetOwnedGames`) for library + covers (regular internet)
+- Steam identity via "Sign in with Steam" (OpenID against Valve's login
+  page — the app never sees credentials, see ADR-0004); library + covers
+  via Steam Web API (`GetOwnedGames`, device-local user-owned API key,
+  regular internet, never proxied through vault-api)
 - **Connectivity profiles** (user-selectable, abstracted behind one API-client
   interface — the server never knows or cares which one is used):
   - **Embedded Tailscale (tsnet):** Go Mobile `.aar` bridge, auth-key based.
