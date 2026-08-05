@@ -19,13 +19,11 @@ automatically.
 
 from __future__ import annotations
 
-import sqlite3
-
 from fastapi import APIRouter, Depends, HTTPException, Path, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from vault_api.auth import require_api_key
-from vault_api.deps import get_db
+from vault_api.deps import DbOpener, db_opener
 from vault_api.mapping import delete_mapping, upsert_mapping
 
 router = APIRouter(dependencies=[Depends(require_api_key)], tags=["mapping"])
@@ -58,19 +56,21 @@ class MappingEntry(BaseModel):
 def put_mapping(
     depotid: int = Path(ge=1),
     body: MappingUpsertRequest = ...,
-    conn: sqlite3.Connection = Depends(get_db),
+    open_db: DbOpener = Depends(db_opener),
 ) -> MappingUpsertResponse:
     """Upsert a single depot->app mapping fact (additive, manual fallback, plan §4)."""
-    upsert_mapping(conn, depotid=depotid, appid=body.appid, name=body.app_name)
+    with open_db() as conn:
+        upsert_mapping(conn, depotid=depotid, appid=body.appid, name=body.app_name)
     return MappingUpsertResponse(depotid=depotid, appid=body.appid)
 
 
 @router.get("/v1/mapping", response_model=list[MappingEntry])
-def list_mapping(conn: sqlite3.Connection = Depends(get_db)) -> list[MappingEntry]:
+def list_mapping(open_db: DbOpener = Depends(db_opener)) -> list[MappingEntry]:
     """Full depot->app mapping table, for inspection/debugging."""
-    rows = conn.execute(
-        "SELECT depotid, appid FROM depot_app_map ORDER BY depotid, appid"
-    ).fetchall()
+    with open_db() as conn:
+        rows = conn.execute(
+            "SELECT depotid, appid FROM depot_app_map ORDER BY depotid, appid"
+        ).fetchall()
     return [MappingEntry(depotid=row["depotid"], appid=row["appid"]) for row in rows]
 
 
@@ -82,13 +82,14 @@ def list_mapping(conn: sqlite3.Connection = Depends(get_db)) -> list[MappingEntr
 def remove_mapping(
     depotid: int = Path(ge=1),
     appid: int = Path(ge=1),
-    conn: sqlite3.Connection = Depends(get_db),
+    open_db: DbOpener = Depends(db_opener),
 ) -> None:
     """Remove one mapping pair (correction path for the additive PUT, B2).
 
     Does NOT delete the ``apps`` row. 404 if the pair doesn't exist.
     """
-    deleted = delete_mapping(conn, depotid=depotid, appid=appid)
+    with open_db() as conn:
+        deleted = delete_mapping(conn, depotid=depotid, appid=appid)
     if not deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

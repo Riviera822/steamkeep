@@ -12,7 +12,11 @@ from __future__ import annotations
 import os
 import sqlite3
 
-SCHEMA_VERSION = 1
+#: v1 (WP 1.2): initial schema.
+#: v2 (WP 1.4): added the two ``jobs`` indexes below. Purely additive
+#: (``CREATE INDEX IF NOT EXISTS``), so upgrading a v1 file is just running
+#: the current DDL and recording the new version — see ``init_db``.
+SCHEMA_VERSION = 2
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -48,6 +52,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     log_excerpt TEXT
 );
 
+-- The job worker polls "give me the oldest queued job" on every tick and the
+-- enqueue path asks "does this app already have a queued/running job?" on
+-- every POST /v1/prefill. Both would otherwise scan the whole (append-only,
+-- ever-growing) jobs table. Schema v2, WP 1.4.
+CREATE INDEX IF NOT EXISTS idx_jobs_status_id ON jobs (status, id);
+CREATE INDEX IF NOT EXISTS idx_jobs_appid_status ON jobs (appid, status);
+
 -- One row per report (full-list snapshot), matching ADR-0002 literally:
 -- the agent reports its complete installed-app-ID list every time; vault-api
 -- derives additions/removals by diffing the two most recent rows per
@@ -67,32 +78,19 @@ def get_connection(db_path: str) -> sqlite3.Connection:
     """Open a new connection with sane defaults (row access by column name).
 
     WAL journal mode + a busy_timeout let HTTP request handlers read the
-    database while a background job-queue writer (WP 1.4+) holds a write
-    transaction, instead of failing immediately with "database is locked".
+    database while the background job worker holds a write transaction,
+    instead of failing immediately with "database is locked".
 
-    ``check_same_thread=False`` (WP 1.3 review fix, B1): FastAPI's sync
-    dependency-injection machinery runs a sync generator dependency (like
-    ``deps.get_db``) in one anyio worker thread and the endpoint body that
-    consumes its yielded value in another thread pulled from the same pool
-    — the same ``sqlite3.Connection`` object legitimately crosses threads
-    within a single request under concurrency. sqlite3's default
-    ``check_same_thread=True`` raises ``ProgrammingError`` in that case
-    (reviewer proved 60/60 requests 500'd under concurrent load via
-    ``httpx.ASGITransport`` + ``asyncio.gather`` before this fix, 264/264
-    succeeded after). This is safe to disable here because each connection
-    is opened fresh per request (``deps.get_db``) and only ever used by the
-    single request that owns it — never shared or reused concurrently
-    across *different* requests — and CPython's bundled sqlite3 driver
-    reports ``sqlite3.threadsafety == 3`` ("Serialized": safe to use from
-    multiple threads without restriction, including sharing a single
-    connection), so the underlying library-level guarantee holds even
-    though only one thread touches this connection at a time in practice.
+    ``check_same_thread`` is left at its safe default of ``True`` (WP 1.4;
+    WP 1.3 had set it to ``False``). Every connection in this codebase is now
+    thread-confined by construction — request handlers open and close theirs
+    inside the endpoint body (``deps.db_opener``) and the job worker owns one
+    connection created inside its own thread — so the default costs nothing
+    and turns a future accidental hand-off into a loud ``ProgrammingError``
+    instead of a native crash. See ``deps.py`` for the measured access
+    violation that made the old shared-connection approach untenable.
     """
-    assert sqlite3.threadsafety == 3, (
-        "sqlite3.threadsafety != 3 (Serialized) on this Python build — "
-        "check_same_thread=False would be unsafe here."
-    )
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
@@ -101,7 +99,20 @@ def get_connection(db_path: str) -> sqlite3.Connection:
 
 
 def init_db(db_path: str) -> None:
-    """Create the schema if it doesn't exist yet. Idempotent — safe to call on every startup."""
+    """Create/upgrade the schema. Idempotent — safe to call on every startup.
+
+    Migration story (deliberately minimal, plan §9 "keep it simple"): every
+    statement in ``_DDL`` is ``CREATE ... IF NOT EXISTS``, so running the
+    current DDL against an older file brings it to the current shape as long
+    as all changes so far have been *additive*. That holds for v1 -> v2 (two
+    new ``jobs`` indexes), so the "migration" is just recording the new
+    version number afterwards.
+
+    The day a change is NOT additive (dropping/retyping a column), this
+    function needs a real per-version step list — the ``stored > SCHEMA_VERSION``
+    guard below exists so a downgrade is caught loudly instead of silently
+    operating on a schema this code doesn't understand.
+    """
     parent = os.path.dirname(db_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -109,11 +120,21 @@ def init_db(db_path: str) -> None:
     conn = get_connection(db_path)
     try:
         conn.executescript(_DDL)
-        (row_count,) = conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()
-        if row_count == 0:
+
+        row = conn.execute("SELECT version FROM schema_version").fetchone()
+        if row is None:
             conn.execute(
                 "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
             )
+        elif row["version"] > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Database {db_path} has schema version {row['version']}, but this "
+                f"vault-api only understands up to {SCHEMA_VERSION}. It was written "
+                "by a newer version — upgrade vault-api instead of downgrading."
+            )
+        elif row["version"] < SCHEMA_VERSION:
+            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+
         conn.commit()
     finally:
         conn.close()

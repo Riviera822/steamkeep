@@ -216,7 +216,8 @@ Steam-only, prefill-first design can solve better:
 |---|---|---|
 | GET | /v1/games | All tracked games: status, size, last prefill |
 | GET | /v1/games/{appid} | Detail incl. depot list |
-| POST | /v1/prefill | Body: `{appids: [..]}` → create jobs |
+| POST | /v1/prefill | Body: `{appids: [..]}` → create jobs (response marks deduplicated entries) |
+| GET | /v1/jobs | Recent jobs, newest first (app polling UI) |
 | GET | /v1/jobs/{id} | Job status (for app polling) |
 | DELETE | /v1/cache/{appid} | Delete a game from the cache |
 | POST | /v1/cache/{appid}/gc | Garbage-collect orphaned chunks (manifest diff) |

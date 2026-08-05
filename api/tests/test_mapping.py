@@ -218,3 +218,57 @@ def test_delete_mapping_function_returns_false_when_pair_missing(
         assert delete_mapping(conn, depotid=441, appid=440) is False  # already gone
     finally:
         conn.close()
+
+
+def test_concurrent_upsert_of_the_same_new_appid_does_not_500(tmp_path) -> None:
+    """WP 1.4 fix: upsert_mapping's app-row creation must be race-free.
+
+    The old SELECT-then-INSERT made two writers that both saw "no apps row"
+    both try to insert; the loser got
+    ``sqlite3.IntegrityError: UNIQUE constraint failed: apps.appid`` and the
+    request 500'd. Reproduced with parallel threads, so it is pinned here.
+    """
+    import threading
+
+    from vault_api.db import get_connection, init_db
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    errors: list[BaseException] = []
+    start = threading.Barrier(10)
+
+    def upsert(index: int) -> None:
+        conn = get_connection(db_path)
+        try:
+            start.wait(timeout=10)
+            for offset in range(10):
+                upsert_mapping(
+                    conn, depotid=5000 + index * 10 + offset, appid=999, name="Same App"
+                )
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=upsert, args=(index,)) for index in range(10)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+
+    conn = get_connection(db_path)
+    try:
+        (app_rows,) = conn.execute("SELECT COUNT(*) FROM apps WHERE appid = 999").fetchone()
+        (map_rows,) = conn.execute(
+            "SELECT COUNT(*) FROM depot_app_map WHERE appid = 999"
+        ).fetchone()
+        name = conn.execute("SELECT name FROM apps WHERE appid = 999").fetchone()["name"]
+    finally:
+        conn.close()
+
+    assert app_rows == 1
+    assert map_rows == 100
+    assert name == "Same App"

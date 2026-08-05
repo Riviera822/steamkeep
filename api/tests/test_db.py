@@ -129,3 +129,104 @@ def test_connection_pragmas_are_applied(tmp_path) -> None:
 
     assert journal_mode.lower() == "wal"
     assert busy_timeout == 5000
+
+
+def test_jobs_has_the_queue_indexes(tmp_path) -> None:
+    # Schema v2 (WP 1.4): the worker polls "oldest queued job" on every tick
+    # and the enqueue path checks "queued/running job for this appid?" on every
+    # POST /v1/prefill — both would otherwise scan the whole jobs table.
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'jobs'"
+        ).fetchall()
+        index_names = {row["name"] for row in rows}
+    finally:
+        conn.close()
+
+    assert {"idx_jobs_status_id", "idx_jobs_appid_status"} <= index_names
+
+
+def test_init_db_upgrades_a_v1_database_in_place(tmp_path) -> None:
+    """v1 -> v2 is additive, so running the current DDL + bumping the marker is
+    the whole migration. Simulate a v1 file by dropping the new indexes and
+    resetting the recorded version."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("DROP INDEX idx_jobs_status_id")
+        conn.execute("DROP INDEX idx_jobs_appid_status")
+        conn.execute("UPDATE schema_version SET version = 1")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        (version,) = conn.execute("SELECT version FROM schema_version").fetchone()
+        index_names = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'jobs'"
+            )
+        }
+    finally:
+        conn.close()
+
+    assert version == SCHEMA_VERSION
+    assert {"idx_jobs_status_id", "idx_jobs_appid_status"} <= index_names
+
+
+def test_init_db_refuses_a_database_from_a_newer_vault_api(tmp_path) -> None:
+    import pytest
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION + 1,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(RuntimeError, match="newer version"):
+        init_db(db_path)
+
+
+def test_connections_are_thread_confined_by_default(tmp_path) -> None:
+    """WP 1.4: check_same_thread must stay ON.
+
+    Handing a connection to another thread is what produced a native access
+    violation in WP 1.3's shared-connection design (see vault_api/deps.py).
+    Every connection here is opened and closed in the thread that uses it, so
+    the safe default must be in force — a future accidental hand-off has to be
+    a loud ProgrammingError, not a crash.
+    """
+    import threading
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    failures: list[str] = []
+
+    def use_from_another_thread() -> None:
+        try:
+            conn.execute("SELECT 1").fetchone()
+            failures.append("no ProgrammingError was raised")
+        except sqlite3.ProgrammingError:
+            pass
+
+    thread = threading.Thread(target=use_from_another_thread)
+    thread.start()
+    thread.join(timeout=10)
+    conn.close()
+
+    assert not failures, failures

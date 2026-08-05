@@ -2,30 +2,66 @@
 
 Kept separate from db.py so db.py stays framework-agnostic (plain sqlite3
 helpers, importable without FastAPI installed) while routers get a normal
-FastAPI ``Depends(get_db)`` dependency.
+FastAPI ``Depends`` dependency.
+
+Why routers get an *opener* instead of a connection (WP 1.4 fix)
+---------------------------------------------------------------
+WP 1.3's version was a sync generator dependency: open a connection, yield it
+to the endpoint, close it in a ``finally``. That is the shape every FastAPI
+tutorial shows, and under concurrency it **segfaulted the interpreter** —
+reproduced repeatedly on Windows/CPython 3.12 as "Windows fatal exception:
+access violation" while hammering the API with parallel requests.
+
+Measured mechanism (not a guess — captured by wrapping ``sqlite3.Connection``
+in a subclass that recorded every overlapping use of one connection):
+
+    thread A (anyio worker): conn.execute("BEGIN IMMEDIATE")  <- blocked on the
+                                                                 write lock,
+                                                                 GIL released
+    thread B (event loop):   FastAPI's AsyncExitStack unwinds the dependency
+                             -> the old get_db's finally -> conn.close()
+
+Closing a connection while another thread is inside ``sqlite3_step`` on it is a
+use-after-free at the C level; sqlite's serialized threading mode protects the
+*database*, not CPython's per-connection objects. The window opens whenever the
+exit stack unwinds while the body is still running, and write-lock contention
+(``PRAGMA busy_timeout``) makes the body block long enough for it to matter.
+
+The fix is structural: **the connection never leaves the thread that created it
+and never outlives the endpoint body.** The dependency hands the endpoint a
+zero-argument opener; the endpoint does ``with open_db() as conn:``, so open,
+use and close all happen inside the single ``run_in_threadpool`` call that runs
+the body. Nothing else can close it — and ``check_same_thread`` is back at its
+safe default (see ``db.get_connection``), so a future regression is a loud
+``ProgrammingError`` instead of a crash.
 """
 
 from __future__ import annotations
 
-from typing import Iterator
-
 import sqlite3
+from contextlib import closing
+from typing import Callable, ContextManager
 
 from fastapi import Request
 
 from vault_api.db import get_connection
 
+#: What routers receive: call it to get a context-managed connection.
+DbOpener = Callable[[], ContextManager[sqlite3.Connection]]
 
-def get_db(request: Request) -> Iterator[sqlite3.Connection]:
-    """Yield a per-request SQLite connection, closed when the request ends.
 
-    Uses the same ``get_connection`` helper as startup's ``init_db`` (WAL
-    journal mode + busy_timeout), so route handlers don't immediately fail
-    with "database is locked" while a background job-queue writer (WP 1.4+)
-    holds a write transaction.
+def db_opener(request: Request) -> DbOpener:
+    """FastAPI dependency returning a per-call SQLite connection opener.
+
+    Deliberately NOT a generator dependency (see the module docstring). This
+    function touches no sqlite object at all — it only captures the configured
+    database path — so FastAPI may run it in whatever thread it likes.
     """
-    conn = get_connection(request.app.state.settings.db_path)
-    try:
-        yield conn
-    finally:
-        conn.close()
+    db_path = request.app.state.settings.db_path
+
+    def open_db() -> ContextManager[sqlite3.Connection]:
+        # closing(), not `with conn:` — the latter is sqlite3's *transaction*
+        # context manager and never closes the connection.
+        return closing(get_connection(db_path))
+
+    return open_db

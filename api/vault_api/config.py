@@ -21,6 +21,44 @@ except ImportError:  # pragma: no cover - python-dotenv is a pinned dependency,
     pass
 
 
+#: Default wall-clock budget for one SteamPrefill subprocess run. A large
+#: game legitimately takes hours on a slow line, so the default is
+#: deliberately generous — this is a runaway/hang backstop, not a
+#: performance knob (WP 1.4).
+DEFAULT_PREFILL_TIMEOUT_SECONDS = 14400  # 4 hours
+
+#: How long the job worker sleeps between polls of an empty queue.
+DEFAULT_WORKER_POLL_SECONDS = 1.0
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive integer env var, falling back to ``default``."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer, got {raw!r}") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be > 0, got {value}")
+    return value
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a positive float env var, falling back to ``default``."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a number, got {raw!r}") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be > 0, got {value}")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable snapshot of the environment at startup."""
@@ -29,6 +67,14 @@ class Settings:
     db_path: str
     cache_root: str
     log_level: str
+    # WP 1.4. Path to the SteamPrefill executable. Deliberately NOT required
+    # at startup: vault-api must still serve /v1/games, /v1/mapping and
+    # /v1/health on a box where SteamPrefill hasn't been set up yet. A prefill
+    # job then fails with a clear per-job error instead of taking the whole
+    # app down (see vault_api/prefill.py).
+    steamprefill_path: str = ""
+    prefill_timeout_seconds: int = DEFAULT_PREFILL_TIMEOUT_SECONDS
+    worker_poll_seconds: float = DEFAULT_WORKER_POLL_SECONDS
 
     @staticmethod
     def from_env() -> "Settings":
@@ -51,4 +97,11 @@ class Settings:
             db_path=os.environ.get("VAULT_DB_PATH", "./vault.db"),
             cache_root=os.environ.get("VAULT_CACHE_ROOT", "./cache"),
             log_level=os.environ.get("VAULT_LOG_LEVEL", "INFO"),
+            steamprefill_path=os.environ.get("VAULT_STEAMPREFILL_PATH", "").strip(),
+            prefill_timeout_seconds=_env_int(
+                "VAULT_PREFILL_TIMEOUT_SECONDS", DEFAULT_PREFILL_TIMEOUT_SECONDS
+            ),
+            worker_poll_seconds=_env_float(
+                "VAULT_WORKER_POLL_SECONDS", DEFAULT_WORKER_POLL_SECONDS
+            ),
         )

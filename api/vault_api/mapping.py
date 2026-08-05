@@ -50,17 +50,24 @@ def upsert_mapping(
     during a prefill job (WP 1.4) — neither caller needs a shared
     transaction across multiple mapping facts.
     """
-    existing = conn.execute(
-        "SELECT name FROM apps WHERE appid = ?", (appid,)
-    ).fetchone()
-
-    if existing is None:
+    # INSERT OR IGNORE, not SELECT-then-INSERT (WP 1.4 fix): two concurrent
+    # writers upserting the *same* new appid both saw "no row" and both tried
+    # to insert, so the loser got "UNIQUE constraint failed: apps.appid" — a
+    # 500 on a perfectly legitimate request. Reproduced with 10 parallel
+    # threads hammering PUT /v1/mapping; now the loser's insert is simply a
+    # no-op. Creating the row and naming it are separate statements for the
+    # same reason: the row may already exist by the time we get here.
+    conn.execute(
+        "INSERT OR IGNORE INTO apps (appid, name, status) VALUES (?, ?, 'idle')",
+        (appid, name),
+    )
+    if name is not None:
+        # A None name must never clobber an existing one, and a given name
+        # fills in a row that was created earlier without one.
         conn.execute(
-            "INSERT INTO apps (appid, name, status) VALUES (?, ?, 'idle')",
-            (appid, name),
+            "UPDATE apps SET name = ? WHERE appid = ? AND (name IS NULL OR name != ?)",
+            (name, appid, name),
         )
-    elif name is not None and existing["name"] != name:
-        conn.execute("UPDATE apps SET name = ? WHERE appid = ?", (name, appid))
 
     conn.execute(
         "INSERT OR IGNORE INTO depot_app_map (depotid, appid) VALUES (?, ?)",
