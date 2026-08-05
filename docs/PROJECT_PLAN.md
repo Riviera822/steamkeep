@@ -312,7 +312,14 @@ for users who expose the API differently.
       survive deletion by design. Opus + Fable double review)*
 - [ ] Docker Compose (2 services + volume), .env convention, pinned image tags
 - [ ] Optional vault-dns container behind a Compose profile (`--profile dns`)
-- [ ] **MVP test: prefill a game via curl, query its size, delete it — no app**
+- [x] **MVP test: prefill a game via curl, query its size, delete it — no app**
+      *(2026-08-05, WP 1.7: full HTTP-only cycle against the real Steam
+      CDN through the resident vault-core — prefill 79.7 MiB via job
+      queue, size and summary internally consistent to the byte,
+      deletion freed exactly the app's size, disk verified. Evidence:
+      `core/tests/mvp/RESULTS-*.md`. Note: unattended real-account
+      prefills are blocked by the local permission classifier — the
+      run is operator-executed by design)*
 
 ### Phase 2 — vault-agent (PC listener)
 - [ ] ACF/VDF parser (appmanifest + libraryfolders, multiple drives)
@@ -330,6 +337,9 @@ for users who expose the API differently.
 ### Phase 3 — Scheduler & Update Logic
 - [ ] Miss-triggered prefill completion: a cache miss on an unknown/partial
       app queues a prefill job for that app (hybrid decision, ADR-0001)
+- [ ] Job outcome honesty: a prefill run that observed zero depots and has
+      zero cached bytes must not end 'done' (WP 1.7 finding: SteamPrefill
+      exits 0 for unowned apps → green badge for a never-cached game)
 - [ ] Manifest comparison (stale detection)
 - [ ] Configurable cron window (e.g. 09:00–17:00, every 3 h)
 - [ ] Manifest-based garbage collection (`/v1/cache/{appid}/gc`, optional

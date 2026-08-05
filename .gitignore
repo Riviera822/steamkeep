@@ -1,7 +1,9 @@
 ﻿# private planning doc — lives in Forgejo, never in this repo
 steamvault_projektplan.md
 
-# local env
+# local env -- pattern has no slash, so it matches .env at ANY depth
+# (api/.env, deploy/.env, ...). Only the committed *.env.example templates
+# ever enter the repo.
 .env
 
 # Phase 0 PoC (poc/) — throwaway artifacts, never committed
@@ -24,6 +26,10 @@ core/tmp/
 core/*.pid
 core/_testcore_tmp/
 
+# WP 1.7 MVP end-to-end test -- throwaway DB + uvicorn stdout/stderr logs for
+# each run; RESULTS-*.md next to it IS committed evidence, this is not.
+core/tests/mvp/_run_tmp/
+
 
 # Claude Code harness artifacts
 .claude/scheduled_tasks.lock
@@ -42,4 +48,13 @@ __pycache__/
 # vault-dns (dns/) — rendered test config, created and cleaned up by
 # dns/tests/test-dnsmasq-config.ps1 (WP 1.8); only survives a crashed run.
 dns/tests/_tmp/
+
+# vault-agent (agent/) — Python virtualenv, test-only (WP 2.1); runtime is
+# stdlib only.
+agent/.venv/
+
+# deploy/ (WP 1.9) — deploy/.env is already covered by the .env rule at the
+# top. deploy/VERIFICATION-*.md is deliberately NOT ignored: like poc/RESULTS-*,
+# it is committed evidence of a real container run.
+
 
