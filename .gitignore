@@ -53,6 +53,20 @@ dns/tests/_tmp/
 # stdlib only.
 agent/.venv/
 
+# vault-agent Go port (agent/go/, WP 2.1b, ADR-0005) — cross-compiled probe/
+# agent binaries are build output, never committed; only agent/go/go.mod,
+# go.sum (if any deps are added later), and *.go source are tracked.
+agent/go/probe
+agent/go/probe.exe
+agent/go/cmd/probe/probe
+agent/go/cmd/probe/probe.exe
+agent/go/*.exe
+agent/go/**/*.exe
+agent/go/vault-agent
+agent/go/vault-agent.exe
+# `go test -c` compiled test binaries, any nesting depth.
+agent/go/**/*.test
+
 # deploy/ (WP 1.9) — deploy/.env is already covered by the .env rule at the
 # top. deploy/VERIFICATION-*.md is deliberately NOT ignored: like poc/RESULTS-*,
 # it is committed evidence of a real container run.

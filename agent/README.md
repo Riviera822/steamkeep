@@ -5,17 +5,217 @@ The PC listener for SteamVault. Deliberately dumb by design (see
 what's installed, no control logic on the device. All prefill/scheduling
 decisions live in vault-api.
 
-Status: work in progress. This package currently ships the ACF/VDF parser
-(WP 2.1) only — no HTTP reporter yet (WP 2.2), no hosts-file mode (WP 2.3),
-no Linux/SteamOS variant (WP 2.5, see ADR-0002).
+Status: work in progress. The ACF/VDF parser has been ported to Go
+(WP 2.1b, `go/`) and is judged against this Python package's test corpus —
+see "Go port (production)" below. No HTTP reporter yet (WP 2.2), no
+hosts-file mode (WP 2.3), no Linux/SteamOS variant (WP 2.5, see ADR-0002).
 
 **Executable specification (ADR-0005):** vault-agent ships as a Go binary
-in production; this Python package and its test suite are kept as the
-pinned reference for that port (WP 2.1b). Every parsing decision below —
-especially the ones that are conventions rather than the one obviously
-correct answer (escape handling, nesting limits, conditional tags) — is
-deliberately spelled out and tested so the Go port can match it exactly
-rather than re-deriving it.
+in production; this Python package and its test suite are the pinned
+reference the Go port (`go/acf`, WP 2.1b) was built and tested against.
+Every parsing decision below — especially the ones that are conventions
+rather than the one obviously correct answer (escape handling, nesting
+limits, conditional tags) — is deliberately spelled out and tested so the
+Go port matches it (with a small number of named exceptions — see "Known
+divergences from the Python spec" below) rather than re-deriving it. Per
+ADR-0005, this Python package is retained as the frozen spec baseline —
+it is no longer the code that ships, but it stays in the repo, unremoved,
+through the rest of Phase 2; removal happens at the **Phase-2 close-out
+package**, not automatically the moment WP 2.2 (reporter) lands.
+`tests/fixtures/` is permanent either way: it's the shared fixture corpus
+both this Python suite and the Go suite (`go/acf/*_test.go`) reference,
+and stays regardless of which implementation is currently shipping.
+
+## Go port (production)
+
+`go/acf` is the Go package vault-agent actually ships (ADR-0005): a
+straight port of this Python package's parsing behavior, tested against
+the SAME fixture corpus under `tests/fixtures/` (referenced relatively,
+never copied).
+
+**Layout:**
+
+```
+agent/go/
+├── go.mod                    # module github.com/Riviera822/steamvault/agent
+├── acf/
+│   ├── acf.go                 # KeyValues (ordered map), ParseError, getCI
+│   ├── tokenizer.go            # rune-based tokenizer
+│   ├── parser.go                # recursive-descent parser, depth cap, conditionals, BOM
+│   ├── strictuint.go             # parseStrictUint (ASCII-digit-only grammar)
+│   ├── appmanifest.go              # InstalledApp, ParseAppManifest(File)
+│   ├── libraryfolders.go            # ParseLibraryFolders(File), modern + old flat
+│   ├── discover.go                   # DiscoverInstalled, Warning
+│   ├── testhelpers_test.go            # fixture path resolution, KeyValues-vs-map equality helper
+│   ├── acf_test.go                     # tokenizer/parser tests (ported from test_tokenizer.py)
+│   ├── appmanifest_test.go              # ported from test_appmanifest.py
+│   ├── libraryfolders_test.go            # ported from test_libraryfolders.py
+│   └── discover_test.go                   # ported from test_discover.py
+└── cmd/probe/main.go          # throwaway CLI: DiscoverInstalled against a real
+                                # library_root, for manual real-machine validation —
+                                # NOT the production reporter (that's WP 2.2)
+```
+
+**Building and testing (WSL2 — no Windows Go toolchain in this repo's dev
+environment; Go 1.26 in WSL):**
+
+```bash
+wsl bash -c "cd /mnt/c/claude-dev/SteamVault/agent/go && go build ./... && go vet ./... && gofmt -l . && go test ./..."
+```
+
+**Cross-compile matrix** (static binaries, no CGO, matching the three
+ADR-0005 targets plus a Linux/arm64 SteamOS check):
+
+```bash
+GOOS=windows GOARCH=amd64 go build -o /tmp/probe-windows-amd64.exe ./cmd/probe
+GOOS=linux   GOARCH=amd64 go build -o /tmp/probe-linux-amd64      ./cmd/probe
+GOOS=linux   GOARCH=arm64 go build -o /tmp/probe-linux-arm64      ./cmd/probe
+```
+
+All three build clean (verified during WP 2.1b). Build output is never
+committed — `agent/go/*.exe`, `agent/go/probe`, `agent/go/vault-agent(.exe)`
+are gitignored.
+
+**Key porting decisions:**
+
+- **Ordered `KeyValues`, not a plain `map[string]any`.** Go map iteration
+  order is randomized; Python dicts are insertion-ordered, and
+  `ParseLibraryFolders`' returned path list is order-sensitive (the
+  modern-format fixture asserts library 0 before library 1). `KeyValues`
+  is a small struct (ordered key slice + lookup map) instead — a bare Go
+  map here would make that test flaky rather than deterministically
+  wrong, which is worse.
+- **Runes, not bytes, in the tokenizer.** Python strings are indexed by
+  code point; a byte-indexed Go tokenizer would split multi-byte UTF-8
+  content (e.g. a non-ASCII game name in a quoted value) mid-character.
+  `tokenize` converts to `[]rune` up front so offsets and slicing behave
+  the same way.
+- **`os.ReadDir` + manual `appmanifest_*.acf` prefix/suffix matching in
+  `DiscoverInstalled`, not `filepath.Glob`.** Found during real-machine
+  validation: Go's `filepath.Glob` runs `Match`-style pattern parsing
+  over EVERY segment of the full joined path — on non-Windows GOOS it
+  treats `\` as an escape metacharacter (a library path containing a
+  literal backslash, e.g. a Windows-native `libraryfolders.vdf` path fed
+  through a non-Windows-built `acf` binary while cross-testing under
+  WSL, makes `Glob` silently match nothing), and `[`/`]` are ALWAYS
+  character-class syntax on every platform (a library folder legitimately
+  named e.g. `lib [beta] one` hits the same silent-nothing-matched trap,
+  no OS-specific quirk needed). Python's `pathlib.Path.glob` has no
+  equivalent trap — it only pattern-matches the final path component,
+  never earlier directory segments. Plain directory listing sidesteps the
+  whole class of bug and doubles as the "is this a directory" check.
+  Regression-tested for both trigger cases (`go/acf/discover_test.go`);
+  mutation-tested once during WP 2.1b's review round by reverting to
+  `filepath.Glob` and confirming both new tests fail, then restoring the
+  fix and confirming green again.
+- **Manifest filename matching is case-insensitive.** `strings.ToLower`
+  before the prefix/suffix check, so e.g. `AppManifest_100.ACF` is still
+  found. Windows is the primary ADR-0005 target and Windows filesystems
+  are case-insensitive; Python's `Path.glob` gets this for free there,
+  a Go string comparison does not without the explicit lowering.
+- **`Warning` slice instead of `logging.warning`.** Go has no ambient
+  logging convention; `DiscoverInstalled` returns `(apps []InstalledApp,
+  warnings []Warning)` and leaves it to the caller (WP 2.2's reporter) to
+  decide how to surface them. The warning text distinguishes "no
+  steamapps directory" (missing/not-a-directory) from "permission
+  denied" — different operator actions, so collapsing them into one
+  message would lose actionable information the Python spec's per-
+  exception-type warning also preserves implicitly (a `PermissionError`
+  vs `FileNotFoundError` read differently in a log).
+- **Plain `string` for library/manifest paths, not a `Path` type.** Go
+  has no cross-platform path-object abstraction equivalent to
+  `pathlib.Path`; paths are plain strings throughout, joined with
+  `path/filepath` where the code itself constructs a path (e.g.
+  `steamapps` under a library root).
+- **Invalid UTF-8 in a file is rejected with a `*ParseError`, not
+  silently decoded.** Python's `read_text(encoding="utf-8-sig",
+  errors="strict")` raises on a byte sequence that isn't valid UTF-8
+  (e.g. a stray Latin-1/cp1252 byte like `0xE9` for an accented
+  character in a manifest name), which the spec wraps into
+  `VdfParseError` — corrupt file, skip it, warn. Go's `string(data)` has
+  no equivalent guard: it silently substitutes the U+FFFD replacement
+  character for every invalid byte, which would let a mojibake-mangled
+  name flow all the way into `InstalledApp` (and from there, WP 2.2's
+  reporter → vault-api) with no error at all. `readFileStripBOM` now
+  calls `utf8.Valid` explicitly before returning.
+- **`ParseError` carries a `Cause error` field and implements
+  `Unwrap()`.** So callers can use `errors.Is`/`errors.As` — e.g.
+  `errors.Is(err, fs.ErrNotExist)` in WP 2.2's reporter to tell "the
+  manifest file vanished between listing and reading it" apart from "the
+  manifest is corrupt", without string-matching the error message.
+
+**Real-machine validation (WP 2.1b):** `DiscoverInstalled` was run from
+WSL against the real `/mnt/c/steam` install (read-only — the install
+itself was never modified) and found the same 15 installed apps with
+zero warnings that the Python spec's empirical verification documents
+(see "StateFlags" section below). The real `libraryfolders.vdf` on that
+machine lists a Windows-native path (`C:\Steam`); resolving it from a
+Linux-built binary needed a throwaway symlink in a scratch `/tmp`
+directory (`ln -s /mnt/c/steam 'C:\Steam'`, deleted afterward) — a WSL-
+vs-Windows path-syntax bridge for this one manual validation run, not
+anything `go/acf` itself does or needs to do in real (single-OS)
+production use. Real app names/sizes from that run are not reproduced
+here or anywhere in the repo (fixture policy below).
+
+**Parity with the Python spec:** every Python test in `tests/test_*.py`
+(69 cases across 4 files, `pytest`-parametrized cases counted
+individually) has a Go counterpart in `go/acf/*_test.go` using
+`t.Run` subtests where Python used `@pytest.mark.parametrize`, so the
+per-case count matches 1:1 (`go test ./... -v` reports 81 leaf test
+cases total: the 69 ported plus 12 Go-only). The 12 Go-only tests pin
+behavior the Python corpus implies but doesn't separately exercise:
+- 3 depth-cap boundary tests (nesting depth exactly at the 100-level
+  cap, one over it, and 1500);
+- 2 `filepath.Glob`-vs-`os.ReadDir` regression tests (a library path
+  containing `[` `]` glob-metacharacters, and — non-Windows only — a
+  literal backslash), mutation-tested once by reverting to `filepath.Glob`
+  and confirming both fail;
+- 1 case-insensitive manifest filename match test;
+- 2 invalid-UTF-8-rejection tests (one per `readFileStripBOM` caller)
+  plus 1 discover-level test proving the invalid-UTF-8 file is skipped
+  with a warning, not silently mangled into the result;
+- 3 integer-overflow divergence tests (one per affected field — see
+  below).
+
+### Known divergences from the Python spec
+
+The Go port is judged against the Python spec's test corpus and matches
+it for every case that corpus (or any real Steam-written file) exercises.
+Two divergences exist by deliberate choice rather than oversight —
+named here instead of buried in a "matches bit-for-bit" claim that
+wouldn't survive contact with either of them:
+
+1. **Integer overflow** (`parseStrictUint`, `go/acf/strictuint.go`): Go's
+   `int` is a 64-bit machine integer on every ADR-0005 build target;
+   Python's `int` is arbitrary-precision. A digit string too large to fit
+   (~19+ digits) is grammatically valid in both, but:
+   - `SizeOnDisk` silently becomes `nil` in Go where Python would return
+     the actual (huge) value — shaped like the existing "tolerated
+     field" contract, but the number is lost, not just defaulted.
+   - `StateFlags` makes Go reject the WHOLE appmanifest as corrupt
+     (`*ParseError`) where Python would accept it with an enormous
+     `StateFlags` value — a file Python treats as fine, Go skips.
+   - `appid` is rejected the same way, even though appid is stored as a
+     plain string and never used arithmetically anywhere in this
+     package — kept anyway, for consistency with the ONE house rule
+     this grammar check shares with `api/vault_api/deletion.py`'s
+     `coerce_positive_id` (see "Integer field grammar" below), not
+     because appid needs the numeric bound.
+
+   No real Steam-written file has ever been observed anywhere near this
+   range (StateFlags is a small bitmask, appid and SizeOnDisk are
+   ordinary Steam-scale numbers) — this is a corruption/hostile-input
+   edge case, not a real-world compatibility gap. Pinned by three tests
+   in `go/acf/appmanifest_test.go`.
+
+2. **`isAllASCIIDigits`** (`go/acf/libraryfolders.go`), used to recognize
+   numbered library keys in `libraryfolders.vdf`: stricter than Python's
+   `str.isdigit()`, which also accepts some non-ASCII Unicode digit-like
+   characters that this ASCII-only check rejects. Every real
+   libraryfolders.vdf uses plain ASCII numeric keys, so this has no
+   observed real-world impact; documented so the divergence is a named,
+   deliberate fact rather than an implicit (and wrong) "identical
+   behavior" assumption.
 
 ## What's here
 
@@ -104,7 +304,11 @@ digit-group separators (`"1_0"` -> `10`), non-ASCII Unicode digit
 characters (e.g. Arabic-Indic `"٤"` -> `4`). This mirrors Go's
 `strconv.Atoi` (base 10), which accepts none of those either — since this
 package is the executable specification for the Go port (ADR-0005), the
-two must agree on the same input byte-for-byte.
+two are designed to agree on the same input, with one named exception:
+digit strings too large for a 64-bit machine int, where Python's
+arbitrary-precision `int` still accepts and Go's port does not — see the
+Go port section's "Known divergences from the Python spec" above for the
+three concrete consequences.
 
 `appid` stays a `str` (it's an identifier, not a quantity), but is
 validated with the same grammar; a value that fails it makes the whole
