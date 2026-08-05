@@ -20,7 +20,7 @@ from fastapi import FastAPI
 from vault_api.config import Settings
 from vault_api.db import get_connection, init_db
 from vault_api.jobs import recover_stale_jobs
-from vault_api.routers import cache, games, health, jobs, mapping
+from vault_api.routers import agent, cache, clients, games, health, jobs, mapping
 from vault_api.sizes import SizeCache
 from vault_api.worker import PrefillWorker
 
@@ -89,4 +89,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(mapping.router)
     app.include_router(jobs.router)
     app.include_router(cache.router)
+    app.include_router(agent.router)
+    app.include_router(clients.router)
     return app

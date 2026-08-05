@@ -36,9 +36,22 @@ DEFAULT_WORKER_POLL_SECONDS = 1.0
 #: window reuse the last scan instead of re-walking.
 DEFAULT_SIZE_CACHE_TTL_SECONDS = 60.0
 
+#: How many agent report snapshots to keep per client_id (WP 2.4). The agent
+#: reports its full installed list every ~30 min (plan §3), so without a
+#: retention policy ``agent_reports`` grows forever. 20 keeps roughly the last
+#: 10 hours of a default reporting interval — enough to look back at what a
+#: machine installed/removed during a day, and still tiny on disk.
+#: The floor is 2 (mirrored as ``agent_reports.MIN_REPORTS_KEPT``, which clamps
+#: defensively): the diff needs the previous snapshot next to the one being
+#: written.
+DEFAULT_AGENT_REPORT_KEEP = 20
 
-def _env_int(name: str, default: int) -> int:
-    """Read a positive integer env var, falling back to ``default``."""
+#: Hard floor for VAULT_AGENT_REPORT_KEEP — see above.
+MIN_AGENT_REPORT_KEEP = 2
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    """Read an integer env var >= ``minimum``, falling back to ``default``."""
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -46,8 +59,11 @@ def _env_int(name: str, default: int) -> int:
         value = int(raw)
     except ValueError as exc:
         raise RuntimeError(f"{name} must be an integer, got {raw!r}") from exc
-    if value <= 0:
-        raise RuntimeError(f"{name} must be > 0, got {value}")
+    if value < minimum:
+        # The default floor is the plain "positive integer" case; phrase it the
+        # way it has always been phrased so existing messages don't change.
+        limit = "> 0" if minimum == 1 else f">= {minimum}"
+        raise RuntimeError(f"{name} must be {limit}, got {value}")
     return value
 
 
@@ -83,6 +99,8 @@ class Settings:
     worker_poll_seconds: float = DEFAULT_WORKER_POLL_SECONDS
     # WP 1.5. TTL (seconds) for the in-process per-game size cache.
     size_cache_ttl_seconds: float = DEFAULT_SIZE_CACHE_TTL_SECONDS
+    # WP 2.4. Snapshots kept per client in agent_reports (retention).
+    agent_report_keep: int = DEFAULT_AGENT_REPORT_KEEP
 
     @staticmethod
     def from_env() -> "Settings":
@@ -114,5 +132,10 @@ class Settings:
             ),
             size_cache_ttl_seconds=_env_float(
                 "VAULT_SIZE_CACHE_TTL", DEFAULT_SIZE_CACHE_TTL_SECONDS
+            ),
+            agent_report_keep=_env_int(
+                "VAULT_AGENT_REPORT_KEEP",
+                DEFAULT_AGENT_REPORT_KEEP,
+                minimum=MIN_AGENT_REPORT_KEEP,
             ),
         )

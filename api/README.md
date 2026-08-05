@@ -10,8 +10,12 @@ depot folders" (`docs/PROJECT_PLAN.md` §3), wired into `GET /v1/games`/
 `GET /v1/games/{appid}`, plus `GET /v1/cache/summary` (§6); WP 1.6 adds
 **per-game deletion** (`vault_api/deletion.py`) — `DELETE /v1/cache/{appid}`
 with shared-depot protection, path/link safety guards and an audit trail in the
-log (§4). The scheduler, garbage collection and the miss trigger remain scope
-for later work packages.
+log (§4); WP 2.4 adds the **agent report data path**
+(`vault_api/agent_reports.py`) — `POST /v1/agent/installed` with ADR-0002
+full-list snapshots, the server-side diff that surfaces removals, snapshot
+retention, plus a minimal `GET /v1/clients`. The scheduler (which will consume
+those snapshots), garbage collection, bypass detection and the miss trigger
+remain scope for later work packages.
 
 ## Layout
 
@@ -29,12 +33,16 @@ api/
 │   ├── worker.py         # the single background job worker thread
 │   ├── sizes.py          # depot disk walk, TTL size cache, summary aggregation
 │   ├── deletion.py       # per-game deletion: path/link guards, shared-depot plan
+│   ├── agent_reports.py  # agent snapshots: store, ADR-0002 diff, retention
+│   ├── validation.py     # shared request types (AppId) — one coercion rule
 │   └── routers/
 │       ├── health.py     # GET /v1/health — the ONE public router
 │       ├── games.py      # GET /v1/games, GET /v1/games/{appid}
 │       ├── mapping.py    # PUT /v1/mapping/{depotid}, GET /v1/mapping
 │       ├── jobs.py       # POST /v1/prefill, GET /v1/jobs[/{id}]
-│       └── cache.py      # GET /v1/cache/summary, DELETE /v1/cache/{appid}
+│       ├── cache.py      # GET /v1/cache/summary, DELETE /v1/cache/{appid}
+│       ├── agent.py      # POST /v1/agent/installed
+│       └── clients.py    # GET /v1/clients (minimal v1, stats in Phase 3)
 ├── tests/                # pytest (incl. tests/stub_prefill.py — fake CLI)
 ├── requirements.txt      # pinned, runtime only
 ├── requirements-dev.txt  # pinned, adds test-only deps (pytest, httpx)
@@ -57,6 +65,7 @@ Copy `.env.example` to `.env` and adjust:
 | `VAULT_PREFILL_TIMEOUT_SECONDS` | no       | `14400`      | Hard time budget for one SteamPrefill run (hang backstop)           |
 | `VAULT_WORKER_POLL_SECONDS`     | no       | `1.0`        | Worker sleep between polls of an empty queue                        |
 | `VAULT_SIZE_CACHE_TTL`          | no       | `60`         | TTL (seconds) for the in-process per-game size cache; **must be > 0** (see below) |
+| `VAULT_AGENT_REPORT_KEEP`       | no       | `20`         | Agent report snapshots kept per `client_id`; **must be >= 2** (see "Agent reports") |
 
 `VAULT_API_KEY` has no default. Starting the app without it raises
 `RuntimeError` immediately (`Settings.from_env`) — this is the "fail loudly"
@@ -118,10 +127,10 @@ as a gate without functioning as one (harmless so far since every change has
 been additive, but a future non-additive statement would already have run
 against a newer-than-understood schema by the time the check fired).
 
-**Retention (not yet implemented):** `agent_reports` grows one row per
-client per report interval indefinitely. A simple policy — e.g. keep only
-the last N reports per `client_id`, pruned on insert or via a periodic job —
-is deferred to the work package that implements the diff logic (Phase 2).
+**Retention (implemented in WP 2.4):** `agent_reports` would otherwise grow one
+row per client per report interval forever. `POST /v1/agent/installed` prunes
+to the newest `VAULT_AGENT_REPORT_KEEP` snapshots per `client_id` **inside the
+same transaction that inserts the new one** — see "Agent reports" below.
 
 No foreign keys enforced between `depot_app_map`/`jobs`/`agent_reports` and
 `apps.appid` — depot mappings and agent reports may arrive before an
@@ -195,11 +204,11 @@ appid both saw "no row" and both inserted; the loser got
 is now `INSERT OR IGNORE` plus a conditional name `UPDATE`, pinned by
 `tests/test_mapping.py::test_concurrent_upsert_of_the_same_new_appid_does_not_500`.
 
-## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6)
+## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4)
 
 All routes below require `X-Api-Key` (see "Auth"). Full API table:
-`docs/PROJECT_PLAN.md` §6; the games, mapping, prefill, jobs and cache rows
-are implemented so far.
+`docs/PROJECT_PLAN.md` §6; the games, mapping, prefill, jobs, cache, agent and
+clients rows are implemented so far.
 
 | Method | Endpoint                          | Purpose |
 |--------|-------------------------------------|---------|
@@ -213,6 +222,8 @@ are implemented so far.
 | GET    | `/v1/jobs/{id}`                    | One job incl. `log_excerpt`; `404` for an unknown id |
 | DELETE | `/v1/cache/{appid}`                | Delete this game's depot directories. `200` with `{appid, deleted_depots[], skipped_shared[], failed[], total_bytes_freed}`; `404` unknown appid or no mappings; `409` while a prefill job for the app is queued/running; `422` for `appid < 1`; `500` if the cache-root guards refuse. See "Per-game deletion" below |
 | GET    | `/v1/cache/summary`                | `total_bytes` (disk usage of `depot/`, each depot counted once), `top_consumers` (top 10 `{appid, name, size_bytes}`, largest first), `unmapped_depots` (`{count, size_bytes}` for depot dirs on disk with no mapping row for any app), `free_disk_bytes` (free space on the cache filesystem, `null` if undeterminable) |
+| POST   | `/v1/agent/installed`              | Body `{"client_id": str, "appids": [int, ...]}` — store one **full-list** snapshot of a client's installed games. `200` with `{client_id, received, added, removed, first_report}`; `422` for a bad `client_id` (empty, > 64 chars, control characters, surrounding whitespace, `.`/`..`), an appid `< 1` or a boolean, a missing/non-list `appids`, more than 10 000 ids, or an unrecognized body field. See "Agent reports" below |
+| GET    | `/v1/clients`                      | One row per reporting client: `{client_id, first_seen, last_reported_at, app_count}`, sorted by `client_id`. **Minimal v1** — hit statistics and bypass warnings (plan §5/§6) arrive in Phase 3 as *additional* fields |
 
 ## Prefill orchestration (WP 1.4)
 
@@ -789,6 +800,209 @@ with the reason, a depot that became shared between plan and removal logs
   the response report exactly what happened. A client that disconnects
   mid-deletion does **not** abort the work; only the report is lost.
 
+## Agent reports (WP 2.4)
+
+`POST /v1/agent/installed` is the vault-agent's only write path (plan §3, §6).
+The agent — on a Windows gaming PC or a Linux/SteamOS device (ADR-0002) — posts
+the **complete** list of installed Steam app ids, typically every 30 minutes.
+The mechanics live in `vault_api/agent_reports.py`, the HTTP shape in
+`vault_api/routers/agent.py`.
+
+```
+POST /v1/agent/installed
+{"client_id": "gaming-pc", "appids": [440, 570, 1234]}
+
+200
+{"client_id": "gaming-pc", "received": 3,
+ "added": [1234], "removed": [730], "first_report": false}
+```
+
+### Full-list snapshots and the server-side diff (ADR-0002)
+
+The agent is **stateless and dumb by design**: it never computes a delta, it
+just says what is installed *now*. vault-api stores that as one snapshot row
+and derives `added`/`removed` by diffing against that client's previous
+snapshot. Consequences worth stating:
+
+- **A snapshot is a set.** Duplicate ids in one request collapse
+  (`[440, 440, 730]` stores `[440, 730]`) and the stored order is sorted, so
+  `received` is the number of **distinct** ids — it can be lower than the
+  number of entries sent. The response's `added`/`removed` are sorted too.
+- **`first_report: true`** means "there was no usable previous snapshot", and
+  then `added` is the whole list and `removed` is empty. That covers the
+  client's genuine first report *and* the rare case of a predecessor row whose
+  JSON could not be decoded (corrupt/hand-edited database) — that row is
+  logged at WARNING and the chain restarts at the next report instead of the
+  endpoint 500ing forever.
+- **An empty list is a legitimate report**, not an error: a machine with
+  nothing installed reports `[]`, and the diff correctly says everything was
+  removed. The empty snapshot is stored like any other, so a reinstall later
+  shows up as an addition.
+- **`appids` is required.** Omitting it is a `422`, deliberately not "an empty
+  library" — a broken agent build that stops sending the field must not read
+  as "every game was uninstalled". Same reason `extra="forbid"` is set: a
+  typo'd `appIds` would otherwise leave `appids` missing.
+- **Clients are fully isolated.** The diff only ever looks at rows with the
+  same `client_id`; two machines with different libraries never interfere.
+- `client_id` must be 1–64 characters, printable, with no control characters,
+  no leading/trailing whitespace, and it may not be `.` or `..`. Nothing
+  derives a filesystem path from it today; rejecting the two path segments is
+  one line that forecloses a traversal if a future feature ever does (a
+  per-client log or export directory is an obvious candidate), and neither is
+  a machine label anyone meant to type. Control characters are rejected because
+  the value is written into log lines (a newline would let a malformed agent
+  forge audit lines); surrounding whitespace because it is an identity key and
+  `"pc"` / `"pc "` would silently be two clients. Both are `422`, not silently
+  normalised — it is a one-line setting in the agent's config.
+- `appids` is capped at 10 000 entries (larger than any real Steam library),
+  so a broken agent cannot push a multi-megabyte blob into SQLite every 30
+  minutes.
+- Numeric strings (`"440"`) are coerced to ints by Pydantic's default lax
+  mode. Pinned by a test rather than "fixed": `POST /v1/prefill` behaves
+  identically, and the `>= 1` constraint still applies afterwards (`"0"` is a
+  `422`). A JSON agent cannot produce this anyway.
+- **Booleans are rejected** (`422`) — see "One shared `AppId` type" below.
+
+### One shared `AppId` type (WP 2.4 review)
+
+`vault_api/validation.py` defines the single app-id request type used by
+`POST /v1/agent/installed`, `POST /v1/prefill` **and**
+`PUT /v1/mapping/{depotid}`:
+
+```python
+AppId = Annotated[int, BeforeValidator(reject_bool), Field(ge=1)]
+```
+
+Two things it fixes, both found by the WP 2.4 review:
+
+- **`true` is no longer an app id.** `bool` is an `int` subclass in Python, so
+  lax mode accepted a JSON `true` and stored **app id 1** — a real Steam app
+  id, so nothing downstream would have looked wrong. It also made the *write*
+  path more permissive than this project's own *read* path, which already
+  drops booleans when decoding a stored snapshot
+  (`agent_reports._decode_appids`). (`false` was already a `422`, but only by
+  accident: it coerces to `0`, which fails `ge=1`.)
+- **The three endpoints can no longer diverge.** They previously each declared
+  their own `Annotated[int, Field(ge=1)]` — identical by coincidence, not by
+  construction. Behavior for ordinary integers and for numeric strings is
+  unchanged; the full existing suite (including the pinned `"440"` coercion
+  test) stays green.
+
+### Removals are SURFACED, never acted on (the boundary)
+
+This is the deliberate limit of this work package, and it is what ADR-0002 and
+plan A9 ask for. When a title disappears from a client's library, vault-api:
+
+- **returns** it in `removed`, and
+- **logs** it at INFO, audit-style:
+
+```
+INFO vault_api.agent_reports: agent-report client='gaming-pc' stored snapshot: reported_at=2026-08-05T20:44:34Z apps=3 first_report=False added=1 removed=1 pruned=0
+INFO vault_api.agent_reports: agent-report client='gaming-pc' REMOVED 1 app(s) from the client library: [730] - cache content is NOT deleted and apps.status is NOT changed (ADR-0002: removals are surfaced; deletion stays a human/API decision, plan A9)
+```
+
+and it does **none** of the following:
+
+- it does not delete cache content for the removed app (that is
+  `DELETE /v1/cache/{appid}`, an explicit human/API decision — plan A9),
+- it does not change `apps.status` or `last_prefill_at`,
+- it does not create `apps` rows for reported app ids (a report is an
+  observation about a *client machine*, not a statement about the server's
+  cache; creating rows here would make every game installed anywhere show up
+  as a tracked, uncached game),
+- it queues nothing.
+
+Phase 3's scheduler is the component that turns these snapshots into a prefill
+set (plan §7 Phase 2's last bullet, executed in Phase 3). This package builds
+the data path it will read; live-verified above and pinned by
+`test_a_removal_is_logged_but_changes_no_app_state`, which seeds a tracked,
+cached, `status='done'` app and asserts the status, the timestamp, the depot
+mapping, the chunk file on disk and the job queue are all untouched by a
+removal report.
+
+The log line is ASCII on purpose (a Windows console at codepage 850 renders an
+em dash as a replacement character — observed during verification), and long
+removal lists are sampled (`[...50 ids] (+N more)`) so one report cannot emit a
+10 000-element log line.
+
+### Retention
+
+`VAULT_AGENT_REPORT_KEEP` (default 20, **minimum 2**) snapshots are kept per
+`client_id`. Pruning happens **inside the same transaction as the insert**, so
+the table is bounded at all times rather than by a periodic cleanup job that
+could fail to run. Only the *oldest* rows go.
+
+The floor of 2 is enforced at startup (`Settings.from_env` raises) and clamped
+again in `agent_reports.prune_reports`: with `keep=1` the prune would delete
+the predecessor in the same transaction that writes the new snapshot, so every
+report would come back as a `first_report` with no removals — a silently
+broken diff, which is worse than refusing to boot.
+
+Consequence to be aware of: **`first_seen` in `GET /v1/clients` is the oldest
+*retained* report**, not a permanent first-contact record. It moves forward as
+old snapshots are pruned. A durable "known clients" table is Phase 3's business
+(it needs one anyway for hit statistics).
+
+### Ordering: rowid, not the timestamp
+
+The "previous" snapshot is the previous row by SQLite **`rowid`** (insertion
+order), not by `reported_at`. `reported_at` is a second-precision server
+timestamp, so two reports inside one second tie, and a clock that steps
+backwards (NTP correction on a homelab box that just booted) would reorder the
+chain outright. `rowid` can do neither, and pruning only ever removes the
+oldest rows, so the maximum `rowid` stays monotonic and is never recycled.
+`idx_agent_reports_client_time` still narrows the lookup to one client's rows;
+retention keeps that at a handful, so the small sort by rowid on top is free.
+
+### Concurrency: the diff chain must not fork
+
+Reading the previous snapshot, inserting the new one and pruning all happen
+inside **one `BEGIN IMMEDIATE` transaction** (`jobs.immediate_transaction`,
+the same primitive the job queue uses). Without the write lock, two reports
+from the same client arriving together both read the same predecessor: both
+report the same additions, one snapshot gets diffed twice and another never at
+all — a forked chain, and the ADR's removal detection silently loses events.
+
+That is measured, not assumed.
+`test_parallel_reports_from_one_client_form_one_unbroken_chain` fires 8
+parallel reports at one `client_id`, each with a distinct single-app library so
+every response identifies itself (`added`) and names its predecessor
+(`removed`), and asserts a single unbroken chain: exactly one first report, no
+predecessor claimed twice, the walk from the first report visiting all 8, and
+all 8 snapshots on disk. Re-running it against a version with the transaction
+removed failed 5 out of 5 times — a representative failure reported **4 of 8**
+requests as `first_report: true`.
+
+`GET /v1/clients` and `POST /v1/agent/installed` also joined the mixed hammer
+in `tests/test_concurrency.py` (now 90 parallel requests), where agent writes
+race prefill enqueues, cache deletes and the size-cache scan.
+
+### `GET /v1/clients` — minimal v1, forward-compatible
+
+```json
+[{"client_id": "gaming-pc", "first_seen": "2026-08-05T20:44:34Z",
+  "last_reported_at": "2026-08-05T20:44:36Z", "app_count": 0},
+ {"client_id": "steam-deck", "first_seen": "2026-08-05T20:44:36Z",
+  "last_reported_at": "2026-08-05T20:44:36Z", "app_count": 1}]
+```
+
+Plan §6 describes this endpoint as "per-client hit stats incl. bypass
+warnings". **Hit statistics and bypass detection are Phase 3** — they need
+vault-core's access log, which does not feed vault-api yet. What ships here is
+the agent-report half of the same object, in a shape Phase 3 can extend rather
+than replace: a flat object per client, so fields like `cache_hits`,
+`last_seen_in_cache_log` or `bypass_suspected` are *added* next to these and a
+client that reads only the fields it knows keeps working.
+
+- `app_count` is the size of the client's **latest** snapshot (`0` for an empty
+  library; `null` only if that stored row's JSON is unreadable — logged at
+  WARNING).
+- `last_reported_at` and `app_count` come from the *same* row, which is why
+  the implementation does a `GROUP BY` for `first_seen` plus one
+  `latest_snapshot` lookup per client rather than a single `MAX(reported_at)`
+  aggregate. The follow-up query runs once per gaming machine — a homelab has
+  a handful.
+
 ## Auth
 
 Every endpoint requires the header `X-Api-Key: <VAULT_API_KEY>`, checked
@@ -831,15 +1045,17 @@ render on an offline homelab install regardless.
 **Secure-by-default pattern.** Auth is attached at the `APIRouter` level,
 not per-route: `routers/health.py` is the one router with no
 `require_api_key` dependency; every other router (`routers/games.py`,
-`routers/mapping.py`, `routers/jobs.py`, `routers/cache.py`, and future ones —
-clients, agent) is constructed as
+`routers/mapping.py`, `routers/jobs.py`, `routers/cache.py`,
+`routers/agent.py`, `routers/clients.py`, and future ones) is constructed as
 `APIRouter(dependencies=[Depends(require_api_key)])`, so a route added to it is
 authenticated automatically and can't be forgotten.
 `tests/test_security.py` enforces this by walking `app.routes` and
 asserting the dependency is present everywhere except `/v1/health` — it picked
-up WP 1.4's three new routes and WP 1.6's `DELETE /v1/cache/{appid}` with no
-test change, verified by rerunning it (a route that deletes user data is exactly
-the one you do not want to add unauthenticated by accident).
+up WP 1.4's three new routes, WP 1.6's `DELETE /v1/cache/{appid}` and WP 2.4's
+`POST /v1/agent/installed` + `GET /v1/clients` with no test change, verified by
+rerunning it each time (a route that deletes user data, or one that accepts
+writes from a machine on the tailnet, is exactly the one you do not want to add
+unauthenticated by accident).
 
 **`GET /v1/ping` removed (WP 1.3).** It was WP 1.2's scaffold route,
 existing solely so the test suite had an authenticated endpoint to exercise
@@ -1063,6 +1279,63 @@ Depot 900's chunk file was checked on disk after all of the above: still present
 still 5,000,000 bytes. The `cache-delete` audit lines quoted under "Audit trail"
 are from this same run.
 
+### WP 2.4: agent reports via curl (live-verified)
+
+Against a live `uvicorn` instance with `VAULT_AGENT_REPORT_KEEP=3` and a
+tracked app 440 (depot 441, 1,000 bytes on disk) seeded via
+`PUT /v1/mapping/441` first:
+
+```
+curl -X POST http://localhost:8000/v1/agent/installed \
+     -H "Content-Type: application/json" -d '{"client_id":"gaming-pc","appids":[440]}'
+# 401 - missing X-Api-Key
+
+curl -H "X-Api-Key: <your key>" -X POST http://localhost:8000/v1/agent/installed \
+     -H "Content-Type: application/json" -d '{"client_id":"gaming-pc","appids":[440,730,570]}'
+# {"client_id":"gaming-pc","received":3,"added":[440,570,730],"removed":[],"first_report":true}
+
+curl ... -d '{"client_id":"gaming-pc","appids":[440,570,1234]}'
+# {"client_id":"gaming-pc","received":3,"added":[1234],"removed":[730],"first_report":false}
+
+curl ... -d '{"client_id":"gaming-pc","appids":[440,440,570,1234,440]}'
+# {"client_id":"gaming-pc","received":3,"added":[],"removed":[],"first_report":false}
+#   duplicates deduped -> received 3, and no phantom change
+
+curl ... -d '{"client_id":"gaming-pc","appids":[]}'
+# {"client_id":"gaming-pc","received":0,"added":[],"removed":[440,570,1234],"first_report":false}
+#   an empty library is a legitimate report: everything is reported as removed
+
+curl ... -d '{"client_id":"steam-deck","appids":[440]}'
+# {"client_id":"steam-deck","received":1,"added":[440],"removed":[],"first_report":true}
+#   another client's first report is diffed against ITS OWN history, not gaming-pc's
+
+curl ... -d '{"client_id":"pc\nX","appids":[440]}'      # 422 (control character)
+curl ... -d '{"client_id":"pc"}'                        # 422 (appids is required)
+
+curl -H "X-Api-Key: <your key>" http://localhost:8000/v1/clients
+# [{"client_id":"gaming-pc","first_seen":"2026-08-05T20:44:34Z",
+#   "last_reported_at":"2026-08-05T20:44:36Z","app_count":0},
+#  {"client_id":"steam-deck","first_seen":"2026-08-05T20:44:36Z",
+#   "last_reported_at":"2026-08-05T20:44:36Z","app_count":1}]
+
+curl http://localhost:8000/v1/clients
+# 401 - missing X-Api-Key
+```
+
+Checked in the database and on disk after that run:
+
+- `agent_reports` holds **3** rows for `gaming-pc` (the 4 reports minus the
+  pruned oldest, `pruned=1` in the log) and 1 for `steam-deck`;
+- `apps` still holds exactly the one row seeded by hand
+  (`440 | Team Fortress 2 | idle`) — the reports created nothing, even though
+  app ids 570, 730 and 1234 were reported and then "removed";
+- `jobs` is empty — nothing was queued;
+- `depot/441/chunk/aa` is still there, still 1,000 bytes, and `GET /v1/games`
+  reports the unchanged `status`/`size_bytes` after the removal reports.
+
+The audit log lines quoted under "Removals are SURFACED, never acted on" are
+from this same run.
+
 ## Tests
 
 ```powershell
@@ -1071,7 +1344,7 @@ cd api
 .venv\Scripts\python -m pytest
 ```
 
-200 tests, no network and no Steam login required.
+262 tests, no network and no Steam login required.
 
 Covers: health returns `ok` without a key and leaks nothing else; every
 registered route requires `require_api_key` except `/v1/health` (route-walk
@@ -1292,6 +1565,77 @@ WP 1.6 additions:
   of them target the same app ids the concurrent mapping `PUT`s are creating, so
   deletes race each other, race the size-cache scan, and race the mapping writer.
   Assertion unchanged: nothing may 5xx.
+
+WP 2.4 additions:
+
+- `test_agent_reports.py` (new, the bulk of this package):
+  - **The diff:** first report (everything added, nothing removed), a
+    consecutive report's additions *and* removals, an unchanged library
+    reporting neither, an empty library removing everything (and the empty
+    snapshot being stored, so a reinstall afterwards reads as an addition), an
+    empty *first* report, duplicate ids deduped (asserted both in `received`
+    and in the stored row, plus "the dedupe must not look like a change next
+    time"), and per-client isolation in both directions.
+  - **The ADR-0002 boundary:**
+    `test_a_removal_is_logged_but_changes_no_app_state` seeds a tracked app
+    with a mapping row, a real chunk file and `status='done'`, reports the app
+    as removed, and asserts exactly one audit log line *and* that `status`,
+    `last_prefill_at`, the depot list, the file on disk and the job queue are
+    all unchanged. `test_a_report_does_not_create_app_rows` pins that reported
+    app ids do not become tracked games.
+  - **Validation:** 25 parametrized `422` bodies (missing/empty/too-long
+    `client_id`, newline/tab/NUL, leading/trailing/only whitespace, `.`/`..`,
+    a non-string, missing/null/non-list `appids`, appid `0`/negative/float/
+    null/non-numeric string/`true`/`false`/`true` mixed into a valid list,
+    > 10 000 ids, an extra field), plus
+    `test_a_missing_appids_field_never_reads_as_an_empty_library` which
+    asserts the stored snapshot is untouched by the rejected request, and a
+    positive list of accepted ids (64 chars, spaces inside, non-ASCII).
+  - **Retention:** `keep + 2` reports leave exactly the newest `keep`
+    snapshots in insertion order while every intermediate diff stays correct
+    across the pruning boundary; retention is per client; and
+    `prune_reports` clamps a nonsense `keep=1` to 2 (otherwise every report
+    would be a first report).
+  - **Units:** `normalize_appids`; `latest_snapshot` picking the newest row by
+    **rowid** against deliberately non-monotonic `reported_at` values (two
+    identical timestamps plus one that goes backwards); an unparseable stored
+    snapshot degrading to `first_report` with a WARNING instead of a permanent
+    500, and the next report having a healthy predecessor again; and
+    non-integer entries in a stored snapshot being dropped — including `true`,
+    which must **not** become app id 1 (`bool` is an `int` subclass).
+  - **Concurrency:**
+    `test_parallel_reports_from_one_client_form_one_unbroken_chain` (described
+    under "Agent reports → Concurrency"). Verified to fail 5/5 runs against a
+    version with the `BEGIN IMMEDIATE` transaction removed — 4 of 8 racing
+    requests then claimed to be the first report.
+- `test_clients_api.py` (new): 401 without a key; an empty list before any
+  report; one row per client with `app_count` following the **latest**
+  snapshot and the exact field set (so a Phase-3 addition is a deliberate
+  change); `app_count: 0` for an empty library; `first_seen` being the oldest
+  *retained* report after pruning (the documented consequence, pinned); and
+  `app_count: null` for an unreadable latest snapshot.
+- `test_concurrency.py`: the mixed hammer grew to **90** parallel requests —
+  `POST /v1/agent/installed` (two client ids across ten iterations, so several
+  race the *same* client's diff transaction against the prefill enqueues, the
+  deletes and the size-cache scan) and `GET /v1/clients` joined it, and
+  `/v1/clients` also joined the worker-writing-in-the-background test.
+- `test_config.py`: `VAULT_AGENT_REPORT_KEEP`'s default, an override, and its
+  loud rejection of `1`, `0`, `-3` and a non-integer — with `2` accepted, so
+  the boundary itself is pinned.
+
+WP 2.4-review additions:
+
+- `test_no_body_endpoint_accepts_a_boolean_as_an_app_id` asserts `422` for a
+  boolean app id on **all three** endpoints that take one
+  (`/v1/agent/installed`, `/v1/prefill`, `/v1/mapping/{depotid}`), which is
+  what pins the shared `AppId` type rather than one endpoint's behavior; plus
+  a unit test for `validation.reject_bool` and three more parametrized `422`
+  bodies. Verified against the pre-fix annotation: the `[true]`, the
+  `[440, true]` and the all-endpoints test all fail without
+  `BeforeValidator(reject_bool)` (`[false]` passes either way — it coerces to
+  `0` and trips `ge=1`).
+- Two parametrized `422` bodies for `client_id` `"."` and `".."`, and `"..."`
+  added to the accepted-ids list so the rule stays exactly two values wide.
 
 Each of the three carry-over fixes and both link guards were verified by
 temporarily reverting the fix and re-running the affected tests: the

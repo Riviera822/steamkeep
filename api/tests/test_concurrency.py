@@ -92,6 +92,23 @@ def test_concurrent_mixed_requests_do_not_500(tmp_path) -> None:
                 response = await client.delete(f"/v1/cache/{appid}", headers=AUTH)
                 return response.status_code
 
+            async def agent_report(index: int) -> int:
+                # Two client ids across ten iterations, so several of these
+                # race on the SAME client_id's diff transaction.
+                response = await client.post(
+                    "/v1/agent/installed",
+                    json={
+                        "client_id": f"client-{index % 2}",
+                        "appids": [440 + index, 730],
+                    },
+                    headers=AUTH,
+                )
+                return response.status_code
+
+            async def clients_list() -> int:
+                response = await client.get("/v1/clients", headers=AUTH)
+                return response.status_code
+
             tasks = []
             for i in range(10):
                 tasks.append(games_list())
@@ -117,12 +134,19 @@ def test_concurrent_mixed_requests_do_not_500(tmp_path) -> None:
                 # the second must come back as a clean 404/empty result, never
                 # a 500 from a vanished directory or a double removal.
                 tasks.append(cache_delete(440 + (i % 3)))
+                # WP 2.4: the agent report path is another writer that takes
+                # SQLite's write lock (BEGIN IMMEDIATE around read-previous ->
+                # insert -> prune), so it must not deadlock or time out against
+                # the prefill enqueues and deletes above; GET /v1/clients reads
+                # the same table while those writes and prunes are in flight.
+                tasks.append(agent_report(i))
+                tasks.append(clients_list())
 
             return await asyncio.gather(*tasks)
 
     statuses = asyncio.run(run())
 
-    assert len(statuses) == 70
+    assert len(statuses) == 90
     assert all(status_code < 500 for status_code in statuses), statuses
 
 
@@ -180,6 +204,8 @@ def test_http_reads_survive_a_worker_writing_in_the_background(tmp_path) -> None
                     tasks.append(get("/v1/games"))
                     tasks.append(get(f"/v1/games/{index}"))
                     tasks.append(get("/v1/mapping"))
+                    # WP 2.4: reading the client list while the worker writes.
+                    tasks.append(get("/v1/clients"))
                     # WP 1.5: reads through the size cache while the worker
                     # writes chunk files into the SAME cache_root tree the
                     # cache scans — a disk-level analogue of the sqlite

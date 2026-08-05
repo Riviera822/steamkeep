@@ -20,11 +20,12 @@ automatically.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Path, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from vault_api.auth import require_api_key
 from vault_api.deps import DbOpener, db_opener
 from vault_api.mapping import delete_mapping, upsert_mapping
+from vault_api.validation import AppId
 
 router = APIRouter(dependencies=[Depends(require_api_key)], tags=["mapping"])
 
@@ -37,8 +38,12 @@ class MappingUpsertRequest(BaseModel):
 
     # Steam appids are positive; ge=1 rejects 0/negative junk that would
     # otherwise sit in the table permanently (no delete-by-appid exists
-    # yet — WP 1.3 review, should-fix).
-    appid: int = Field(ge=1)
+    # yet — WP 1.3 review, should-fix). The shared ``AppId`` type (WP 2.4
+    # review) adds the bool rejection and keeps this endpoint's coercion
+    # semantics identical to /v1/prefill's and /v1/agent/installed's — three
+    # separate `Annotated[int, Field(ge=1)]` declarations were identical by
+    # coincidence, not by construction.
+    appid: AppId
     app_name: str | None = None
 
 

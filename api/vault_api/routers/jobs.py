@@ -11,19 +11,15 @@ job (``vault_api/worker.py``), so ``POST /v1/prefill`` answers immediately with
 
 from __future__ import annotations
 
-from typing import Annotated
-
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from vault_api import jobs as jobs_queue
 from vault_api.auth import require_api_key
 from vault_api.deps import DbOpener, db_opener
+from vault_api.validation import AppId
 
 router = APIRouter(dependencies=[Depends(require_api_key)], tags=["jobs"])
-
-#: Steam app ids are positive integers.
-AppId = Annotated[int, Field(ge=1)]
 
 
 class PrefillRequest(BaseModel):

@@ -90,3 +90,33 @@ def test_bad_numeric_settings_fail_loudly(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("VAULT_WORKER_POLL_SECONDS", "-1")
     with pytest.raises(RuntimeError, match="VAULT_WORKER_POLL_SECONDS"):
         Settings.from_env()
+
+
+def test_agent_report_keep_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.delenv("VAULT_AGENT_REPORT_KEEP", raising=False)
+    assert Settings.from_env().agent_report_keep == 20
+
+    monkeypatch.setenv("VAULT_AGENT_REPORT_KEEP", "5")
+    assert Settings.from_env().agent_report_keep == 5
+
+
+def test_agent_report_keep_below_two_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The diff needs the previous snapshot AND the new one — 1 is not a value.
+
+    With keep=1 the prune inside the insert transaction would delete the
+    predecessor, so every report would come back as a first report.
+    """
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+
+    for bad in ("1", "0", "-3"):
+        monkeypatch.setenv("VAULT_AGENT_REPORT_KEEP", bad)
+        with pytest.raises(RuntimeError, match="must be >= 2"):
+            Settings.from_env()
+
+    monkeypatch.setenv("VAULT_AGENT_REPORT_KEEP", "many")
+    with pytest.raises(RuntimeError, match="must be an integer"):
+        Settings.from_env()
+
+    monkeypatch.setenv("VAULT_AGENT_REPORT_KEEP", "2")
+    assert Settings.from_env().agent_report_keep == 2

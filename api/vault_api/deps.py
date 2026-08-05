@@ -73,6 +73,16 @@ def get_size_cache(request: Request) -> SizeCache:
     return request.app.state.size_cache
 
 
+def get_agent_report_keep(request: Request) -> int:
+    """FastAPI dependency returning ``VAULT_AGENT_REPORT_KEEP`` (WP 2.4).
+
+    Same pattern as ``get_cache_root``: the retention policy is a setting, and
+    ``POST /v1/agent/installed`` prunes inside its own insert transaction, so
+    the endpoint needs the number rather than the whole ``Settings`` object.
+    """
+    return request.app.state.settings.agent_report_keep
+
+
 def db_opener(request: Request) -> DbOpener:
     """FastAPI dependency returning a per-call SQLite connection opener.
 

@@ -18,8 +18,12 @@ These are not style preferences; each entry cost a review round to learn.
   (hosts-file-poisonable) path (WP 0.1).
 - Strip `Range`, `Accept-Encoding`, `If-Range` upstream on the store path —
   gzip bodies get stored raw and served corrupt otherwise (WP 1.1).
-- nginx official image envsubst: set `NGINX_ENVSUBST_FILTER` or it blanks
-  every `$uri`/`$host` in templates (WP 1.9).
+- nginx official image envsubst: always set `NGINX_ENVSUBST_FILTER` — but know
+  why. It is a no-op today (the entrypoint's allowlist is built from env vars
+  that EXIST, none named like an nginx variable, so filtered and unfiltered
+  renders are byte-identical). It guards a future lowercase env var named
+  `host`/`uri`, which envsubst would substitute INTO the config as its value —
+  not blank it — leaving `nginx -t` green and the cache quietly wrong (WP 1.9).
 - Temp paths must live OUTSIDE the document root but on the SAME filesystem
   as the cache (atomic rename) (WP 1.1/1.9).
 
@@ -73,6 +77,19 @@ These are not style preferences; each entry cost a review round to learn.
   and use lancache discovery; manifest URLs carry per-request codes (no URL
   dedupe); Steam LAN P2P transfers can legitimately replace cache traffic
   (WP 0.3/0.6).
+
+## Parsers / input handling
+- Recursive-descent parsers need an explicit depth limit raising the
+  module's own error type — RecursionError escapes the documented catch
+  contract and crashes the caller (WP 2.1 blocker).
+- Python `int()` accepts " 4 ", "+4", "1_0" (=10) and non-ASCII digits —
+  any value that later feeds Go, SQL, or a filesystem path needs
+  strip + isascii + isdigit validation (WP 1.6/2.1).
+- Pydantic lax mode coerces `true`→1 on int fields — reject bools
+  explicitly on any id field (WP 2.4).
+- envsubst on config templates: a colliding env var REPLACES runtime
+  variables with its value (not blanks) and `nginx -t` still passes —
+  always restrict with an allowlist filter (WP 1.9).
 
 ## Testing discipline
 - Flake-hunt concurrency tests: run the module isolated in a 20-40x loop —
