@@ -5,10 +5,13 @@ functions — no ORM. WP 1.2 shipped the project skeleton (config, DB schema,
 auth dependency, `GET /v1/health`); WP 1.3 added depot→app mapping storage and
 the games endpoints; WP 1.4 added **prefill orchestration** — a job queue, the
 SteamPrefill subprocess runner, and the prefill-driven mapping import; WP 1.5
-adds **per-game size calculation** (`vault_api/sizes.py`) — a cached "du over
+added **per-game size calculation** (`vault_api/sizes.py`) — a cached "du over
 depot folders" (`docs/PROJECT_PLAN.md` §3), wired into `GET /v1/games`/
-`GET /v1/games/{appid}`, plus the new `GET /v1/cache/summary` (§6). Deletion,
-the scheduler and the miss trigger remain scope for later work packages.
+`GET /v1/games/{appid}`, plus `GET /v1/cache/summary` (§6); WP 1.6 adds
+**per-game deletion** (`vault_api/deletion.py`) — `DELETE /v1/cache/{appid}`
+with shared-depot protection, path/link safety guards and an audit trail in the
+log (§4). The scheduler, garbage collection and the miss trigger remain scope
+for later work packages.
 
 ## Layout
 
@@ -25,12 +28,13 @@ api/
 │   ├── prefill.py        # SteamPrefill runner + depot attribution
 │   ├── worker.py         # the single background job worker thread
 │   ├── sizes.py          # depot disk walk, TTL size cache, summary aggregation
+│   ├── deletion.py       # per-game deletion: path/link guards, shared-depot plan
 │   └── routers/
 │       ├── health.py     # GET /v1/health — the ONE public router
 │       ├── games.py      # GET /v1/games, GET /v1/games/{appid}
 │       ├── mapping.py    # PUT /v1/mapping/{depotid}, GET /v1/mapping
 │       ├── jobs.py       # POST /v1/prefill, GET /v1/jobs[/{id}]
-│       └── cache.py      # GET /v1/cache/summary
+│       └── cache.py      # GET /v1/cache/summary, DELETE /v1/cache/{appid}
 ├── tests/                # pytest (incl. tests/stub_prefill.py — fake CLI)
 ├── requirements.txt      # pinned, runtime only
 ├── requirements-dev.txt  # pinned, adds test-only deps (pytest, httpx)
@@ -47,12 +51,12 @@ Copy `.env.example` to `.env` and adjust:
 |---------------------------------|----------|--------------|--------------------------------------------------------------------|
 | `VAULT_API_KEY`                 | yes      | *(none)*     | Shared secret for the `X-Api-Key` header                           |
 | `VAULT_DB_PATH`                 | no       | `./vault.db` | SQLite database file                                               |
-| `VAULT_CACHE_ROOT`              | no       | `./cache`    | Depot cache root — diffed before/after a prefill (see below)        |
+| `VAULT_CACHE_ROOT`              | no       | `./cache`    | Depot cache root — diffed before/after a prefill, and the **deletion base** (guarded, see below) |
 | `VAULT_LOG_LEVEL`               | no       | `INFO`       | Log level                                                          |
 | `VAULT_STEAMPREFILL_PATH`       | no*      | *(empty)*    | Path to the SteamPrefill executable; *required to run prefill jobs* |
 | `VAULT_PREFILL_TIMEOUT_SECONDS` | no       | `14400`      | Hard time budget for one SteamPrefill run (hang backstop)           |
 | `VAULT_WORKER_POLL_SECONDS`     | no       | `1.0`        | Worker sleep between polls of an empty queue                        |
-| `VAULT_SIZE_CACHE_TTL`          | no       | `60`         | TTL (seconds) for the in-process per-game size cache (see below)     |
+| `VAULT_SIZE_CACHE_TTL`          | no       | `60`         | TTL (seconds) for the in-process per-game size cache; **must be > 0** (see below) |
 
 `VAULT_API_KEY` has no default. Starting the app without it raises
 `RuntimeError` immediately (`Settings.from_env`) — this is the "fail loudly"
@@ -63,8 +67,15 @@ behavior required by the work package, verified in `tests/test_config.py`.
 `/v1/health` on a host where SteamPrefill hasn't been set up yet. A missing or
 wrong path fails the individual *job* with an actionable message
 (`tests/test_worker.py::test_missing_steamprefill_path_fails_the_job_but_not_the_app`).
-The two numeric settings reject non-numeric and non-positive values loudly at
-startup.
+The three numeric settings (`VAULT_PREFILL_TIMEOUT_SECONDS`,
+`VAULT_WORKER_POLL_SECONDS`, `VAULT_SIZE_CACHE_TTL`) reject non-numeric and
+non-positive values loudly at startup. In particular **`VAULT_SIZE_CACHE_TTL`
+must be greater than 0**: `0` is rejected rather than accepted as "no caching",
+because a zero TTL would mean a full `depot/` tree walk on *every* request —
+a footgun on a large cache, not a feature. Set a small value (e.g. `1`) if you
+want near-live numbers; note the cache is invalidated explicitly after a
+successful prefill and after a deletion anyway, so a long TTL does not make
+those two events look stale.
 
 ## Database schema (v2)
 
@@ -184,7 +195,7 @@ appid both saw "no row" and both inserted; the loser got
 is now `INSERT OR IGNORE` plus a conditional name `UPDATE`, pinned by
 `tests/test_mapping.py::test_concurrent_upsert_of_the_same_new_appid_does_not_500`.
 
-## Endpoints (WP 1.3 + 1.4 + 1.5)
+## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6)
 
 All routes below require `X-Api-Key` (see "Auth"). Full API table:
 `docs/PROJECT_PLAN.md` §6; the games, mapping, prefill, jobs and cache rows
@@ -200,6 +211,7 @@ are implemented so far.
 | POST   | `/v1/prefill`                      | Body `{"appids": [int, ...]}` — queue one prefill job per app id. `202` with a list of `{appid, job_id, status, deduplicated}`. `422` for an empty list, an appid `< 1`, a non-list, or an unrecognized body field |
 | GET    | `/v1/jobs`                         | Recent jobs, newest first. `?limit=` 1–200, default 20 (`422` outside that range). Omits `log_excerpt` on purpose — this is the polling list |
 | GET    | `/v1/jobs/{id}`                    | One job incl. `log_excerpt`; `404` for an unknown id |
+| DELETE | `/v1/cache/{appid}`                | Delete this game's depot directories. `200` with `{appid, deleted_depots[], skipped_shared[], failed[], total_bytes_freed}`; `404` unknown appid or no mappings; `409` while a prefill job for the app is queued/running; `422` for `appid < 1`; `500` if the cache-root guards refuse. See "Per-game deletion" below |
 | GET    | `/v1/cache/summary`                | `total_bytes` (disk usage of `depot/`, each depot counted once), `top_consumers` (top 10 `{appid, name, size_bytes}`, largest first), `unmapped_depots` (`{count, size_bytes}` for depot dirs on disk with no mapping row for any app), `free_disk_bytes` (free space on the cache filesystem, `null` if undeterminable) |
 
 ## Prefill orchestration (WP 1.4)
@@ -455,6 +467,28 @@ directory listing already returned rather than a second filesystem round
 trip per file. `sizes.scan_depot_dir_bytes` is just the byte totals out of
 the same signatures.
 
+**Link handling (WP 1.6 carry-over fix #1 from the WP 1.5 review).** Top-level
+depot directories are detected **following** links (`entry.is_dir()`), because
+placing one depot directory on another volume via a symlink/junction is a
+legitimate homelab move. Previously they were detected with
+`follow_symlinks=False`, which made a *symlinked* depot directory **invisible**
+— and the damage went beyond an under-reported size: the depot never showed up
+in a prefill's before/after snapshot either, so `prefill.apply_observed_mapping`
+treated the app's correct mapping row as stale and **deleted** it on the next
+prefill. Measured: `DirEntry.is_dir(follow_symlinks=False)` is `False` for a
+directory symlink but `True` for a Windows junction, so only symlinks were
+affected — and that same asymmetry is why the fix is pinned by a test using a
+**real** directory symlink (`make_dir_link` in `tests/conftest.py`, which falls
+back to `mklink /J` where Windows refuses symlink creation without Developer
+Mode).
+
+*Inside* the tree the walk still refuses to follow links, and now refuses
+junctions too (`sizes.is_link_like`): `follow_symlinks=False` alone reports a
+junction as an ordinary directory, so a junction pointing at one of its own
+ancestors would have recursed forever, and a junction pointing outside the cache
+would have counted foreign bytes as this depot's size. Skipping them also keeps
+"reported size" equal to "bytes a deletion would actually free".
+
 ### The TTL cache
 
 `sizes.SizeCache` is deliberately the simplest thing that could work (plan
@@ -504,9 +538,18 @@ hasn't been filled yet.
 ### `GET /v1/cache/summary`
 
 `sizes.build_cache_summary` assembles the whole response from one `SizeCache`
-snapshot plus two small queries against the already-open connection (`depot_app_map`
-for per-app depot membership + `apps` for names) — a summary request inside
-the TTL window costs no filesystem access at all.
+snapshot plus two small queries (`depot_app_map` for per-app depot membership +
+`apps` for names) — a summary request inside the TTL window costs no filesystem
+access at all.
+
+**WP 1.6 carry-over fix #2 from the WP 1.5 review:** the function now takes a
+ready `SizeSnapshot` instead of the `SizeCache`, and `routers/cache.py` fetches
+that snapshot *before* opening its SQLite connection. Previously a cache miss
+walked the whole `depot/` tree under `SizeCache`'s lock while an open database
+connection sat idle in the caller. Same fix removed the dynamically built
+`WHERE appid IN (?,?,?)` list (with its `WHERE 0` special case for the empty
+set) in favour of `SELECT appid, name FROM apps` plus a dict lookup — one row
+per tracked game is less data than the mapping query already reads.
 
 - **`total_bytes`** — real disk usage of `depot/`, each depot id counted once
   (see above).
@@ -523,6 +566,228 @@ the TTL window costs no filesystem access at all.
   up to the nearest existing ancestor directory first (a fresh install may not
   have created it yet); `null` if no ancestor exists at all (defensive, should
   not happen on a real filesystem).
+
+## Per-game deletion (WP 1.6)
+
+`DELETE /v1/cache/{appid}` implements plan §4's "Deletion" section:
+`appid → [depotids] → remove those depot directories → reset status to idle`,
+with **shared-depot protection**. The mechanics live in
+`vault_api/deletion.py`, the HTTP shape in `vault_api/routers/cache.py`.
+
+### Semantics
+
+| Situation | Result |
+|---|---|
+| `appid` has no `apps` row | `404` — nothing to delete |
+| `appid` has no `depot_app_map` rows | `404` — nothing to delete |
+| a prefill job for the app is `queued`/`running` | `409` — retry after the job |
+| `appid < 1` | `422` |
+| the `VAULT_CACHE_ROOT` guards refuse | `500`, nothing deleted (see "Path safety") |
+| otherwise | `200` with the per-depot report |
+
+```json
+{
+  "appid": 440,
+  "deleted_depots":  [{"depotid": 441, "size_bytes_freed": 1000000}],
+  "skipped_shared":  [{"depotid": 900, "shared_with": [730]}],
+  "failed":          [],
+  "total_bytes_freed": 1000000
+}
+```
+
+- **Shared depots are never deleted.** A depot that any *other* tracked app also
+  maps is skipped and reported with the other app ids (plan §4: "2 depots shared
+  with game Y, not deleted"). This holds in both directions — after deleting
+  game A, deleting game B still finds depot 900 shared, because A's mapping rows
+  are kept (see below). Exclusivity is decided **twice**: once when the plan is
+  built, and again immediately before each individual depot is removed (see
+  "Concurrency" below) — a depot that only became shared in between is kept and
+  reported in `skipped_shared` with its fresh owner list.
+- **A depot that is already gone** counts as `deleted` with
+  `size_bytes_freed: 0` rather than as an error: the endpoint is idempotent, so a
+  repeated `DELETE` (or a racing second one) answers `200` with zeros instead of
+  failing.
+- **`total_bytes_freed` is a floor, never an overstatement.** Sizes are measured
+  by walking each depot directory immediately before removing it. A depot whose
+  removal fails part-way contributes `0`, and a symlinked/junctioned depot
+  directory contributes `0` because only the link is removed (its target's bytes
+  are not freed).
+- **`failed` is a partial deletion, still reported as `200`** (not `207`): the
+  body already says per depot what happened, and a multi-status code would force
+  every client to special-case something it cannot act on differently. What
+  matters is that a depot still on disk is *never* reported as deleted.
+- **`last_prefill_at` is always cleared, and `apps.status` reflects the
+  outcome**: `idle` after a clean deletion, **`error` if anything landed in
+  `failed`**. The status rule is deliberate (WP 1.6 review): *"failed" does not
+  mean "untouched"*. `shutil.rmtree` deletes files as it walks and only then
+  raises — measured here, an open handle on the 11th of 20 chunk files left 10
+  of them already deleted — so a failed depot is typically **half** deleted
+  while reporting `0` bytes freed. Leaving such an app at `done` would put a
+  green badge on a half-destroyed game, and Phase 3's staleness check compares
+  manifest ids rather than file counts, so it would never re-fill it. `error` is
+  the honest state: the app UI surfaces it, and a re-prefill (which runs with
+  `--force`) repairs the cache. Clearing `last_prefill_at` is unconditional for
+  the same reason — that timestamp is no longer true either way. (Honest edge
+  case: an app whose depots are *all* shared has nothing deleted and is still
+  reset to `idle`, even though its content remains on disk inside the shared
+  depots. `GET /v1/games` still reports its real `size_bytes`, so the operator
+  sees the truth.)
+- **The `SizeCache` is invalidated** right after the deletion
+  (`sizes.SizeCache.invalidate()`, the hook WP 1.5 exported for exactly this),
+  so `GET /v1/games` and `GET /v1/cache/summary` never serve pre-deletion sizes
+  for up to `VAULT_SIZE_CACHE_TTL` seconds.
+
+### The mapping rows are KEPT (decision)
+
+Deleting a game from the cache does **not** delete its `depot_app_map` rows. The
+mapping is *knowledge* — "these depots are this game's content" — not cache
+state. Keeping it means a later prefill reuses it, the shared-depot protection
+keeps working for the other apps that share a depot, and no information gathered
+from PICS/prefill is thrown away by a cleanup action.
+
+Consequences, stated plainly:
+
+- `GET /v1/games/{appid}` keeps listing the app's depots, each with
+  `size_bytes: null`, and the app's own `size_bytes` becomes `null` **only if all
+  of its depots are gone**. An app that kept a shared depot still reports that
+  depot's bytes — which is correct: that content is still on disk.
+- `depot_count` does not drop after a deletion.
+- Removing a mapping stays a separate, explicit operation:
+  `DELETE /v1/mapping/{depotid}/{appid}` (ADR-0003's repair path).
+
+### Path safety
+
+The deletion target is built from the **integer** depot id only (`int` → `str`),
+joined under the resolved cache root, and verified before anything is removed.
+Both inputs come from outside the code, so both are guarded — as small pure
+functions with direct unit tests (`tests/test_cache_delete.py`):
+
+- `deletion.resolve_depot_root(cache_root)` refuses, deleting nothing, when
+  `VAULT_CACHE_ROOT` is **empty** (measured: `os.path.abspath("")` is the current
+  working directory, so an unset value would aim a recursive delete at wherever
+  vault-api happens to run), resolves to a **filesystem root** (`/`, `C:\`, a
+  bare UNC share — note `os.path.realpath("/")` is `C:\` on Windows, so a
+  Docker-style path pasted onto a Windows host lands here), or contains **no
+  `depot/` directory**. That last one refuses a misconfigured root and a
+  never-used cache alike: both mean "there is nothing here to delete from", and
+  saying so loudly beats "successfully deleted nothing".
+- `deletion.depot_dir_path(depot_root, depotid)` rejects anything that is not a
+  positive integer (`0`, negatives, `None`, `True`, floats, `"../../etc"`,
+  `"441/../.."`, `"441; rm -rf /"`, `"C:\Windows"`, …) and then verifies the
+  result is a **direct child** of `depot_root` (`dirname(candidate) ==
+  depot_root`, which a `startswith` prefix check would not give you — that would
+  accept `…/depot-evil`). Non-integer depot ids are not merely theoretical:
+  SQLite's INTEGER *affinity* does not enforce the column type, so a hand-edited
+  or corrupted database really can hold a string there. Such a row is reported in
+  `failed` (with `depotid: 0`, since it cannot be named) and nothing is touched
+  for it.
+- A mapping row whose *co-owner* app id is unreadable makes the depot count as
+  **shared** — something references it, so refusing to delete is the safe
+  reading.
+- String depot ids must be **exactly ASCII digits** (`isascii() and isdigit()`),
+  not "whatever `int()` accepts" (WP 1.6 review). `int()` parses `" 441 "`,
+  `"1_0"` and Arabic-Indic `"٤٤١"` perfectly happily; none of those is a depot id
+  vault-api ever writes, and on the path that decides which directory gets
+  destroyed a value that odd means the row is broken and the operator should be
+  told rather than have it silently normalised.
+
+### Link safety (symlinks and Windows junctions), measured
+
+A depot directory that is a symlink or a junction must never be traversed —
+recursively deleting through it would destroy data outside the cache. Everything
+below was **measured** on Windows 11 / CPython 3.12.10 against a real
+`mklink /J` junction pointing at a directory outside the cache root, and every
+row is pinned by a test:
+
+| Probe | Result |
+|---|---|
+| `os.path.islink(<junction>)` | **`False`** — an islink-only guard misses junctions |
+| `os.path.isjunction(<junction>)` | `True` (CPython ≥ 3.12) |
+| `DirEntry.is_dir(follow_symlinks=False)` on a junction | **`True`** — looks like a plain directory to a walk |
+| `shutil.rmtree(<junction>)` | **raises** `OSError("Cannot call rmtree on a symbolic link")`; the target is untouched |
+| `os.rmdir(<junction>)` | removes the junction only; target and its contents survive |
+| `shutil.rmtree(<real dir containing a junction>)` | completes, removes the junction *as a link*, target survives |
+
+So `shutil.rmtree` does **not** follow junctions — neither at the top level,
+where it refuses outright, nor nested inside a tree, where it unlinks them. But
+because it refuses outright, it also cannot delete a legitimately linked depot
+directory. `deletion.remove_depot_dir` therefore handles the link case itself: if
+the depot directory is link-like (`sizes.is_link_like`, which checks *both*
+`islink` and `isjunction`), only the link is removed (`os.rmdir`, falling back to
+`os.unlink` for POSIX symlinks, where `rmdir` fails with `ENOTDIR`); otherwise
+`shutil.rmtree` runs. The nested-junction behavior is pinned by its own test so a
+future CPython regression surfaces in this suite instead of in a user's data.
+
+### Audit trail
+
+Every decision goes to the standard `logging` module at INFO (failures at ERROR),
+prefixed `cache-delete`, and records the **resolved absolute path** rather than
+just the depot id — this is the audit trail for an operation that destroys user
+data. Real output from the live verification below:
+
+```
+INFO vault_api.routers.cache: cache-delete appid=440 starting: depot_root=...\cache\depot exclusive=[441, 442] shared=[900] unusable_rows=0
+INFO vault_api.deletion:      cache-delete appid=440 depot=900 KEPT: shared with app(s) [730]
+INFO vault_api.deletion:      cache-delete appid=440 depot=441 DELETED path=...\cache\depot\441 bytes_freed=1000000 link=False
+INFO vault_api.deletion:      cache-delete appid=440 depot=442 DELETED path=...\cache\depot\442 bytes_freed=2000000 link=False
+INFO vault_api.routers.cache: cache-delete appid=440 finished: deleted=2 skipped_shared=1 (of which 0 late) failed=0 bytes_freed=3000000; status set to 'idle', last_prefill_at cleared; mapping rows kept
+```
+
+A depot that was already gone logs `ALREADY-ABSENT`, a path-guard rejection logs
+`REFUSED by the path guard`, a failed removal logs `FAILED` with the exception
+type and message, a depot removed by a racing request logs `ALREADY-ABSENT`
+with the reason, a depot that became shared between plan and removal logs
+`KEPT (late recheck)`, and a refused cache root logs
+`REFUSED (cache root guard)`.
+
+### Concurrency, transactions and cancellation
+
+- **No database transaction is held across the filesystem work.** The endpoint
+  opens a connection for the read (app row, mapping rows, active-job check),
+  closes it, deletes, then opens a connection again for the status reset. That
+  keeps the `deps.db_opener` rule intact (a connection never leaves the thread
+  that created it, see "Connection handling") and means a long `rmtree` cannot
+  block writers.
+- **The shared-depot decision is rechecked at execute time (TOCTOU).** The plan
+  is built from one snapshot at the start of the request, and no lock is held
+  across the filesystem work — so a `PUT /v1/mapping/{depotid}` landing in that
+  window could make a depot shared *after* it was planned for deletion, and
+  deleting it would then destroy another game's content, breaking plan §4's
+  guarantee. Immediately before removing **each** depot, its owners are re-read
+  with one indexed lookup on `depot_app_map(depotid, appid)` (its primary key —
+  an index seek, no transaction, which is what makes a per-depot recheck
+  affordable); a depot that became shared is kept, logged as `KEPT (late
+  recheck)` and reported in `skipped_shared`. If the recheck itself fails, the
+  depot is **not** deleted and is reported in `failed` — "unknown ownership"
+  must never resolve to "delete it". This narrows the window to the microseconds
+  between the recheck and `remove_depot_dir`; a mapping written *during* the
+  `rmtree` was always going to lose that race, and closing that last gap would
+  need a lock held across filesystem work.
+- **The 409 guard is check-then-act, and that is stated rather than hidden.** A
+  prefill job enqueued in the microseconds after the check would still race the
+  deletion. Single-worker operation keeps the window tiny and the outcome is
+  benign (the job refills what was deleted), so this stays a guard rather than a
+  lock that would have to be held across filesystem work.
+- **Two concurrent `DELETE`s of the same app** both answer `200`: the loser
+  reports zeros, so the freed bytes are counted exactly once. Getting that right
+  needs more than a `try`/`except` — the loser's `rmtree` walks a tree the winner
+  is deleting underneath it and raises part-way through, while the outer depot
+  directory may still be there for another moment. `deletion.remove_depot_dir_settling`
+  therefore decides the outcome from the **settled** filesystem state: a removal
+  that raised an `OSError` is retried a few times (it is idempotent; worst case
+  ~80 ms) and only a path that is *still present* at the end counts as a failure.
+  Retrying every `OSError` rather than just `FileNotFoundError` is measured, not
+  padding: on Windows a racing deletion surfaces as `PermissionError [WinError 5]`
+  just as often, because a deleted-but-still-open file enters "delete pending" and
+  reports access-denied instead of not-found. Without this, a perfectly clean
+  concurrent deletion landed in `failed` and dragged the app to `status='error'`
+  (measured: `test_two_racing_deletes_do_not_5xx_or_double_delete` failed in 2 of
+  15 isolated module runs before the fix, 0 of 70 after). Also covered by the
+  mixed hammer in `tests/test_concurrency.py`.
+- **Deletion runs in the request thread** (a sync endpoint, so FastAPI's
+  threadpool) — right for the size of a typical depot tree, and it is what lets
+  the response report exactly what happened. A client that disconnects
+  mid-deletion does **not** abort the work; only the report is lost.
 
 ## Auth
 
@@ -566,13 +831,15 @@ render on an offline homelab install regardless.
 **Secure-by-default pattern.** Auth is attached at the `APIRouter` level,
 not per-route: `routers/health.py` is the one router with no
 `require_api_key` dependency; every other router (`routers/games.py`,
-`routers/mapping.py`, `routers/jobs.py`, and future ones — cache, clients,
-agent) is constructed as
+`routers/mapping.py`, `routers/jobs.py`, `routers/cache.py`, and future ones —
+clients, agent) is constructed as
 `APIRouter(dependencies=[Depends(require_api_key)])`, so a route added to it is
 authenticated automatically and can't be forgotten.
 `tests/test_security.py` enforces this by walking `app.routes` and
 asserting the dependency is present everywhere except `/v1/health` — it picked
-up WP 1.4's three new routes with no test change, verified by rerunning it.
+up WP 1.4's three new routes and WP 1.6's `DELETE /v1/cache/{appid}` with no
+test change, verified by rerunning it (a route that deletes user data is exactly
+the one you do not want to add unauthenticated by accident).
 
 **`GET /v1/ping` removed (WP 1.3).** It was WP 1.2's scaffold route,
 existing solely so the test suite had an authenticated endpoint to exercise
@@ -722,6 +989,80 @@ into both — exactly the documented asymmetry (see "Per-game size calculation"
 above). `unmapped_depots` correctly picked up depot 555, which has no mapping
 row at all.
 
+### WP 1.6: per-game deletion via curl (live-verified)
+
+Against a live `uvicorn` instance with `VAULT_CACHE_ROOT` seeded by hand (441:
+1,000,000 bytes and 442: 2,000,000 bytes mapped only to appid 440; 900:
+5,000,000 bytes mapped to both 440 and 730 — the shared case; 555: 250,000 bytes
+left unmapped) and `VAULT_WORKER_POLL_SECONDS=30` so a queued job stays queued
+long enough to demonstrate the 409:
+
+```
+curl -H "X-Api-Key: <your key>" http://localhost:8000/v1/games
+# [{"appid":440,...,"depot_count":3,"size_bytes":8000000},
+#  {"appid":730,...,"depot_count":1,"size_bytes":5000000}]
+
+curl -X DELETE http://localhost:8000/v1/cache/440
+# 401 - missing X-Api-Key
+
+curl -H "X-Api-Key: <your key>" -X DELETE http://localhost:8000/v1/cache/0
+# 422 - appid must be >= 1
+
+curl -H "X-Api-Key: <your key>" -X DELETE http://localhost:8000/v1/cache/999999
+# 404 {"detail":"Unknown appid 999999 - vault-api tracks no such app, so there is nothing to delete."}
+
+curl -H "X-Api-Key: <your key>" -X DELETE http://localhost:8000/v1/cache/440
+# 200
+# {"appid":440,
+#  "deleted_depots":[{"depotid":441,"size_bytes_freed":1000000},
+#                    {"depotid":442,"size_bytes_freed":2000000}],
+#  "skipped_shared":[{"depotid":900,"shared_with":[730]}],
+#  "failed":[],"total_bytes_freed":3000000}
+# on disk afterwards: depot/ contains only 555 and 900 - the shared depot and the
+# unrelated unmapped one both survived
+
+curl -H "X-Api-Key: <your key>" http://localhost:8000/v1/games/440
+# {"appid":440,"name":"Team Fortress 2","status":"idle","last_prefill_at":null,
+#  "depots":[{"depotid":441,"shared":false,"size_bytes":null},
+#            {"depotid":442,"shared":false,"size_bytes":null},
+#            {"depotid":900,"shared":true,"size_bytes":5000000}],
+#  "size_bytes":5000000}
+# mapping rows kept (depot list intact), the deleted depots report null, and the
+# app's total is now just the kept shared depot
+
+curl -H "X-Api-Key: <your key>" http://localhost:8000/v1/cache/summary
+# {"total_bytes":5250000,...}   (was 8250000 - immediately, without waiting out
+#                                VAULT_SIZE_CACHE_TTL: the cache was invalidated)
+
+curl -H "X-Api-Key: <your key>" http://localhost:8000/v1/mapping
+# [{"depotid":441,"appid":440},{"depotid":442,"appid":440},
+#  {"depotid":900,"appid":440},{"depotid":900,"appid":730}]
+
+curl -H "X-Api-Key: <your key>" -X DELETE http://localhost:8000/v1/cache/440
+# 200 - clean no-op: deleted_depots report size_bytes_freed 0, failed is empty
+# {"appid":440,"deleted_depots":[{"depotid":441,"size_bytes_freed":0},
+#                               {"depotid":442,"size_bytes_freed":0}],
+#  "skipped_shared":[{"depotid":900,"shared_with":[730]}],
+#  "failed":[],"total_bytes_freed":0}
+
+curl -H "X-Api-Key: <your key>" -X DELETE http://localhost:8000/v1/cache/730
+# 200 - the other direction: 900 is still shared with 440, so nothing is deleted
+# {"appid":730,"deleted_depots":[],
+#  "skipped_shared":[{"depotid":900,"shared_with":[440]}],
+#  "failed":[],"total_bytes_freed":0}
+
+curl -H "X-Api-Key: <your key>" -X POST http://localhost:8000/v1/prefill ^
+     -H "Content-Type: application/json" -d "{\"appids\": [440]}"
+curl -H "X-Api-Key: <your key>" -X DELETE http://localhost:8000/v1/cache/440
+# 409 {"detail":"Prefill job 1 for app 440 is queued. Deleting depots while they
+#      are being downloaded would delete under an active write - retry once that
+#      job has finished (poll GET /v1/jobs/{id})."}
+```
+
+Depot 900's chunk file was checked on disk after all of the above: still present,
+still 5,000,000 bytes. The `cache-delete` audit lines quoted under "Audit trail"
+are from this same run.
+
 ## Tests
 
 ```powershell
@@ -730,7 +1071,7 @@ cd api
 .venv\Scripts\python -m pytest
 ```
 
-133 tests, no network and no Steam login required.
+200 tests, no network and no Steam login required.
 
 Covers: health returns `ok` without a key and leaks nothing else; every
 registered route requires `require_api_key` except `/v1/health` (route-walk
@@ -878,3 +1219,82 @@ WP 1.5 additions:
   pin it unchanged; the depot list now always carries `size_bytes` (`null` in
   these fixtures, since none of them write real cache files), so three
   existing assertions were updated to include it.
+
+WP 1.6 additions:
+
+- `test_cache_delete.py` (new, the bulk of this package) — three layers:
+  - **Path guards, as pure functions:** empty / whitespace / `None` cache root,
+    `"/"` and the platform root, a cache root without a `depot/` directory and
+    one where `depot` is a *file*, a UNC-style path, a *relative* cache root
+    (the default `./cache` is relative, so this is the normal case), a cache root
+    reached through a directory link (the resolved path becomes the deletion
+    base), plus 17 parametrized poisoned depot ids (`"../../etc"`, `"441/../.."`,
+    `".."`, `"0x1c1"`, `"441; rm -rf /"`, `"C:\Windows"`, `0`, `-5`, `None`,
+    `True`, `1.5`, …) each asserted to raise instead of yielding a path, and
+    `coerce_positive_id`'s `bool` exclusion (`True == 1` would otherwise become
+    "delete depot 1").
+  - **Link mechanics against the real filesystem** (no mocks): `shutil.rmtree`
+    refusing a linked directory while its target survives, `remove_depot_dir`
+    unlinking a link-like depot directory and sparing the target, a link *nested*
+    inside a depot tree not being followed, and `depot_dir_bytes` reporting `0`
+    for a link (so freed bytes are never overstated). Each of these has a
+    **junction-specific** twin (`make_junction`, Windows-only) because
+    `make_dir_link` prefers a symlink where it can create one and the two behave
+    differently exactly where it matters.
+  - **The endpoint end to end:** 401 without a key, 422 for `appid < 1`, 404 for
+    an unknown app and for an app with no mappings, 409 while a prefill job is
+    queued (and *not* for a job belonging to a different app), the happy path
+    (exclusive depots removed, an unrelated unmapped depot and the `depot/` root
+    itself untouched, exact freed byte counts), shared-depot protection **in both
+    directions**, `status` reset to `idle` with `last_prefill_at` cleared, mapping
+    rows surviving, size-cache invalidation asserted with the **default 60 s TTL**
+    (so only an explicit `invalidate()` can make it pass), a second `DELETE` as a
+    clean no-op, four racing `DELETE`s via `httpx.ASGITransport` (all 200, bytes
+    freed exactly once in total, no exception), **partial failure** with one depot
+    made undeletable (an open file handle on Windows, a read-only directory mode
+    on POSIX — skipped as root) asserting the other depot still deleted and the
+    failure reported per depot, an end-to-end symlinked *and* junctioned depot
+    directory pointing OUTSIDE the cache root (link gone, foreign data intact,
+    `size_bytes_freed: 0`), and both cache-root guard refusals surfacing as `500`
+    with nothing deleted. Plus a **real poisoned database row**: a non-numeric
+    `depotid` inserted as TEXT (which SQLite's INTEGER affinity permits,
+    asserted via `typeof()`) is reported in `failed` with `depotid: 0`, the
+    healthy depot is still deleted, and a file that the poisoned value pointed
+    at outside the cache root survives.
+- Two tests added for the WP 1.6 review findings, both verified to fail against
+  the pre-fix code:
+  - `test_a_partial_failure_leaves_the_app_in_error_not_done` — an open handle
+    on a file in the **middle** of the only mapped depot (so `rmtree` really
+    does remove part of the tree before raising) must end at `status='error'`
+    with `last_prefill_at` cleared. Against the old rule the app stayed `done`
+    with its timestamp intact.
+  - `test_a_depot_that_becomes_shared_between_plan_and_removal_survives` — the
+    exact TOCTOU interleaving: `deletion.plan_deletion` is wrapped so a second
+    app maps depot 900 *after* the (real) plan is computed and *before* any
+    removal, with nothing inside the deletion loop patched. The depot must
+    survive and appear in `skipped_shared` with the fresh owner list; without
+    the recheck it was deleted (50 bytes of another game's content).
+  Plus unit tests for the recheck seam itself: a depot kept when `co_owners`
+  reports a new owner, a recheck that *raises* leaving the depot alone and
+  reporting it in `failed`, `load_co_owners` returning only other apps, and the
+  ASCII-digit exactness rule (`" 441 "`, `"1_0"`, `"٤٤١"`, `"²"` all rejected
+  even though `int()` accepts the first three).
+- `test_sizes.py`: the carry-over fixes are pinned, not just implemented — a
+  **real directory symlink** as a depot directory is now visible to
+  `scan_depot_signatures` (this test fails against the pre-fix code: the depot is
+  absent from the result entirely), a link *inside* the tree is not followed, the
+  junction-specific version of that (which is the one that fails without the
+  explicit junction check, since `is_dir(follow_symlinks=False)` reports a
+  junction as a directory), and `is_link_like` detecting both kinds. The
+  `build_cache_summary` tests were updated for its new `SizeSnapshot` parameter.
+- `test_concurrency.py`: the mixed hammer grew to 70 parallel requests with
+  `DELETE /v1/cache/{appid}` in the mix against a pre-seeded depot tree — several
+  of them target the same app ids the concurrent mapping `PUT`s are creating, so
+  deletes race each other, race the size-cache scan, and race the mapping writer.
+  Assertion unchanged: nothing may 5xx.
+
+Each of the three carry-over fixes and both link guards were verified by
+temporarily reverting the fix and re-running the affected tests: the
+symlinked-depot test, the junction-walk test and the three link-deletion tests
+all fail against the pre-fix code, so they are genuine regression guards rather
+than tests that happen to pass.

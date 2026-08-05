@@ -30,6 +30,10 @@ from typing import Iterator
 #: queue.
 JOB_TYPE_PREFILL = "prefill"
 
+#: ``apps.status`` only (never a job status): the schema default, and what
+#: deleting a game from the cache resets an app to (plan §4, WP 1.6).
+STATUS_IDLE = "idle"
+
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
@@ -185,6 +189,29 @@ def get_job(conn: sqlite3.Connection, job_id: int) -> dict[str, object] | None:
     """One job incl. its log excerpt, or None if the id is unknown."""
     row = conn.execute(
         f"SELECT {_JOB_COLUMNS} FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    return None if row is None else _row_to_dict(row)
+
+
+def active_job_for_app(
+    conn: sqlite3.Connection, appid: int
+) -> dict[str, object] | None:
+    """The app's oldest ``queued``/``running`` job, or None if it has none.
+
+    Same "in flight" definition ``enqueue_prefill`` dedupes on
+    (``ACTIVE_STATUSES``), exposed as a read for ``DELETE /v1/cache/{appid}``
+    (WP 1.6): deleting depot directories while a prefill is writing into them
+    would delete under an active download, so that endpoint refuses with 409.
+    Served by ``idx_jobs_appid_status``.
+    """
+    row = conn.execute(
+        f"""
+        SELECT {_JOB_COLUMNS} FROM jobs
+        WHERE appid = ? AND status IN (?, ?)
+        ORDER BY id
+        LIMIT 1
+        """,
+        (appid, STATUS_QUEUED, STATUS_RUNNING),
     ).fetchone()
     return None if row is None else _row_to_dict(row)
 

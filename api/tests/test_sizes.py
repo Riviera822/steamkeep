@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from tests.conftest import make_dir_link, make_junction
 from vault_api import sizes
 from vault_api.db import get_connection, init_db
 from vault_api.mapping import upsert_mapping
@@ -39,6 +40,88 @@ def test_walk_file_stats_finds_nested_files(tmp_path: Path) -> None:
 
 def test_walk_file_stats_on_missing_path_yields_nothing(tmp_path: Path) -> None:
     assert list(walk_file_stats(str(tmp_path / "does-not-exist"))) == []
+
+
+def test_walk_file_stats_does_not_follow_links_inside_the_tree(tmp_path: Path) -> None:
+    """Cycle protection + "reported size == deletable size" (WP 1.6).
+
+    ``follow_symlinks=False`` alone is not enough on Windows: measured,
+    ``DirEntry.is_dir(follow_symlinks=False)`` is **True** for a junction, so
+    without the explicit link check the walk descends through it — counting
+    foreign bytes as this depot's size, and recursing forever if the junction
+    points at one of its own ancestors.
+    """
+    depot = tmp_path / "441"
+    _write(depot / "chunk" / "aa", b"1" * 5)
+    outside = tmp_path / "outside"
+    _write(outside / "big.bin", b"1" * 1000)
+    kind = make_dir_link(depot / "chunk" / "sneaky", outside)
+
+    total = sum(stat.st_size for stat in walk_file_stats(str(depot)))
+
+    assert total == 5, f"the walk followed a {kind} out of the tree"
+
+
+def test_walk_file_stats_does_not_follow_a_junction_inside_the_tree(
+    tmp_path: Path,
+) -> None:
+    """The junction-specific half of the test above — the one that actually bites.
+
+    ``make_dir_link`` prefers a symlink where it can create one, and
+    ``follow_symlinks=False`` already handled those. A junction is the case
+    where it does not: ``DirEntry.is_dir(follow_symlinks=False)`` is **True**
+    for a junction (measured), so before the explicit link check this walk
+    descended into it — counting bytes outside the depot as the depot's size.
+    """
+    depot = tmp_path / "441"
+    _write(depot / "chunk" / "aa", b"1" * 5)
+    outside = tmp_path / "outside"
+    _write(outside / "big.bin", b"1" * 1000)
+    make_junction(depot / "chunk" / "sneaky", outside)
+
+    total = sum(stat.st_size for stat in walk_file_stats(str(depot)))
+
+    assert total == 5, "the walk followed a junction out of the tree"
+
+
+def test_scan_depot_signatures_sees_a_linked_depot_directory(tmp_path: Path) -> None:
+    """WP 1.6 carry-over fix #1 from the WP 1.5 review.
+
+    A depot directory placed as a link onto another volume was **invisible** to
+    the scan, because top-level entries were checked with
+    ``is_dir(follow_symlinks=False)`` — ``False`` for a directory symlink
+    (measured; a Windows junction was reported as ``True`` and did show up, so
+    only symlinks were affected). The consequence was worse than an
+    under-reported size: the depot never appeared in a prefill's before/after
+    snapshot either, so ``apply_observed_mapping`` treated the app's correct
+    mapping row as stale and deleted it on the next prefill.
+    """
+    cache_root = tmp_path / "cache"
+    (cache_root / "depot").mkdir(parents=True)
+    outside = tmp_path / "other-volume" / "441"
+    _write(outside / "chunk" / "aa", b"1" * 20)
+    kind = make_dir_link(cache_root / "depot" / "441", outside)
+
+    result = scan_depot_signatures(str(cache_root))
+
+    assert 441 in result, f"a {kind} depot directory must be visible to the scan"
+    file_count, total_bytes, _newest_mtime = result[441]
+    assert (file_count, total_bytes) == (1, 20)
+    assert scan_depot_dir_bytes(str(cache_root)) == {441: 20}
+
+
+def test_is_link_like_detects_both_symlinks_and_junctions(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    kind = make_dir_link(link, real)
+
+    assert sizes.is_link_like(str(link)) is True, f"{kind} not detected"
+    assert sizes.is_link_like(str(real)) is False
+    # os.path.islink alone is exactly what this helper exists to fix: measured
+    # False for a Windows junction.
+    if kind == "junction":
+        assert os.path.islink(str(link)) is False
 
 
 def test_scan_depot_dir_bytes_sums_per_depot_and_ignores_empty_and_non_numeric(
@@ -184,7 +267,9 @@ def test_build_cache_summary_total_counts_shared_once(tmp_path: Path) -> None:
         upsert_mapping(conn, depotid=900, appid=440, name="Team Fortress 2")
         upsert_mapping(conn, depotid=900, appid=730, name="Counter-Strike 2")
 
-        summary = build_cache_summary(conn, str(cache_root), SizeCache(ttl_seconds=60.0))
+        summary = build_cache_summary(
+            conn, str(cache_root), SizeCache(ttl_seconds=60.0).get(str(cache_root))
+        )
     finally:
         conn.close()
 
@@ -207,7 +292,9 @@ def test_build_cache_summary_reports_unmapped_depots(tmp_path: Path) -> None:
     conn = _conn(tmp_path)
     try:
         upsert_mapping(conn, depotid=441, appid=440, name="Team Fortress 2")
-        summary = build_cache_summary(conn, str(cache_root), SizeCache(ttl_seconds=60.0))
+        summary = build_cache_summary(
+            conn, str(cache_root), SizeCache(ttl_seconds=60.0).get(str(cache_root))
+        )
     finally:
         conn.close()
 
@@ -229,7 +316,10 @@ def test_build_cache_summary_top_consumers_capped_and_sorted(tmp_path: Path) -> 
             upsert_mapping(conn, depotid=depotid, appid=appid, name=f"Game {i}")
 
         summary = build_cache_summary(
-            conn, str(cache_root), SizeCache(ttl_seconds=60.0), top_n=10
+            conn,
+            str(cache_root),
+            SizeCache(ttl_seconds=60.0).get(str(cache_root)),
+            top_n=10,
         )
     finally:
         conn.close()
@@ -240,9 +330,17 @@ def test_build_cache_summary_top_consumers_capped_and_sorted(tmp_path: Path) -> 
     assert reported[0] == 12  # the largest (i=11 -> 12 bytes)
 
 
-def test_build_cache_summary_uses_the_cache_not_a_fresh_scan(tmp_path: Path) -> None:
-    # Proves the summary goes through SizeCache.get() (and therefore benefits
-    # from the TTL / invalidation contract) rather than scanning disk itself.
+def test_build_cache_summary_reports_exactly_the_snapshot_it_is_given(
+    tmp_path: Path,
+) -> None:
+    """WP 1.6 carry-over fix #2: the summary takes a ready ``SizeSnapshot``.
+
+    It no longer calls ``SizeCache.get()`` itself (that would walk the depot
+    tree under the cache lock while the caller's SQLite connection sits open —
+    the caller now does it first, see ``routers/cache.py``). So the function is
+    a pure function of its inputs, and the TTL/invalidation contract is
+    observable in what the *caller* passes in.
+    """
     cache_root = tmp_path / "cache"
     _write(cache_root / "depot" / "441" / "chunk" / "a", b"1" * 10)
 
@@ -250,14 +348,18 @@ def test_build_cache_summary_uses_the_cache_not_a_fresh_scan(tmp_path: Path) -> 
     try:
         upsert_mapping(conn, depotid=441, appid=440, name="Team Fortress 2")
         cache = SizeCache(ttl_seconds=999.0)
-        first = build_cache_summary(conn, str(cache_root), cache)
+        first = build_cache_summary(conn, str(cache_root), cache.get(str(cache_root)))
+        assert first.total_bytes == 10
 
+        # More bytes on disk, but a stale (within-TTL) snapshot -> stale total.
         _write(cache_root / "depot" / "441" / "chunk" / "b", b"1" * 90)
-        still_stale = build_cache_summary(conn, str(cache_root), cache)
-        assert still_stale.total_bytes == first.total_bytes == 10
+        still_stale = build_cache_summary(
+            conn, str(cache_root), cache.get(str(cache_root))
+        )
+        assert still_stale.total_bytes == 10
 
         cache.invalidate()
-        fresh = build_cache_summary(conn, str(cache_root), cache)
+        fresh = build_cache_summary(conn, str(cache_root), cache.get(str(cache_root)))
         assert fresh.total_bytes == 100
     finally:
         conn.close()

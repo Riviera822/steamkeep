@@ -52,6 +52,48 @@ DepotSignature = tuple[int, int, int]
 # --------------------------------------------------------------------------
 
 
+def is_link_like(path: str) -> bool:
+    """True if ``path`` is a symlink **or** a Windows junction.
+
+    Both are "this name points somewhere else" and must never be traversed or
+    recursively deleted — but they are *different* things to Python, which is
+    exactly the trap this helper exists to close. Measured on Windows 11 /
+    CPython 3.12.10 against a real junction created with ``mklink /J`` (WP 1.6):
+
+    ==================================  ===============  ==============
+    check                               dir symlink      junction
+    ==================================  ===============  ==============
+    ``os.path.islink()``                True             **False**
+    ``os.path.isjunction()``            False            True
+    ``DirEntry.is_dir(follow=False)``   False            **True**
+    ==================================  ===============  ==============
+
+    So ``os.path.islink`` alone silently misses junctions, and
+    ``is_dir(follow_symlinks=False)`` reports a junction as an ordinary
+    directory — a walk relying only on those descends straight through it.
+
+    ``os.path.isjunction`` exists from CPython 3.12; the ``getattr`` keeps
+    this function correct (just symlink-only) on an older interpreter instead
+    of raising.
+    """
+    if os.path.islink(path):
+        return True
+    isjunction = getattr(os.path, "isjunction", None)
+    return bool(isjunction is not None and isjunction(path))
+
+
+def _entry_is_link_like(entry: os.DirEntry) -> bool:
+    """``is_link_like`` for an already-listed directory entry (no extra stat).
+
+    ``DirEntry.is_junction()`` exists from CPython 3.12; ``getattr`` keeps
+    older interpreters working (symlink detection only).
+    """
+    if entry.is_symlink():
+        return True
+    is_junction = getattr(entry, "is_junction", None)
+    return bool(is_junction is not None and is_junction())
+
+
 def walk_file_stats(path: str) -> Iterator[os.stat_result]:
     """Recursively yield an ``os.stat_result`` for every regular file under ``path``.
 
@@ -64,6 +106,17 @@ def walk_file_stats(path: str) -> Iterator[os.stat_result]:
     ``vault_api.prefill.scan_depots`` (WP 1.4 review) — this is the same
     walk, reused here instead of duplicated (WP 1.5 carry-over fix #1).
 
+    **Links are never traversed *inside* the tree** (cycle protection, and it
+    keeps reported sizes equal to what a deletion would actually free — see
+    ``vault_api.deletion``, which likewise refuses to follow a link out of the
+    cache). ``follow_symlinks=False`` alone is not enough for that on Windows:
+    a junction is reported as a plain directory by
+    ``DirEntry.is_dir(follow_symlinks=False)`` (measured, see
+    ``is_link_like``), so a junction pointing at one of its own ancestors would
+    recurse forever. Junction and symlink entries are therefore skipped
+    explicitly. The *top-level* depot directory is the deliberate exception —
+    see ``scan_depot_signatures``.
+
     A file or directory that vanishes mid-walk (vault-core is writing into
     this tree concurrently) is skipped rather than failing the whole scan.
     """
@@ -73,6 +126,8 @@ def walk_file_stats(path: str) -> Iterator[os.stat_result]:
         return
     for entry in entries:
         try:
+            if _entry_is_link_like(entry):
+                continue
             if entry.is_dir(follow_symlinks=False):
                 yield from walk_file_stats(entry.path)
             elif entry.is_file(follow_symlinks=False):
@@ -98,6 +153,24 @@ def scan_depot_signatures(cache_root: str) -> dict[int, DepotSignature]:
     ``vault_api.prefill.scan_depots`` (before/after attribution diff) and
     this module's own ``scan_depot_dir_bytes`` (size calculation) call it
     rather than each walking the tree themselves.
+
+    **Top-level depot directories are detected FOLLOWING links** (WP 1.6
+    carry-over fix #1 from the WP 1.5 review): ``entry.is_dir()``, not
+    ``entry.is_dir(follow_symlinks=False)``. Placing an individual depot
+    directory as a symlink/junction onto another volume is a legitimate
+    homelab move, and the old check made such a depot **invisible** —
+    measured: ``DirEntry.is_dir(follow_symlinks=False)`` is ``False`` for a
+    directory symlink (it *is* ``True`` for a Windows junction, so only
+    symlinks were affected). Consequences of that invisibility were worse than
+    an under-reported size: the depot never appeared in a prefill's
+    before/after snapshot either, so ``prefill.apply_observed_mapping`` treated
+    the app's correct mapping row as stale and **deleted** it on the next
+    prefill.
+
+    Inside the tree the walk still refuses to follow links
+    (``walk_file_stats``) — the exception is exactly one level deep, where the
+    directory name IS the depot id and there is no cycle risk from entering it
+    once.
     """
     signatures: dict[int, DepotSignature] = {}
     depot_root = os.path.join(cache_root, "depot")
@@ -113,7 +186,9 @@ def scan_depot_signatures(cache_root: str) -> dict[int, DepotSignature]:
         if not entry.name.isdigit():
             continue
         try:
-            if not entry.is_dir(follow_symlinks=False):
+            # follow_symlinks defaults to True here ON PURPOSE — see the
+            # docstring: a symlinked/junctioned depot directory must be seen.
+            if not entry.is_dir():
                 continue
         except OSError:  # pragma: no cover - defensive
             continue
@@ -308,17 +383,24 @@ def free_disk_bytes(cache_root: str) -> int | None:
 def build_cache_summary(
     conn: sqlite3.Connection,
     cache_root: str,
-    cache: SizeCache,
+    snapshot: SizeSnapshot,
     top_n: int = 10,
 ) -> CacheSummary:
     """Assemble ``GET /v1/cache/summary`` (plan §6): total usage, top
     consumers, unmapped depots, free disk space.
 
     All app/depot data comes from two small queries against the already-open
-    connection; the (potentially expensive) disk scan goes through ``cache``,
-    so a summary request inside the TTL window costs no filesystem access.
+    connection.
+
+    **Takes a ready ``SizeSnapshot``, not the ``SizeCache``** (WP 1.6
+    carry-over fix #2 from the WP 1.5 review): a cache miss walks the whole
+    ``depot/`` tree while holding ``SizeCache``'s lock, and doing that from
+    inside this function meant the caller's SQLite connection sat open — and
+    every other request waiting on that same lock sat behind a disk walk —
+    for the duration. The caller now takes the snapshot *before* opening its
+    connection (``routers/cache.py``), which also makes this function purely
+    a function of its inputs: no clock, no filesystem walk, no cache state.
     """
-    snapshot = cache.get(cache_root)
     depot_bytes = snapshot.depot_bytes
 
     mapping_rows = conn.execute("SELECT appid, depotid FROM depot_app_map").fetchall()
@@ -330,13 +412,16 @@ def build_cache_summary(
         app_depotids.setdefault(appid, []).append(depotid)
         mapped_depotids.add(depotid)
 
-    name_rows = conn.execute(
-        "SELECT appid, name FROM apps WHERE appid IN ({})".format(
-            ",".join("?" * len(app_depotids))
-        ) if app_depotids else "SELECT appid, name FROM apps WHERE 0",
-        tuple(app_depotids),
-    ).fetchall()
-    names = {int(row["appid"]): row["name"] for row in name_rows}
+    # Plain "give me all app names" + a dict lookup, rather than a dynamically
+    # built IN (?,?,?) list with an empty-set special case (WP 1.6 carry-over
+    # fix #2 from the WP 1.5 review — that ternary produced two different SQL
+    # strings and needed a "WHERE 0" branch for the empty case). The apps table
+    # has one row per tracked game: a homelab library is hundreds of rows, and
+    # the mapping query above already reads more than this.
+    names = {
+        int(row["appid"]): row["name"]
+        for row in conn.execute("SELECT appid, name FROM apps").fetchall()
+    }
 
     consumers: list[TopConsumer] = []
     for appid, depotids in app_depotids.items():

@@ -35,10 +35,19 @@ def test_concurrent_mixed_requests_do_not_500(tmp_path) -> None:
     ``asyncio.gather`` over a mix of read and write endpoints, all asserted
     to return a non-5xx status.
     """
+    cache_root = tmp_path / "cache"
+    # A real depot tree to scan and (WP 1.6) to delete from: the mapping PUTs
+    # below map depot 1000+i to app 440+i, so these are the directories the
+    # concurrent DELETEs actually remove while other requests walk them.
+    for depotid in range(1000, 1010):
+        chunk = cache_root / "depot" / str(depotid) / "chunk"
+        chunk.mkdir(parents=True)
+        (chunk / "aa").write_bytes(b"1" * 64)
+
     settings = Settings(
         vault_api_key=TEST_API_KEY,
         db_path=str(tmp_path / "vault.db"),
-        cache_root=str(tmp_path / "cache"),
+        cache_root=str(cache_root),
         log_level="INFO",
     )
     app = create_app(settings)
@@ -79,6 +88,10 @@ def test_concurrent_mixed_requests_do_not_500(tmp_path) -> None:
                 response = await client.get("/v1/cache/summary", headers=AUTH)
                 return response.status_code
 
+            async def cache_delete(appid: int) -> int:
+                response = await client.delete(f"/v1/cache/{appid}", headers=AUTH)
+                return response.status_code
+
             tasks = []
             for i in range(10):
                 tasks.append(games_list())
@@ -96,12 +109,20 @@ def test_concurrent_mixed_requests_do_not_500(tmp_path) -> None:
                 # the same-request games_list()/games_detail() calls that also
                 # hit it, instead of each other, without a 500.
                 tasks.append(cache_summary())
+                # WP 1.6: DELETE joins the mix — it reads the mapping, walks
+                # and removes depot directories, invalidates the size cache and
+                # writes apps.status, all while the mapping PUTs above are
+                # creating rows for the very same app ids. Two DELETEs of the
+                # same app can therefore race (i % 3 collides across the loop):
+                # the second must come back as a clean 404/empty result, never
+                # a 500 from a vanished directory or a double removal.
+                tasks.append(cache_delete(440 + (i % 3)))
 
             return await asyncio.gather(*tasks)
 
     statuses = asyncio.run(run())
 
-    assert len(statuses) == 60
+    assert len(statuses) == 70
     assert all(status_code < 500 for status_code in statuses), statuses
 
 

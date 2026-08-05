@@ -303,7 +303,11 @@ for users who expose the API differently.
 - [x] Prefill orchestration (SteamPrefill subprocess, job queue, one job at a time)
       *(WP 1.4: selection-file driven — SteamPrefill has no app-id CLI;
       hybrid miss-trigger itself remains Phase 3 per ADR-0001)*
-- [ ] Size calculation + deletion incl. shared-depot protection
+- [x] Size calculation + deletion incl. shared-depot protection
+      *(WP 1.5/1.6: TTL-cached sizes; deletion with path guards,
+      link-safe removal, execute-time shared recheck closing the
+      TOCTOU, settle-and-recheck against racing deletes; mapping rows
+      survive deletion by design. Opus + Fable double review)*
 - [ ] Docker Compose (2 services + volume), .env convention, pinned image tags
 - [ ] Optional vault-dns container behind a Compose profile (`--profile dns`)
 - [ ] **MVP test: prefill a game via curl, query its size, delete it — no app**
