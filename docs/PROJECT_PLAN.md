@@ -223,6 +223,9 @@ Steam-only, prefill-first design can solve better:
 | GET | /v1/cache/summary | Total usage, top consumers, free space |
 | GET | /v1/clients | Per-client hit stats incl. bypass warnings |
 | POST | /v1/agent/installed | PC agent reports installed app IDs |
+| PUT | /v1/mapping/{depotid} | Manual depot→app mapping fallback (additive, see ADR-0003) |
+| GET | /v1/mapping | List all depot→app mappings |
+| DELETE | /v1/mapping/{depotid}/{appid} | Remove one mapping pair (repair path) |
 | GET | /v1/health | Liveness (for external monitoring) |
 
 Auth: static API key in a header (v1). Since everything is only reachable
@@ -289,7 +292,10 @@ for users who expose the API differently.
       timeouts/retry, store-on-miss
       *(caveat: log rotation is documented, implemented with the
       container in WP 1.9; tmp/ and cache/ must share one volume)*
-- [ ] FastAPI skeleton, SQLite schema, depot mapping import
+- [x] FastAPI skeleton, SQLite schema, depot mapping import
+      *(WP 1.2/1.3: skeleton with secure-by-default auth, schema v1,
+      manual mapping endpoints per ADR-0003; the prefill-driven mapping
+      import lands with the orchestration in the next package)*
 - [ ] Prefill orchestration (SteamPrefill subprocess, job queue, one job at a time)
 - [ ] Size calculation + deletion incl. shared-depot protection
 - [ ] Docker Compose (2 services + volume), .env convention, pinned image tags

@@ -69,8 +69,30 @@ def get_connection(db_path: str) -> sqlite3.Connection:
     WAL journal mode + a busy_timeout let HTTP request handlers read the
     database while a background job-queue writer (WP 1.4+) holds a write
     transaction, instead of failing immediately with "database is locked".
+
+    ``check_same_thread=False`` (WP 1.3 review fix, B1): FastAPI's sync
+    dependency-injection machinery runs a sync generator dependency (like
+    ``deps.get_db``) in one anyio worker thread and the endpoint body that
+    consumes its yielded value in another thread pulled from the same pool
+    — the same ``sqlite3.Connection`` object legitimately crosses threads
+    within a single request under concurrency. sqlite3's default
+    ``check_same_thread=True`` raises ``ProgrammingError`` in that case
+    (reviewer proved 60/60 requests 500'd under concurrent load via
+    ``httpx.ASGITransport`` + ``asyncio.gather`` before this fix, 264/264
+    succeeded after). This is safe to disable here because each connection
+    is opened fresh per request (``deps.get_db``) and only ever used by the
+    single request that owns it — never shared or reused concurrently
+    across *different* requests — and CPython's bundled sqlite3 driver
+    reports ``sqlite3.threadsafety == 3`` ("Serialized": safe to use from
+    multiple threads without restriction, including sharing a single
+    connection), so the underlying library-level guarantee holds even
+    though only one thread touches this connection at a time in practice.
     """
-    conn = sqlite3.connect(db_path)
+    assert sqlite3.threadsafety == 3, (
+        "sqlite3.threadsafety != 3 (Serialized) on this Python build — "
+        "check_same_thread=False would be unsafe here."
+    )
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")

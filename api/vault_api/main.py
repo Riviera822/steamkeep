@@ -17,7 +17,7 @@ from fastapi import FastAPI
 
 from vault_api.config import Settings
 from vault_api.db import init_db
-from vault_api.routers import health, internal
+from vault_api.routers import games, health, mapping
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -36,5 +36,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="vault-api", version="0.1.0", openapi_url=None)
     app.state.settings = settings
     app.include_router(health.router)
-    app.include_router(internal.router)
+    app.include_router(games.router)
+    app.include_router(mapping.router)
     return app
