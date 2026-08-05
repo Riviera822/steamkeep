@@ -13,9 +13,13 @@ with shared-depot protection, path/link safety guards and an audit trail in the
 log (§4); WP 2.4 adds the **agent report data path**
 (`vault_api/agent_reports.py`) — `POST /v1/agent/installed` with ADR-0002
 full-list snapshots, the server-side diff that surfaces removals, snapshot
-retention, plus a minimal `GET /v1/clients`. The scheduler (which will consume
-those snapshots), garbage collection, bypass detection and the miss trigger
-remain scope for later work packages.
+retention, plus a minimal `GET /v1/clients`; WP 3.1 adds **manifest parsers**
+(`vault_api/manifests.py`) — pure functions that turn the two on-disk Steam
+manifest formats into one common shape, the foundation for staleness
+detection (ADR-0006) and manifest-diff garbage collection (ADR-0007). The
+scheduler, the schema/ingestion that will store what these parsers produce,
+GC itself, bypass detection and the miss trigger remain scope for later work
+packages.
 
 ## Layout
 
@@ -34,6 +38,7 @@ api/
 │   ├── sizes.py          # depot disk walk, TTL size cache, summary aggregation
 │   ├── deletion.py       # per-game deletion: path/link guards, shared-depot plan
 │   ├── agent_reports.py  # agent snapshots: store, ADR-0002 diff, retention
+│   ├── manifests.py      # manifest parsers (.bin / cache-stored), pure functions
 │   ├── validation.py     # shared request types (AppId) — one coercion rule
 │   └── routers/
 │       ├── health.py     # GET /v1/health — the ONE public router
@@ -1002,6 +1007,144 @@ client that reads only the fields it knows keeps working.
   `latest_snapshot` lookup per client rather than a single `MAX(reported_at)`
   aggregate. The follow-up query runs once per gaming machine — a homelab has
   a handful.
+
+## Manifest parsers (WP 3.1)
+
+`vault_api/manifests.py` implements the parsing half of ADR-0006 (staleness
+detection) and ADR-0007 (manifest-diff garbage collection):
+`docs/research/phase3-manifests.md` established that both Steam manifest
+formats are parseable with ~60 lines of stdlib code, and this package turns
+that research into pure functions plus a test suite. **Nothing here is wired
+up yet** — no schema, no ingestion, no GC logic, no HTTP endpoint. That is
+explicitly Phase 3.2 (schema + ingestion) and Phase 3.6 (GC core).
+
+### Two formats, one shared result shape
+
+| | SteamPrefill `.bin` | Cache-stored manifest |
+|---|---|---|
+| Where | `$HOME/.cache/SteamPrefill/v1/{originalAppId}_{containingAppId}_{depotId}_{manifestId}.bin` (`%LOCALAPPDATA%\SteamPrefill\v1` on Windows) | `/cache/depot/<id>/manifest/<manifestid>/5/<requestcode>` |
+| On-disk shape | Plain, uncompressed protobuf | ZIP, single deflate entry `z`, containing a sectioned stream (PAYLOAD/METADATA/SIGNATURE/END) |
+| Parser | `parse_steamprefill_bin(path) -> PrefillManifest` | `parse_cache_manifest(path) -> CacheManifest` |
+| Self-check | filename ids vs. payload ids must match | parsed chunk count vs. METADATA `unique_chunks` must match |
+
+`PrefillManifest` and `CacheManifest` are **the same dataclass**
+(`ParsedManifest`), not two structurally-similar types — that is the point of
+"a common shape usable by GC" (the work package's own phrasing): calling code
+never has to branch on which source a manifest came from.
+
+```python
+@dataclass(frozen=True)
+class ParsedManifest:
+    depot_id: int
+    manifest_id: int
+    chunks: dict[str, int]   # 40-hex chunk id -> compressed byte size
+    source: str              # "steamprefill_bin" | "cache_manifest"
+```
+
+`chunks` values are `cb_compressed`/the `.bin` format's compressed length —
+prior research established these are byte-exact against the real cached
+chunk file's size, so this map alone is enough for GC's reclaim-size
+reporting without a second filesystem walk.
+
+### Wire format, and one detail the research doc didn't spell out
+
+Field numbers (confirmed empirically against real files while building this
+module — see "Empirical validation" below, not just taken on faith from the
+research document):
+
+- `.bin` payload: field 2 = manifest id, field 4 = depot id, field 1
+  (repeated) = `FileData`, whose field 1 (repeated) = `ChunkData`
+  (field 1 = chunk id as a 40-hex ASCII string, field 2 = compressed length).
+- Cache manifest METADATA: field 1 = depot_id, field 2 = gid_manifest, field 7
+  = unique_chunks.
+- Cache manifest PAYLOAD (`ContentManifestPayload`): field 1 (repeated) =
+  `FileMapping`, whose field 6 (repeated) = `ChunkData` (field 1 = sha, 20 raw
+  bytes -> hex-encoded; field 5 = cb_compressed).
+
+**New finding, not in the research document:** the sectioned stream's END
+marker (`0x32C415AB`) is a **bare 4-byte magic with no length field** —
+unlike PAYLOAD/METADATA/SIGNATURE, which are each `u32 magic + u32 length
+(LE) + payload`. Discovered by probing the raw bytes of a real cache-stored
+manifest (`poc/cache/depot/481/manifest/...`) while writing
+`manifests._read_sections`; missing this would have made every real manifest
+file look truncated.
+
+**Filenames inside a cache-stored manifest's PAYLOAD are Valve-encrypted**
+(need the depot decryption key, which vault-api never holds) — this module
+never attempts to read them. Garbage collection (ADR-0007) only needs chunk
+SHAs, which are **not** encrypted, so this is a non-limitation for this
+project's purposes, stated once here rather than re-litigated later.
+
+### Untrusted input, bounded by construction
+
+Both formats are bytes that ultimately trace back to network content
+SteamPrefill or a Steam client wrote, so every entry point treats them as
+hostile:
+
+- `MAX_MESSAGE_SIZE` (64 MiB) bounds every buffer this module parses as one
+  unit — the whole `.bin` file, one section of the sectioned stream, the
+  decompressed `z` entry, and every nested submessage.
+- `MAX_CHUNK_COUNT` (2,000,000) bounds how many chunks a single manifest may
+  contribute — headroom above the largest real manifest seen while
+  researching this WP (SteamPrefill depot 990081: 72,283 chunks).
+- The ZIP entry is read through a **bounded** `read(MAX_MESSAGE_SIZE + 1)` on
+  an open stream, not `ZipFile.read(name)` — the ZIP format's declared
+  `file_size`/`compress_size` describe what the writer *claims*, not a limit
+  enforced during decompression, so reading unbounded would let a hostile
+  entry inflate past any check this module could otherwise make.
+- The field reader (`_read_fields`) is **iterative, not recursive**: a nested
+  submessage is parsed by calling it again on a byte slice, not by the
+  function calling itself on growing input. Unlike `agent/vault_agent/acf.py`'s
+  genuine recursive-descent KeyValues parser (which needs, and has, an
+  explicit depth cap after the WP 2.1 `RecursionError` lesson in
+  `docs/LEARNINGS.md`), there is no call-stack depth here driven by
+  attacker-controlled nesting to bound in the first place — nesting in both
+  manifest formats is a small, fixed number of levels this module's own code
+  walks explicitly.
+- Every failure mode — a truncated varint, an oversized declared length, a
+  non-zip file, a zip missing the `z` entry, a missing required field, a
+  filename/payload id mismatch, a `unique_chunks` mismatch, a malformed chunk
+  id/sha — raises this module's own `ManifestParseError`. No other exception
+  type escapes a public function here.
+
+### Empirical validation (read-only; no output committed)
+
+Run manually against real files on this dev machine while building this
+module (not part of the automated suite — these paths are machine-local):
+
+- **SteamPrefill `.bin` manifests**, `%LOCALAPPDATA%\SteamPrefill\v1\*.bin`
+  (8 files): all parsed without error; filename ids matched payload ids in
+  every case, including the shared-depot example
+  `107100_228980_229002_....bin` (app 107100 pulling a depot nominally
+  belonging to app 228980). Chunk counts ranged from 1 (`107103`) to 70,643
+  distinct chunks (`990081`, 72,283 raw `ChunkData` entries before dedup by
+  id — the difference is repeated chunk ids across `FileData` entries, not a
+  bug).
+- **Cache-stored manifests**, `poc/cache/depot/*/manifest/*/5/*` (7 files
+  across 5 depots, one depot with 3 differently-request-coded copies of the
+  same manifest): all parsed without error, `unique_chunks` matched the
+  parsed chunk count in every case. Reproduced
+  `docs/research/phase3-manifests.md`'s numbers exactly: depot 1070561 → 3594
+  chunks, 1391111 → 8174, 229006 → 84, 4594150 → 2, 481 → 8 (all three
+  differently-request-coded copies of depot 481's manifest agree).
+- **Cross-check against on-disk chunk files** (both sources): for every depot
+  above, the parsed chunk id set was diffed against
+  `poc/cache/depot/<id>/chunk/` and every parsed `cb_compressed`/compressed
+  length was compared against the real on-disk file size —
+  **zero orphans, zero size mismatches** in all 5 cache-stored-manifest
+  depots and all 8 `.bin`-manifest depots (including the two partially-cached
+  ones, `107101` and `990081`, where the `.bin` manifest legitimately lists
+  more chunks than are on disk yet — a "missing" chunk, not an orphan).
+- `core/cache/depot/` held no manifest files at this time (only chunk data
+  for depot 70403) — nothing to validate there.
+
+Two mutation tests were run manually (revert the check, confirm the
+corresponding test fails, restore it) as an extra confidence check beyond the
+committed suite: disabling the `.bin` filename/payload depot-id cross-check,
+and disabling the cache manifest `unique_chunks` self-check, each made exactly
+one test fail (`test_bin_depot_id_mismatch_between_filename_and_payload_is_rejected`,
+`test_cache_manifest_unique_chunks_mismatch_is_rejected`) — confirming those
+tests are genuine regression guards, not incidental passes.
 
 ## Auth
 
