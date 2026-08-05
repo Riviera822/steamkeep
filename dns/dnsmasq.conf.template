@@ -1,0 +1,153 @@
+# SteamVault vault-dns -- production dnsmasq config TEMPLATE (Phase 1, WP 1.8).
+#
+# This is a TEMPLATE, not a ready-to-use config: every ${VAR} placeholder
+# below is substituted by `envsubst` when the vault-dns container starts.
+# Wiring that substitution into an actual container entrypoint/Compose
+# service is WP 1.9's job -- this work package defines the file and the
+# placeholder CONTRACT only. See "Placeholder contract" in dns/README.md
+# for the full variable list, required defaults, and who is responsible
+# for supplying them (WP 1.9's entrypoint, not this file).
+#
+# Derives directly from the proven pattern in
+# poc/linux-client-test/scenario-b.sh (Phase 0, WP 0.6 + follow-up fix),
+# the first real evidence the vault-dns approach works for Linux/Steam
+# Deck-class clients, not just Windows. Two differences from that
+# throwaway WSL2 test instance, both because this file targets a
+# long-running container instead of a one-off test harness:
+#   - upstream forwarders and the cache IP are configurable here, not
+#     hardcoded literals
+#   - listens on all interfaces (0.0.0.0), not just 127.0.0.1 -- a
+#     container's loopback isn't reachable from the LAN. WP 1.9's Compose
+#     file is what actually restricts *external* exposure (which host
+#     interface/port gets published); this file only controls what the
+#     daemon does *inside* the container.
+#
+# Validated by dns/tests/test-dnsmasq-config.ps1 (`dnsmasq --test`, plus an
+# optional live A/AAAA functional check) against dnsmasq 2.92.
+
+# --- AAAA / IPv6-bypass guard (ADR-0001 req 6) -- READ THIS FIRST -----------
+# THE SINGLE MOST IMPORTANT LINE PAIR IN THIS FILE.
+#
+# Verified live on dnsmasq 2.92 during Phase 0 (poc/linux-client-test,
+# WP 0.6 follow-up fix, see docs/adr/0001-proxy-store-feasibility.md
+# requirement 6): `address=/DOMAIN/IP` alone only intercepts the DNS
+# record TYPE it was given a literal for -- here an IPv4 address, so only
+# A queries are answered locally. Every OTHER query type for the same
+# name, including AAAA, is FORWARDED UPSTREAM by modern dnsmasq and comes
+# back as Valve's real, routable IPv6 address. An IPv6-capable client
+# (increasingly the common case -- "happy eyeballs" prefers AAAA when
+# present) would then connect directly to the real Steam CDN over IPv6,
+# silently bypassing this cache entirely -- no error, no log evidence on
+# this side, just a client that mysteriously never shows up as a cache
+# hit (this is exactly the failure mode requirement A12/bypass-detection
+# has to assume can happen).
+#
+# The fix, and it is a REQUIRED pairing, not optional hardening:
+# `local=/DOMAIN/` makes dnsmasq authoritative for the whole zone -- it
+# answers from its own data for every RR type and never forwards zone
+# queries upstream at all. Paired with address= (which supplies the
+# concrete A answer), this makes AAAA -- and any other RR type for the
+# zone -- resolve to NODATA (NOERROR, ANSWER: 0) locally instead of
+# leaking upstream.
+#
+# Confirmed live during Phase 0: with a bare address= line, `dig AAAA
+# cache2-ams1.steamcontent.com` returned Valve's real routable
+# 2a01:bc80:... address. With local=/steamcontent.com/ added alongside
+# it, the same query returns clean NODATA. docs/PROJECT_PLAN.md
+# originally claimed "address= returns NODATA for AAAA" -- that claim was
+# outdated and has been corrected there and in ADR-0001. Do not remove or
+# "simplify" the local= line below; it is the entire reason this
+# container exists instead of a plain `address=` one-liner.
+address=/steamcontent.com/${CACHE_IP}
+local=/steamcontent.com/
+
+# --- Upstream forwarders -----------------------------------------------------
+# no-resolv: never read /etc/resolv.conf for upstream servers. Inside a
+# container, that file is typically managed by the container runtime and
+# can point at a resolver that itself forwards back into this container's
+# own Docker network -- relying on it risks a resolution loop, the same
+# category of problem poc/linux-client-test/scenario-b.sh had to guard
+# against on the WSL2 side, and that core/nginx/nginx.conf's own
+# `resolver` directive had to guard against for vault-core (see
+# core/README.md's loop-safety note). The explicit server= lines below
+# are the ONLY upstream this daemon will ever use.
+#
+# ${UPSTREAM_DNS_1} / ${UPSTREAM_DNS_2}: substituted at container start.
+# Documented defaults (supplied by WP 1.9's entrypoint/.env, NOT by this
+# template -- see dns/README.md "Placeholder contract"): 1.1.1.1
+# (Cloudflare) and 8.8.8.8 (Google), the same pair
+# poc/linux-client-test/scenario-b.sh used successfully in Phase 0.
+no-resolv
+server=${UPSTREAM_DNS_1}
+server=${UPSTREAM_DNS_2}
+
+# --- Listen configuration (container-appropriate) ---------------------------
+# 0.0.0.0: unlike scenario-b.sh's 127.0.0.1-only WSL2 test instance, this
+# daemon runs inside a container and must be reachable from LAN clients
+# (or from the router's DHCP-assigned DNS server, once WP 1.9's Compose
+# file publishes port 53 to a host interface). bind-interfaces makes
+# dnsmasq bind directly to the addresses in listen-address (instead of
+# the wildcard socket + per-request source-address filtering dnsmasq
+# otherwise uses), which is required for listen-address to take effect
+# predictably in a container's restricted network namespace.
+#
+# Exposure is NOT controlled here: this only governs what the daemon does
+# INSIDE the container. WP 1.9's Compose file (port publishing / network
+# mode) is what restricts which host interfaces actually reach it --
+# scope boundary, not an oversight of this file.
+#
+# *** OPEN-RESOLVER WARNING -- BINDING REQUIREMENT FOR WP 1.9 ***
+# This is a recursive/forwarding DNS server with NO source-address ACL
+# (dnsmasq's --no-resolv + server= above define WHERE it forwards, not WHO
+# is allowed to ask it to). Publishing this container's port 53 on 0.0.0.0
+# or any WAN-facing interface turns it into a public open resolver -- a
+# well-known abuse vector (DNS amplification/reflection attacks against
+# third parties, using this homelab's bandwidth). WP 1.9's Compose file
+# MUST publish port 53 on a specific LAN-only host IP/interface, e.g.
+# `"192.168.1.50:53:53/udp"` (and the matching /tcp line), NEVER a bare
+# `"53:53/udp"` (which Docker maps to 0.0.0.0 on the host, i.e. every
+# interface including any WAN one) -- this is a hard requirement, not a
+# style preference, and must be called out explicitly in WP 1.9's own
+# compose/README so it isn't silently relaxed later.
+#
+# Caveat for whoever wires WP 1.9: in a bridge-network container, incoming
+# connections are NAT'd (DNAT) to the container's internal 0.0.0.0:53, but
+# the original client source IP is preserved end-to-end (DNAT rewrites the
+# destination, not the source) -- dnsmasq's own listen-address/
+# bind-interfaces settings here see that real source IP but have no ACL
+# concept to filter it. In other words: exposure control belongs ENTIRELY
+# at the compose/port-publishing level (which host interface gets mapped),
+# not inside this file -- there is no in-container setting that can
+# retroactively fix a 0.0.0.0 publish.
+listen-address=0.0.0.0
+bind-interfaces
+port=53
+
+# --- Cache & logging ---------------------------------------------------------
+# dnsmasq's own DNS answer cache (unrelated to vault-core's depot cache).
+# Default is a low 150 entries -- a household with several game consoles/
+# PCs/phones/Steam Decks all repeatedly resolving the same handful of
+# steamcontent.com names benefits from a larger cache; 1000 is a generous
+# bump at negligible memory cost.
+cache-size=1000
+
+# log-queries: log every query dnsmasq answers. In a container this would
+# go to stdout/stderr (no log-facility path set, which is what makes
+# dnsmasq log there instead of syslog) -- exactly what `docker logs` / the
+# json-file logging driver (docs/PROJECT_PLAN.md Docker rules) expects.
+#
+# PRIVACY NOTE -- why this is OFF by default: unlike vault-core (which only
+# ever sees Steam CDN traffic), vault-dns is this LAN's forwarding resolver
+# for EVERY domain every client asks it, not just steamcontent.com --
+# turning this on logs full browsing-metadata-level query history (every
+# hostname every device resolves) to disk/stdout indefinitely. That's a
+# meaningfully bigger privacy footprint than "cache debug logging" implies,
+# especially for a homelab a household shares, so it defaults OFF here.
+# Uncomment the line below only for active debugging (e.g. confirming
+# requirement A12's "is my client even asking vault-dns" question), and
+# turn it back off again afterward:
+#
+# log-queries
+#
+# See dns/README.md's "Privacy note: query logging" section for the full
+# reasoning and how to enable it safely for a short debugging session.

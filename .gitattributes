@@ -3,3 +3,12 @@
 # core.autocrlf setting, so a Windows checkout never silently reintroduces
 # CRLF (which breaks `#!/usr/bin/env bash` shebangs and confuses bash).
 poc/linux-client-test/*.sh eol=lf
+
+# Same rationale, extended to vault-dns (WP 1.8): functional-check.sh runs
+# INSIDE WSL2/Linux (shebang breaks under CRLF same as above), and
+# dnsmasq.conf.template is envsubst'd verbatim inside a Linux container
+# (WP 1.9) -- a CRLF checkout would bake a trailing \r into every
+# substituted line (e.g. address=.../CACHE_IP\r), which dnsmasq's parser
+# does not tolerate and would fail to start on, not just a cosmetic issue.
+dns/tests/*.sh eol=lf
+dns/*.template eol=lf
