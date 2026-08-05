@@ -111,8 +111,10 @@ for v1.)
 - REST API (see section 5)
 
 **vault-agent** — PC listener
-- Small Python or Go binary on the gaming machine — Windows PC first,
-  plus a Linux/SteamOS variant (Steam Deck, Steam Machine) in Phase 2
+- Small static Go binary (ADR-0005: single-file distribution, trivial
+  cross-compilation for windows/amd64, linux/amd64, linux/arm64) on the
+  gaming machine — Windows PC first, plus a Linux/SteamOS variant
+  (Steam Deck, Steam Machine) in Phase 2
 - Reads `steamapps/appmanifest_*.acf` from all library folders
   (parses `libraryfolders.vdf` for multiple drives); the ACF/VDF format
   is identical on Linux/SteamOS, only library paths and packaging differ
