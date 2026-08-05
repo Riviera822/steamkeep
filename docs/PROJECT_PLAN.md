@@ -45,7 +45,7 @@ for v1.)
 | A5 | Per-game download trigger from the app (start → done status) | Backend + App |
 | A6 | App "homecall" works over Tailscale (embedded tsnet), Twingate, or a public domain — user-selectable connectivity profile | Android App |
 | A7 | Prefill updates automatically during the day (cron) | Scheduler |
-| A8 | Cron criterion: games actually installed on the gaming PC | PC Agent |
+| A8 | Cron criterion: games actually installed on the gaming machines (Windows PC and SteamOS/Linux devices such as Steam Deck / Steam Machine); removals are detected and reflected | PC Agent |
 | A9 | Delete individual games from the cache to free up space | Cache Core + Backend |
 | A10 | Per-game size overview | Backend |
 | A11 | Community-ready: Docker-first, documented, licensed, CI | Project Infra |
@@ -107,11 +107,17 @@ for v1.)
 - REST API (see section 5)
 
 **vault-agent** — PC listener
-- Small Python or Go binary on the gaming PC (Windows)
+- Small Python or Go binary on the gaming machine — Windows PC first,
+  plus a Linux/SteamOS variant (Steam Deck, Steam Machine) in Phase 2
 - Reads `steamapps/appmanifest_*.acf` from all library folders
-  (parses `libraryfolders.vdf` for multiple drives)
-- Reports the list of installed app IDs periodically (e.g. every 30 min)
-  via HTTP POST to vault-api — over Tailscale
+  (parses `libraryfolders.vdf` for multiple drives); the ACF/VDF format
+  is identical on Linux/SteamOS, only library paths and packaging differ
+  (XDG paths under `~/.local/share/Steam`, systemd user service instead
+  of a scheduled task)
+- Reports the FULL list of installed app IDs periodically (e.g. every
+  30 min) via HTTP POST to vault-api — over Tailscale. Removed titles
+  are derived server-side by diffing against the previous report — the
+  agent stays stateless and dumb by design
 - Runs as a scheduled task / optional tray icon; config: one URL + API key
 - Deliberately dumb: read + report only, no control logic
 - **Optional hosts-file mode (opt-in, requires admin rights):** writes a
@@ -278,7 +284,13 @@ for users who expose the API differently.
 - [ ] HTTP reporter with retry (tolerate VPN/network outages)
 - [ ] Optional hosts-file mode (opt-in, admin rights, clean uninstall path)
 - [ ] Document Windows scheduled-task setup, optional installer script
-- [ ] vault-api: scheduler uses the installed list as the prefill set
+- [ ] Linux/SteamOS agent variant (Steam Deck / Steam Machine): library
+      discovery under `~/.local/share/Steam`, systemd user service
+      packaging, SteamOS read-only-rootfs-friendly install (home dir only)
+      — see ADR-0002
+- [ ] vault-api: scheduler uses the installed list as the prefill set;
+      server-side diff of consecutive agent reports surfaces removed
+      titles (status update / optional cleanup hint, see ADR-0002)
 
 ### Phase 3 — Scheduler & Update Logic
 - [ ] Manifest comparison (stale detection)
