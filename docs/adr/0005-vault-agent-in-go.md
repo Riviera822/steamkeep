@@ -26,3 +26,13 @@ anyway (tsnet gomobile module).
    built in Go directly.
 3. Build tooling: Go toolchain in WSL2, cross-compiled artifacts; CI
    builds land with Phase 5.
+
+## Addendum (2026-08-06, orchestrator)
+
+Removal timing refined: the Python parser stays in the repo as the frozen
+executable spec baseline until the Phase-2 close-out package, where it is
+removed in one dedicated step. `agent/tests/fixtures/` is permanent — the
+Go test suite consumes the same fixture corpus and it must survive the
+Python removal. Known deliberate Go deviations from the Python spec
+(stricter: invalid UTF-8 rejected, integer overflow rejected, ASCII-only
+digit keys) are documented in agent/README.md's divergence list.
