@@ -13,6 +13,13 @@ no production code and performs no reviews itself. Two subagents exist in
 - **reviewer** (Opus): reviews every completed work package before it counts
   as done; read-only
 
+## Shared learnings (mandatory)
+
+`docs/LEARNINGS.md` is the living list of project-proven findings. Every
+coder and reviewer reads it before their first task of a session; work
+package briefs reference it instead of repeating its content. The
+orchestrator appends newly distilled findings after each review cycle.
+
 ## Work mode (applies to the whole project)
 
 - Work strictly phase by phase per `docs/PROJECT_PLAN.md`. Phase 0

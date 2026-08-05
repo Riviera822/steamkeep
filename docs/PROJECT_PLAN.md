@@ -401,7 +401,12 @@ steamvault/
 
 **Deliberately OUT of scope (v1):** multi-service (Epic etc.), multi-tenant
 setups, a web UI (the Android app IS the UI; a web UI is welcome as a
-community contribution), iOS.
+community contribution).
+
+**Post-v1 roadmap:** an iOS app. The groundwork is deliberately kept
+compatible: the app talks pure REST to vault-api, the connectivity-profile
+abstraction is UI-framework-agnostic, and tsnet builds for iOS via the same
+gomobile toolchain as the Android `.aar`.
 
 ---
 
