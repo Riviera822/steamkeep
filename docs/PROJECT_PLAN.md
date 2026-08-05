@@ -282,10 +282,13 @@ for users who expose the API differently.
   the spirit of lancache-manager; the rest of the project stays usable as-is)
 
 ### Phase 1 — vault-core + vault-api (server MVP)
-- [ ] Production-ready nginx config (log rotation, healthcheck) —
+- [x] Production-ready nginx config (log rotation, healthcheck) —
       implements the Phase-0 requirements from ADR-0001: lancache
-      heartbeat, Range-strip + 200-only store guards, nocache=1 bypass,
-      client-Host upstream with short timeouts/retry, store-on-miss
+      heartbeat, Range-strip + 200-only store guards (incl. retried-200
+      handling), nocache=1 bypass, client-Host upstream with short
+      timeouts/retry, store-on-miss
+      *(caveat: log rotation is documented, implemented with the
+      container in WP 1.9; tmp/ and cache/ must share one volume)*
 - [ ] FastAPI skeleton, SQLite schema, depot mapping import
 - [ ] Prefill orchestration (SteamPrefill subprocess, job queue, one job at a time)
 - [ ] Size calculation + deletion incl. shared-depot protection
