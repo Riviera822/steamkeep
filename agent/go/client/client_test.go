@@ -1,0 +1,489 @@
+package client
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"math/rand"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/Riviera822/steamvault/agent/report"
+)
+
+// testBackoff keeps every retry test fast: base/max are tiny, so even a
+// full retry budget sleeps for well under a second in the worst case (real
+// sleeps, tight caps - see WP 2.2 brief).
+func testBackoff() Option { return WithBackoff(1*time.Millisecond, 5*time.Millisecond) }
+
+func testPayload() report.Payload {
+	return report.Payload{ClientID: "test-pc", AppIDs: []int{440, 730}}
+}
+
+func TestReportInstalled_Success(t *testing.T) {
+	var gotAPIKey, gotMethod, gotPath string
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKey = r.Header.Get("X-Api-Key")
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"client_id":"test-pc","received":2,"added":[440,730],"removed":[],"first_report":true}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "secret-key", testBackoff())
+	result, err := c.ReportInstalled(context.Background(), testPayload())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotAPIKey != "secret-key" {
+		t.Errorf("X-Api-Key header = %q, want %q", gotAPIKey, "secret-key")
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/v1/agent/installed" {
+		t.Errorf("path = %q, want /v1/agent/installed", gotPath)
+	}
+	var sentPayload report.Payload
+	if err := json.Unmarshal(gotBody, &sentPayload); err != nil {
+		t.Fatalf("request body was not valid JSON: %v (body=%s)", err, gotBody)
+	}
+	if sentPayload.ClientID != "test-pc" || len(sentPayload.AppIDs) != 2 {
+		t.Errorf("request body = %+v, want client_id=test-pc appids=[440 730]", sentPayload)
+	}
+
+	if result.ClientID != "test-pc" || result.Received != 2 || !result.FirstReport {
+		t.Errorf("result = %+v, unexpected", result)
+	}
+	if len(result.Added) != 2 || len(result.Removed) != 0 {
+		t.Errorf("result.Added/Removed = %v/%v, unexpected", result.Added, result.Removed)
+	}
+}
+
+func TestReportInstalled_401IsNotRetried(t *testing.T) {
+	var requestCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"detail":"Missing or invalid X-Api-Key header"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "wrong-key", testBackoff())
+	_, err := c.ReportInstalled(context.Background(), testPayload())
+	if err == nil {
+		t.Fatal("expected an error for a 401 response")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v (%T), want *APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("StatusCode = %d, want 401", apiErr.StatusCode)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 1 {
+		t.Errorf("server received %d request(s), want exactly 1 (no retry on 401)", got)
+	}
+}
+
+func TestReportInstalled_422IsNotRetried(t *testing.T) {
+	var requestCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"detail":"bad client_id"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "any-key", testBackoff())
+	_, err := c.ReportInstalled(context.Background(), testPayload())
+	if err == nil {
+		t.Fatal("expected an error for a 422 response")
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 1 {
+		t.Errorf("server received %d request(s), want exactly 1 (no retry on 422)", got)
+	}
+}
+
+func TestReportInstalled_500IsRetriedThenSucceeds(t *testing.T) {
+	var requestCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requestCount, 1)
+		if n < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"detail":"temporary"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"client_id":"test-pc","received":2,"added":[],"removed":[],"first_report":false}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "key", testBackoff(), WithMaxRetries(5))
+	result, err := c.ReportInstalled(context.Background(), testPayload())
+	if err != nil {
+		t.Fatalf("unexpected error after eventual success: %v", err)
+	}
+	if result.ClientID != "test-pc" {
+		t.Errorf("result = %+v, unexpected", result)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 3 {
+		t.Errorf("server received %d request(s), want exactly 3 (2 failures + 1 success)", got)
+	}
+}
+
+func TestReportInstalled_RetryCapIsRespected(t *testing.T) {
+	var requestCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"detail":"permanent-ish"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "key", testBackoff(), WithMaxRetries(3))
+	_, err := c.ReportInstalled(context.Background(), testPayload())
+	if err == nil {
+		t.Fatal("expected an error - server always returns 500")
+	}
+	want := int32(4) // 1 initial + 3 retries
+	if got := atomic.LoadInt32(&requestCount); got != want {
+		t.Errorf("server received %d request(s), want exactly %d (retry cap respected)", got, want)
+	}
+}
+
+// --- S4/S5 (WP 2.2 review, orchestrator decision): 429 is retryable with
+// the normal capped backoff (the one 4xx that heals), and any Retry-After
+// header is deliberately ignored rather than honored.
+
+func TestReportInstalled_429IsRetriedThenSucceeds(t *testing.T) {
+	var requestCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requestCount, 1)
+		if n < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"detail":"slow down"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"client_id":"test-pc","received":0,"added":[],"removed":[],"first_report":false}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "key", testBackoff(), WithMaxRetries(5))
+	result, err := c.ReportInstalled(context.Background(), testPayload())
+	if err != nil {
+		t.Fatalf("unexpected error after eventual success: %v", err)
+	}
+	if result.ClientID != "test-pc" {
+		t.Errorf("result = %+v, unexpected", result)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 3 {
+		t.Errorf("server received %d request(s), want exactly 3 (2x 429 + 1 success)", got)
+	}
+}
+
+func TestReportInstalled_RetryAfterHeaderIsIgnored(t *testing.T) {
+	var requestCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requestCount, 1)
+		if n == 1 {
+			// A huge Retry-After that this client must NOT honor - if it
+			// did, this test would need to wait ~an hour instead of
+			// completing almost instantly on the small testBackoff().
+			w.Header().Set("Retry-After", "3600")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"detail":"slow down"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"client_id":"test-pc","received":0,"added":[],"removed":[],"first_report":false}`))
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	c := New(srv.URL, "key", testBackoff(), WithMaxRetries(3))
+	_, err := c.ReportInstalled(context.Background(), testPayload())
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if elapsed > 1*time.Second {
+		t.Errorf("elapsed = %v, want well under 1s - the 3600s Retry-After header must be ignored", elapsed)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 2 {
+		t.Errorf("server received %d request(s), want exactly 2", got)
+	}
+}
+
+// --- alignment (WP 2.2 review nitpick): a 2xx response whose BODY fails
+// to be fully read gets the same non-retry treatment as a 2xx response
+// whose body fails to PARSE as JSON (TestReportInstalled_
+// MalformedResponseJSONIsNotRetried below) - both mean the server already
+// accepted the report. A non-2xx read error, by contrast, retries exactly
+// when the status code itself would have.
+
+func TestReportInstalled_2xxBodyReadErrorIsNotRetried(t *testing.T) {
+	var requestCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("ResponseWriter does not support hijacking")
+		}
+		conn, bufrw, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack failed: %v", err)
+		}
+		defer conn.Close()
+		// Advertise more bytes than are actually sent, then close - the
+		// client's body read sees an unexpected EOF partway through.
+		bufrw.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort")
+		bufrw.Flush()
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "key", testBackoff())
+	_, err := c.ReportInstalled(context.Background(), testPayload())
+	if err == nil {
+		t.Fatal("expected an error for a truncated 200 response body")
+	}
+	if !strings.Contains(err.Error(), "ACCEPTED") {
+		t.Errorf("error = %v, want it to say the report was likely still accepted", err)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 1 {
+		t.Errorf("server received %d request(s), want exactly 1 (2xx body-read error is not retried)", got)
+	}
+}
+
+func TestReportInstalled_5xxBodyReadErrorIsRetriedThenSucceeds(t *testing.T) {
+	var requestCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requestCount, 1)
+		if n == 1 {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("ResponseWriter does not support hijacking")
+			}
+			conn, bufrw, err := hj.Hijack()
+			if err != nil {
+				t.Fatalf("hijack failed: %v", err)
+			}
+			defer conn.Close()
+			bufrw.WriteString("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 100\r\n\r\nshort")
+			bufrw.Flush()
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"client_id":"test-pc","received":0,"added":[],"removed":[],"first_report":false}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "key", testBackoff(), WithMaxRetries(2))
+	result, err := c.ReportInstalled(context.Background(), testPayload())
+	if err != nil {
+		t.Fatalf("unexpected error after eventual success: %v", err)
+	}
+	if result.ClientID != "test-pc" {
+		t.Errorf("result = %+v, unexpected", result)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 2 {
+		t.Errorf("server received %d request(s), want exactly 2 (1 failed read + 1 success)", got)
+	}
+}
+
+// --- S2 (WP 2.2 review): the backoff sleep itself must be interruptible
+// by ctx cancellation mid-sleep, not just checked before it starts.
+
+// maxInt63n is a randSource fake that always returns the largest value
+// backoffDelay's rng.Int63n(n) call could legally return (n-1) - i.e. it
+// always answers "the top of the range", making backoffDelay
+// deterministically return its full upper bound (== maxDelay, once
+// baseDelay is also set to maxDelay so the cap is reached on attempt 1).
+//
+// This does NOT wrap a rand.Source: a fixed/non-random Source under a
+// real *rand.Rand would make Int63n's internal modulo-bias rejection-
+// sampling loop spin FOREVER (confirmed empirically while writing this
+// test - it hung the whole suite) trying to draw an in-range value from a
+// Source that always returns the same out-of-range constant. Implementing
+// randSource's Int63n directly sidesteps that loop entirely.
+type maxInt63n struct{}
+
+func (maxInt63n) Int63n(n int64) int64 {
+	if n <= 0 {
+		return 0
+	}
+	return n - 1
+}
+
+func TestReportInstalled_CancelDuringBackoffSleepReturnsQuickly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError) // always retryable
+		_, _ = w.Write([]byte(`{"detail":"down"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "key",
+		WithBackoff(2*time.Second, 2*time.Second), // deterministically-forced delay, see maxInt63n
+		WithMaxRetries(5),
+		withRand(maxInt63n{}),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := c.ReportInstalled(ctx, testPayload())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error (context canceled)")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want it to wrap context.Canceled", err)
+	}
+	if elapsed >= 100*time.Millisecond {
+		t.Fatalf("elapsed = %v, want < 100ms - the 2s backoff sleep must be interrupted "+
+			"by ctx cancellation, not slept out in full", elapsed)
+	}
+}
+
+func TestReportInstalled_MalformedResponseJSONIsNotRetried(t *testing.T) {
+	var requestCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`not json at all`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "key", testBackoff())
+	_, err := c.ReportInstalled(context.Background(), testPayload())
+	if err == nil {
+		t.Fatal("expected an error for a malformed 200 response body")
+	}
+	if !strings.Contains(err.Error(), "not valid JSON") {
+		t.Errorf("error = %v, want it to mention invalid JSON", err)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 1 {
+		t.Errorf("server received %d request(s), want exactly 1 (a 2xx is never retried)", got)
+	}
+}
+
+func TestReportInstalled_TimeoutIsRetried(t *testing.T) {
+	var requestCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		time.Sleep(50 * time.Millisecond) // longer than the client's timeout below
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"client_id":"test-pc","received":0,"added":[],"removed":[],"first_report":false}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "key", testBackoff(), WithMaxRetries(2), WithTimeout(5*time.Millisecond))
+	_, err := c.ReportInstalled(context.Background(), testPayload())
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	want := int32(3) // 1 initial + 2 retries, every attempt times out
+	if got := atomic.LoadInt32(&requestCount); got != want {
+		t.Errorf("server received %d request(s), want exactly %d", got, want)
+	}
+}
+
+// TestReportInstalled_ConnectionRefusedIsRetried proves a real connection
+// error (nothing listening on the target port) is retried up to the cap.
+// A custom DialContext counts dial attempts against the real OS network
+// stack (not a fake transport) while still being fully deterministic: a
+// closed listener's port refuses connections immediately (no SYN-timeout
+// wait), so this needs no goroutine synchronization or port-timing luck.
+func TestReportInstalled_ConnectionRefusedIsRetried(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve a port: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close() // now nothing is listening on addr -> connections are refused
+
+	var dialCount int32
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	hc := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+				atomic.AddInt32(&dialCount, 1)
+				return dialer.DialContext(ctx, network, address)
+			},
+		},
+	}
+
+	c := New("http://"+addr, "key", testBackoff(), WithMaxRetries(2), WithHTTPClient(hc))
+	_, err = c.ReportInstalled(context.Background(), testPayload())
+	if err == nil {
+		t.Fatal("expected a connection error")
+	}
+	want := int32(3) // 1 initial + 2 retries
+	if got := atomic.LoadInt32(&dialCount); got != want {
+		t.Errorf("dial attempts = %d, want exactly %d (connection-refused retried up to the cap)", got, want)
+	}
+}
+
+func TestBackoffDelay_BoundedByMaxDelay(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	base := 10 * time.Millisecond
+	max := 100 * time.Millisecond
+	for attempt := 1; attempt <= 40; attempt++ {
+		d := backoffDelay(attempt, base, max, rng)
+		if d < 0 || d > max {
+			t.Fatalf("attempt %d: backoffDelay = %v, want in [0, %v]", attempt, d, max)
+		}
+	}
+}
+
+func TestBackoffDelay_GrowsWithAttemptBeforeHittingCap(t *testing.T) {
+	// Not a statistical test - just checks the UPPER BOUND used for the
+	// jitter grows with attempt number, by pinning the rng to always
+	// return its max (Int63n(n) with n=1 degenerates, so instead check
+	// across many samples that later attempts occasionally produce a
+	// larger delay than early ones ever do while under the cap).
+	rng := rand.New(rand.NewSource(42))
+	base := 1 * time.Millisecond
+	max := 1 * time.Second
+
+	var maxAtAttempt1, maxAtAttempt10 time.Duration
+	for i := 0; i < 200; i++ {
+		if d := backoffDelay(1, base, max, rng); d > maxAtAttempt1 {
+			maxAtAttempt1 = d
+		}
+		if d := backoffDelay(10, base, max, rng); d > maxAtAttempt10 {
+			maxAtAttempt10 = d
+		}
+	}
+	if maxAtAttempt10 <= maxAtAttempt1 {
+		t.Errorf("expected attempt 10's observed max delay (%v) > attempt 1's (%v)", maxAtAttempt10, maxAtAttempt1)
+	}
+}
+
+func TestBackoffDelay_HugeAttemptDoesNotOverflowOrPanic(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	base := 500 * time.Millisecond
+	max := 30 * time.Second
+	d := backoffDelay(1_000_000, base, max, rng)
+	if d < 0 || d > max {
+		t.Fatalf("backoffDelay with a huge attempt count = %v, want in [0, %v]", d, max)
+	}
+}

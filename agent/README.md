@@ -7,8 +7,13 @@ decisions live in vault-api.
 
 Status: work in progress. The ACF/VDF parser has been ported to Go
 (WP 2.1b, `go/`) and is judged against this Python package's test corpus —
-see "Go port (production)" below. No HTTP reporter yet (WP 2.2), no
-hosts-file mode (WP 2.3), no Linux/SteamOS variant (WP 2.5, see ADR-0002).
+see "Go port (production)" below. The HTTP reporter and the `vault-agent`
+CLI now exist (WP 2.2, `go/report`, `go/client`, `go/agentconfig`,
+`go/cmd/vault-agent`) — see "vault-agent CLI (WP 2.2)" below. No
+hosts-file mode yet (WP 2.3), no Linux/SteamOS discovery variant (WP 2.5,
+see ADR-0002; the binary already cross-compiles for linux/amd64 and
+linux/arm64 and runs, but library-discovery paths beyond the OS-generic
+default are WP 2.5's job).
 
 **Executable specification (ADR-0005):** vault-agent ships as a Go binary
 in production; this Python package and its test suite are the pinned
@@ -51,9 +56,22 @@ agent/go/
 │   ├── appmanifest_test.go              # ported from test_appmanifest.py
 │   ├── libraryfolders_test.go            # ported from test_libraryfolders.py
 │   └── discover_test.go                   # ported from test_discover.py
-└── cmd/probe/main.go          # throwaway CLI: DiscoverInstalled against a real
-                                # library_root, for manual real-machine validation —
-                                # NOT the production reporter (that's WP 2.2)
+├── report/
+│   ├── report.go               # BuildReport, ValidateClientID (mirrors the server's rules)
+│   └── report_test.go
+├── client/
+│   ├── client.go                # HTTP POST /v1/agent/installed, retry + backoff + jitter
+│   └── client_test.go            # httptest.Server: success/401/500-then-ok/timeout/
+│                                  # malformed-JSON/connection-refused/retry-cap cases
+├── agentconfig/
+│   ├── config.go                 # flags+env parsing, defaults, validation (WP 2.2)
+│   └── config_test.go
+├── cmd/
+│   ├── probe/main.go          # throwaway CLI: DiscoverInstalled against a real
+│   │                           # library_root, for manual real-machine validation —
+│   │                           # NOT the production reporter
+│   └── vault-agent/main.go     # THE production CLI (WP 2.2): `report` [--loop]
+│       └── main_test.go         # exit codes, one-shot success/failure, API-key redaction
 ```
 
 **Building and testing (WSL2 — no Windows Go toolchain in this repo's dev
@@ -64,17 +82,43 @@ wsl bash -c "cd /mnt/c/claude-dev/SteamVault/agent/go && go build ./... && go ve
 ```
 
 **Cross-compile matrix** (static binaries, no CGO, matching the three
-ADR-0005 targets plus a Linux/arm64 SteamOS check):
+ADR-0005 targets plus a Linux/arm64 SteamOS check). `CGO_ENABLED=0` is
+REQUIRED on every line, not a cosmetic default: building `linux/amd64`
+*from* the linux/amd64 WSL host without it silently produces a
+dynamically-linked binary (Go enables cgo automatically whenever
+GOOS/GOARCH match the build host and a C toolchain is present) - `file`
+reported it as "dynamically linked" against `libc.so.6`, directly
+contradicting ADR-0005's "no runtime dependencies" static-binary premise
+(WP 2.2 review finding S3). The other two targets (`windows/amd64`,
+`linux/arm64`) don't have a host C toolchain configured for them so they
+came out static either way, but `CGO_ENABLED=0` is set explicitly on all
+three so this doesn't depend on which machine happens to run the build:
 
 ```bash
-GOOS=windows GOARCH=amd64 go build -o /tmp/probe-windows-amd64.exe ./cmd/probe
-GOOS=linux   GOARCH=amd64 go build -o /tmp/probe-linux-amd64      ./cmd/probe
-GOOS=linux   GOARCH=arm64 go build -o /tmp/probe-linux-arm64      ./cmd/probe
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o /tmp/vault-agent-windows-amd64.exe ./cmd/vault-agent
+CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -o /tmp/vault-agent-linux-amd64      ./cmd/vault-agent
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -o /tmp/vault-agent-linux-arm64      ./cmd/vault-agent
 ```
 
-All three build clean (verified during WP 2.1b). Build output is never
-committed — `agent/go/*.exe`, `agent/go/probe`, `agent/go/vault-agent(.exe)`
-are gitignored.
+All three build clean for both `cmd/probe` and `cmd/vault-agent` (verified
+during WP 2.1b and WP 2.2). **Verified static, not just assumed** (WP
+2.2): `file` reports the `linux/amd64` output as "statically linked" and
+`ldd` refuses it ("not a dynamic executable") only with `CGO_ENABLED=0`
+set - the same build without it links against `libc.so.6` per the
+paragraph above. Build output is never committed —
+`agent/go/*.exe`, `agent/go/probe`, `agent/go/vault-agent(.exe)` are
+gitignored.
+
+**Live integration check (WP 2.2):** the real vault-api (loopback,
+throwaway SQLite DB) was started and the built Windows `vault-agent.exe`
+was run against the real `C:\steam` library (read-only): first run —
+`200`, `first_report=true`, `received=15` (matching the same 15 apps
+`cmd/probe`/WP 2.1b found); second run — `added=[]`, `removed=[]`,
+`first_report=false`; a run with a deliberately wrong `--api-key` returned
+`401` in under 100ms (no retry storm — 4xx is never retried) with exit
+code 1. Server-side logs confirmed the matching
+`vault_api.agent_reports` audit lines. No real app names/sizes are
+reproduced here (fixture/privacy policy, same as WP 2.1b).
 
 **Key porting decisions:**
 
@@ -216,6 +260,150 @@ wouldn't survive contact with either of them:
    observed real-world impact; documented so the divergence is a named,
    deliberate fact rather than an implicit (and wrong) "identical
    behavior" assumption.
+
+## vault-agent CLI (WP 2.2)
+
+The production entrypoint: `go/cmd/vault-agent` discovers the local Steam
+library (`go/acf`) and reports the FULL installed-app-id list to vault-api
+(`go/report` builds and locally validates the payload, `go/client` sends
+it with retry). Deliberately dumb (plan §3): no control logic runs here —
+scheduling, prefill decisions, and removal handling all live in vault-api.
+
+Out of scope for this package (see the Status line above and the WP 2.2
+brief): hosts-file mode (WP 2.3), a Windows Scheduled Task installer script
+(WP 2.6), a Linux/SteamOS-specific library discovery variant and systemd
+packaging (WP 2.5 — the binary runs on linux/amd64 and linux/arm64 today
+with the OS-generic `~/.local/share/Steam` default, but that's this
+package's default, not WP 2.5's dedicated variant).
+
+### Usage
+
+```
+vault-agent report                one-shot: discover -> report -> print result -> exit
+vault-agent report --loop         keep running, reporting every --interval
+                                    (jittered ±10%) until SIGTERM/CTRL-C
+```
+
+One-shot is the PRIMARY mode (plan §7: a Windows Scheduled Task provides
+the timing — see WP 2.6 for the installer). `--loop` exists for a systemd
+user service (Phase 2.5's Linux/SteamOS packaging), where the service
+itself needs to stay resident and do its own timing.
+
+### Configuration: flags with an environment-variable fallback
+
+No config FILE format (no TOML, no hand-rolled `KEY=VALUE` parser) — the
+brief asked for "the simplest option that satisfies: one URL + API key",
+and flags-with-env-fallback needs no parser at all. A flag, if given, wins
+over its env var equivalent.
+
+| Flag             | Env var                     | Required | Default                                              |
+|------------------|------------------------------|----------|-------------------------------------------------------|
+| `--server-url`   | `VAULT_AGENT_SERVER_URL`     | yes      | —                                                       |
+| `--api-key`      | `VAULT_AGENT_API_KEY`        | yes      | — (prefer the env var: a flag value is visible in process listings / Task Manager) |
+| `--client-id`    | `VAULT_AGENT_CLIENT_ID`      | no       | sanitized local hostname (see below)                    |
+| `--library-root` | `VAULT_AGENT_LIBRARY_ROOT`   | no       | `C:\Program Files (x86)\Steam` (Windows) / `~/.local/share/Steam` (else) |
+| `--interval`     | `VAULT_AGENT_REPORT_INTERVAL`| no       | `30m` (only consulted with `--loop`)                    |
+| `--loop`         | —                            | no       | off (one-shot)                                          |
+
+Why no config file: a file holding `VAULT_AGENT_API_KEY` needs its own
+permission story and its own "never commit this" warning that this project
+would then have to invent and document — whatever LAUNCHES the agent
+(a Windows Scheduled Task's own environment, a systemd unit's
+`Environment=`/`EnvironmentFile=`) already has that story solved. An env
+var also never appears in a process listing the way a CLI flag would.
+
+**`--server-url` validation:** must parse as an absolute `http://` or
+`https://` URL with a host; a trailing slash is stripped. **`--client-id`**
+is validated with the exact same rules vault-api enforces server-side
+(`go/report.ValidateClientID`, mirroring
+`vault_api.routers.agent.InstalledReportRequest`'s validator) — 1-64
+characters, no surrounding whitespace, no control characters, not `.` or
+`..` — so a bad value is rejected locally with a clear message instead of
+spending a round trip on the 422 the server would return anyway.
+**`--interval`** must be a positive Go duration (`"30m"`, `"1h"`, ...).
+
+**Default `--client-id`:** the local hostname (`os.Hostname()`), trimmed,
+with any control character replaced by `-`, truncated to 64 characters. If
+`os.Hostname()` fails, or the sanitized result is empty / `.` / `..`,
+config parsing fails loudly with an actionable message rather than
+silently falling back to some placeholder value — set `--client-id`
+explicitly in that case.
+
+**Missing/invalid configuration fails loudly** (`go/agentconfig`): every
+problem found (not just the first one) is collected into one error report,
+printed to stderr, and the process exits **2** without attempting any
+discovery or network call.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0`  | the report was sent and accepted (one-shot); or `--loop` exited cleanly on SIGTERM/CTRL-C; or `-h`/`--help` was requested |
+| `1`  | a runtime failure: local report validation failed (should be unreachable in practice — acf's own parser already enforces the appid grammar — but checked, not assumed), or the HTTP client gave up (network error after retries, `401`, `422`, malformed response, ...) |
+| `2`  | a configuration/usage error (missing/invalid flag or env var, no subcommand given) |
+
+In `--loop` mode, a failed report is logged and the loop keeps going —
+exit codes 0/1 only describe one-shot runs and how `--loop` itself
+terminates, never an individual iteration inside the loop (plan §7:
+"tolerate VPN/network outages" means staying up through a bad interval,
+not exiting on one).
+
+### What gets sent (ADR-0002) and the privacy boundary
+
+Every `report` run sends exactly two things to **your own vault-api, over
+your own network** (Tailscale/VPN/your reverse proxy — see plan §10; never
+to any third party, never to Valve): the **complete** list of currently
+installed Steam app ids (`go/acf.DiscoverInstalled` → `go/report.BuildReport`
+— filtered to `StateFlags & 4`, de-duplicated, sorted), and the configured
+`client_id`. Nothing else about the machine — no game names, no file
+paths, no usernames, no Steam account/session identifiers — leaves it;
+`InstalledApp.Name` is used only for local log/error messages
+(`go/report`'s validation errors), never included in the wire payload
+(`report.Payload` has exactly two JSON fields: `client_id`, `appids`).
+
+The agent is **stateless and dumb by design**: it does not remember what
+it reported last time, does not compute what changed, and does not decide
+anything. vault-api stores each report as a snapshot and diffs it against
+that client's previous one to derive `added`/`removed` — see
+`api/README.md`'s "Agent reports" section for the full server-side
+contract, and ADR-0002 for why removals are surfaced there but never acted
+on automatically.
+
+### Retry behavior (`go/client`)
+
+Per-attempt timeout defaults to 15s; connection errors (refused, reset,
+DNS failure, timeout), `5xx` responses, **and `429` (Too Many Requests)**
+are retried with capped exponential backoff + jitter (default: up to 5
+retries, 500ms base, 30s cap). `429` is the one `4xx` that heals by
+waiting and resending — plan §9 recommends operators put rate limiting in
+front of vault-api via their reverse proxy, so a real deployment can
+plausibly return this. Any `Retry-After` header on a `429` is **deliberately
+ignored** rather than parsed and honored precisely (plan §9's simplicity
+principle: the backoff already waits between attempts, and this is a small
+periodic status report, not high-volume traffic a precise wait would
+meaningfully protect a server from) — pinned by
+`TestReportInstalled_RetryAfterHeaderIsIgnored`, which sets a 3600s
+`Retry-After` and asserts the retry still happens almost immediately.
+Every OTHER `4xx` response (`401` bad key, `422` rejected body) is
+**never** retried — resending the identical request cannot fix either, and
+hammering the server on a genuine auth/validation failure would be
+actively harmful. The backoff sleep itself is cancellable mid-wait (not
+just checked before it starts) — canceling the context passed to
+`ReportInstalled` (e.g. on SIGTERM in `--loop` mode) interrupts a pending
+backoff sleep immediately rather than sitting through it.
+
+**Worst-case retry wall time** with the defaults above: 6 total attempts
+(1 initial + 5 retries), each up to the 15s per-attempt timeout, plus the
+5 backoff sleeps between them at their upper bound
+(500ms+1s+2s+4s+8s = 15.5s) ⇒ 6×15s + 15.5s ≈ **105.5s**. `cmd/vault-agent`
+budgets **2 minutes** per report specifically to comfortably clear this
+worst case without an operator needing to reason about the arithmetic
+themselves.
+
+TLS uses the OS/system root CA pool; `http_proxy`/`https_proxy`/`no_proxy`
+environment variables are honored by default (`http.ProxyFromEnvironment`)
+— set them in the environment vault-agent runs under if reaching the
+server needs a proxy.
 
 ## What's here
 

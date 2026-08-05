@@ -1,0 +1,285 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"log"
+	"math/rand"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/Riviera822/steamvault/agent/agentconfig"
+	"github.com/Riviera822/steamvault/agent/client"
+)
+
+func TestRun_NoSubcommandIsUsageError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run(nil, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "usage:") {
+		t.Errorf("stderr = %q, want a usage message", stderr.String())
+	}
+}
+
+func TestRun_UnknownSubcommandIsUsageError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"bogus"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+}
+
+func TestRun_MissingRequiredConfigIsUsageError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	// No --server-url, no --api-key: agentconfig.Parse must fail loudly.
+	code := run([]string{"report", "--client-id", "pc"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "config error") {
+		t.Errorf("stderr = %q, want it to mention a config error", stderr.String())
+	}
+}
+
+func TestRun_HelpFlagExitsZero(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"report", "-h"}, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 for -h", code)
+	}
+}
+
+// TestRun_HelpNeverLeaksAPIKeyFromEnv is the end-to-end version of B1's
+// fix at the level real users invoke: agentconfig.Parse is called here
+// via run()'s os.Getenv, not injected directly, so this proves the whole
+// wiring (not just the agentconfig package in isolation) never echoes
+// VAULT_AGENT_API_KEY into -h's usage text.
+func TestRun_HelpNeverLeaksAPIKeyFromEnv(t *testing.T) {
+	t.Setenv("VAULT_AGENT_API_KEY", "CANARY-MAIN-HELP-LEAK")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"report", "-h"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 for -h", code)
+	}
+	if strings.Contains(stdout.String(), "CANARY-MAIN-HELP-LEAK") || strings.Contains(stderr.String(), "CANARY-MAIN-HELP-LEAK") {
+		t.Fatalf("API key leaked: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+// TestRun_UnknownFlagNeverLeaksAPIKeyFromEnv is the same end-to-end proof
+// for the OTHER trigger flag.Usage() prints on: an unrecognized flag,
+// which fires regardless of whether --api-key/env was even the flag in
+// question.
+func TestRun_UnknownFlagNeverLeaksAPIKeyFromEnv(t *testing.T) {
+	t.Setenv("VAULT_AGENT_API_KEY", "CANARY-MAIN-UNKNOWNFLAG-LEAK")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"report", "--this-flag-does-not-exist"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 for an unrecognized flag", code)
+	}
+	if strings.Contains(stdout.String(), "CANARY-MAIN-UNKNOWNFLAG-LEAK") || strings.Contains(stderr.String(), "CANARY-MAIN-UNKNOWNFLAG-LEAK") {
+		t.Fatalf("API key leaked: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestRun_OneShotSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"client_id":"test-pc","received":0,"added":[],"removed":[],"first_report":true}`))
+	}))
+	defer srv.Close()
+
+	libraryRoot := t.TempDir() // empty: no steamapps dir -> zero installed apps, still a legitimate report
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"report",
+		"--server-url", srv.URL,
+		"--api-key", "test-key",
+		"--client-id", "test-pc",
+		"--library-root", libraryRoot,
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0. stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "reported") {
+		t.Errorf("stdout = %q, want it to mention the report result", stdout.String())
+	}
+}
+
+func TestRun_OneShotFailureOn401(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"detail":"bad key"}`))
+	}))
+	defer srv.Close()
+
+	libraryRoot := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"report",
+		"--server-url", srv.URL,
+		"--api-key", "wrong-key",
+		"--client-id", "test-pc",
+		"--library-root", libraryRoot,
+	}, &stdout, &stderr)
+
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1 for a rejected report", code)
+	}
+}
+
+// TestRun_APIKeyNeverAppearsInLoggedOutput is the redaction proof the WP
+// 2.2 brief asks for explicitly ("api key redacted everywhere ... test
+// it"): run a full one-shot report with a distinctive API key and assert
+// that exact value never appears anywhere in stdout or stderr, in any
+// code path (startup log line, request, response handling).
+func TestRun_APIKeyNeverAppearsInLoggedOutput(t *testing.T) {
+	const secretAPIKey = "MY-VERY-SECRET-REDACTION-CANARY-VALUE"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Api-Key") != secretAPIKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"detail":"bad key"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"client_id":"test-pc","received":0,"added":[],"removed":[],"first_report":true}`))
+	}))
+	defer srv.Close()
+
+	libraryRoot := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"report",
+		"--server-url", srv.URL,
+		"--api-key", secretAPIKey,
+		"--client-id", "test-pc",
+		"--library-root", libraryRoot,
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (the server DOES receive the real key over the wire - only logs must never show it). stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), secretAPIKey) {
+		t.Fatalf("API key leaked into stdout: %s", stdout.String())
+	}
+	if strings.Contains(stderr.String(), secretAPIKey) {
+		t.Fatalf("API key leaked into stderr (log output): %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "<redacted>") {
+		t.Errorf("stderr = %q, want the startup log line to show the redaction placeholder", stderr.String())
+	}
+}
+
+func TestRun_ConfigErrorDoesNotLeakAPIKey(t *testing.T) {
+	const secretAPIKey = "ANOTHER-SECRET-CANARY"
+	var stdout, stderr bytes.Buffer
+	// Missing --server-url -> config error path, before any HTTP call.
+	code := run([]string{"report", "--api-key", secretAPIKey, "--client-id", ".."}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	if strings.Contains(stderr.String(), secretAPIKey) {
+		t.Fatalf("API key leaked into the config-error log line: %s", stderr.String())
+	}
+}
+
+func TestJitteredInterval_StaysWithinTenPercent(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	interval := 30 * time.Minute
+	lower := interval - interval/10
+	upper := interval + interval/10
+	for i := 0; i < 200; i++ {
+		got := jitteredInterval(interval, rng)
+		if got < lower || got > upper {
+			t.Fatalf("jitteredInterval() = %v, want within [%v, %v]", got, lower, upper)
+		}
+	}
+}
+
+func TestJitteredInterval_ZeroStaysZero(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	if got := jitteredInterval(0, rng); got != 0 {
+		t.Errorf("jitteredInterval(0) = %v, want 0", got)
+	}
+}
+
+// TestRunLoop_ContinuesAfterFailureAndExitsCleanlyOnCancel pins the two
+// loop-mode behaviors the WP 2.2 review asked for a dedicated test on:
+// (1) a failed report does NOT stop the loop - plan §7 "tolerate VPN/
+// network outages" means staying up through a bad interval; (2) canceling
+// ctx (main wires this from SIGTERM/CTRL-C via signal.NotifyContext) makes
+// runLoop return promptly and log the clean-shutdown line.
+//
+// Driving runLoop directly with an ordinary cancelable context (rather
+// than sending the test process a real OS SIGTERM) is deliberate: it is
+// deterministic, portable, and doesn't risk the test binary's own
+// process-wide signal handling - see runLoop's doc comment.
+func TestRunLoop_ContinuesAfterFailureAndExitsCleanlyOnCancel(t *testing.T) {
+	var requestCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requestCount, 1)
+		if n == 1 {
+			// First report fails - the loop must not give up because of it.
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"detail":"temporary"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"client_id":"pc","received":0,"added":[],"removed":[],"first_report":true}`))
+	}))
+	defer srv.Close()
+
+	cfg := agentconfig.Config{
+		ServerURL:      srv.URL,
+		APIKey:         "k",
+		ClientID:       "pc",
+		LibraryRoot:    t.TempDir(), // empty: zero installed apps is a legitimate report
+		ReportInterval: 10 * time.Millisecond,
+	}
+	// MaxRetries(0): each reportOnce attempt fails/succeeds immediately -
+	// the LOOP's own repetition (not the client's internal retry) is what
+	// this test proves recovers from the first failure.
+	httpClient := client.New(cfg.ServerURL, cfg.APIKey, client.WithMaxRetries(0))
+
+	var stdout, stderr bytes.Buffer
+	logger := log.New(&stderr, "", 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runLoop(ctx, logger, &stdout, cfg, httpClient)
+		close(done)
+	}()
+
+	// Let the loop run through the first (failing) report and at least
+	// one subsequent (succeeding) one before asking it to stop.
+	time.Sleep(80 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runLoop did not return within 2s of ctx being canceled")
+	}
+
+	if got := atomic.LoadInt32(&requestCount); got < 2 {
+		t.Fatalf("server received %d request(s), want at least 2 (a failure followed by the loop continuing)", got)
+	}
+	if !strings.Contains(stdout.String(), "reported") {
+		t.Errorf("stdout = %q, want at least one successful report despite the first failure", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "shutdown signal received, exiting cleanly") {
+		t.Errorf("stderr = %q, want the clean-shutdown log line", stderr.String())
+	}
+}
