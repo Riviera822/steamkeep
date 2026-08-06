@@ -224,6 +224,10 @@ Steam-only, prefill-first design can solve better:
 | POST | /v1/prefill | Body: `{appids: [..]}` → create jobs (response marks deduplicated entries) |
 | GET | /v1/jobs | Recent jobs, newest first (app polling UI) |
 | GET | /v1/jobs/{id} | Job status (for app polling) |
+| DELETE | /v1/jobs/{id} | Cancel a queued or running job (Phase 3, user decision 2026-08-06) |
+| POST | /v1/jobs/{id}/pause | Pause a running download — terminates the subprocess; cached chunks make resume cheap |
+| POST | /v1/jobs/{id}/resume | Resume: re-runs the prefill; already-cached chunks replay as disk-speed HITs |
+| GET | /v1/schedule | Scheduler state: window, interval, last/next sweep |
 | DELETE | /v1/cache/{appid} | Delete a game from the cache |
 | POST | /v1/cache/{appid}/gc | Garbage-collect orphaned chunks (manifest diff) |
 | GET | /v1/cache/summary | Total usage, top consumers, unmapped depots, free space |
@@ -352,6 +356,10 @@ for users who expose the API differently.
 - [ ] Job outcome honesty: a prefill run that observed zero depots and has
       zero cached bytes must not end 'done' (WP 1.7 finding: SteamPrefill
       exits 0 for unowned apps → green badge for a never-cached game)
+- [ ] Job control: pause/resume/cancel (`DELETE /v1/jobs/{id}`,
+      pause = terminate the SteamPrefill subprocess, resume = re-run —
+      already-cached chunks replay as disk-speed HITs, so the cache
+      itself is the progress store; user feature decision 2026-08-06)
 - [ ] Manifest comparison (stale detection)
 - [ ] Configurable cron window (e.g. 09:00–17:00, every 3 h)
 - [ ] Manifest-based garbage collection (`/v1/cache/{appid}/gc`, optional
