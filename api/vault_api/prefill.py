@@ -27,18 +27,28 @@ writing this module — NOT assumed from docs:
   listed exactly that one app, confirming the file is the selection store.
 - So the non-interactive way to prefill a specific app id is: **write
   ``Config/selectedAppsToPrefill.json`` = ``[appid]``, then run
-  ``SteamPrefill.exe prefill --force --no-ansi``.** That is what this module
+  ``SteamPrefill.exe prefill [--force] --no-ansi``.** That is what this module
   does. Consequence, documented in api/README.md: vault-api OWNS that file —
   a manual ``select-apps`` selection on the same SteamPrefill installation
   gets overwritten on the next job.
-- ``--force`` is deliberate. Without it SteamPrefill skips apps its own
+- ``--force`` is deliberate, but (WP 3.4, ADR-0006 decision 2) no longer
+  unconditional. Without it SteamPrefill skips apps its own
   ``Config/successfullyDownloadedDepots.json`` considers up to date — state
   that knows nothing about vault-api deleting an app from the cache
   (``DELETE /v1/cache/{appid}``, WP 1.6), so a non-forced run would silently
   refuse to re-fill a game we just deleted. Chunks still present on disk are
   re-requested and served by vault-core as local HITs, so the cost of
   ``--force`` is disk speed, not internet bandwidth (Phase 0 measured
-  HIT ~120x faster than MISS, ADR-0001).
+  HIT ~120x faster than MISS, ADR-0001) — which is why it remains the right
+  tool for first fills and post-deletion refills specifically, rather than
+  something to avoid altogether. What changed is *when* it is applied: a
+  per-app ``apps.needs_force`` flag (schema v5) now reserves it for exactly
+  those two cases, so a routine "is this app still current?" run (the
+  staleness check ADR-0006 decision 1 is built around) is a genuinely cheap
+  non-forced no-op instead of always re-touching every chunk on disk. See
+  ``worker.py`` for who reads/clears the flag and ``deletion.py`` for who sets
+  it, and api/README.md's "needs_force lifecycle" table for the full state
+  machine.
 - ``--no-ansi`` is passed but is **not sufficient**: Spectre.Console's
   exception renderer still emits SGR escapes (observed). Captured output is
   therefore stripped of ANSI escapes here before being stored.
@@ -206,6 +216,7 @@ def run_prefill(
     steamprefill_path: str,
     timeout_seconds: int,
     should_abort: Callable[[], bool] | None = None,
+    use_force: bool = True,
 ) -> PrefillResult:
     """Run SteamPrefill for one appid. Never raises for a prefill failure.
 
@@ -213,6 +224,15 @@ def run_prefill(
     shutting down) the subprocess is terminated and the result is a failure with
     reason ``'aborted'``. Without that, ``docker stop`` would hang until the
     prefill finished or the runtime SIGKILLed the container.
+
+    ``use_force`` (WP 3.4, ADR-0006 decision 2) controls whether ``--force`` is
+    included in the argv at all. Defaults to ``True`` — the pre-WP-3.4
+    behavior this module always had — for any direct caller that doesn't care;
+    ``worker.py`` always passes it explicitly, computed from the app's
+    ``apps.needs_force`` flag (``jobs.get_app_needs_force``). See the module
+    docstring's "``--force`` is deliberate" note for *why* forcing exists at
+    all — that reasoning is unchanged, only *when* it is applied is now
+    conditional instead of unconditional.
     """
     executable, error = resolve_executable(steamprefill_path)
     if executable is None:
@@ -222,7 +242,10 @@ def run_prefill(
     if error is not None:
         return PrefillResult(False, "setup", None, error)
 
-    command = [executable, "prefill", "--force", "--no-ansi"]
+    command = [executable, "prefill"]
+    if use_force:
+        command.append("--force")
+    command.append("--no-ansi")
     workdir = os.path.dirname(os.path.abspath(executable))
 
     # Output goes to a temp FILE rather than a pipe on purpose: a prefill run

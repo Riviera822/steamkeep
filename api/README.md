@@ -120,7 +120,7 @@ is a `manifests` sibling of `VAULT_DB_PATH`'s directory (`config._default_manife
 — consistent with a single persistent volume holding both the database and
 the archive, same caveat about `deploy/` wiring.
 
-## Database schema (v4)
+## Database schema (v5)
 
 Created idempotently at startup by `vault_api/db.py::init_db` (safe to call
 on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
@@ -129,7 +129,7 @@ on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
 | Table            | Columns                                                                                   | Purpose |
 |------------------|--------------------------------------------------------------------------------------------|---------|
 | `schema_version` | `version`                                                                                   | Single-row marker for future migrations |
-| `apps`           | `appid` (PK), `name`, `status`, `last_prefill_at`, `last_manifest_check`                    | One row per tracked Steam app |
+| `apps`           | `appid` (PK), `name`, `status`, `last_prefill_at`, `last_manifest_check`, `needs_force`     | One row per tracked Steam app. `needs_force` (**v5**, WP 3.4) is ADR-0006 decision 2's per-app flag — see "needs_force" below |
 | `depot_app_map`  | `depotid`, `appid`, PK `(depotid, appid)`                                                   | Depot→app mapping; a depot can map to multiple apps (shared depots, plan §4) |
 | `jobs`           | `id` (PK autoincrement), `appid`, `type`, `status`, `created_at`, `started_at`, `finished_at`, `log_excerpt`, `updated`, `up_to_date`, `summary_parse_ok` | Prefill/GC job queue (plan §3, §6). The last three (**v4**, WP 3.3) are SteamPrefill's own summary-table counters — see "Job outcome honesty" above |
 | `agent_reports`  | `client_id`, `reported_at`, `appids` (JSON array of ints)                                    | One row per agent report — a full installed-app-ID snapshot at that timestamp (ADR-0002: the agent is stateless/dumb, always reports the complete list). vault-api derives additions/removals by diffing the two most recent rows per `client_id` |
@@ -172,6 +172,18 @@ of `_DDL` runs; a brand-new database gets the columns directly from `_DDL`'s
 `tests/test_db.py::test_init_db_upgrades_a_v3_database_to_v4_in_place` (a
 pre-existing job row survives with the new columns `NULL`, never a guessed
 value) and `..._idempotent_if_called_twice`.
+
+**v4 → v5 (WP 3.4) is the same situation, one column.** `apps.needs_force`
+(ADR-0006 decision 2) needs its own `db._add_missing_app_columns` step for
+the same reason: `CREATE TABLE IF NOT EXISTS apps` is a no-op against an
+existing pre-v5 `apps` table. Unlike the v4 columns, this one is
+`NOT NULL DEFAULT 1` — SQLite applies a constant `ALTER TABLE ... ADD COLUMN
+... DEFAULT` retroactively to existing rows, so an app that predates this
+migration starts at `needs_force=1` (forced), which costs at most one
+redundant `--force` run per app after the upgrade and is the safe side to
+err on for an app this code has no force-history for. Covered by
+`tests/test_db.py::test_init_db_upgrades_a_v4_database_to_v5_in_place` and
+`..._idempotent_if_called_twice`.
 
 **Ordering fix (WP 1.5 carry-over from the WP 1.4 review):** `init_db` now
 creates only the `schema_version` table, reads the stored version, and checks
@@ -266,7 +278,7 @@ clients rows are implemented so far.
 
 | Method | Endpoint                          | Purpose |
 |--------|-------------------------------------|---------|
-| GET    | `/v1/games`                        | All tracked apps: `appid`, `name`, `status`, `last_prefill_at`, `depot_count`, `size_bytes` (sum of the app's mapped depots' bytes on disk; `null` if unmapped or not yet cached — see "Per-game size calculation" below) |
+| GET    | `/v1/games`                        | All tracked apps: `appid`, `name`, `status`, `last_prefill_at`, `depot_count`, `size_bytes` (sum of the app's mapped depots' bytes on disk; `null` if unmapped or not yet cached — see "Per-game size calculation" below), `needs_force` (schema v5, WP 3.4 — whether the NEXT prefill will run with `--force`, see "needs_force" below) |
 | GET    | `/v1/games/{appid}`                | Detail for one app: same fields plus `depots` (list of `{depotid, shared, size_bytes}`); `404` for an unknown `appid` |
 | PUT    | `/v1/mapping/{depotid}`            | Body `{"appid": int, "app_name": str \| null}` — **additively** upsert one depot→app mapping fact (manual fallback, see below); `422` for `depotid <= 0`, `appid <= 0`, or an unrecognized body field |
 | GET    | `/v1/mapping`                      | Full depot→app mapping table: list of `{depotid, appid}` |
@@ -359,16 +371,20 @@ So the invocation vault-api uses is:
 
 ```
 write <exe dir>/Config/selectedAppsToPrefill.json  =  [<appid>]
-run   <exe> prefill --force --no-ansi     (cwd = exe dir, stdin = DEVNULL)
+run   <exe> prefill [--force] --no-ansi   (cwd = exe dir, stdin = DEVNULL)
 ```
 
-- **`--force` is deliberate.** Without it SteamPrefill skips apps its own
-  `Config/successfullyDownloadedDepots.json` thinks are up to date — state that
-  knows nothing about vault-api deleting an app from the cache
+- **`--force` is deliberate, but no longer unconditional (WP 3.4, ADR-0006
+  decision 2 — see "needs_force" below).** Without it SteamPrefill skips apps
+  its own `Config/successfullyDownloadedDepots.json` thinks are up to date —
+  state that knows nothing about vault-api deleting an app from the cache
   (`DELETE /v1/cache/{appid}`, WP 1.6), so a non-forced run would silently
   refuse to refill a game we just deleted. Chunks still on disk are re-requested
   and served by vault-core as local HITs, so the cost is disk speed, not
-  internet bandwidth (Phase 0: HIT ~120× faster than MISS, ADR-0001).
+  internet bandwidth (Phase 0: HIT ~120× faster than MISS, ADR-0001) — which is
+  why it stays the right tool for first fills and post-deletion refills
+  specifically, gated by the per-app `needs_force` flag, rather than something
+  to run on every job regardless of whether it's needed.
 - **`--no-ansi` is not sufficient** — Spectre.Console's exception renderer still
   emits SGR escapes (observed), so captured output is ANSI-stripped in code.
 - **vault-api OWNS `Config/selectedAppsToPrefill.json`** and overwrites it on
@@ -485,6 +501,81 @@ additive fields: `updated`, `up_to_date` (`int | null`), `summary_parse_ok`
 job, later; a failed/timed-out/aborted prefill; a job still queued/running).
 Schema v4 (see "Database schema" below) adds the three backing `jobs`
 columns.
+
+### needs_force — reserving `--force` for first fills and refills (WP 3.4, ADR-0006 decision 2)
+
+**The problem this closes:** `--force` used to be unconditional (see
+"SteamPrefill invocation" above) — every job re-touched every chunk on disk,
+even a routine "is this app still current?" check, which is exactly the cheap
+non-forced no-op ADR-0006 decision 1's staleness check is built around
+(~3 s, zero bytes, for an up-to-date app — measured, `docs/research/phase3-manifests.md`
+§1b). Passing `--force` unconditionally would make that check nowhere near as
+cheap for an app whose chunks are already large.
+
+**The fix:** a per-app `apps.needs_force` flag (schema v5) decides, at the
+start of every job, whether `run_prefill` is called with `use_force=True`.
+`jobs.get_app_needs_force` reads it; `jobs.clear_needs_force_if_unchanged`
+(the worker's end-of-job clear, see "Concurrent DELETE" below) and
+`deletion.reset_app_after_deletion(..., set_needs_force=...)` (the deletion
+path's set) are the only two writers — `set_app_status` deliberately has
+**no** `needs_force` parameter at all, so there is no unconditional-write path
+left for a future call site to accidentally reintroduce the race described
+next. The lifecycle:
+
+| Event | `needs_force` after |
+|---|---|
+| Fresh app (schema default, never filled) | `1` |
+| Successful job — `'done'` outcome (covers both the `Updated>0` row and the `Up To Date>0`/`Updated==0` confirmed-current row of the job-outcome table above, and a `parse_ok=False` exit-code-rule `'done'`) | `0` |
+| Unowned outcome (`Updated==0 AND Up To Date==0`, ends `'error'`) | unchanged |
+| Any failure (non-zero exit, timeout, aborted, not-logged-in, internal error) | unchanged |
+| `DELETE /v1/cache/{appid}` removed ≥1 depot, or reported a depot ALREADY-ABSENT | `1` |
+| `DELETE /v1/cache/{appid}` — any depot landed in `failed` (partial deletion; cache state now unknown) | `1` |
+| `DELETE /v1/cache/{appid}` — nothing exclusive existed to delete (every mapped depot was shared) | unchanged |
+
+Why deletion sets it rather than clearing it (this is the WP 1.4 rationale
+ADR-0006 decision 2 explicitly preserves): SteamPrefill's own
+`Config/successfullyDownloadedDepots.json` has no idea vault-api just removed
+an app's depot directories, so a non-forced run after a deletion would
+silently refuse to re-fill a game that is now demonstrably not on disk. The
+ALREADY-ABSENT case is included on purpose: a repeated/racing `DELETE`
+finding "nothing there" is still new information about cache state (not "no
+change happened"), so it earns the same `needs_force=1` a real removal would.
+
+**Concurrent DELETE: the clear is a compare-and-swap, not an unconditional
+write (review fix).** `DELETE /v1/cache/{appid}`'s active-job check only
+looks at the instant it runs (documented check-then-act, see "Per-game
+deletion" below) — a *different* job for the same app can still be enqueued
+and claimed while a DELETE's filesystem work is in flight. An earlier version
+of this package cleared `needs_force` at the end of a successful job with a
+plain `UPDATE apps SET needs_force = 0 WHERE appid = ?`, which is a
+last-writer-wins race: a job that read `needs_force=0` at claim time and
+finishes *after* a concurrent DELETE has already set it back to `1` would
+clobber that `1`, wedging the app at `'done'` over an **empty** cache with no
+self-healing path (SteamPrefill's own bookkeeping never learns the depots
+were deleted, so every future run stays non-forced forever). The fix:
+`jobs.clear_needs_force_if_unchanged(conn, appid, expected_needs_force)` clears
+via `UPDATE apps SET needs_force = 0 WHERE appid = ? AND needs_force = ?`, where
+the second parameter is the exact value the job read at claim time — a single
+atomic SQL statement, so a DELETE's `1` landing in between makes the clear a
+no-op instead of overwriting it, and the app's *next* prefill is correctly
+forced. Regression-tested end to end in
+`tests/test_worker.py::test_a_deletion_racing_a_slow_job_does_not_get_its_needs_force_clobbered`
+(deterministic: the racing job is injected inside a wrapped
+`deletion.plan_deletion`, which runs after the DELETE's own active-job check
+and before its filesystem work, with a stub sleep long enough that the job
+can only finish after the — fast — DELETE has already returned).
+
+**No separate "force" flag on `POST /v1/prefill`** — the flag is entirely
+server-managed (plan §9 "keep the API surface small"). An operator who wants
+to force a re-fill uses the documented path: `DELETE /v1/cache/{appid}` then
+`POST /v1/prefill {"appids": [appid]}`, which sets `needs_force=1` as a
+natural consequence of the deletion. A non-forced run still correctly
+"fetches only the changed chunks" (plan §4): it is SteamPrefill's own
+bookkeeping deciding there's nothing to fetch at all when nothing changed,
+and its normal delta behavior when something did.
+
+`GET /v1/games` and `GET /v1/games/{appid}` expose `needs_force` (operator
+visibility only — see "Endpoints" above).
 
 ### Mapping import — replace-semantics per app (ADR-0003 decision 3)
 
@@ -783,6 +874,15 @@ with **shared-depot protection**. The mechanics live in
   (`sizes.SizeCache.invalidate()`, the hook WP 1.5 exported for exactly this),
   so `GET /v1/games` and `GET /v1/cache/summary` never serve pre-deletion sizes
   for up to `VAULT_SIZE_CACHE_TTL` seconds.
+- **`apps.needs_force` is set to `1`** whenever this request changed or left
+  uncertain what is on disk for this app — anything in `deleted_depots`
+  (including the ALREADY-ABSENT case) or `failed` — so the app's next prefill
+  runs with `--force` instead of trusting SteamPrefill's own now-stale
+  bookkeeping (schema v5, WP 3.4, ADR-0006 decision 2 — see "needs_force"
+  above). Left untouched in the all-shared edge case just above, since
+  nothing on disk actually changed for this app. This is also the documented
+  way to force a re-fill: `DELETE` then `POST /v1/prefill`, no separate flag
+  on the prefill API.
 
 ### The mapping rows are KEPT (decision)
 
@@ -1511,7 +1611,9 @@ curl -H "X-Api-Key: <your key>" http://localhost:8000/v1/games/440
 # {"appid":440,"name":"Team Fortress 2","status":"idle","last_prefill_at":null,
 #  "depots":[{"depotid":441,"shared":false,"size_bytes":null}],"size_bytes":null}
 # (size_bytes fields added in WP 1.5; null here because nothing has been
-# written to VAULT_CACHE_ROOT yet in this walkthrough)
+# written to VAULT_CACHE_ROOT yet in this walkthrough. needs_force added in
+# WP 3.4 -- omitted from this WP 1.3-era transcript; would read "true" for
+# this never-filled app, see "needs_force" above)
 
 curl -H "X-Api-Key: <your key>" http://localhost:8000/v1/games/999999
 # 404

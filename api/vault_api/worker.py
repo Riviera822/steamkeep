@@ -109,12 +109,20 @@ class PrefillWorker:
         try:
             jobs.set_app_status(conn, appid, jobs.STATUS_RUNNING)
 
+            # WP 3.4 / ADR-0006 decision 2: read BEFORE running, right after
+            # set_app_status above has already ensured the apps row exists.
+            # --force is reserved for first fills and post-deletion refills
+            # (needs_force set by the deletion path, see deletion.py); every
+            # other run is a genuinely cheap non-forced staleness check.
+            use_force = jobs.get_app_needs_force(conn, appid)
+
             before = prefill.scan_depots(self._settings.cache_root)
             result = prefill.run_prefill(
                 appid=appid,
                 steamprefill_path=self._settings.steamprefill_path,
                 timeout_seconds=self._settings.prefill_timeout_seconds,
                 should_abort=self._stop.is_set,
+                use_force=use_force,
             )
 
             log_parts = [result.output]
@@ -254,6 +262,34 @@ class PrefillWorker:
                     last_prefill_at=now,
                     last_manifest_check=last_manifest_check,
                 )
+
+                # WP 3.4 / ADR-0006 decision 2, hardened against a concurrent
+                # DELETE (reviewer-reproduced wedge, see
+                # jobs.clear_needs_force_if_unchanged's docstring for the
+                # full sequence): this is the ONE branch that reaches a
+                # genuinely successful outcome (covers both the updated>0 and
+                # the up-to-date-confirmed rows of the table above) --
+                # --force has done its job for this app (or was never
+                # needed), so the next run may safely go non-forced. But the
+                # clear is a compare-and-swap against `use_force` -- the
+                # value read at job-claim time, BEFORE this run started --
+                # not an unconditional write: if a DELETE landed on this app
+                # while the job was running and set needs_force=1 (cache
+                # state changed underneath this run), the swap's WHERE
+                # clause no longer matches and the clear is correctly a
+                # no-op, leaving the NEXT run forced instead of wedging the
+                # app at 'done' over an empty cache forever. The unowned
+                # branch above and every failure branch below never call
+                # this at all, leaving the flag exactly as the deletion path
+                # (or the schema default) last set it.
+                if not jobs.clear_needs_force_if_unchanged(conn, appid, use_force):
+                    logger.info(
+                        "Prefill job %s for appid %s: needs_force was changed "
+                        "concurrently (likely a DELETE) while this job ran; "
+                        "left as-is so the next run for this app is forced.",
+                        job_id, appid,
+                    )
+
                 jobs.finish_job(
                     conn, job_id, jobs.STATUS_DONE, "\n".join(log_parts),
                     updated=summary.updated,
@@ -261,11 +297,11 @@ class PrefillWorker:
                     summary_parse_ok=summary.parse_ok,
                 )
 
-                # Disk content just changed (plan §3: size calculation is
-                # "cached" — explicit invalidation, not polling). A prefill
-                # that observed nothing still ran --force and may have
-                # rewritten existing chunks, so invalidate unconditionally
-                # rather than only when `observed` is non-empty.
+                # Disk content may have changed (plan §3: size calculation is
+                # "cached" — explicit invalidation, not polling). Whether this
+                # particular run was forced or not, invalidating unconditionally
+                # rather than only when `observed` is non-empty is still
+                # correct and cheap: a no-op recompute costs one disk walk.
                 if self._size_cache is not None:
                     self._size_cache.invalidate()
 

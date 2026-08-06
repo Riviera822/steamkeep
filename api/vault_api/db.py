@@ -28,7 +28,16 @@ import sqlite3
 #: columns, so ``init_db`` runs an explicit ``ALTER TABLE ... ADD COLUMN``
 #: step for pre-v4 databases (see ``_add_missing_job_columns``) — a fresh
 #: install gets them straight from ``_DDL``'s ``CREATE TABLE``.
-SCHEMA_VERSION = 4
+#: v5 (WP 3.4): added ``apps.needs_force`` — ADR-0006 decision 2's per-app
+#: flag deciding whether the next prefill for this app must run with
+#: ``--force``. ``DEFAULT 1`` on the column itself encodes "a fresh app row
+#: has never been filled, so its first run needs --force" without any
+#: application code having to special-case a never-seen app. Same
+#: not-expressible-as-``CREATE TABLE IF NOT EXISTS`` situation as v4 (an
+#: existing pre-v5 ``apps`` table lacks the column), so this needs its own
+#: explicit ``ALTER TABLE ... ADD COLUMN`` step too (see
+#: ``_add_missing_app_columns``).
+SCHEMA_VERSION = 5
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -40,7 +49,14 @@ CREATE TABLE IF NOT EXISTS apps (
     name                TEXT,
     status              TEXT NOT NULL DEFAULT 'idle',
     last_prefill_at     TEXT,
-    last_manifest_check TEXT
+    last_manifest_check TEXT,
+    -- v5 (WP 3.4): ADR-0006 decision 2. 1 = the next prefill for this app
+    -- must run with --force; 0 = a non-forced run is enough (SteamPrefill's
+    -- own up-to-date bookkeeping is trusted). DEFAULT 1 because a brand-new
+    -- app row has never been filled -- see worker.py/deletion.py for who
+    -- flips it and README.md's "needs_force lifecycle" table for the full
+    -- state machine.
+    needs_force         INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS depot_app_map (
@@ -210,6 +226,12 @@ def init_db(db_path: str) -> None:
         if row is not None and row["version"] < 4:
             _add_missing_job_columns(conn)
 
+        # v5 (WP 3.4): same situation as the v4 step above -- an existing
+        # pre-v5 `apps` table already exists, so `CREATE TABLE IF NOT EXISTS`
+        # below is a no-op for it and needs_force needs an explicit ALTER.
+        if row is not None and row["version"] < 5:
+            _add_missing_app_columns(conn)
+
         conn.executescript(_DDL)
 
         if row is None:
@@ -237,3 +259,29 @@ def _add_missing_job_columns(conn: sqlite3.Connection) -> None:
     for column in ("updated", "up_to_date", "summary_parse_ok"):
         if column not in existing:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} INTEGER")
+
+
+def _add_missing_app_columns(conn: sqlite3.Connection) -> None:
+    """v1->v5 migration step: add ``apps.needs_force`` (ADR-0006 decision 2).
+
+    Same reasoning as ``_add_missing_job_columns``: guarded via ``PRAGMA
+    table_info`` rather than only the version check, so calling ``init_db``
+    twice against the same pre-v5 file never raises ``duplicate column
+    name``. ``DEFAULT 1`` on the ``ALTER TABLE`` is deliberate and matches
+    ``_DDL``'s own column default exactly: every pre-existing app row already
+    represents "has been prefilled before" from vault-api's point of view,
+    but this migration has no way to know whether that prior prefill ran with
+    or without ``--force`` (schema versions before this one always passed
+    ``--force`` unconditionally — see ``vault_api/prefill.py``). Starting
+    every pre-existing app at ``needs_force=1`` costs at most one redundant
+    forced run per app after the upgrade (cheap: disk-speed re-requests, not
+    bandwidth, per the same ADR-0001 measurement `--force` always relied on),
+    which is a safe default to err on compared to silently trusting
+    SteamPrefill's own stale bookkeeping for an app this code has no history
+    for.
+    """
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(apps)")}
+    if "needs_force" not in existing:
+        conn.execute(
+            "ALTER TABLE apps ADD COLUMN needs_force INTEGER NOT NULL DEFAULT 1"
+        )

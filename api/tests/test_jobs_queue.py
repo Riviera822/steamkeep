@@ -128,6 +128,146 @@ def test_set_app_status_can_write_both_timestamps_together(conn) -> None:
     assert row["last_manifest_check"] == "2026-08-06T01:00:00Z"
 
 
+def test_set_app_status_has_no_needs_force_parameter(conn) -> None:
+    # WP 3.4 review fix: an unconditional needs_force write here was the
+    # concurrent-deletion wedge -- set_app_status must not offer that footgun
+    # at all. clear_needs_force_if_unchanged (CAS) is the only writer that
+    # clears it; deletion.py's raw UPDATE is the only writer that sets it.
+    jobs.set_app_status(conn, 440, jobs.STATUS_RUNNING)
+    row = conn.execute("SELECT needs_force FROM apps WHERE appid = 440").fetchone()
+    # A brand-new app defaults to needs_force=1 (schema default, WP 3.4);
+    # set_app_status must not have touched it either way.
+    assert row["needs_force"] == 1
+
+    import inspect
+
+    assert "needs_force" not in inspect.signature(jobs.set_app_status).parameters
+
+
+def test_get_app_needs_force_defaults_true_for_a_never_seen_app(conn) -> None:
+    # No apps row at all yet -- matches the schema column's own DEFAULT 1.
+    assert jobs.get_app_needs_force(conn, 999) is True
+
+
+def test_get_app_needs_force_reflects_the_stored_value(conn) -> None:
+    jobs.ensure_app_row(conn, 440)
+    conn.commit()
+    assert jobs.get_app_needs_force(conn, 440) is True
+
+    assert jobs.clear_needs_force_if_unchanged(conn, 440, expected_needs_force=True)
+    assert jobs.get_app_needs_force(conn, 440) is False
+
+
+# -- clear_needs_force_if_unchanged (WP 3.4 review fix: CAS, not last-writer-wins) --
+
+
+def test_clear_needs_force_if_unchanged_applies_when_nothing_raced_it(conn) -> None:
+    jobs.ensure_app_row(conn, 440)
+    conn.commit()
+    assert jobs.get_app_needs_force(conn, 440) is True
+
+    applied = jobs.clear_needs_force_if_unchanged(conn, 440, expected_needs_force=True)
+
+    assert applied is True
+    assert jobs.get_app_needs_force(conn, 440) is False
+
+
+def test_clear_needs_force_if_unchanged_is_a_noop_when_the_value_changed(conn) -> None:
+    """The exact reviewer-reproduced sequence: a job read needs_force=0 at
+    claim time (use_force=False), and -- while the job ran -- something else
+    (a DELETE, in production) set it to 1. The job's end-of-run clear must
+    NOT clobber that 1 back to 0, or the app wedges at 'done' over a cache
+    that was actually just emptied, with no self-healing path (every future
+    run stays non-forced forever)."""
+    jobs.ensure_app_row(conn, 440)
+    conn.commit()
+    # Simulate: needs_force was 0 when the (simulated) job claimed it...
+    conn.execute("UPDATE apps SET needs_force = 0 WHERE appid = 440")
+    conn.commit()
+    use_force_at_claim_time = jobs.get_app_needs_force(conn, 440)
+    assert use_force_at_claim_time is False
+
+    # ...then, while the job is "running", a concurrent DELETE sets it to 1.
+    conn.execute("UPDATE apps SET needs_force = 1 WHERE appid = 440")
+    conn.commit()
+
+    # The job now finishes "successfully" and tries to clear the flag using
+    # the STALE value it read at claim time.
+    applied = jobs.clear_needs_force_if_unchanged(
+        conn, 440, expected_needs_force=use_force_at_claim_time
+    )
+
+    assert applied is False
+    # The DELETE's 1 must survive -- this is the whole fix.
+    assert jobs.get_app_needs_force(conn, 440) is True
+
+
+def test_clear_needs_force_if_unchanged_is_atomic_against_a_racing_writer(
+    conn, db_path
+) -> None:
+    """The same scenario as the sequential test above, but through two real
+    connections hitting the database concurrently rather than same-connection
+    UPDATEs one after another -- proves the compare-and-swap really is a
+    single atomic SQL statement (SQLite's own write lock serializes the two
+    connections; there is no Python-level read-then-write window for the
+    other connection to land in), not something that merely happens to work
+    because nothing else touched the row in the sequential test above.
+
+    Deterministic regardless of which thread's statement SQLite serializes
+    first: the racing writer's `UPDATE ... SET needs_force = 1` is
+    unconditional, so needs_force ends at 1 either way -- if it runs BEFORE
+    the CAS, the CAS's `WHERE needs_force = 0` no longer matches (a correct
+    no-op); if it runs AFTER, it simply overwrites the CAS's 0. What must
+    NEVER happen is the CAS reporting `applied=True` while a 1 the racing
+    writer set is silently still there un-detected, or any exception/deadlock
+    from the two connections colliding.
+    """
+    jobs.ensure_app_row(conn, 550)
+    conn.execute("UPDATE apps SET needs_force = 0 WHERE appid = 550")
+    conn.commit()
+
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def racing_delete() -> None:
+        delete_conn = get_connection(db_path)
+        try:
+            barrier.wait(timeout=10)
+            # The "DELETE sets needs_force=1" side of the race.
+            delete_conn.execute(
+                "UPDATE apps SET needs_force = 1 WHERE appid = 550"
+            )
+            delete_conn.commit()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            delete_conn.close()
+
+    def racing_clear() -> None:
+        worker_conn = get_connection(db_path)
+        try:
+            barrier.wait(timeout=10)
+            jobs.clear_needs_force_if_unchanged(
+                worker_conn, 550, expected_needs_force=False
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            worker_conn.close()
+
+    threads = [threading.Thread(target=racing_delete), threading.Thread(target=racing_clear)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not errors, errors
+    # Deterministic outcome regardless of interleaving (see docstring): the
+    # racing writer's unconditional 1 always ends up as the final value.
+    final = conn.execute("SELECT needs_force FROM apps WHERE appid = 550").fetchone()
+    assert final["needs_force"] == 1
+
+
 def test_log_excerpt_keeps_the_tail_and_is_capped(conn) -> None:
     job, _ = jobs.enqueue_prefill(conn, 440)
     long_log = "".join(f"line {index}\n" for index in range(5000))

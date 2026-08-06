@@ -96,8 +96,25 @@ def _app_row(settings: Settings, appid: int) -> sqlite3.Row:
     conn.row_factory = sqlite3.Row
     try:
         return conn.execute(
-            "SELECT appid, status, last_prefill_at FROM apps WHERE appid = ?", (appid,)
+            "SELECT appid, status, last_prefill_at, needs_force FROM apps "
+            "WHERE appid = ?",
+            (appid,),
         ).fetchone()
+    finally:
+        conn.close()
+
+
+def _clear_needs_force(settings: Settings, appid: int) -> None:
+    """Drive an app to needs_force=0 so a test can prove deletion SETS it,
+    rather than merely observing the schema's own DEFAULT 1."""
+    conn = sqlite3.connect(settings.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO apps (appid, status, needs_force) VALUES (?, 'idle', 0) "
+            "ON CONFLICT(appid) DO UPDATE SET needs_force = 0",
+            (appid,),
+        )
+        conn.commit()
     finally:
         conn.close()
 
@@ -477,6 +494,76 @@ def test_delete_app_depots_never_deletes_when_the_recheck_itself_fails(
     assert (depot_root / "441").exists()
 
 
+# --------------------------------------------------------------------------
+# needs_force (WP 3.4, ADR-0006 decision 2) -- unit level
+# --------------------------------------------------------------------------
+
+
+def test_reset_app_after_deletion_requires_the_set_needs_force_kwarg(
+    tmp_path: Path,
+) -> None:
+    """Same rule as delete_app_depots's required `co_owners`: a future caller
+    must not be able to silently skip deciding this."""
+    from vault_api.db import get_connection, init_db
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        with pytest.raises(TypeError):
+            deletion.reset_app_after_deletion(conn, 440, "idle")  # type: ignore[call-arg]
+    finally:
+        conn.close()
+
+
+def test_reset_app_after_deletion_sets_needs_force_when_requested(
+    tmp_path: Path,
+) -> None:
+    from vault_api.db import get_connection, init_db
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO apps (appid, status, needs_force) VALUES (440, 'done', 0)"
+        )
+        conn.commit()
+
+        deletion.reset_app_after_deletion(conn, 440, "idle", set_needs_force=True)
+
+        row = conn.execute(
+            "SELECT status, last_prefill_at, needs_force FROM apps WHERE appid = 440"
+        ).fetchone()
+        assert row["status"] == "idle"
+        assert row["last_prefill_at"] is None
+        assert row["needs_force"] == 1
+    finally:
+        conn.close()
+
+
+def test_reset_app_after_deletion_leaves_needs_force_when_not_requested(
+    tmp_path: Path,
+) -> None:
+    from vault_api.db import get_connection, init_db
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO apps (appid, status, needs_force) VALUES (440, 'done', 0)"
+        )
+        conn.commit()
+
+        deletion.reset_app_after_deletion(conn, 440, "idle", set_needs_force=False)
+
+        row = conn.execute("SELECT needs_force FROM apps WHERE appid = 440").fetchone()
+        assert row["needs_force"] == 0
+    finally:
+        conn.close()
+
+
 def test_load_co_owners_returns_only_the_other_apps(tmp_path: Path) -> None:
     from vault_api.db import get_connection, init_db
     from vault_api.mapping import upsert_mapping
@@ -617,6 +704,106 @@ def test_delete_resets_status_to_idle_and_clears_last_prefill_at(
     row = _app_row(settings, 440)
     assert row["status"] == "idle"
     assert row["last_prefill_at"] is None
+
+
+# --------------------------------------------------------------------------
+# needs_force (WP 3.4, ADR-0006 decision 2) -- through the endpoint
+# --------------------------------------------------------------------------
+
+
+def test_delete_sets_needs_force_after_a_clean_deletion(tmp_path: Path) -> None:
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=441, appid=440)
+    _seed_depot(cache_root, 441, 10)
+    _clear_needs_force(settings, 440)
+    assert _app_row(settings, 440)["needs_force"] == 0
+
+    response = client.delete("/v1/cache/440", headers=AUTH)
+
+    assert response.status_code == 200, response.text
+    assert _app_row(settings, 440)["needs_force"] == 1
+
+
+def test_delete_sets_needs_force_on_partial_failure(tmp_path: Path) -> None:
+    """Cache state is unknown after a partial failure, so the next fill must
+    not trust SteamPrefill's own (now possibly stale) bookkeeping — the
+    partial-failure error path sets needs_force even though ONE depot really
+    was fully removed here."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=441, appid=440)
+    _seed_mapping(client, depotid=442, appid=440)
+    _seed_depot(cache_root, 441, 10)
+    depot442 = _seed_depot(cache_root, 442, 25)
+    _clear_needs_force(settings, 440)
+
+    if os.name == "nt":
+        blocker = open(depot442 / "chunk" / "aa", "rb")
+        restore = None
+    else:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("running as root: directory mode bits do not block unlink")
+        blocker = None
+        chunk_dir = depot442 / "chunk"
+        os.chmod(chunk_dir, 0o500)
+        restore = chunk_dir
+
+    try:
+        response = client.delete("/v1/cache/440", headers=AUTH)
+        assert response.status_code == 200, response.text
+        assert len(response.json()["failed"]) == 1
+        assert _app_row(settings, 440)["needs_force"] == 1
+    finally:
+        if blocker is not None:
+            blocker.close()
+        if restore is not None:
+            os.chmod(restore, 0o700)
+
+
+def test_delete_sets_needs_force_when_a_depot_is_already_absent(tmp_path: Path) -> None:
+    """The already-absent race: the mapping row is kept after a first delete
+    (documented decision), so a second DELETE of the same app targets a depot
+    that is demonstrably no longer there. That is new information about cache
+    state (not "nothing happened") and must set needs_force just like an
+    actual removal would — proven independently of the first delete's own
+    (also-correct) needs_force=1 by clearing the flag back to 0 in between."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=441, appid=440)
+    _seed_depot(cache_root, 441, 10)
+
+    first = client.delete("/v1/cache/440", headers=AUTH)
+    assert first.status_code == 200, first.text
+    assert first.json()["deleted_depots"] == [{"depotid": 441, "size_bytes_freed": 10}]
+
+    _clear_needs_force(settings, 440)
+    assert _app_row(settings, 440)["needs_force"] == 0
+
+    second = client.delete("/v1/cache/440", headers=AUTH)
+
+    assert second.status_code == 200, second.text
+    assert second.json()["deleted_depots"] == [{"depotid": 441, "size_bytes_freed": 0}]
+    assert second.json()["failed"] == []
+    assert _app_row(settings, 440)["needs_force"] == 1
+
+
+def test_delete_does_not_touch_needs_force_when_everything_is_shared(
+    tmp_path: Path,
+) -> None:
+    """Nothing exclusive existed to delete -> nothing on disk changed for
+    this app -> needs_force is left exactly as it was, not reset to 1."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=900, appid=440)
+    _seed_mapping(client, depotid=900, appid=730)
+    _seed_depot(cache_root, 900, 50)
+    _clear_needs_force(settings, 440)
+    assert _app_row(settings, 440)["needs_force"] == 0
+
+    response = client.delete("/v1/cache/440", headers=AUTH)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["deleted_depots"] == []
+    assert body["failed"] == []
+    assert _app_row(settings, 440)["needs_force"] == 0
 
 
 def test_delete_keeps_the_mapping_rows(tmp_path: Path) -> None:

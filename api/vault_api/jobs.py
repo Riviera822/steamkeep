@@ -142,6 +142,11 @@ def set_app_status(
     given — the worker passes it exactly when SteamPrefill's summary reported
     ``Up To Date > 0 AND Updated == 0`` for this run, i.e. a non-forced-run
     style confirmation that the app is current as of now.
+
+    Deliberately has **no** ``needs_force`` parameter (schema v5, WP 3.4,
+    ADR-0006 decision 2) — see ``clear_needs_force_if_unchanged`` below for
+    why an unconditional write here would be wrong, and its own docstring for
+    the concurrent-deletion bug an earlier version of this function had.
     """
     ensure_app_row(conn, appid)
     fields = ["status = ?"]
@@ -155,6 +160,93 @@ def set_app_status(
     params.append(appid)
     conn.execute(f"UPDATE apps SET {', '.join(fields)} WHERE appid = ?", params)
     conn.commit()
+
+
+def get_app_needs_force(conn: sqlite3.Connection, appid: int) -> bool:
+    """Read ``apps.needs_force`` (schema v5, WP 3.4, ADR-0006 decision 2).
+
+    Read by the worker at job start to decide whether this run must pass
+    ``--force`` (see ``vault_api/prefill.py::run_prefill``'s ``use_force``
+    parameter). Defaults to ``True`` when the app has no row at all — matching
+    the column's own ``DEFAULT 1`` semantics ("never filled before, so force
+    the first run") — even though in practice ``worker.py`` always calls this
+    right after ``set_app_status`` has already ensured the row exists via
+    ``ensure_app_row``; the default keeps this function safe for any other
+    caller too.
+
+    The value this returns is also what the worker must hand back to
+    ``clear_needs_force_if_unchanged`` at the end of the job — see that
+    function for why.
+    """
+    row = conn.execute(
+        "SELECT needs_force FROM apps WHERE appid = ?", (appid,)
+    ).fetchone()
+    return True if row is None else bool(row["needs_force"])
+
+
+def clear_needs_force_if_unchanged(
+    conn: sqlite3.Connection, appid: int, expected_needs_force: bool
+) -> bool:
+    """Clear ``apps.needs_force`` to 0 — but ONLY as a compare-and-swap against
+    the value read at job-claim time. Returns whether the clear applied.
+
+    **The bug this closes (reviewer-reproduced end-to-end wedge, WP 3.4
+    review).** The worker used to clear ``needs_force`` unconditionally on
+    every successful job — an unconditional ``UPDATE apps SET needs_force =
+    0 WHERE appid = ?``. That is a last-writer-wins race against
+    ``DELETE /v1/cache/{appid}``, which is allowed to run concurrently with a
+    *different* job than the one it 409-refused (the 409 guard only checks
+    for an active job at the START of the DELETE request — plan §4's
+    documented check-then-act window, see ``routers/cache.py``). The
+    reproduced sequence:
+
+    1. A job for this app is claimed; it reads ``needs_force`` (say ``0`` —
+       not currently forced) and runs a non-forced check. SteamPrefill's own
+       ``successfullyDownloadedDepots.json`` still says the depots are
+       present, so it reports "up to date" — correctly, *for what was on
+       disk when it started*.
+    2. Concurrently, ``DELETE /v1/cache/{appid}`` removes the depot
+       directories and, at the end, sets ``needs_force = 1`` (this request
+       genuinely changed what is on disk — see
+       ``deletion.reset_app_after_deletion``).
+    3. The job finishes "successfully" (an up-to-date confirmation is a
+       'done' outcome, ADR-0006 decision 1) and unconditionally clears
+       ``needs_force`` back to ``0`` — clobbering step 2's ``1``.
+
+    End state: ``apps.status = 'done'``, ``last_prefill_at`` set, the cache
+    directory **empty**, and ``needs_force = 0``. There is no self-healing
+    path from there: every future run goes non-forced, SteamPrefill's own
+    bookkeeping keeps saying "up to date" forever (it was never told the
+    depots were deleted), and the app is permanently wedged at a green badge
+    over an empty cache.
+
+    **The fix.** The worker remembers the ``needs_force`` value it read at
+    claim time (``jobs.get_app_needs_force``, the same value it passed to
+    ``prefill.run_prefill`` as ``use_force``) and hands it back here as
+    ``expected_needs_force``. The clear is then a single atomic SQL
+    statement — ``UPDATE ... WHERE appid = ? AND needs_force = ?`` — matched
+    against the table's *current* value, not a value this function read
+    itself: SQLite evaluates the ``WHERE`` clause and applies the write in
+    one indivisible step under the write lock, so there is no separate
+    read-then-write window for another connection to land in between. If
+    step 2 above happened, the current value is ``1`` but
+    ``expected_needs_force`` is ``0`` (what the job saw at claim time) — the
+    ``WHERE`` clause matches zero rows, the clear is a no-op, and
+    ``needs_force`` is correctly left at ``1``: the very next prefill for
+    this app is forced, which is exactly the self-healing path that was
+    missing. If nothing raced the job, the current value still equals
+    ``expected_needs_force`` and the clear applies normally.
+
+    Returns ``True`` when the clear applied (no concurrent write raced it),
+    ``False`` when it was skipped because something changed the value in the
+    meantime (the caller may want to log this — see ``worker.py``).
+    """
+    cursor = conn.execute(
+        "UPDATE apps SET needs_force = 0 WHERE appid = ? AND needs_force = ?",
+        (appid, int(expected_needs_force)),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
 
 
 def enqueue_prefill(conn: sqlite3.Connection, appid: int) -> tuple[dict[str, object], bool]:

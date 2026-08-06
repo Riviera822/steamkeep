@@ -669,7 +669,9 @@ def load_mapping_rows(conn: sqlite3.Connection, appid: int) -> list[tuple[object
     ]
 
 
-def reset_app_after_deletion(conn: sqlite3.Connection, appid: int, status: str) -> None:
+def reset_app_after_deletion(
+    conn: sqlite3.Connection, appid: int, status: str, *, set_needs_force: bool
+) -> None:
     """Plan §4: "reset status to 'idle'" — and clear ``last_prefill_at`` with it.
 
     The two belong together, and clearing the timestamp is **unconditional**
@@ -682,9 +684,31 @@ def reset_app_after_deletion(conn: sqlite3.Connection, appid: int, status: str) 
 
     The depot→app **mapping rows are deliberately kept** — see
     ``routers/cache.py``.
+
+    ``set_needs_force`` (schema v5, WP 3.4, ADR-0006 decision 2) is a
+    **required keyword argument, no default** — same rule as ``co_owners`` on
+    ``delete_app_depots`` above: a future caller must not be able to silently
+    skip deciding this, it has to be spelled out at the call site. The caller
+    (``routers/cache.py``) passes ``True`` exactly when this request actually
+    changed or left uncertain what is on disk for this app — at least one
+    depot landed in ``deleted`` (which includes the ALREADY-ABSENT case: the
+    mapping said this depot was here, and it demonstrably wasn't, which is
+    itself new information) or at least one depot landed in ``failed``
+    (cache state unknown after a partial failure ⇒ the next fill must not
+    trust SteamPrefill's own stale bookkeeping). ``False`` for the "nothing
+    exclusive to delete" case (every mapped depot turned out to be shared) —
+    nothing on disk changed for this app, so its ``needs_force`` is left
+    exactly as it was.
     """
-    conn.execute(
-        "UPDATE apps SET status = ?, last_prefill_at = NULL WHERE appid = ?",
-        (status, appid),
-    )
+    if set_needs_force:
+        conn.execute(
+            "UPDATE apps SET status = ?, last_prefill_at = NULL, needs_force = 1 "
+            "WHERE appid = ?",
+            (status, appid),
+        )
+    else:
+        conn.execute(
+            "UPDATE apps SET status = ?, last_prefill_at = NULL WHERE appid = ?",
+            (status, appid),
+        )
     conn.commit()

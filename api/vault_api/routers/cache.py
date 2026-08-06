@@ -172,6 +172,16 @@ def delete_cached_app(
     **The depot→app mapping rows are KEPT.** The mapping is knowledge (which
     depots belong to this game), not cache state — see api/README.md for the
     decision and its consequences.
+
+    **``apps.needs_force`` (schema v5, WP 3.4, ADR-0006 decision 2)** is set
+    to 1 whenever this request changed or left uncertain what is on disk for
+    this app — anything in ``deleted_depots`` (including the ALREADY-ABSENT
+    case) or ``failed`` — so the next prefill for this app runs with
+    ``--force`` rather than trusting SteamPrefill's own now-stale bookkeeping.
+    Left untouched when nothing exclusive existed to delete (every mapped
+    depot was shared). This is also the documented way an operator forces a
+    re-fill: ``DELETE`` then ``POST /v1/prefill`` — no separate "force" flag
+    on the prefill API itself (see api/README.md's "needs_force lifecycle").
     """
     with open_db() as conn:
         app_row = conn.execute(
@@ -268,16 +278,26 @@ def delete_cached_app(
     # runs with --force) repairs the cache. last_prefill_at is cleared either
     # way, because it is no longer true either way.
     new_status = jobs.STATUS_ERROR if failed else jobs.STATUS_IDLE
+    # WP 3.4 / ADR-0006 decision 2: this request changed or left uncertain
+    # what is on disk for this app the moment ANYTHING landed in `deleted`
+    # (includes the ALREADY-ABSENT case — the mapping claimed this depot was
+    # here and it wasn't) or in `failed` (cache state unknown after a partial
+    # failure). The "everything mapped turned out to be shared, nothing
+    # exclusive to touch" case leaves both empty, so needs_force is left
+    # exactly as it was — nothing on disk changed for this app.
+    set_needs_force = bool(deleted) or bool(failed)
     with open_db() as conn:
-        deletion.reset_app_after_deletion(conn, appid, new_status)
+        deletion.reset_app_after_deletion(
+            conn, appid, new_status, set_needs_force=set_needs_force
+        )
 
     total_bytes_freed = sum(depot.size_bytes_freed for depot in deleted)
     logger.info(
         "cache-delete appid=%s finished: deleted=%d skipped_shared=%d (of which "
         "%d late) failed=%d bytes_freed=%d; status set to '%s', last_prefill_at "
-        "cleared; mapping rows kept",
+        "cleared, needs_force=%s; mapping rows kept",
         appid, len(deleted), len(skipped_shared), len(late_shared), len(failed),
-        total_bytes_freed, new_status,
+        total_bytes_freed, new_status, "1" if set_needs_force else "unchanged",
     )
 
     return CacheDeletionOut(

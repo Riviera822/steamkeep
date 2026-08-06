@@ -53,6 +53,22 @@ def test_list_games_reports_depot_count_and_null_size(client: TestClient) -> Non
     assert game["size_bytes"] is None
 
 
+def test_list_games_exposes_needs_force_defaulting_true(client: TestClient) -> None:
+    # Schema v5 default (WP 3.4, ADR-0006 decision 2): a never-filled app
+    # needs its first prefill forced.
+    _seed_mapping(client, depotid=441, appid=440, app_name="Team Fortress 2")
+
+    game = client.get("/v1/games", headers=AUTH).json()[0]
+    assert game["needs_force"] is True
+
+
+def test_get_game_detail_exposes_needs_force(client: TestClient) -> None:
+    _seed_mapping(client, depotid=441, appid=440, app_name="Team Fortress 2")
+
+    body = client.get("/v1/games/440", headers=AUTH).json()
+    assert body["needs_force"] is True
+
+
 def test_get_game_without_key_is_rejected(client: TestClient) -> None:
     response = client.get("/v1/games/440")
     assert response.status_code == 401

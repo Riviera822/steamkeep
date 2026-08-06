@@ -389,6 +389,121 @@ def test_jobs_has_the_summary_columns(tmp_path) -> None:
     assert {"updated", "up_to_date", "summary_parse_ok"} <= columns
 
 
+def test_apps_has_the_needs_force_column(tmp_path) -> None:
+    # Schema v5 (WP 3.4): ADR-0006 decision 2's per-app flag deciding whether
+    # the next prefill must run with --force.
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(apps)")}
+    finally:
+        conn.close()
+
+    assert "needs_force" in columns
+
+
+def test_a_fresh_app_row_defaults_needs_force_to_one(tmp_path) -> None:
+    # A never-filled app has never had a chance to prove it's current, so its
+    # first prefill must be forced (ADR-0006 decision 2).
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("INSERT INTO apps (appid, status) VALUES (440, 'idle')")
+        conn.commit()
+        row = conn.execute(
+            "SELECT needs_force FROM apps WHERE appid = 440"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row["needs_force"] == 1
+
+
+def test_init_db_upgrades_a_v4_database_to_v5_in_place(tmp_path) -> None:
+    """v4 -> v5 (WP 3.4) adds apps.needs_force. Same situation as the v3->v4
+    jobs bump: `CREATE TABLE IF NOT EXISTS apps` is a no-op against an
+    existing v1-v4 apps table (it already exists, just without this column),
+    so this is the one migration that needs an explicit ALTER — pinned here.
+    Simulate a v4 file by dropping the column and resetting the recorded
+    version; a pre-existing app row proves the migration doesn't lose data."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        # Recreate `apps` in its exact pre-v5 shape (no needs_force) rather
+        # than ALTER ... DROP COLUMN, matching the v3->v4 test's own
+        # reasoning for jobs (DROP COLUMN trips over _DDL's comment block).
+        conn.execute("DROP TABLE apps")
+        conn.execute(
+            """
+            CREATE TABLE apps (
+                appid               INTEGER PRIMARY KEY,
+                name                TEXT,
+                status              TEXT NOT NULL DEFAULT 'idle',
+                last_prefill_at     TEXT,
+                last_manifest_check TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO apps (appid, name, status, last_prefill_at) "
+            "VALUES (440, 'Team Fortress 2', 'done', '2026-08-06T00:00:00Z')"
+        )
+        conn.execute("UPDATE schema_version SET version = 4")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        (version,) = conn.execute("SELECT version FROM schema_version").fetchone()
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(apps)")}
+        row = conn.execute("SELECT * FROM apps WHERE appid = 440").fetchone()
+    finally:
+        conn.close()
+
+    assert version == SCHEMA_VERSION
+    assert "needs_force" in columns
+    # The pre-existing row survived the ALTER, and — because the column has a
+    # constant DEFAULT 1, which SQLite applies retroactively to existing rows
+    # for ALTER TABLE ADD COLUMN — it is populated, not NULL.
+    assert row["name"] == "Team Fortress 2"
+    assert row["needs_force"] == 1
+
+
+def test_init_db_upgrade_to_v5_is_idempotent_if_called_twice(tmp_path) -> None:
+    """Calling init_db twice against the same pre-v5 file must not raise
+    'duplicate column name' -- _add_missing_app_columns guards per-column,
+    not just per-version."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("ALTER TABLE apps DROP COLUMN needs_force")
+        conn.execute("UPDATE schema_version SET version = 4")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+    init_db(db_path)  # must not raise
+
+    conn = get_connection(db_path)
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(apps)")}
+    finally:
+        conn.close()
+    assert "needs_force" in columns
+
+
 def test_init_db_refuses_a_database_from_a_newer_vault_api(tmp_path) -> None:
     import pytest
 

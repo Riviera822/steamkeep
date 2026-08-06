@@ -28,6 +28,13 @@ class GameSummary(BaseModel):
     # (depot_count == 0) or uncached (mapped but never written to disk yet)
     # — see app_size_bytes for why those two cases are both "unknown", not 0.
     size_bytes: int | None = None
+    # Whether the NEXT prefill for this app will run with --force (schema v5,
+    # WP 3.4, ADR-0006 decision 2): True for a never-filled app (schema
+    # default) or after a deletion that changed/left uncertain what's on
+    # disk; False once a successful run has confirmed/refreshed it. Operator
+    # visibility only — the API surface for triggering a forced run stays
+    # DELETE then POST /v1/prefill, see api/README.md.
+    needs_force: bool
 
 
 class DepotEntry(BaseModel):
@@ -47,6 +54,8 @@ class GameDetail(BaseModel):
     depots: list[DepotEntry]
     # See GameSummary.size_bytes.
     size_bytes: int | None = None
+    # See GameSummary.needs_force.
+    needs_force: bool
 
 
 @router.get("/v1/games", response_model=list[GameSummary])
@@ -59,7 +68,7 @@ def list_games(
     with open_db() as conn:
         rows = conn.execute(
             """
-            SELECT a.appid, a.name, a.status, a.last_prefill_at,
+            SELECT a.appid, a.name, a.status, a.last_prefill_at, a.needs_force,
                    COUNT(d.depotid) AS depot_count
             FROM apps a
             LEFT JOIN depot_app_map d ON d.appid = a.appid
@@ -85,6 +94,7 @@ def list_games(
             last_prefill_at=row["last_prefill_at"],
             depot_count=row["depot_count"],
             size_bytes=app_size_bytes(app_depotids.get(row["appid"], []), depot_bytes),
+            needs_force=bool(row["needs_force"]),
         )
         for row in rows
     ]
@@ -105,7 +115,8 @@ def get_game(
     """
     with open_db() as conn:
         app_row = conn.execute(
-            "SELECT appid, name, status, last_prefill_at FROM apps WHERE appid = ?",
+            "SELECT appid, name, status, last_prefill_at, needs_force FROM apps "
+            "WHERE appid = ?",
             (appid,),
         ).fetchone()
         if app_row is None:
@@ -149,4 +160,5 @@ def get_game(
         last_prefill_at=app_row["last_prefill_at"],
         depots=depots,
         size_bytes=app_size_bytes([row["depotid"] for row in depot_rows], depot_bytes),
+        needs_force=bool(app_row["needs_force"]),
     )

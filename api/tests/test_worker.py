@@ -449,6 +449,247 @@ def test_updated_case_does_not_touch_last_manifest_check(
     assert row["last_manifest_check"] is None
 
 
+# -- needs_force (WP 3.4, ADR-0006 decision 2) ------------------------------
+#
+# A fresh app row defaults to needs_force=1 (schema v5 default: never filled
+# before, so the first run must force). A successful job (the 'done' outcome
+# -- including a parse-failure-but-exit-0 run and the up-to-date-confirmed
+# case, NOT the unowned zero/zero case) clears it, so the app's NEXT run goes
+# non-forced. The unowned-app error and every failure branch must leave it
+# exactly as it was.
+
+
+def test_first_run_is_forced_and_success_clears_needs_force_for_the_next_run(
+    tmp_path: Path, bindir: Path, cache_root: Path
+) -> None:
+    """Proven through two real subprocess runs (the recorded argv), not just
+    the stored flag value: a brand-new app's first job passes --force, and
+    after it succeeds the SAME app's next job omits it."""
+    executable = stub_prefill.make_stub(
+        bindir, cache_root=str(cache_root), depots_by_app={440: [441]}
+    )
+    app = create_app(make_settings(tmp_path, cache_root, executable))
+
+    with TestClient(app) as client:
+        (job_id,) = enqueue(client, 440)
+        assert wait_for_job(client, job_id)["status"] == "done"
+        assert stub_prefill.read_argv(bindir) == ["prefill", "--force", "--no-ansi"]
+
+        (job_id_2,) = enqueue(client, 440)
+        assert wait_for_job(client, job_id_2)["status"] == "done"
+        assert stub_prefill.read_argv(bindir) == ["prefill", "--no-ansi"]
+
+
+def test_needs_force_is_exposed_on_the_games_endpoints_and_cleared_by_success(
+    tmp_path: Path, bindir: Path, cache_root: Path
+) -> None:
+    executable = stub_prefill.make_stub(
+        bindir, cache_root=str(cache_root), depots_by_app={440: [441]}
+    )
+    app = create_app(make_settings(tmp_path, cache_root, executable))
+
+    with TestClient(app) as client:
+        (job_id,) = enqueue(client, 440)
+        # The apps row is created synchronously on enqueue (ensure_app_row),
+        # so this is visible before the job even starts running.
+        detail = client.get("/v1/games/440", headers=AUTH).json()
+        assert detail["needs_force"] is True
+        listed = next(
+            entry for entry in client.get("/v1/games", headers=AUTH).json()
+            if entry["appid"] == 440
+        )
+        assert listed["needs_force"] is True
+
+        assert wait_for_job(client, job_id)["status"] == "done"
+
+        assert client.get("/v1/games/440", headers=AUTH).json()["needs_force"] is False
+
+
+def test_up_to_date_confirmation_also_clears_needs_force(
+    tmp_path: Path, bindir: Path, cache_root: Path
+) -> None:
+    """The up-to-date-confirmed case is still a genuine success ('done') --
+    ADR-0006 decision 2 clears needs_force there too, not only when something
+    was actually updated."""
+    executable = stub_prefill.make_stub(
+        bindir, cache_root=str(cache_root), summary_text=_CLEAN_TABLE_UP_TO_DATE
+    )
+    app = create_app(make_settings(tmp_path, cache_root, executable))
+
+    with TestClient(app) as client:
+        (job_id,) = enqueue(client, 440)
+        assert wait_for_job(client, job_id)["status"] == "done"
+        assert client.get("/v1/games/440", headers=AUTH).json()["needs_force"] is False
+
+
+def test_unowned_outcome_leaves_needs_force_unchanged(
+    tmp_path: Path, bindir: Path, cache_root: Path
+) -> None:
+    """Driven from needs_force=0 (not the schema default of 1), so this
+    actually proves the unowned branch leaves the flag alone rather than
+    merely observing the default it started at."""
+    executable = stub_prefill.make_stub(
+        bindir, cache_root=str(cache_root), depots_by_app={550: [551]}
+    )
+    app = create_app(make_settings(tmp_path, cache_root, executable))
+
+    with TestClient(app) as client:
+        (job_id,) = enqueue(client, 550)
+        assert wait_for_job(client, job_id)["status"] == "done"
+        assert client.get("/v1/games/550", headers=AUTH).json()["needs_force"] is False
+
+        stub_prefill.set_mode(
+            bindir, depots_by_app={}, summary_text=_MOJIBAKE_TABLE_UNOWNED
+        )
+        (job_id_2,) = enqueue(client, 550)
+        job2 = wait_for_job(client, job_id_2)
+        assert job2["status"] == "error"
+        assert client.get("/v1/games/550", headers=AUTH).json()["needs_force"] is False
+
+
+def test_failed_job_leaves_needs_force_unchanged(
+    tmp_path: Path, bindir: Path, cache_root: Path
+) -> None:
+    """Same reasoning as the unowned test above: start from needs_force=0 so
+    a bug that resets it on failure would actually be caught."""
+    executable = stub_prefill.make_stub(
+        bindir, cache_root=str(cache_root), depots_by_app={440: [441]}
+    )
+    app = create_app(make_settings(tmp_path, cache_root, executable))
+
+    with TestClient(app) as client:
+        (job_id,) = enqueue(client, 440)
+        assert wait_for_job(client, job_id)["status"] == "done"
+        assert client.get("/v1/games/440", headers=AUTH).json()["needs_force"] is False
+
+        stub_prefill.set_mode(bindir, mode="fail", exit_code=4)
+        (job_id_2,) = enqueue(client, 440)
+        job2 = wait_for_job(client, job_id_2)
+        assert job2["status"] == "error"
+        assert client.get("/v1/games/440", headers=AUTH).json()["needs_force"] is False
+
+
+def test_a_deletion_racing_a_slow_job_does_not_get_its_needs_force_clobbered(
+    tmp_path: Path, bindir: Path, cache_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer-reproduced end-to-end wedge (WP 3.4 review blocker).
+
+    A prefill job claimed DURING a DELETE's filesystem window used to clear
+    needs_force back to 0 with a last-writer-wins ``UPDATE`` at the end of
+    its run, clobbering the 1 the deletion had just set. Reproduced sequence:
+    app 'done' with last_prefill_at set, cache directory EMPTY, needs_force=0
+    -- and no self-healing path, since SteamPrefill's own bookkeeping still
+    thinks the (now-deleted) depots are present, so every future run stays
+    non-forced forever.
+
+    **Deterministic reproduction, not a real thread race gamble.**
+    ``DELETE /v1/cache/{appid}``'s active-job check runs BEFORE
+    ``deletion.plan_deletion`` (see ``routers/cache.py``), so wrapping
+    ``plan_deletion`` to enqueue the racing job at that exact point guarantees
+    it is created strictly AFTER the check already passed (no 409) and
+    strictly BEFORE ``delete_app_depots``/``reset_app_after_deletion`` run.
+    Polling the job's status via a direct DB read (not the HTTP client, to
+    avoid nesting requests inside the DELETE's own in-flight request) confirms
+    the real background worker actually claimed it -- reading
+    ``needs_force=0``, the PRE-deletion value -- before letting the DELETE
+    request continue. The racing job's stub sleeps long enough (well past a
+    single small depot's removal) that it can only finish, and attempt its
+    needs_force clear, AFTER the "fast" DELETE has already returned.
+    """
+    from vault_api import deletion as deletion_module
+    from vault_api import jobs as jobs_queue
+
+    executable = stub_prefill.make_stub(bindir, cache_root=str(cache_root), sleep_seconds=1.5)
+    settings = make_settings(tmp_path, cache_root, executable)
+    app = create_app(settings)
+
+    # Pre-existing state: app 440 already successfully filled once
+    # (needs_force=0) with real content on disk for DELETE to remove.
+    depot_dir = cache_root / "depot" / "441" / "chunk"
+    depot_dir.mkdir(parents=True)
+    (depot_dir / "aa").write_bytes(b"1" * 10)
+
+    with TestClient(app) as client:
+        assert client.put(
+            "/v1/mapping/441", json={"appid": 440}, headers=AUTH
+        ).status_code == 200
+        conn = get_connection(settings.db_path)
+        try:
+            conn.execute("UPDATE apps SET needs_force = 0 WHERE appid = 440")
+            conn.commit()
+        finally:
+            conn.close()
+
+        racing_job_id: list[int] = []
+        real_plan_deletion = deletion_module.plan_deletion
+
+        def plan_then_enqueue_the_racing_job(rows, appid):  # type: ignore[no-untyped-def]
+            plan = real_plan_deletion(rows, appid)
+
+            # Enqueued here: strictly AFTER the endpoint's own active-job
+            # check (already passed by the time plan_deletion runs) and
+            # strictly BEFORE delete_app_depots/reset_app_after_deletion.
+            race_conn = get_connection(settings.db_path)
+            try:
+                job, _created = jobs_queue.enqueue_prefill(race_conn, appid)
+            finally:
+                race_conn.close()
+            racing_job_id.append(int(job["id"]))
+
+            # Give the real background worker (fast poll interval in tests)
+            # a chance to actually claim it -- reading needs_force=0, the
+            # PRE-deletion value -- before the deletion's own filesystem work
+            # runs. Polled via a fresh direct connection, not client.get,
+            # since this callback executes INSIDE the DELETE request's own
+            # (threadpool) handling of this TestClient -- nesting another
+            # request through the same client here is unnecessary risk for
+            # no benefit.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                check_conn = get_connection(settings.db_path)
+                try:
+                    row = check_conn.execute(
+                        "SELECT status FROM jobs WHERE id = ?", (job["id"],)
+                    ).fetchone()
+                finally:
+                    check_conn.close()
+                if row is not None and row["status"] == "running":
+                    break
+                time.sleep(0.01)
+            else:  # pragma: no cover
+                pytest.fail("racing job was never claimed by the background worker")
+
+            return plan
+
+        monkeypatch.setattr(
+            deletion_module, "plan_deletion", plan_then_enqueue_the_racing_job
+        )
+
+        response = client.delete("/v1/cache/440", headers=AUTH)
+
+        assert response.status_code == 200, response.text
+        assert response.json()["deleted_depots"] == [
+            {"depotid": 441, "size_bytes_freed": 10}
+        ]
+        assert racing_job_id, "the racing job was never enqueued"
+
+        # Immediately after the (fast) DELETE returns, the racing job is
+        # still asleep (sleep_seconds=1.5) -- needs_force must already be 1
+        # from the deletion itself.
+        assert client.get("/v1/games/440", headers=AUTH).json()["needs_force"] is True
+
+        job = wait_for_job(client, racing_job_id[0], timeout=30)
+        assert job["status"] == "done"
+
+        # THE FIX: the racing job read needs_force=0 at claim time, so its
+        # end-of-run clear is a compare-and-swap against that STALE value --
+        # by the time it runs, the current value is already 1 (set by the
+        # deletion), so the CAS is a no-op. needs_force must still be 1, not
+        # clobbered back to 0 (the reviewer-reproduced wedge).
+        final = client.get("/v1/games/440", headers=AUTH).json()
+        assert final["needs_force"] is True
+
+
 # -- manifest ingestion (WP 3.2) --------------------------------------------
 
 
