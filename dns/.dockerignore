@@ -1,0 +1,4 @@
+# Build context for dns/Dockerfile. Only dnsmasq.conf.template and
+# docker-entrypoint.sh belong in the image.
+tests/
+README.md

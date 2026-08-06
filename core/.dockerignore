@@ -1,0 +1,18 @@
+# Build context for core/Dockerfile. Only docker/ is actually COPYed; everything
+# below is either runtime state from running nginx natively for development
+# (gitignored, and megabytes of real depot chunks) or documentation/tests that
+# have no business inside the image.
+cache/
+logs/
+tmp/
+*.pid
+_testcore_tmp/
+tests/
+README.md
+
+# The reviewed native config is deliberately NOT copied into the image -- the
+# container runs core/docker/nginx.conf.template, and
+# core/docker/check-config-drift.sh is what keeps the two in sync in the repo.
+# Excluding it from the context makes "which config is in this image?"
+# unambiguous.
+nginx/
