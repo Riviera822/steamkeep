@@ -8,6 +8,9 @@
 //	vault-agent report                 one-shot: discover -> report -> print -> exit 0/1
 //	vault-agent report --loop           keep running, reporting every --interval (jittered)
 //	                                     until SIGTERM/CTRL-C
+//	vault-agent hosts apply|remove|status
+//	                                    opt-in, DNS-free hosts-file mode (WP 2.3) - see
+//	                                     hosts.go and agent/go/hostsfile
 //
 // One-shot is the PRIMARY mode (plan §7: a Windows Scheduled Task provides
 // the timing); --loop exists for systemd (Phase 2.5's Linux/SteamOS
@@ -39,6 +42,8 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -58,13 +63,46 @@ func main() {
 // e.g. main_test.go's TestRun_APIKeyNeverAppearsInLoggedOutput, the
 // redaction proof) instead of exec'ing a subprocess.
 func run(args []string, stdout, stderr io.Writer) int {
-	logger := log.New(stderr, "", log.LstdFlags)
-
-	if len(args) == 0 || args[0] != "report" {
-		fmt.Fprintln(stderr, "usage: vault-agent report [--loop] [flags]")
-		fmt.Fprintln(stderr, "run 'vault-agent report -h' for the full flag list")
+	if len(args) == 0 {
+		printUsage(stderr)
 		return 2
 	}
+	switch args[0] {
+	case "report":
+		return runReport(args, stdout, stderr)
+	case "hosts":
+		return runHosts(args[1:], stdout, stderr, programName())
+	default:
+		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
+		printUsage(stderr)
+		return 2
+	}
+}
+
+// programName is what the elevation hint tells the user to type. Taken
+// from os.Args[0] so a renamed binary still prints a command that works.
+func programName() string {
+	if len(os.Args) == 0 || strings.TrimSpace(os.Args[0]) == "" {
+		return "vault-agent"
+	}
+	return filepath.Base(os.Args[0])
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprintln(w, "usage: vault-agent <command> [flags]")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "commands:")
+	fmt.Fprintln(w, "  report [--loop]              discover the local Steam library and report it to vault-api")
+	fmt.Fprintln(w, "  hosts apply|remove|status    manage the optional hosts-file cache entry (opt-in, admin rights)")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "run 'vault-agent report -h' or 'vault-agent hosts' for the full flag list")
+}
+
+// runReport is the WP 2.2 `report` subcommand, unchanged by WP 2.3's
+// addition of `hosts` beyond being lifted out of run()'s body. args
+// INCLUDES the subcommand name at index 0.
+func runReport(args []string, stdout, stderr io.Writer) int {
+	logger := log.New(stderr, "", log.LstdFlags)
 
 	// output goes to stderr (the SAME writer the caller passed in, not the
 	// real os.Stderr) so -h/unknown-flag usage text is captured wherever

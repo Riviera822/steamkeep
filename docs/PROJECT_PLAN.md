@@ -330,7 +330,13 @@ for users who expose the API differently.
 ### Phase 2 — vault-agent (PC listener)
 - [ ] ACF/VDF parser (appmanifest + libraryfolders, multiple drives)
 - [ ] HTTP reporter with retry (tolerate VPN/network outages)
-- [ ] Optional hosts-file mode (opt-in, admin rights, clean uninstall path)
+- [x] Optional hosts-file mode (opt-in, admin rights, clean uninstall path)
+      *(WP 2.3: marker-block management with byte-exact preservation,
+      fail-closed backup, measured Windows ACL write strategy, UTF-16/
+      symlink refusal, SIGKILL/ENOSPC fault-injection evidence. Note:
+      Phase 0 proved CURRENT Linux clients also perform lancache
+      discovery, so hosts mode works beyond Windows; Opus + Fable
+      double review. Real-Windows-hosts run = 2-min user checklist)*
 - [ ] Document Windows scheduled-task setup, optional installer script
 - [ ] Linux/SteamOS agent variant (Steam Deck / Steam Machine): library
       discovery under `~/.local/share/Steam`, systemd user service

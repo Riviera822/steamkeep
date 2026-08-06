@@ -9,11 +9,13 @@ Status: work in progress. The ACF/VDF parser has been ported to Go
 (WP 2.1b, `go/`) and is judged against this Python package's test corpus —
 see "Go port (production)" below. The HTTP reporter and the `vault-agent`
 CLI now exist (WP 2.2, `go/report`, `go/client`, `go/agentconfig`,
-`go/cmd/vault-agent`) — see "vault-agent CLI (WP 2.2)" below. No
-hosts-file mode yet (WP 2.3), no Linux/SteamOS discovery variant (WP 2.5,
-see ADR-0002; the binary already cross-compiles for linux/amd64 and
-linux/arm64 and runs, but library-discovery paths beyond the OS-generic
-default are WP 2.5's job).
+`go/cmd/vault-agent`) — see "vault-agent CLI (WP 2.2)" below. The optional
+hosts-file mode now exists too (WP 2.3, `go/hostsfile` +
+`go/cmd/vault-agent/hosts.go`) — see "Hosts-file mode (WP 2.3)" below. No
+Linux/SteamOS discovery variant yet (WP 2.5, see ADR-0002; the binary
+already cross-compiles for linux/amd64 and linux/arm64 and runs, but
+library-discovery paths beyond the OS-generic default are WP 2.5's job),
+and no Windows Scheduled Task installer (WP 2.6).
 
 **Executable specification (ADR-0005):** vault-agent ships as a Go binary
 in production; this Python package and its test suite are the pinned
@@ -66,13 +68,24 @@ agent/go/
 ├── agentconfig/
 │   ├── config.go                 # flags+env parsing, defaults, validation (WP 2.2)
 │   └── config_test.go
+├── hostsfile/                     # WP 2.3: the managed hosts-file block
+│   ├── hostsfile.go                # parse/Verify/Apply/Remove, states, IPv4 validation
+│   ├── write.go                     # backup + atomic rename with in-place fallback
+│   ├── paths.go                      # per-GOOS default path, elevation hint
+│   └── hostsfile_test.go              # fixture corpus: CRLF/LF, corruption, byte-exactness
 ├── cmd/
 │   ├── probe/main.go          # throwaway CLI: DiscoverInstalled against a real
 │   │                           # library_root, for manual real-machine validation —
 │   │                           # NOT the production reporter
-│   └── vault-agent/main.go     # THE production CLI (WP 2.2): `report` [--loop]
-│       └── main_test.go         # exit codes, one-shot success/failure, API-key redaction
+│   └── vault-agent/            # THE production CLI
+│       ├── main.go              # subcommand dispatch + `report` [--loop] (WP 2.2)
+│       ├── hosts.go              # `hosts apply|remove|status` (WP 2.3)
+│       ├── main_test.go           # exit codes, one-shot success/failure, API-key redaction
+│       └── hosts_test.go           # hosts CLI: exit codes, refusals, elevation hint
 ```
+
+Sandbox verification scripts for hosts mode live in `agent/tests/sandbox/`
+(see "Hosts-file mode" below) — they are not `go test` and are run by hand.
 
 **Building and testing (WSL2 — no Windows Go toolchain in this repo's dev
 environment; Go 1.26 in WSL):**
@@ -269,12 +282,14 @@ library (`go/acf`) and reports the FULL installed-app-id list to vault-api
 it with retry). Deliberately dumb (plan §3): no control logic runs here —
 scheduling, prefill decisions, and removal handling all live in vault-api.
 
-Out of scope for this package (see the Status line above and the WP 2.2
-brief): hosts-file mode (WP 2.3), a Windows Scheduled Task installer script
-(WP 2.6), a Linux/SteamOS-specific library discovery variant and systemd
-packaging (WP 2.5 — the binary runs on linux/amd64 and linux/arm64 today
-with the OS-generic `~/.local/share/Steam` default, but that's this
-package's default, not WP 2.5's dedicated variant).
+Out of scope for `report` (see the Status line above): a Windows Scheduled
+Task installer script (WP 2.6), a Linux/SteamOS-specific library discovery
+variant and systemd packaging (WP 2.5 — the binary runs on linux/amd64 and
+linux/arm64 today with the OS-generic `~/.local/share/Steam` default, but
+that's this package's default, not WP 2.5's dedicated variant). The
+hosts-file mode landed separately as the `hosts` subcommand — see
+"Hosts-file mode (WP 2.3)" below; `report` itself never touches the hosts
+file.
 
 ### Usage
 
@@ -404,6 +419,317 @@ TLS uses the OS/system root CA pool; `http_proxy`/`https_proxy`/`no_proxy`
 environment variables are honored by default (`http.ProxyFromEnvironment`)
 — set them in the environment vault-agent runs under if reaching the
 server needs a proxy.
+
+## Hosts-file mode (WP 2.3)
+
+The optional, **opt-in** DNS-free deployment mode from `docs/PROJECT_PLAN.md`
+§10 (mode 3) and §3. It automates — auditably and reversibly — exactly what
+`poc/steam-client-test/PROTOCOL.md` §1 and §4 ask you to do by hand in an
+elevated Notepad.
+
+```
+vault-agent hosts apply  --cache-ip 192.168.1.50   # add/update the entry
+vault-agent hosts status [--cache-ip 192.168.1.50] # what's there, and is it live?
+vault-agent hosts remove                           # clean uninstall
+```
+
+Nothing here runs automatically. `report` never touches the hosts file; the
+only way this code writes anything is you typing `hosts apply`.
+
+### What it writes — exactly one block, exactly one line
+
+```
+# BEGIN steamvault-agent (managed block - do not edit inside)
+192.168.1.50 lancache.steamcontent.com
+# END steamvault-agent
+```
+
+That's the whole change. `lancache.steamcontent.com` is **not** a
+LanCache-project name and not ours: it is hardcoded by Valve in the Steam
+client, on Valve's own `steamcontent.com` domain, as the client's built-in
+cache-discovery interface (plan §3). The client looks it up at startup, and
+if it resolves, uses that host as its download cache — which is why this
+mode needs no DNS server at all.
+
+**Everything outside the two markers is preserved byte for byte.** The
+splice is done on byte offsets, not by re-parsing and re-joining lines, so
+line endings, tabs, trailing whitespace and unrelated entries come through
+untouched. The block itself is written with the file's own dominant line
+ending (CRLF on a Windows hosts file, LF on Linux) — detected per file, not
+assumed from the platform.
+
+### Guarantees and refusals
+
+| Situation | Behavior |
+|---|---|
+| No block yet | Appended at the end of the file |
+| Block present, different IP | Replaced **in place** — its position in the file is kept |
+| Block already exactly right | **Nothing is written at all** (no backup, no touch) |
+| Block hand-edited inside the markers | Rewritten (the boundaries are ours, the contents are ours) |
+| Markers damaged (BEGIN without END, two BEGINs, END before BEGIN, …) | **Refuses to touch the file** — `apply` *and* `remove`. The block cannot be identified, so any edit would be a guess. The error names the offending line numbers so you can fix it by hand |
+| An entry for `lancache.steamcontent.com` exists **outside** the block | `apply` refuses and names the line. The resolver answers with the FIRST match, so appending a second entry would look correct and do nothing. `remove` is deliberately **not** blocked by this — uninstall must always work |
+| The file is UTF-16/UTF-32 (BOM, or NUL bytes anywhere) | **Refuses everything**, including `status`, with a conversion hint. This package is byte-oriented: in UTF-16 every ASCII character is followed by a NUL, so conflict detection and marker detection are blind, and `apply` would append a UTF-8 block to a UTF-16 file — a mixed-encoding file the resolver ignores while vault-agent cheerfully reports `present-correct`. A UTF-8 BOM is fine and is *not* rejected |
+| The path is a **symlink** | Refuses, naming the link target. The atomic write replaces the path, so it would silently turn the link into a regular file — `/etc/hosts` is a symlink on NixOS and in some container images, and neither `remove` nor the `.bak` can put a link back. Add the entry wherever that file is generated from instead. (Following the link with `EvalSymlinks` was the alternative; refusal was chosen for v1 because it cannot surprise anyone) |
+| The path is a directory | Refuses with an actionable message instead of the platform's raw error (Windows reports a misleading "Access is denied." here) |
+| Not running elevated | Fails with exit 1, changes nothing, and prints the exact command to re-run in an elevated shell |
+
+**Before every mutation** the pre-change bytes are written to
+`<hosts file>.steamvault.bak`. If that backup cannot be written, the
+mutation does not happen at all.
+
+`--cache-ip` must be a plain IPv4 address (`netip.ParseAddr` + `Is4`, so
+leading zeros, IPv6, IPv4-mapped IPv6, ports, CIDR, `0.0.0.0`, multicast and
+`255.255.255.255` are all rejected). This is the same IPv4-only stance
+vault-dns takes for `CACHE_IP`, for the same two reasons: an AAAA answer
+would let IPv6-capable clients bypass the cache, and an unvalidated value
+substituted into a line-oriented config file is a line-injection vector —
+here, the ability to redirect any hostname on the machine.
+
+`hosts status` additionally resolves `lancache.steamcontent.com` through the
+system resolver and prints what it got. That is the real "is it live?"
+check. Note the honesty caveat it prints for you: the resolver always
+answers from the **system** hosts file, so with `--hosts-path` pointed
+elsewhere, the state line and the resolver line describe two different files.
+
+### Uninstall
+
+```
+vault-agent hosts remove
+```
+
+Deletes exactly the block and leaves the rest of the file byte-identical to
+what it was before `apply` — with one documented exception: **a hosts file
+that did not end in a newline gains one.** `apply` has to insert a line
+terminator before the block (otherwise the file's last line would be glued
+to the BEGIN marker), and on removal that byte cannot be told apart from one
+the file always had. It is a single byte, and it makes the file more
+POSIX-correct, not less. Every other round trip is hash-identical, which the
+test suite and both sandboxes assert.
+
+The `.steamvault.bak` file is left in place on purpose — it is your undo
+copy. Delete it yourself when you're satisfied. **It is a single slot, not a
+history:** every mutation overwrites it with the state from immediately
+before that mutation, so after `apply` → `remove` it holds the *applied*
+file, not your original. If you want to keep a particular version, copy it
+somewhere else before running the next command.
+
+### Administrator / root rights, and why there is no auto-elevation
+
+Writing the hosts file needs Administrator on Windows and root on Linux.
+vault-agent detects the permission failure, changes nothing, and prints the
+platform's way of getting an elevated shell **plus the exact command you
+just ran**, e.g.:
+
+```
+The hosts file is only writable by an Administrator.
+Open a new terminal as Administrator (press Start, type "Terminal",
+then press Ctrl+Shift+Enter) and run exactly:
+
+    vault-agent.exe hosts apply --cache-ip 192.168.1.50
+```
+
+There is deliberately **no self-elevation** (`runas` / re-exec under sudo) in
+v1. A binary that can silently re-launch itself with administrator rights is
+a materially larger attack surface — the elevated child inherits arguments
+and environment from a context that may not be trustworthy, and it trains
+users to click through UAC prompts raised by a background task. It also
+needs platform-specific code plus a way to get output back out of the
+elevated process. One copy-paste keeps the privileged step visible and in
+your own shell.
+
+### How the write happens (and what was measured to decide it)
+
+Primary path: write a temp file in the same directory, fsync it, `rename` it
+over the target (atomic on Windows and Linux, so a crash can never leave a
+truncated hosts file). Fallback: truncate and rewrite the file in place.
+
+**The fallback is not atomic, and that matters:** it truncates the real hosts
+file and then writes into it, so a crash, power cut or kill signal in that
+window can leave the file empty or half-written — which would break name
+resolution for the whole machine until it is repaired. That is exactly why it
+is the fallback and not the default, and why the backup is written first and
+is mandatory. **Recovery is a single copy:** put
+`<hosts file>.steamvault.bak` back over the hosts file (from an elevated
+shell, e.g. `copy C:\Windows\System32\drivers\etc\hosts.steamvault.bak
+C:\Windows\System32\drivers\etc\hosts` or
+`sudo cp /etc/hosts.steamvault.bak /etc/hosts`). Which path was used is
+printed on every mutation as `write: rename` or `write: in-place`. If a write
+does fail after the fallback already truncated the file, the error says so
+explicitly ("may be partially written or empty right now") rather than
+claiming the file is untouched — the two cases are distinguished, not guessed.
+
+**Concurrent writers.** Nothing is locked, deliberately: holding a lock on the
+file the whole machine resolves through would be more disruptive than the
+narrow race it closes, and the realistic other writer is a human in Notepad,
+which no lock of ours would exclude anyway. The consequence differs by path —
+on the rename path the loser is simply overwritten wholesale; on the in-place
+path the result can be genuinely **corrupt** (interleaved or truncated
+content), not merely missing a line. That corruption then **fails closed**:
+a damaged block trips the markers-corrupt check, so every later `apply` and
+`remove` refuses to touch the file until a human fixes it, and the `.bak`
+holds the pre-mutation bytes.
+
+The fallback is not hypothetical. Measured on real Windows 11 with a
+cross-compiled probe against ACL-restricted files (no admin needed to
+reproduce; the real hosts file was never involved):
+
+| file / directory ACL | `os.Rename` | in-place write |
+|---|---|---|
+| unrestricted | ok | ok |
+| file denies DELETE, parent still grants delete-child | ok | ok |
+| file denies DELETE **and** parent denies DELETE_CHILD | **denied** | ok |
+| file denies FILE_WRITE_DATA | ok | **denied** |
+| both denied | denied | denied |
+
+Neither strategy dominates. Row 3 is the shape a hardened hosts file
+actually takes — security software commonly blocks replacing or deleting it
+while still letting an administrator edit it — so without the fallback,
+hosts mode would simply be unavailable on those machines. Every failing case
+surfaced as `fs.ErrPermission`, which is what makes the elevation hint fire
+reliably on Windows and not just on Unix.
+
+Two consequences worth knowing:
+
+- **Permission bits are preserved** (the original file's mode is applied to
+  the temp file before the rename). Without that, `os.CreateTemp`'s `0600`
+  would land on `/etc/hosts` and make it unreadable to every non-root
+  process on the machine.
+- **A rename replaces the file object**, so an *explicit* (non-inherited)
+  ACE on the Windows hosts file is not carried over; the new file inherits
+  its ACL from `%SystemRoot%\System32\drivers\etc`. On a default Windows
+  install the hosts file's ACL is entirely inherited from that directory
+  anyway, so the result is identical — and the ACLs that would be worth
+  preserving are exactly the ones that deny DELETE, which push the write
+  onto the in-place path that preserves them by construction. Preserving an
+  explicit ACL across a rename needs `golang.org/x/sys/windows`; this module
+  is dependency-free by ADR-0005, so this is documented rather than
+  implemented.
+
+### The Linux-client finding
+
+Plan §3 originally scoped this mode Windows-only, on the grounds that "the
+Linux/Steam Deck client does not perform this lookup". **Phase 0 WP 0.6
+disproved that**: the current stable Linux client *does* perform lancache
+discovery (3574 requests through the PoC cache, real CDN Host headers, zero
+Range headers — `poc/linux-client-test/RESULTS-20260805-083353.md`, and the
+Linux checkbox in plan §7). Hosts mode is therefore useful on Linux and
+SteamOS too, and `go/hostsfile` is implemented platform-neutrally: only the
+default path (`/etc/hosts` vs `%SystemRoot%\System32\drivers\etc\hosts`) and
+the elevation wording differ.
+
+Windows remains the **documented primary target**, because that is where the
+"single gaming PC, no local DNS server" scenario mode 3 exists for is most
+common. On SteamOS specifically, note that the rootfs is read-only by
+default — hosts mode there needs `steamos-readonly disable`, which is
+outside what this package does or recommends; the systemd/SteamOS packaging
+story is WP 2.5.
+
+### Verifying it
+
+Three layers, all reproducible:
+
+**1. Fixture tests** (`go test ./hostsfile/`): CRLF and LF variants, mixed
+endings, no trailing newline, empty file, file containing only our block,
+block in the middle of a file, block at EOF without a terminator, IP-change
+re-apply, idempotent no-op re-apply, all six marker-corruption shapes,
+conflict detection (including the fully-qualified
+`lancache.steamcontent.com.` spelling), backup contents, the backup-failure
+refusal (backup impossible while the target is still writable ⇒ refuse and
+change nothing), UTF-16/32 and symlink refusals, the half-written-file
+warning (a real ENOSPC via `/dev/full`), permission-mode preservation, the
+in-place fallback, and hash-compare round trips.
+
+Those tests are **mutation-tested**: eleven separate revert-the-guarantee
+mutations (line-ending detection, conflict refusal, corrupt-marker refusal,
+END-terminator reuse, mode preservation, backup written, backup-failure
+abort, encoding refusal, symlink refusal, the truncated flag, and the
+write-failure wording) each make at least one named test fail. The two that
+matter most — "a failed backup must abort the mutation" and "a half-written
+file must be reported as such" — are pinned by dedicated tests rather than
+caught incidentally.
+
+**2. Linux container sandbox** — the end-to-end proof against a REAL
+`/etc/hosts` that a real resolver reads:
+
+```bash
+wsl -u root bash /mnt/c/claude-dev/SteamVault/agent/tests/sandbox/run-hosts-sandbox.sh
+```
+
+It cross-builds the linux/amd64 binary, then in a throwaway
+`alpine:3.23.5` container (`--network none`, so only the hosts file can
+answer any lookup) runs: apply → `getent hosts lancache.steamcontent.com`
+resolves to the cache IP → status agrees → IP change → remove → resolution
+gone and the file byte-identical (sha256) to the pre-apply state → then the
+same operations as an unprivileged user, expecting a clean permission-denied
+message with the sudo hint and an untouched file. 44 assertions.
+
+*(A container's `/etc/hosts` is a Docker-managed bind mount, and a
+bind-mounted file cannot be renamed over — so this sandbox exercises the
+in-place fallback. The rename path is covered by the fixture tests and by
+the Windows sandbox below.)*
+
+**3. Windows sandbox** — for CRLF behavior and ACL reality on the real OS:
+
+```powershell
+agent\tests\sandbox\hosts-windows-sandbox.ps1 -Exe <path to vault-agent.exe>
+```
+
+No admin rights needed. It builds fixtures under `-LabDir` only, hashes the
+real system hosts file before and after, and **fails if that hash changed**.
+Covers: CRLF preservation and hash-identical round trip, the
+ACL-hardened-file case (asserting the in-place fallback engages), a fully
+write-denied file (asserting exit 1, the Administrator hint, and an
+unmodified file), corrupt-marker refusal, and conflict refusal.
+
+### Optional: verify it on YOUR real machine (2 minutes, needs Administrator)
+
+The automated suites deliberately never touch your real hosts file. If you
+want to confirm the real thing end to end, this is the whole procedure:
+
+1. **Look before you leap** (no admin needed):
+   ```
+   vault-agent hosts status
+   ```
+   Expect `state: absent`. If it reports a **conflict**, you have a manual
+   `lancache.steamcontent.com` entry from an earlier experiment (e.g. the
+   Phase 0 PoC protocol) — remove that line first, or `apply` will refuse.
+2. Open Windows Terminal **as Administrator** (Start → type "Terminal" →
+   `Ctrl+Shift+Enter`).
+3. Apply, using your cache server's LAN IP:
+   ```
+   vault-agent hosts apply --cache-ip 192.168.1.50
+   ```
+   Expect `absent -> present-correct`, a `backup:` path, and the three-line
+   block echoed back.
+4. Confirm it is live:
+   ```
+   vault-agent hosts status --cache-ip 192.168.1.50
+   ```
+   Expect `state: present-correct` and
+   `resolver: lancache.steamcontent.com -> 192.168.1.50`.
+   (`Resolve-DnsName lancache.steamcontent.com` is the independent
+   second opinion.)
+5. **Fully quit and restart Steam** — tray icon → Exit, not just closing the
+   window. The client only runs cache discovery at startup, so a running
+   client ignores the change. This is the single most common reason the
+   whole thing appears to "do nothing"
+   (`poc/steam-client-test/PROTOCOL.md` §5).
+6. Roll back whenever you like:
+   ```
+   vault-agent hosts remove
+   ```
+   Then `vault-agent hosts status` should report `absent`, and
+   `Resolve-DnsName lancache.steamcontent.com` should stop returning your
+   cache IP. Restart Steam again. Delete the `.steamvault.bak` file if you
+   don't want the undo copy.
+
+### Exit codes
+
+| Code | `hosts` meaning |
+|------|-----------------|
+| `0` | the operation succeeded, or `status` produced a report (whatever state it found — the state is the output, not an error), or `-h` |
+| `1` | a runtime failure: permission denied, corrupt markers, a conflicting entry, an unreadable file |
+| `2` | a usage error: unknown subcommand, missing/invalid `--cache-ip`, an unknown flag, a stray positional argument |
 
 ## What's here
 

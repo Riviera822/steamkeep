@@ -36,3 +36,11 @@ deploy/compose.yaml eol=lf
 # .env.example is copied to .env and parsed by Compose; a trailing \r ends up
 # inside the VALUE (e.g. an API key that never matches).
 **/.env.example eol=lf
+
+# WP 2.3 (vault-agent hosts mode) sandbox verification. Same shebang rationale
+# as above: hosts-sandbox-container.sh is executed INSIDE an alpine container
+# and run-hosts-sandbox.sh under WSL/bash, so a CRLF checkout makes the kernel
+# look for an interpreter named "/bin/sh\r" and the script fails on a file that
+# visibly exists. (The .ps1 in that directory runs on Windows and is left
+# alone.)
+agent/tests/sandbox/*.sh eol=lf
