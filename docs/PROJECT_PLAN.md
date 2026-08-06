@@ -354,7 +354,18 @@ for users who expose the API differently.
 - [ ] Optional generic webhook notifications (Discord/Slack/ntfy-compatible;
       built as a generic webhook feature, not vendor-specific)
 
-### Phase 4 — Android App
+### Phase 4 — Frontends (user decision 2026-08-06: web first, then app)
+
+#### Phase 4a — Web UI (served by vault-api as static files)
+- [ ] SPA sharing the mockup's design language; zero extra deploy
+      complexity (vault-api serves it; works over Tailscale/LAN and on
+      phone browsers immediately)
+- [ ] Same API surface as the app: library grid with badges + search,
+      download-to-cache/delete flows, jobs view, settings incl. vault name
+- [ ] Steam identity via Sign in with Steam (ADR-0004); library fetched
+      browser-side, never proxied through vault-api
+
+#### Phase 4b — Android App
 - [ ] Kotlin/Compose project, Steam Web API integration (library + covers)
 - [ ] Connectivity-profile abstraction (one API-client interface, three
       implementations: tsnet / system VPN / public domain)
@@ -406,8 +417,9 @@ steamvault/
 | SteamPrefill upstream dependency | LOW | Used only as a CLI subprocess, replaceable |
 
 **Deliberately OUT of scope (v1):** multi-service (Epic etc.), multi-tenant
-setups, a web UI (the Android app IS the UI; a web UI is welcome as a
-community contribution).
+setups. *(The web UI moved INTO scope as Phase 4a by user decision on
+2026-08-06 — it shares the app's design language and API surface and is
+served by vault-api itself.)*
 
 **Post-v1 roadmap:** an iOS app. The groundwork is deliberately kept
 compatible: the app talks pure REST to vault-api, the connectivity-profile
