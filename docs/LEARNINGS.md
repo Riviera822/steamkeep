@@ -101,6 +101,16 @@ These are not style preferences; each entry cost a review round to learn.
   image needs at least a credential-free smoke RUN in the verify suite
   (WP 1.9).
 
+## Subprocess output handling
+- SteamPrefill writes its summary table in the OS OEM codepage (cp850
+  here), not UTF-8 — decode strict-UTF-8 first, OS-queried OEM second,
+  lossy LAST (a decode path that can raise turns a successful download
+  into a crashed job: terminate() leaves truncated multibyte tails as
+  the NORMAL case) (WP 3.3 blocker).
+- "Contains a digit" is a terrible row-detector: SGR remnants
+  (\x1b[38;5;226m) and timestamps are digits too — require
+  digits-and-separators-only (WP 3.3).
+
 ## Go / CLI
 - Never register a secret env value as a flag DEFAULT — Go's
   flag.PrintDefaults() prints non-empty defaults verbatim on -h and every

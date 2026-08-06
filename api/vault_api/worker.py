@@ -23,7 +23,7 @@ import sqlite3
 import threading
 import traceback
 
-from vault_api import jobs, manifest_ingest, prefill
+from vault_api import jobs, manifest_ingest, prefill, prefill_summary
 from vault_api.config import Settings
 from vault_api.db import get_connection
 from vault_api.sizes import SizeCache
@@ -120,6 +120,92 @@ class PrefillWorker:
             log_parts = [result.output]
 
             if result.success:
+                # WP 3.3 / ADR-0006 decision 1, reordered ahead of the
+                # mapping/manifest mutation below (review S2 fix): SteamPrefill
+                # exiting 0 does NOT mean it did anything for this app -- parse
+                # its own summary table and let THAT decide the job outcome
+                # FIRST, before anything on disk gets attributed to it. Doing
+                # this after apply_observed_mapping/ingest_after_prefill left
+                # an error-outcome job's mapping/depot_manifests state mutated
+                # from evidence that (by the unowned branch's own definition)
+                # cannot belong to this app -- an app that was never
+                # considered has no depots and no manifests to attribute,
+                # planted-or-not. See prefill_summary.py's docstring for the
+                # evidenced reason a table like this exists at all: an
+                # unowned app exits 0 with a "Prefilled 0 apps" /
+                # Updated=0, Up To Date=0 summary (the WP 1.7 job-outcome
+                # trap this whole package closes).
+                summary = prefill_summary.parse_summary(result.output)
+
+                if not summary.parse_ok:
+                    logger.warning(
+                        "Could not parse SteamPrefill's summary table for "
+                        "appid %s (job %s); job outcome falls back to the "
+                        "exit-code rule (process exited 0 -> 'done').",
+                        appid, job_id,
+                    )
+                    log_parts.append(
+                        "[vault-api] Could not parse SteamPrefill's summary "
+                        "table; job outcome follows the exit-code rule only "
+                        "(see api/README.md's job-outcome table)."
+                    )
+                else:
+                    log_parts.append(
+                        "[vault-api] Prefill summary: updated="
+                        f"{summary.updated} up_to_date={summary.up_to_date}"
+                        + (
+                            f" (totaling {summary.total_bytes_text})"
+                            if summary.total_bytes_text
+                            else ""
+                        )
+                    )
+
+                unowned = (
+                    summary.parse_ok
+                    and summary.updated == 0
+                    and summary.up_to_date == 0
+                )
+
+                if unowned:
+                    # Updated==0 AND Up To Date==0 means SteamPrefill never
+                    # actually considered this app — reporting that as a
+                    # successful prefill is precisely the trap above. The job
+                    # ends 'error'; apps.status follows it to 'error' too
+                    # (deliberately NOT 'done' — this run accomplished
+                    # nothing for the app; NOT left at 'running' or reset to
+                    # 'idle' either, since a run did execute, it just found
+                    # nothing to do, and 'error' is the status this file
+                    # already uses elsewhere for "a run happened and produced
+                    # no usable outcome"). Neither last_prefill_at nor
+                    # last_manifest_check are touched — nothing was prefilled
+                    # or confirmed current. The depot mapping AND manifest
+                    # state (depot_manifests) are likewise deliberately left
+                    # untouched — scan_depots/apply_observed_mapping/
+                    # ingest_after_prefill below never run for this branch
+                    # (review S2), even if a depot directory or a stray
+                    # SteamPrefill .bin file happens to exist on disk: an app
+                    # SteamPrefill never considered has nothing that can
+                    # honestly be attributed to it.
+                    log_parts.append(
+                        "[vault-api] SteamPrefill did not consider this app "
+                        "- is it owned by the logged-in account? Depot "
+                        "mapping and manifest state were NOT touched."
+                    )
+                    jobs.set_app_status(conn, appid, jobs.STATUS_ERROR)
+                    jobs.finish_job(
+                        conn, job_id, jobs.STATUS_ERROR, "\n".join(log_parts),
+                        updated=summary.updated,
+                        up_to_date=summary.up_to_date,
+                        summary_parse_ok=summary.parse_ok,
+                    )
+                    logger.warning(
+                        "Prefill job %s for appid %s ended 'error': "
+                        "SteamPrefill reported Updated=0 and Up To Date=0 "
+                        "(app not considered).",
+                        job_id, appid,
+                    )
+                    return
+
                 after = prefill.scan_depots(self._settings.cache_root)
                 observed = prefill.diff_depots(before, after)
                 change = prefill.apply_observed_mapping(conn, appid, observed)
@@ -148,10 +234,32 @@ class PrefillWorker:
                         "(the prefill job itself still succeeded)."
                     )
 
-                jobs.set_app_status(
-                    conn, appid, jobs.STATUS_DONE, last_prefill_at=jobs.utcnow_iso()
+                now = jobs.utcnow_iso()
+                # ADR-0006 "current as of <timestamp>" semantics: only this
+                # exact shape — nothing changed, but SteamPrefill DID confirm
+                # at least one already-current depot for this app — earns
+                # last_manifest_check. A parse failure or the updated>0 case
+                # both leave it untouched (None -> set_app_status skips it).
+                last_manifest_check = (
+                    now
+                    if summary.parse_ok
+                    and summary.updated == 0
+                    and summary.up_to_date is not None
+                    and summary.up_to_date > 0
+                    else None
                 )
-                jobs.finish_job(conn, job_id, jobs.STATUS_DONE, "\n".join(log_parts))
+
+                jobs.set_app_status(
+                    conn, appid, jobs.STATUS_DONE,
+                    last_prefill_at=now,
+                    last_manifest_check=last_manifest_check,
+                )
+                jobs.finish_job(
+                    conn, job_id, jobs.STATUS_DONE, "\n".join(log_parts),
+                    updated=summary.updated,
+                    up_to_date=summary.up_to_date,
+                    summary_parse_ok=summary.parse_ok,
+                )
 
                 # Disk content just changed (plan §3: size calculation is
                 # "cached" — explicit invalidation, not polling). A prefill

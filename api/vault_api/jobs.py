@@ -43,9 +43,13 @@ STATUS_ERROR = "error"
 ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_RUNNING)
 
 #: Columns returned by the job read helpers. ``log_excerpt`` is intentionally
-#: excluded from the *list* query (see ``list_jobs``).
+#: excluded from the *list* query (see ``list_jobs``). ``updated``/
+#: ``up_to_date``/``summary_parse_ok`` (schema v4, WP 3.3) are SteamPrefill's
+#: own summary-table counters (ADR-0006 decision 1) — small scalars, so unlike
+#: ``log_excerpt`` they ARE included in the list query too.
 _JOB_COLUMNS = (
-    "id, appid, type, status, created_at, started_at, finished_at, log_excerpt"
+    "id, appid, type, status, created_at, started_at, finished_at, log_excerpt, "
+    "updated, up_to_date, summary_parse_ok"
 )
 
 #: Cap on stored log excerpts. 4 KiB is enough to show the tail of a
@@ -128,20 +132,28 @@ def set_app_status(
     appid: int,
     status: str,
     last_prefill_at: str | None = None,
+    last_manifest_check: str | None = None,
 ) -> None:
     """Set ``apps.status`` (plan §3: idle/running/done/error).
 
     ``last_prefill_at`` is only written when given — a failed run must not
-    claim the app was prefilled.
+    claim the app was prefilled. ``last_manifest_check`` (WP 3.3, ADR-0006
+    "current as of <timestamp>" semantics) is likewise only written when
+    given — the worker passes it exactly when SteamPrefill's summary reported
+    ``Up To Date > 0 AND Updated == 0`` for this run, i.e. a non-forced-run
+    style confirmation that the app is current as of now.
     """
     ensure_app_row(conn, appid)
-    if last_prefill_at is None:
-        conn.execute("UPDATE apps SET status = ? WHERE appid = ?", (status, appid))
-    else:
-        conn.execute(
-            "UPDATE apps SET status = ?, last_prefill_at = ? WHERE appid = ?",
-            (status, last_prefill_at, appid),
-        )
+    fields = ["status = ?"]
+    params: list[object] = [status]
+    if last_prefill_at is not None:
+        fields.append("last_prefill_at = ?")
+        params.append(last_prefill_at)
+    if last_manifest_check is not None:
+        fields.append("last_manifest_check = ?")
+        params.append(last_manifest_check)
+    params.append(appid)
+    conn.execute(f"UPDATE apps SET {', '.join(fields)} WHERE appid = ?", params)
     conn.commit()
 
 
@@ -221,11 +233,14 @@ def list_jobs(conn: sqlite3.Connection, limit: int) -> list[dict[str, object]]:
 
     Deliberately omits ``log_excerpt``: this endpoint is the app's polling
     surface, and 20 x 4 KiB of log text per poll is not what "small" means.
-    ``GET /v1/jobs/{id}`` carries the excerpt.
+    ``GET /v1/jobs/{id}`` carries the excerpt. ``updated``/``up_to_date``/
+    ``summary_parse_ok`` (schema v4, WP 3.3) ARE included here — they are
+    small scalars, not multi-KB text, so the same size argument doesn't apply.
     """
     rows = conn.execute(
         """
-        SELECT id, appid, type, status, created_at, started_at, finished_at
+        SELECT id, appid, type, status, created_at, started_at, finished_at,
+               updated, up_to_date, summary_parse_ok
         FROM jobs
         ORDER BY id DESC
         LIMIT ?
@@ -274,15 +289,40 @@ def claim_next_job(conn: sqlite3.Connection) -> dict[str, object] | None:
 
 
 def finish_job(
-    conn: sqlite3.Connection, job_id: int, status: str, log_excerpt: str
+    conn: sqlite3.Connection,
+    job_id: int,
+    status: str,
+    log_excerpt: str,
+    updated: int | None = None,
+    up_to_date: int | None = None,
+    summary_parse_ok: bool | None = None,
 ) -> None:
-    """Mark a job ``done`` or ``error`` and store its (tail-truncated) log."""
+    """Mark a job ``done`` or ``error`` and store its (tail-truncated) log.
+
+    ``updated``/``up_to_date``/``summary_parse_ok`` (schema v4, WP 3.3) are
+    SteamPrefill's own summary-table counters (``vault_api.prefill_summary``,
+    ADR-0006 decision 1) — left at their SQL-``NULL`` default (all three
+    parameters default to ``None``) for any job that never reaches a parsed
+    summary (a GC job, a failed/timed-out/aborted prefill, the crash-recovery
+    path in ``recover_stale_jobs``). ``summary_parse_ok`` is stored as 0/1,
+    SQLite having no native boolean.
+    """
     conn.execute(
         """
-        UPDATE jobs SET status = ?, finished_at = ?, log_excerpt = ?
+        UPDATE jobs
+        SET status = ?, finished_at = ?, log_excerpt = ?,
+            updated = ?, up_to_date = ?, summary_parse_ok = ?
         WHERE id = ?
         """,
-        (status, utcnow_iso(), tail_excerpt(log_excerpt), job_id),
+        (
+            status,
+            utcnow_iso(),
+            tail_excerpt(log_excerpt),
+            updated,
+            up_to_date,
+            None if summary_parse_ok is None else int(summary_parse_ok),
+            job_id,
+        ),
     )
     conn.commit()
 

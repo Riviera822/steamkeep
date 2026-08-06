@@ -24,8 +24,14 @@ scans SteamPrefill's own manifest temp-cache directory for this app's `.bin`
 files, records the latest manifest state per `(appid, depotid)`, archives the
 source file durably (SteamPrefill's temp cache does not survive its own
 `clear-temp`), and additively maps a shared depot to its "containing" app.
-The scheduler, summary parsing, GC itself, bypass detection and the miss
-trigger remain scope for later work packages.
+WP 3.3 adds **summary parsing and job outcome honesty**
+(`vault_api/prefill_summary.py`) — schema v4 (three new `jobs` columns), a
+decode fix for SteamPrefill's OEM-codepage console output, and the
+`Updated`/`Up To Date`-driven job-outcome rule (ADR-0006 decision 1) that
+stops an unowned app's zero-work run from being reported as a successful
+prefill (see "Job outcome honesty" below).
+The scheduler, GC itself, bypass detection and the miss trigger remain scope
+for later work packages.
 
 ## Layout
 
@@ -114,7 +120,7 @@ is a `manifests` sibling of `VAULT_DB_PATH`'s directory (`config._default_manife
 — consistent with a single persistent volume holding both the database and
 the archive, same caveat about `deploy/` wiring.
 
-## Database schema (v3)
+## Database schema (v4)
 
 Created idempotently at startup by `vault_api/db.py::init_db` (safe to call
 on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
@@ -125,7 +131,7 @@ on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
 | `schema_version` | `version`                                                                                   | Single-row marker for future migrations |
 | `apps`           | `appid` (PK), `name`, `status`, `last_prefill_at`, `last_manifest_check`                    | One row per tracked Steam app |
 | `depot_app_map`  | `depotid`, `appid`, PK `(depotid, appid)`                                                   | Depot→app mapping; a depot can map to multiple apps (shared depots, plan §4) |
-| `jobs`           | `id` (PK autoincrement), `appid`, `type`, `status`, `created_at`, `started_at`, `finished_at`, `log_excerpt` | Prefill/GC job queue (plan §3, §6) |
+| `jobs`           | `id` (PK autoincrement), `appid`, `type`, `status`, `created_at`, `started_at`, `finished_at`, `log_excerpt`, `updated`, `up_to_date`, `summary_parse_ok` | Prefill/GC job queue (plan §3, §6). The last three (**v4**, WP 3.3) are SteamPrefill's own summary-table counters — see "Job outcome honesty" above |
 | `agent_reports`  | `client_id`, `reported_at`, `appids` (JSON array of ints)                                    | One row per agent report — a full installed-app-ID snapshot at that timestamp (ADR-0002: the agent is stateless/dumb, always reports the complete list). vault-api derives additions/removals by diffing the two most recent rows per `client_id` |
 | `depot_manifests` | `appid`, `containing_appid`, `depotid`, `manifestid` (TEXT), `chunk_count`, `total_bytes`, `recorded_at`, `source`, PK `(appid, depotid)` | **Latest**-known manifest state per (app, depot) — WP 3.2, ADR-0006 decision 3. See "Manifest ingestion" below |
 
@@ -152,6 +158,20 @@ data migration has been needed yet. A stored version *higher* than
 schema this code doesn't know (downgrade guard). The first non-additive change
 will need a real per-version step list — that's called out in `init_db`'s
 docstring. Both upgrade paths are covered in `tests/test_db.py`.
+
+**v3 → v4 (WP 3.3) needed a real migration step, not just a version bump.**
+Adding three nullable `jobs` columns is still additive data-wise, but
+`CREATE TABLE IF NOT EXISTS jobs` — the mechanism every earlier bump relied
+on — is a no-op against an *existing* `jobs` table from v1-v3, which lacks
+the columns. `init_db` now runs an explicit
+`db._add_missing_job_columns` step (`ALTER TABLE jobs ADD COLUMN ...`,
+guarded per-column via `PRAGMA table_info` so calling it twice never raises
+`duplicate column name`) for any database recorded below v4, before the rest
+of `_DDL` runs; a brand-new database gets the columns directly from `_DDL`'s
+`CREATE TABLE` and skips this step entirely. Covered by
+`tests/test_db.py::test_init_db_upgrades_a_v3_database_to_v4_in_place` (a
+pre-existing job row survives with the new columns `NULL`, never a guessed
+value) and `..._idempotent_if_called_twice`.
 
 **Ordering fix (WP 1.5 carry-over from the WP 1.4 review):** `init_db` now
 creates only the `schema_version` table, reads the stored version, and checks
@@ -252,14 +272,14 @@ clients rows are implemented so far.
 | GET    | `/v1/mapping`                      | Full depot→app mapping table: list of `{depotid, appid}` |
 | DELETE | `/v1/mapping/{depotid}/{appid}`    | Remove one mapping pair (correction path for the additive `PUT`, see below); `204` on success, `404` if the pair doesn't exist, `422` for non-positive ids |
 | POST   | `/v1/prefill`                      | Body `{"appids": [int, ...]}` — queue one prefill job per app id. `202` with a list of `{appid, job_id, status, deduplicated}`. `422` for an empty list, an appid `< 1`, a non-list, or an unrecognized body field |
-| GET    | `/v1/jobs`                         | Recent jobs, newest first. `?limit=` 1–200, default 20 (`422` outside that range). Omits `log_excerpt` on purpose — this is the polling list |
-| GET    | `/v1/jobs/{id}`                    | One job incl. `log_excerpt`; `404` for an unknown id |
+| GET    | `/v1/jobs`                         | Recent jobs, newest first. `?limit=` 1–200, default 20 (`422` outside that range). Omits `log_excerpt` on purpose — this is the polling list. Includes `updated`, `up_to_date`, `summary_parse_ok` (schema v4, WP 3.3 — see "Job outcome honesty" below; `null` until the job finishes or if the summary couldn't be parsed) |
+| GET    | `/v1/jobs/{id}`                    | One job incl. `log_excerpt` plus the same `updated`/`up_to_date`/`summary_parse_ok` fields; `404` for an unknown id |
 | DELETE | `/v1/cache/{appid}`                | Delete this game's depot directories. `200` with `{appid, deleted_depots[], skipped_shared[], failed[], total_bytes_freed}`; `404` unknown appid or no mappings; `409` while a prefill job for the app is queued/running; `422` for `appid < 1`; `500` if the cache-root guards refuse. See "Per-game deletion" below |
 | GET    | `/v1/cache/summary`                | `total_bytes` (disk usage of `depot/`, each depot counted once), `top_consumers` (top 10 `{appid, name, size_bytes}`, largest first), `unmapped_depots` (`{count, size_bytes}` for depot dirs on disk with no mapping row for any app), `free_disk_bytes` (free space on the cache filesystem, `null` if undeterminable) |
 | POST   | `/v1/agent/installed`              | Body `{"client_id": str, "appids": [int, ...]}` — store one **full-list** snapshot of a client's installed games. `200` with `{client_id, received, added, removed, first_report}`; `422` for a bad `client_id` (empty, > 64 chars, control characters, surrounding whitespace, `.`/`..`), an appid `< 1` or a boolean, a missing/non-list `appids`, more than 10 000 ids, or an unrecognized body field. See "Agent reports" below |
 | GET    | `/v1/clients`                      | One row per reporting client: `{client_id, first_seen, last_reported_at, app_count}`, sorted by `client_id`. **Minimal v1** — hit statistics and bypass warnings (plan §5/§6) arrive in Phase 3 as *additional* fields |
 
-## Prefill orchestration (WP 1.4)
+## Prefill orchestration (WP 1.4, job outcome honesty WP 3.3)
 
 ### Queue semantics
 
@@ -277,7 +297,10 @@ clients rows are implemented so far.
   `idle`) so `GET /v1/games/{appid}` answers 200 while the job is still queued.
 - Statuses: jobs are `queued` → `running` → `done` | `error`; `apps.status`
   follows `idle` → `running` → `done` | `error` (plan §3). `last_prefill_at` is
-  written **only** on success.
+  written **only** on success. **A successful (exit `0`) SteamPrefill run is
+  not automatically `'done'`** — see "Job outcome honesty" below for the
+  summary-table-driven rule (WP 3.3, ADR-0006 decision 1) that can still end
+  such a run as `'error'`.
 - `log_excerpt` is the ANSI-stripped **tail** of SteamPrefill's combined
   stdout/stderr, capped at 4 KiB and prefixed with `[...truncated...]` when it
   was cut, plus vault-api's own `[vault-api] …` diagnostic lines.
@@ -383,6 +406,85 @@ future Steam Guard prompt variant is not.
 
 **vault-api never sees, stores, transmits or logs Steam credentials.** The
 session lives in SteamPrefill's own `Config/` directory next to the executable.
+
+### Job outcome honesty (WP 3.3, ADR-0006 decision 1)
+
+**The problem this closes (WP 1.7 finding):** SteamPrefill exiting `0` does
+not mean it did anything for the requested app. An app the logged-in account
+does not own resolves zero depots, prints `Prefilled 0 apps totaling 0 b`,
+and still exits `0` — before this package, that landed as a `'done'` job with
+a green app badge for a game that was never cached (real evidence:
+`core/tests/mvp/RESULTS-20260805-222046.md`, app 480/Spacewar).
+
+**The fix:** after a successful (exit `0`) run, `vault_api/prefill_summary.py`
+parses SteamPrefill's own end-of-run summary table —
+
+```
+Prefilled 1 apps totaling 75.97 MiB in 16.5553
+
+ Updated | Up To Date
+---------+------------
+    1    |     0
+```
+
+— and the parsed `Updated`/`Up To Date` counters, not the exit code alone,
+decide the job's outcome:
+
+| Exit code | Summary parse | Updated / Up To Date | Job outcome | `apps.status` | `last_prefill_at` | `last_manifest_check` |
+|---|---|---|---|---|---|---|
+| non-zero / timeout / aborted / not-logged-in | — | — | `error` (unchanged, WP 1.4) | `error` | untouched | untouched |
+| `0` | failed (`parse_ok=False`) | — | `done` (exit-code rule, unchanged) | `done` | set | untouched |
+| `0` | ok | `0` / `0` | **`error`** — "SteamPrefill did not consider this app — is it owned by the logged-in account?" | `error` | untouched | untouched |
+| `0` | ok | `0` / `>0` | `done` | `done` | set | **set** (ADR-0006 "current as of \<timestamp\>") |
+| `0` | ok | `>0` / anything | `done` | `done` | set | untouched |
+
+The middle two rows are the interesting ones: a parse failure deliberately
+falls back to the pre-WP-3.3 exit-code rule rather than guessing — a summary
+table this parser cannot recognize is not evidence of anything — while
+`Updated==0 AND Up To Date==0` is treated as definitive (that is the one
+shape SteamPrefill only ever produces for "nothing to evaluate"). `apps.status`
+in the unowned-app row goes to `error`, not left at `running` or reset to
+`idle`: a run did execute, it just accomplished nothing, and `'error'` is
+already this codebase's status for exactly that shape of outcome elsewhere
+in `worker.py`.
+
+**Parsing has to be tolerant, not exact — evidenced, not assumed.** The real
+captured table above is not what actually reaches the parser. This project's
+own SteamPrefill console output was found to be written in the OS's OEM
+codepage (verified: 850 on this dev machine's German Windows install — see
+the "OEM codepage" note under "Agent reports" below and
+`tests/conftest.py`'s `mklink` capture comment), not UTF-8; decoding those
+box-drawing-glyph bytes as UTF-8 (the pre-WP-3.3 code) fails on nearly every
+one of them, and `errors="replace"` then silently replaced each with U+FFFD.
+Real capture, corrupted exactly this way:
+`core/tests/mvp/RESULTS-20260805-222046.md` / `RESULTS-20260805-223328.md`.
+Two independent fixes land in this package:
+
+1. **The decode itself** (`vault_api/prefill.py::_read_text`): try strict
+   UTF-8 first (correct as-is for ASCII-only lines, or a SteamPrefill run
+   that genuinely does write UTF-8, e.g. inside a Linux container); only on
+   a decode failure fall back to the OS's actual OEM codepage
+   (`GetOEMCP()`, not a hardcoded constant — a different Windows locale has
+   a different one, 437 on US Windows for example).
+2. **The parser itself** (`prefill_summary.parse_summary`) stays defensive
+   even after the decode fix, for a stored job row from before this package,
+   a host where OEM-codepage detection fails, or an SGR/ANSI remnant
+   `--no-ansi` doesn't fully strip: it locates the `Updated ... Up To Date`
+   header line (plain ASCII, survives any corruption of the divider glyph
+   between the words), then the first following line that contains an ASCII
+   digit (skipping the border/separator row, which is glyphs only), and
+   pulls the first two integers out of it in column order. Any layout it
+   doesn't recognize this way returns `parse_ok=False` with every field
+   `None` — **never a guessed zero**, since `Updated==0 AND Up To Date==0`
+   has the specific "app not owned" meaning above and an unparseable table
+   never earned the right to claim it.
+
+`GET /v1/jobs/{id}` and `GET /v1/jobs` both expose the parsed result as three
+additive fields: `updated`, `up_to_date` (`int | null`), `summary_parse_ok`
+(`bool | null`) — `null` for a job that never reaches a parsed summary (a GC
+job, later; a failed/timed-out/aborted prefill; a job still queued/running).
+Schema v4 (see "Database schema" below) adds the three backing `jobs`
+columns.
 
 ### Mapping import — replace-semantics per app (ADR-0003 decision 3)
 

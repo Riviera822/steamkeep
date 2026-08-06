@@ -151,6 +151,29 @@ def main():
 
     log("[stub] wrote depots=%s" % written)
     log("[stub] Prefill complete!")
+
+    # WP 3.3: optionally emit SteamPrefill's own end-of-run summary table
+    # (or a corrupted/absent stand-in for it) verbatim, so the worker
+    # end-to-end tests can drive prefill_summary.parse_summary + the
+    # job-outcome wiring through the real subprocess pipe rather than only
+    # unit-testing the parser in isolation. Written via sys.stdout.buffer
+    # (raw bytes), not text-mode sys.stdout.write, so the exact bytes a test
+    # asks for survive unchanged regardless of this interpreter's own stdout
+    # encoding -- "summary_text" is a normal unicode string, UTF-8 encoded;
+    # "summary_bytes_hex" is raw bytes (hex-encoded for the JSON control
+    # file, same convention as manifest_bins above) for tests that need
+    # deliberately-not-valid-UTF-8 bytes, e.g. real single-byte OEM-codepage
+    # bytes exercising vault_api.prefill's decode fallback.
+    summary_text = control.get("summary_text")
+    summary_bytes_hex = control.get("summary_bytes_hex")
+    if summary_text or summary_bytes_hex:
+        sys.stdout.flush()
+        data = bytes.fromhex(summary_bytes_hex) if summary_bytes_hex else summary_text.encode("utf-8")
+        if not data.endswith(b"\n"):
+            data += b"\n"
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+
     _record(runs_path, selected, started, 0)
     return 0
 
@@ -196,6 +219,8 @@ def make_stub(
     exit_code: int = 3,
     sleep_seconds: float = 0.0,
     manifest_bins: list[dict[str, object]] | None = None,
+    summary_text: str | None = None,
+    summary_bytes: bytes | None = None,
 ) -> str:
     """Create a fake SteamPrefill in ``directory``; returns the launcher path.
 
@@ -207,6 +232,17 @@ def make_stub(
     ``os.path.join(dir, filename)`` on a successful run, so a test can point
     ``dir`` at a fake SteamPrefill temp-cache directory and observe
     ``ingest_after_prefill`` pick it up through the real worker.
+
+    ``summary_text``/``summary_bytes`` (WP 3.3, mutually exclusive — pass at
+    most one): appended verbatim to stdout right after "Prefill complete!" on
+    a successful run, so a worker end-to-end test can exercise
+    ``vault_api.prefill_summary.parse_summary`` and the job-outcome wiring
+    through the real subprocess pipe. ``summary_text`` is UTF-8 encoded;
+    ``summary_bytes`` goes through unencoded (hex-encoded only for transport
+    in the JSON control file) — use it for bytes that are deliberately not
+    valid UTF-8, e.g. real single-byte OEM-codepage bytes for the decode-fix
+    test. Neither given (both ``None``, the default) reproduces the exact
+    pre-WP-3.3 stub output every other test in this module depends on.
     """
     directory.mkdir(parents=True, exist_ok=True)
     script = directory / "steamprefill_stub.py"
@@ -220,6 +256,8 @@ def make_stub(
         "sleep_seconds": sleep_seconds,
         "not_logged_in_output": NOT_LOGGED_IN_OUTPUT,
         "manifest_bins": _encode_manifest_bins(manifest_bins),
+        "summary_text": summary_text,
+        "summary_bytes_hex": summary_bytes.hex() if summary_bytes is not None else None,
     }
     (directory / CONTROL_FILENAME).write_text(
         json.dumps(control, indent=2), encoding="utf-8"

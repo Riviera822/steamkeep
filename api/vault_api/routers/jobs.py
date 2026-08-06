@@ -50,6 +50,15 @@ class JobSummary(BaseModel):
     created_at: str
     started_at: str | None
     finished_at: str | None
+    #: SteamPrefill's own summary-table counters (schema v4, WP 3.3,
+    #: ADR-0006 decision 1). All three ``None`` until the job finishes, and
+    #: ``updated``/``up_to_date`` stay ``None`` even after finishing if
+    #: ``summary_parse_ok`` is ``False`` (the table could not be parsed — see
+    #: ``vault_api/prefill_summary.py``) or the job never got as far as a
+    #: parsed summary (a GC job, a failed/timed-out/aborted prefill).
+    updated: int | None = None
+    up_to_date: int | None = None
+    summary_parse_ok: bool | None = None
 
 
 class JobDetail(JobSummary):

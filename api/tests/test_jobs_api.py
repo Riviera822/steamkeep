@@ -163,3 +163,32 @@ def test_job_detail_includes_log_excerpt_field_and_404s_for_unknown(
     assert payload["log_excerpt"] is None
 
     assert client.get("/v1/jobs/999999", headers=AUTH).status_code == 404
+
+
+# -- summary fields (schema v4, WP 3.3) -------------------------------------
+
+
+def test_queued_job_exposes_null_summary_fields_in_list_and_detail(
+    client: TestClient,
+) -> None:
+    """No worker runs in this module (see the module docstring), so these
+    stay exactly what a freshly queued job's DB row is: SQL NULL — never a
+    guessed 0 (ADR-0006 decision 1's whole point extends to the API surface
+    too). Pins that GET /v1/jobs (the list, not just the detail) also carries
+    the three additive fields, per the work package."""
+    job_id = client.post("/v1/prefill", json={"appids": [440]}, headers=AUTH).json()[0][
+        "job_id"
+    ]
+
+    detail = client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()
+    assert detail["updated"] is None
+    assert detail["up_to_date"] is None
+    assert detail["summary_parse_ok"] is None
+
+    listed = next(
+        entry for entry in client.get("/v1/jobs", headers=AUTH).json()
+        if entry["id"] == job_id
+    )
+    assert listed["updated"] is None
+    assert listed["up_to_date"] is None
+    assert listed["summary_parse_ok"] is None

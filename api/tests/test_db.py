@@ -284,6 +284,111 @@ def test_init_db_upgrades_a_v2_database_to_v3_in_place(tmp_path) -> None:
     assert "depot_manifests" in table_names
 
 
+def test_init_db_upgrades_a_v3_database_to_v4_in_place(tmp_path) -> None:
+    """v3 -> v4 (WP 3.3) adds jobs.updated/up_to_date/summary_parse_ok. Unlike
+    every earlier bump, `CREATE TABLE IF NOT EXISTS jobs` is a no-op against
+    an existing v1-v3 jobs table (it already exists, just without these
+    columns) -- this is the one migration that needs an explicit ALTER,
+    which is what this test actually pins. Simulate a v3 file by dropping the
+    three new columns and resetting the recorded version; a pre-existing job
+    row proves the migration doesn't lose data."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        # Recreate `jobs` in its exact pre-v4 shape (no updated/up_to_date/
+        # summary_parse_ok) rather than ALTER ... DROP COLUMN: SQLite's DROP
+        # COLUMN rewrites the table's stored CREATE TABLE text and trips over
+        # the multi-line `--` comment block _DDL has right before those
+        # columns ("incomplete input") -- a real pre-v4 database was never
+        # produced by dropping columns from the current DDL, so this isn't
+        # a gap in the migration itself, just the right way to simulate one.
+        conn.execute("DROP TABLE jobs")
+        conn.execute(
+            """
+            CREATE TABLE jobs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                appid       INTEGER NOT NULL,
+                type        TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'idle',
+                created_at  TEXT NOT NULL,
+                started_at  TEXT,
+                finished_at TEXT,
+                log_excerpt TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO jobs (id, appid, type, status, created_at) "
+            "VALUES (1, 440, 'prefill', 'done', '2026-08-06T00:00:00Z')"
+        )
+        conn.execute("UPDATE schema_version SET version = 3")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        (version,) = conn.execute("SELECT version FROM schema_version").fetchone()
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        row = conn.execute("SELECT * FROM jobs WHERE id = 1").fetchone()
+    finally:
+        conn.close()
+
+    assert version == SCHEMA_VERSION
+    assert {"updated", "up_to_date", "summary_parse_ok"} <= columns
+    # The pre-existing row survived the ALTER with the new columns NULL —
+    # never a silently-guessed 0 (ADR-0006 decision 1's whole point).
+    assert row["appid"] == 440
+    assert row["updated"] is None
+    assert row["up_to_date"] is None
+    assert row["summary_parse_ok"] is None
+
+
+def test_init_db_upgrade_to_v4_is_idempotent_if_called_twice(tmp_path) -> None:
+    """Calling init_db twice against the same pre-v4 file must not raise
+    'duplicate column name' -- _add_missing_job_columns guards per-column,
+    not just per-version."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("ALTER TABLE jobs DROP COLUMN updated")
+        conn.execute("UPDATE schema_version SET version = 3")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+    init_db(db_path)  # must not raise
+
+    conn = get_connection(db_path)
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+    finally:
+        conn.close()
+    assert "updated" in columns
+
+
+def test_jobs_has_the_summary_columns(tmp_path) -> None:
+    # Schema v4 (WP 3.3): SteamPrefill's own summary-table counters
+    # (ADR-0006 decision 1), stored per job.
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+    finally:
+        conn.close()
+
+    assert {"updated", "up_to_date", "summary_parse_ok"} <= columns
+
+
 def test_init_db_refuses_a_database_from_a_newer_vault_api(tmp_path) -> None:
     import pytest
 

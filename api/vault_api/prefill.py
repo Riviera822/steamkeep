@@ -55,6 +55,7 @@ writing this module — NOT assumed from docs:
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
@@ -228,8 +229,18 @@ def run_prefill(
     # can emit a lot of progress output, and a PIPE that nobody drains while we
     # poll for the timeout/abort conditions would deadlock on a full OS pipe
     # buffer. A file also makes reading just the tail trivial.
+    #
+    # Opened in BINARY mode deliberately (WP 3.3 cleanup): this handle is
+    # handed to Popen as ``stdout=``, which redirects the CHILD PROCESS's raw
+    # bytes straight into the underlying OS file descriptor (``handle.fileno()``)
+    # -- the parent never goes through this Python file object's own text
+    # encoding/decoding machinery, so an ``encoding=``/``errors=`` kwarg here
+    # (the previous version passed ``encoding="utf-8", errors="replace"``) is a
+    # complete no-op for what actually lands on disk and was misleading about
+    # where the real decode happens. That is ``_read_text`` below, which is
+    # also where WP 3.3's actual decode fix lives (see its docstring).
     handle = tempfile.NamedTemporaryFile(
-        mode="w+", encoding="utf-8", errors="replace", suffix=".log",
+        mode="w+b", suffix=".log",
         prefix=f"vault-prefill-{appid}-", delete=False,
     )
     log_path = handle.name
@@ -321,12 +332,88 @@ def _stop_process(process: "subprocess.Popen[str]") -> int | None:
             return None
 
 
+def _windows_oem_encoding() -> str:
+    """Best-effort guess at the encoding a redirected-to-file Windows console
+    process actually wrote in.
+
+    A console application that never explicitly reconfigures
+    ``Console.OutputEncoding`` writes bytes in the process's OEM codepage, NOT
+    UTF-8 -- this is codepage 850 on a German Windows install, verified
+    elsewhere in this codebase (``api/README.md``'s agent-report note:
+    "a Windows console at codepage 850 renders an em dash as a replacement
+    character"; ``api/tests/conftest.py``'s ``mklink`` capture comment). It is
+    a *different* codepage on other locales (437 on US Windows, for example),
+    so this asks the OS for the real value (``GetOEMCP``) instead of hardcoding
+    one -- decoding SteamPrefill's Spectre.Console box-drawing table with the
+    wrong single-byte codepage would just trade one mojibake for another.
+    """
+    if os.name == "nt":
+        try:
+            codepage = ctypes.windll.kernel32.GetOEMCP()  # type: ignore[attr-defined]
+            if codepage:
+                return f"cp{codepage}"
+        except Exception:  # pragma: no cover - defensive, non-Windows/odd host
+            pass
+        return "cp437"
+    return "utf-8"
+
+
 def _read_text(path: str) -> str:
+    """Read the captured subprocess output, decoded correctly (WP 3.3 fix).
+
+    **The bug this replaces:** the previous version always decoded as
+    ``utf-8`` with ``errors="replace"``. SteamPrefill's Spectre.Console summary
+    table uses Unicode box-drawing glyphs, but the child process actually wrote
+    them in the OS's single-byte OEM codepage (see ``_windows_oem_encoding``)
+    when its console output was redirected to a file rather than a real
+    terminal -- decoding those bytes as UTF-8 fails on nearly every one of
+    them (a lone high-bit byte is essentially never a valid UTF-8 continuation
+    sequence), so ``errors="replace"`` silently turned every glyph into
+    U+FFFD. That is exactly the corruption captured for real in
+    ``core/tests/mvp/RESULTS-20260805-222046.md`` and
+    ``RESULTS-20260805-223328.md``, which is why ``vault_api/prefill_summary``
+    still has to parse around it defensively even after this fix (a stored job
+    row from before this fix, or a host whose OEM codepage detection fails,
+    still needs to be tolerated).
+
+    **The fix:** try strict UTF-8 first (the common case for ASCII-only login
+    lines, and correct as-is if SteamPrefill ever runs somewhere that really
+    does write UTF-8, e.g. a Linux container). Only on a decode failure fall
+    back to the OS's actual OEM codepage, which -- unlike UTF-8 -- has no
+    invalid byte sequences on Windows, so it recovers the real glyphs instead
+    of replacing them there.
+
+    **This function must NEVER raise (review blocker).** On POSIX,
+    ``_windows_oem_encoding()`` returns ``"utf-8"`` -- so the "fallback" is
+    the exact same strict decode attempted again, which raises the exact
+    same ``UnicodeDecodeError`` a second time on any real-world invalid UTF-8
+    byte sequence. That is not a hypothetical: ``run_prefill``'s
+    timeout/abort path ``terminate()``s (then ``kill()``s) the subprocess
+    while it may be mid-write to this file, which can truncate a multi-byte
+    UTF-8 sequence at the very end of the captured bytes -- turning an
+    otherwise-successful download into a job that "crashes" reading back its
+    own output, on Linux specifically (Windows OEM codepages are single-byte
+    and have no invalid sequences, so this never bit there). The final
+    ``errors="replace"`` decode is therefore not just a defensive fallback
+    for an unknown codepage name (``LookupError``) -- it is the mandatory
+    last resort for a *second* failed decode too (``UnicodeDecodeError``),
+    which is why both exception types are caught around the second attempt.
+    """
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            return handle.read()
+        with open(path, "rb") as handle:
+            raw = handle.read()
     except OSError as exc:  # pragma: no cover - defensive
         return f"[vault-api] Could not read captured output: {exc}"
+
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+
+    try:
+        return raw.decode(_windows_oem_encoding())
+    except (UnicodeDecodeError, LookupError):
+        return raw.decode("utf-8", errors="replace")
 
 
 def _looks_not_logged_in(output: str) -> bool:

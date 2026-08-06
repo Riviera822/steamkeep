@@ -19,7 +19,16 @@ import sqlite3
 #: v3 (WP 3.2): added ``depot_manifests`` (ADR-0006 decision 3: last-known
 #: manifest state per (appid, depotid), recorded from SteamPrefill's
 #: temp-cache filenames) plus its ``depotid`` index. Also purely additive.
-SCHEMA_VERSION = 3
+#: v4 (WP 3.3): added ``jobs.updated``, ``jobs.up_to_date``,
+#: ``jobs.summary_parse_ok`` — SteamPrefill's own summary-table counters
+#: (ADR-0006 decision 1), stored per job so the API can expose them and job
+#: outcome honesty (worker.py) can be audited after the fact. Additive, but
+#: NOT expressible as ``CREATE TABLE IF NOT EXISTS`` alone: that statement is
+#: a no-op against an *existing* ``jobs`` table from v1-v3, which lacks these
+#: columns, so ``init_db`` runs an explicit ``ALTER TABLE ... ADD COLUMN``
+#: step for pre-v4 databases (see ``_add_missing_job_columns``) — a fresh
+#: install gets them straight from ``_DDL``'s ``CREATE TABLE``.
+SCHEMA_VERSION = 4
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -52,7 +61,16 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at  TEXT NOT NULL,
     started_at  TEXT,
     finished_at TEXT,
-    log_excerpt TEXT
+    log_excerpt TEXT,
+    -- v4 (WP 3.3): SteamPrefill's own summary-table counters (ADR-0006
+    -- decision 1). NULL for every job type/outcome that never reaches a
+    -- parsed summary (GC jobs, a job that never finished, a finished job
+    -- whose summary could not be parsed). summary_parse_ok is 0/1, not a
+    -- real SQLite boolean (there isn't one) -- NULL means "not applicable",
+    -- 0 means "parse failed", 1 means "parsed".
+    updated           INTEGER,
+    up_to_date        INTEGER,
+    summary_parse_ok  INTEGER
 );
 
 -- The job worker polls "give me the oldest queued job" on every tick and the
@@ -181,6 +199,17 @@ def init_db(db_path: str) -> None:
                 "by a newer version — upgrade vault-api instead of downgrading."
             )
 
+        # v4 (WP 3.3): an existing pre-v4 database already has a `jobs` table
+        # without the new columns, so `CREATE TABLE IF NOT EXISTS` below is a
+        # no-op for it — unlike the v2/v3 bumps, this one needs an explicit
+        # ALTER. A brand-new database (row is None) skips this: _DDL's CREATE
+        # TABLE already includes the columns directly. Runs before
+        # executescript so the two migration mechanisms (ALTER here, CREATE
+        # ... IF NOT EXISTS below) never depend on ordering relative to each
+        # other.
+        if row is not None and row["version"] < 4:
+            _add_missing_job_columns(conn)
+
         conn.executescript(_DDL)
 
         if row is None:
@@ -193,3 +222,18 @@ def init_db(db_path: str) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _add_missing_job_columns(conn: sqlite3.Connection) -> None:
+    """v1->v4 migration step: add ``jobs.updated``/``up_to_date``/``summary_parse_ok``.
+
+    Guarded per-column via ``PRAGMA table_info`` (not just per-version) so
+    calling ``init_db`` twice against the same pre-v4 file — or against a file
+    some *other* future migration already partially touched — never raises
+    ``duplicate column name`` instead of silently doing nothing on the second
+    call, matching the idempotency the rest of ``init_db`` already promises.
+    """
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+    for column in ("updated", "up_to_date", "summary_parse_ok"):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} INTEGER")

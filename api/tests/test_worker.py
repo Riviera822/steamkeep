@@ -193,6 +193,262 @@ def test_successful_job_invalidates_the_size_cache(
         assert after["size_bytes"] > 0
 
 
+# -- job outcome honesty (WP 3.3, ADR-0006 decision 1) ----------------------
+#
+# SteamPrefill exiting 0 does not mean it did anything for the requested app
+# (WP 1.7 finding: an unowned app exits 0 with "Prefilled 0 apps"). These
+# tests drive the fix through the real stub subprocess pipe -- not just
+# vault_api.prefill_summary in isolation -- covering every branch worker.py's
+# job-outcome wiring has to make: unparseable table (exit-code rule
+# unchanged), Updated==0 AND Up To Date==0 (-> 'error', not 'done'),
+# Up To Date>0 AND Updated==0 (-> 'done' + last_manifest_check), and the
+# normal Updated>0 case, each also checked for the new updated/up_to_date/
+# summary_parse_ok fields on GET /v1/jobs/{id} and GET /v1/jobs (schema v4).
+
+_CLEAN_TABLE_UPDATED = (
+    "  Prefilled 1 apps totaling 12 MiB in 05.0000 \n"
+    "   Updated | Up To Date\n"
+    "  ---------+------------\n"
+    "      1    |     0\n"
+)
+
+_CLEAN_TABLE_UP_TO_DATE = (
+    "  Prefilled 1 apps totaling 0 b in 02.9012 \n"
+    "   Updated | Up To Date\n"
+    "  ---------+------------\n"
+    "      0    |     1\n"
+)
+
+# Verbatim from the real blocked run (core/tests/mvp/RESULTS-20260805-222046.md)
+# -- app 480 (Spacewar), not owned by the account that ran it. Box-drawing
+# glyphs corrupted into "ï¿½" runs exactly as captured for real.
+_MOJIBAKE_TABLE_UNOWNED = (
+    "  Prefilled 0 apps totaling 0 b in 03.2491 \n"
+    "   Updated ï¿½ Up To Date                    \n"
+    "  ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½                   \n"
+    "      0    ï¿½     0                         \n"
+)
+
+
+def test_normal_prefill_is_done_and_exposes_the_summary_fields(
+    tmp_path: Path, bindir: Path, cache_root: Path
+) -> None:
+    executable = stub_prefill.make_stub(
+        bindir,
+        cache_root=str(cache_root),
+        depots_by_app={440: [441]},
+        summary_text=_CLEAN_TABLE_UPDATED,
+    )
+    app = create_app(make_settings(tmp_path, cache_root, executable))
+
+    with TestClient(app) as client:
+        (job_id,) = enqueue(client, 440)
+        job = wait_for_job(client, job_id)
+
+        assert job["status"] == "done"
+        assert job["updated"] == 1
+        assert job["up_to_date"] == 0
+        assert job["summary_parse_ok"] is True
+
+        listed = next(
+            entry for entry in client.get("/v1/jobs", headers=AUTH).json()
+            if entry["id"] == job_id
+        )
+        assert listed["updated"] == 1
+        assert listed["up_to_date"] == 0
+        assert listed["summary_parse_ok"] is True
+
+        assert client.get("/v1/games/440", headers=AUTH).json()["status"] == "done"
+
+
+def test_unparseable_summary_falls_back_to_the_exit_code_rule(
+    tmp_path: Path, bindir: Path, cache_root: Path
+) -> None:
+    """No summary table at all (the stub's default, pre-WP-3.3 output) — the
+    process still exited 0, so the job is still 'done', but the new columns
+    honestly record that nothing could be parsed."""
+    executable = stub_prefill.make_stub(
+        bindir, cache_root=str(cache_root), depots_by_app={440: [441]}
+    )
+    app = create_app(make_settings(tmp_path, cache_root, executable))
+
+    with TestClient(app) as client:
+        (job_id,) = enqueue(client, 440)
+        job = wait_for_job(client, job_id)
+
+        assert job["status"] == "done"
+        assert job["updated"] is None
+        assert job["up_to_date"] is None
+        assert job["summary_parse_ok"] is False
+        assert "Could not parse SteamPrefill's summary table" in job["log_excerpt"]
+
+
+def test_zero_zero_summary_ends_error_not_done(
+    tmp_path: Path, bindir: Path, cache_root: Path
+) -> None:
+    """ADR-0006 decision 1's exact trigger, replayed from the real capture:
+    Updated==0 AND Up To Date==0 means SteamPrefill never considered the app
+    (the real case: unowned) -- the process exited 0, but this must NOT be
+    'done' (WP 1.7's job-outcome trap: a green badge for a never-cached
+    game)."""
+    executable = stub_prefill.make_stub(
+        bindir,
+        cache_root=str(cache_root),
+        # No depots_by_app entry for 440 -- nothing written to disk, matching
+        # the real unowned-app run this fixture is copied from.
+        summary_text=_MOJIBAKE_TABLE_UNOWNED,
+    )
+    app = create_app(make_settings(tmp_path, cache_root, executable))
+
+    with TestClient(app) as client:
+        (job_id,) = enqueue(client, 440)
+        job = wait_for_job(client, job_id)
+
+        assert job["status"] == "error"
+        assert job["updated"] == 0
+        assert job["up_to_date"] == 0
+        assert job["summary_parse_ok"] is True
+        assert "is it owned by the logged-in account" in job["log_excerpt"]
+
+        detail = client.get("/v1/games/440", headers=AUTH).json()
+        assert detail["status"] == "error"
+        assert detail["last_prefill_at"] is None
+
+
+def test_zero_zero_summary_leaves_mapping_and_manifests_untouched_even_with_planted_evidence(
+    tmp_path: Path, bindir: Path, cache_root: Path
+) -> None:
+    """Review S2: the unowned-app branch must run BEFORE
+    apply_observed_mapping/ingest_after_prefill, not after — otherwise an
+    'error' job can still have mutated depot_app_map/depot_manifests from
+    evidence that (by the branch's own definition, Updated==0 AND
+    Up To Date==0) cannot honestly belong to this app. Deliberately plants
+    BOTH a depot directory (stub writes real chunk files for app 440) AND a
+    SteamPrefill manifest .bin for the same depot, to prove the ordering
+    fix, not just the absence of evidence."""
+    from tests.test_manifests import _bin_manifest_bytes, _chunk_id
+    from vault_api.depot_manifests import get_depot_manifest
+
+    steamprefill_cache_dir = tmp_path / "steamprefill-cache"
+    manifest_archive_dir = tmp_path / "manifest-archive"
+    manifest_bytes = _bin_manifest_bytes(
+        depot_id=441, manifest_id=555, files=[[(_chunk_id(1), 1000)]]
+    )
+    executable = stub_prefill.make_stub(
+        bindir,
+        cache_root=str(cache_root),
+        depots_by_app={440: [441]},
+        manifest_bins=[
+            {
+                "dir": str(steamprefill_cache_dir),
+                "filename": "440_440_441_555.bin",
+                "data": manifest_bytes,
+            }
+        ],
+        summary_text=_MOJIBAKE_TABLE_UNOWNED,
+    )
+    settings = make_settings(
+        tmp_path,
+        cache_root,
+        executable,
+        steamprefill_cache_dir=str(steamprefill_cache_dir),
+        manifest_archive_dir=str(manifest_archive_dir),
+    )
+    app = create_app(settings)
+
+    with TestClient(app) as client:
+        (job_id,) = enqueue(client, 440)
+        job = wait_for_job(client, job_id)
+
+        assert job["status"] == "error"
+        assert "Depot mapping and manifest state were NOT touched" in job["log_excerpt"]
+        assert "Manifest ingestion" not in job["log_excerpt"]
+
+        # Planted evidence: the depot dir really is there (proves the "no
+        # mutation" result isn't just "nothing to observe" happenstance).
+        assert (cache_root / "depot" / "441" / "chunk").is_dir()
+        assert any((cache_root / "depot" / "441" / "chunk").iterdir())
+
+        mapping = client.get("/v1/mapping", headers=AUTH).json()
+        assert not any(entry["depotid"] == 441 for entry in mapping)
+
+    conn = get_connection(settings.db_path)
+    try:
+        row = get_depot_manifest(conn, appid=440, depotid=441)
+    finally:
+        conn.close()
+    assert row is None
+    assert not (manifest_archive_dir / "441_555.bin").exists()
+
+
+def test_up_to_date_summary_is_done_and_touches_last_manifest_check(
+    tmp_path: Path, bindir: Path, cache_root: Path
+) -> None:
+    """Up To Date>0 AND Updated==0 -- ADR-0006's "current as of <timestamp>"
+    case: a genuine successful check that changed nothing on disk still
+    earns 'done' (unlike the zero/zero case above) and additionally stamps
+    apps.last_manifest_check, which no HTTP response exposes yet -- checked
+    directly against the database."""
+    executable = stub_prefill.make_stub(
+        bindir,
+        cache_root=str(cache_root),
+        summary_text=_CLEAN_TABLE_UP_TO_DATE,
+    )
+    settings = make_settings(tmp_path, cache_root, executable)
+    app = create_app(settings)
+
+    with TestClient(app) as client:
+        (job_id,) = enqueue(client, 440)
+        job = wait_for_job(client, job_id)
+
+        assert job["status"] == "done"
+        assert job["updated"] == 0
+        assert job["up_to_date"] == 1
+        assert job["summary_parse_ok"] is True
+
+        detail = client.get("/v1/games/440", headers=AUTH).json()
+        assert detail["status"] == "done"
+        assert detail["last_prefill_at"] is not None
+
+    conn = get_connection(settings.db_path)
+    try:
+        row = conn.execute(
+            "SELECT last_manifest_check FROM apps WHERE appid = 440"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["last_manifest_check"] is not None
+
+
+def test_updated_case_does_not_touch_last_manifest_check(
+    tmp_path: Path, bindir: Path, cache_root: Path
+) -> None:
+    """Only the exact Up To Date>0/Updated==0 shape earns last_manifest_check
+    -- a normal Updated>0 run must not set it (nothing confirmed "already
+    current" here, something actually changed)."""
+    executable = stub_prefill.make_stub(
+        bindir,
+        cache_root=str(cache_root),
+        depots_by_app={440: [441]},
+        summary_text=_CLEAN_TABLE_UPDATED,
+    )
+    settings = make_settings(tmp_path, cache_root, executable)
+    app = create_app(settings)
+
+    with TestClient(app) as client:
+        (job_id,) = enqueue(client, 440)
+        assert wait_for_job(client, job_id)["status"] == "done"
+
+    conn = get_connection(settings.db_path)
+    try:
+        row = conn.execute(
+            "SELECT last_manifest_check FROM apps WHERE appid = 440"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["last_manifest_check"] is None
+
+
 # -- manifest ingestion (WP 3.2) --------------------------------------------
 
 

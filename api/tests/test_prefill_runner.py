@@ -186,6 +186,147 @@ def test_output_is_ansi_stripped() -> None:
     assert prefill.strip_ansi("\x1b[38;5;9mred\x1b[0m text") == "red text"
 
 
+# -- decode fix (WP 3.3) -----------------------------------------------------
+#
+# The bug: SteamPrefill's Spectre.Console summary table writes box-drawing
+# glyphs in the OS's OEM codepage when its console output is redirected to a
+# file, NOT UTF-8. This project's own dev machine already established which
+# codepage that is (850, on a German Windows install — see
+# api/README.md's agent-report note and api/tests/conftest.py's mklink
+# capture comment); a differently-localized host has a different one (437 on
+# US Windows), so the fix asks the OS (GetOEMCP), rather than hardcoding one.
+# The previous code always decoded as UTF-8 with errors="replace", which
+# fails on nearly every OEM-codepage byte and silently replaced each with
+# U+FFFD — exactly the corruption captured for real in
+# core/tests/mvp/RESULTS-20260805-222046.md / RESULTS-20260805-223328.md.
+
+
+def test_windows_oem_encoding_matches_the_actual_os_codepage() -> None:
+    """Not hardcoded to this project's own dev machine's codepage (850) —
+    checked against the OS's own answer, so the test stays meaningful on a
+    differently-localized Windows host too."""
+    if os.name != "nt":
+        pytest.skip("OEM codepage detection is a Windows-only concept")
+    import ctypes
+
+    expected = f"cp{ctypes.windll.kernel32.GetOEMCP()}"
+    assert prefill._windows_oem_encoding() == expected
+
+
+def test_windows_oem_encoding_is_utf8_off_windows() -> None:
+    if os.name == "nt":
+        pytest.skip("this branch only runs off Windows")
+    assert prefill._windows_oem_encoding() == "utf-8"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exercises the Windows OEM-codepage fallback")
+def test_read_text_recovers_box_drawing_glyphs_from_oem_codepage_bytes(
+    tmp_path: Path,
+) -> None:
+    """The actual regression test: bytes that are NOT valid UTF-8 (real
+    OEM-codepage box-drawing glyphs) must decode to the real glyphs, not
+    U+FFFD."""
+    original = (
+        "   Updated │ Up To Date\n"
+        "  ─────────┼─────────────────────\n"
+        "      3    │     4\n"
+    )
+    encoding = prefill._windows_oem_encoding()
+    raw_bytes = original.encode(encoding)
+    # Prerequisite check: prove these bytes really are not valid UTF-8. If
+    # they were, this test would pass without ever exercising the fallback,
+    # and silently stop meaning anything.
+    with pytest.raises(UnicodeDecodeError):
+        raw_bytes.decode("utf-8")
+
+    log_path = tmp_path / "captured.log"
+    log_path.write_bytes(raw_bytes)
+
+    recovered = prefill._read_text(str(log_path))
+
+    assert recovered == original
+    assert "�" not in recovered
+
+
+def test_read_text_strict_utf8_is_tried_first(tmp_path: Path) -> None:
+    """Valid UTF-8 bytes (plain ASCII login lines, or a Linux-container
+    SteamPrefill run that really does write UTF-8) decode as-is, no fallback
+    involved."""
+    original = "plain ASCII login lines\nand proper UTF-8 box glyphs: ─│┼\n"
+    log_path = tmp_path / "captured.log"
+    log_path.write_bytes(original.encode("utf-8"))
+
+    recovered = prefill._read_text(str(log_path))
+
+    assert recovered == original
+
+
+def test_read_text_reports_an_oserror_without_raising(tmp_path: Path) -> None:
+    missing = tmp_path / "does-not-exist.log"
+    result = prefill._read_text(str(missing))
+    assert "Could not read captured output" in result
+
+
+def test_read_text_never_raises_on_invalid_utf8_when_oem_encoding_is_utf8(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review blocker: on POSIX, `_windows_oem_encoding()` returns "utf-8",
+    so the fallback used to be the exact same strict decode attempted again
+    -- raising the exact same UnicodeDecodeError a second time, uncaught.
+    Real-world trigger: run_prefill's timeout/abort path terminates the
+    subprocess mid-write, which can truncate a multi-byte UTF-8 sequence at
+    the end of the captured bytes -- an otherwise-successful run must not be
+    reported as a crashed job just because _read_text couldn't decode its
+    own tail byte-for-byte. Patches _windows_oem_encoding to "utf-8"
+    directly so this reproduces on Windows too, not only on Linux CI.
+    """
+    monkeypatch.setattr(prefill, "_windows_oem_encoding", lambda: "utf-8")
+
+    # A valid line followed by a truncated 3-byte UTF-8 sequence (only the
+    # first 2 of 3 bytes present) -- exactly what terminate()/kill() mid-write
+    # can leave behind.
+    raw_bytes = "Prefill complete!\n".encode("utf-8") + "─".encode("utf-8")[:2]
+
+    log_path = tmp_path / "captured.log"
+    log_path.write_bytes(raw_bytes)
+
+    recovered = prefill._read_text(str(log_path))  # must not raise
+
+    assert "Prefill complete!" in recovered
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exercises the Windows OEM-codepage fallback")
+def test_run_prefill_recovers_oem_codepage_summary_table_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """Full pipeline through a real subprocess: the stub writes raw
+    OEM-codepage bytes for the summary table (as the real SteamPrefill.exe
+    does), and run_prefill's captured output must recover it well enough for
+    prefill_summary.parse_summary to read the counters back out."""
+    from vault_api.prefill_summary import parse_summary
+
+    bindir = tmp_path / "bin"
+    table = (
+        "   Updated │ Up To Date\n"
+        "  ─────────┼─────────────────────\n"
+        "      2    │     5\n"
+    )
+    encoding = prefill._windows_oem_encoding()
+    executable = stub_prefill.make_stub(
+        bindir, cache_root=str(tmp_path / "cache"), summary_bytes=table.encode(encoding),
+    )
+
+    result = prefill.run_prefill(440, executable, timeout_seconds=30)
+
+    assert result.success is True, result.output
+    assert "�" not in result.output
+
+    summary = parse_summary(result.output)
+    assert summary.parse_ok is True
+    assert summary.updated == 2
+    assert summary.up_to_date == 5
+
+
 def test_large_output_is_captured_without_deadlocking(tmp_path: Path) -> None:
     # Output goes to a temp file rather than a pipe precisely so a chatty run
     # can't fill an OS pipe buffer while the runner is polling for a timeout.

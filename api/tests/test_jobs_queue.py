@@ -67,6 +67,65 @@ def test_finish_job_records_status_timestamp_and_log(conn) -> None:
     assert stored["status"] == jobs.STATUS_DONE
     assert stored["finished_at"] is not None
     assert stored["log_excerpt"] == "all good"
+    # WP 3.3 additive columns default to SQL NULL when not passed.
+    assert stored["updated"] is None
+    assert stored["up_to_date"] is None
+    assert stored["summary_parse_ok"] is None
+
+
+def test_finish_job_stores_the_summary_counters(conn) -> None:
+    job, _ = jobs.enqueue_prefill(conn, 440)
+    jobs.claim_next_job(conn)
+    jobs.finish_job(
+        conn, int(job["id"]), jobs.STATUS_DONE, "ok",
+        updated=3, up_to_date=5, summary_parse_ok=True,
+    )
+
+    stored = jobs.get_job(conn, int(job["id"]))
+    assert stored["updated"] == 3
+    assert stored["up_to_date"] == 5
+    # Stored/read back as 0/1 (no native SQLite boolean) but the row-to-dict
+    # helper does not coerce it — the API layer's Pydantic model does that.
+    assert stored["summary_parse_ok"] == 1
+
+
+def test_finish_job_stores_summary_parse_ok_false_distinctly_from_null(conn) -> None:
+    """False (parse attempted, failed) must not collapse into None (never
+    attempted) -- distinct on-disk values."""
+    job, _ = jobs.enqueue_prefill(conn, 440)
+    jobs.claim_next_job(conn)
+    jobs.finish_job(
+        conn, int(job["id"]), jobs.STATUS_DONE, "ok",
+        summary_parse_ok=False,
+    )
+
+    stored = jobs.get_job(conn, int(job["id"]))
+    assert stored["summary_parse_ok"] == 0
+    assert stored["summary_parse_ok"] is not None
+
+
+def test_set_app_status_writes_last_manifest_check_only_when_given(conn) -> None:
+    jobs.set_app_status(conn, 440, jobs.STATUS_DONE, last_manifest_check="2026-08-06T00:00:00Z")
+    row = conn.execute("SELECT last_manifest_check FROM apps WHERE appid = 440").fetchone()
+    assert row["last_manifest_check"] == "2026-08-06T00:00:00Z"
+
+    # A later call that doesn't pass it must leave the previous value alone.
+    jobs.set_app_status(conn, 440, jobs.STATUS_RUNNING)
+    row = conn.execute("SELECT last_manifest_check FROM apps WHERE appid = 440").fetchone()
+    assert row["last_manifest_check"] == "2026-08-06T00:00:00Z"
+
+
+def test_set_app_status_can_write_both_timestamps_together(conn) -> None:
+    jobs.set_app_status(
+        conn, 440, jobs.STATUS_DONE,
+        last_prefill_at="2026-08-06T01:00:00Z",
+        last_manifest_check="2026-08-06T01:00:00Z",
+    )
+    row = conn.execute(
+        "SELECT last_prefill_at, last_manifest_check FROM apps WHERE appid = 440"
+    ).fetchone()
+    assert row["last_prefill_at"] == "2026-08-06T01:00:00Z"
+    assert row["last_manifest_check"] == "2026-08-06T01:00:00Z"
 
 
 def test_log_excerpt_keeps_the_tail_and_is_capped(conn) -> None:
