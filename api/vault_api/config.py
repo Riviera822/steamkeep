@@ -10,6 +10,12 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from vault_api.schedule_window import (
+    ScheduleWindow,
+    ScheduleWindowError,
+    parse_window,
+)
+
 try:
     # Optional convenience for local/native dev: load a .env file if present.
     # Never overrides variables already set in the real environment.
@@ -61,6 +67,21 @@ DEFAULT_MANIFEST_KEEP = 3
 #: Hard floor for VAULT_MANIFEST_KEEP — 0 would mean "keep nothing", which
 #: defeats the point of archiving at all.
 MIN_MANIFEST_KEEP = 1
+
+#: How long the scheduler waits between sweeps of the installed list (WP 3.5).
+#: Plan §7 Phase 3 spells the cron window out as "e.g. 09:00-17:00, every 3 h"
+#: — 180 minutes is that "every 3 h", verbatim.
+DEFAULT_SCHEDULE_INTERVAL_MINUTES = 180
+
+#: A client whose most recent agent report is older than this is left OUT of
+#: the scheduler's target set (WP 3.5). Rationale: the target set is "what is
+#: installed on the gaming machines right now" (plan A8). A machine that has
+#: been off for a week is not reporting *anything* right now, and its last
+#: snapshot is a guess about the past — continuing to prefill (and keep
+#: current) a library nobody has confirmed in days quietly burns bandwidth and
+#: disk on a decommissioned PC. 7 days is generous enough to cover a holiday
+#: without the Steam Deck dropping out of the set.
+DEFAULT_SCHEDULE_CLIENT_STALE_DAYS = 7
 
 
 def _default_steamprefill_cache_dir() -> str:
@@ -175,6 +196,23 @@ class Settings:
     # construction re-reads LOCALAPPDATA/HOME at call time, same as
     # `from_env()` does when the env var is unset.
     steamprefill_cache_dir: str = field(default_factory=_default_steamprefill_cache_dir)
+    # WP 3.5. The daytime window the scheduler sweeps in (plan §7 Phase 3).
+    # ``None`` = scheduler disabled, and that is the DEFAULT on purpose: the
+    # scheduler starts Steam logins and downloads on its own schedule, which
+    # is not something a fresh install should begin doing because the operator
+    # never got around to reading the docs. Opt in by setting
+    # VAULT_SCHEDULE_WINDOW.
+    schedule_window: ScheduleWindow | None = None
+    # WP 3.5. Minimum spacing between two sweeps.
+    schedule_interval_minutes: int = DEFAULT_SCHEDULE_INTERVAL_MINUTES
+    # WP 3.5. Clients whose newest agent report is older than this are
+    # excluded from the sweep's target set.
+    schedule_client_stale_days: int = DEFAULT_SCHEDULE_CLIENT_STALE_DAYS
+
+    @property
+    def scheduler_enabled(self) -> bool:
+        """True iff a window is configured (WP 3.5) — the one enable switch."""
+        return self.schedule_window is not None
 
     @staticmethod
     def from_env() -> "Settings":
@@ -195,6 +233,20 @@ class Settings:
         db_path = os.environ.get("VAULT_DB_PATH", "./vault.db")
         manifest_archive_dir = os.environ.get("VAULT_MANIFEST_ARCHIVE_DIR", "").strip()
         steamprefill_cache_dir = os.environ.get("VAULT_STEAMPREFILL_CACHE_DIR", "").strip()
+
+        # WP 3.5. Unset/blank = the scheduler stays off (the safe default);
+        # anything else must parse NOW, at startup, rather than failing on the
+        # first tick hours later inside a background thread where nobody is
+        # looking. The interval and staleness bound are validated even when no
+        # window is set, so a typo in them surfaces immediately too rather
+        # than the day the operator enables the window.
+        raw_window = os.environ.get("VAULT_SCHEDULE_WINDOW", "").strip()
+        schedule_window: ScheduleWindow | None = None
+        if raw_window:
+            try:
+                schedule_window = parse_window(raw_window)
+            except ScheduleWindowError as exc:
+                raise RuntimeError(f"VAULT_SCHEDULE_WINDOW is invalid: {exc}") from exc
 
         return Settings(
             vault_api_key=api_key,
@@ -223,4 +275,11 @@ class Settings:
             ),
             steamprefill_cache_dir=steamprefill_cache_dir
             or _default_steamprefill_cache_dir(),
+            schedule_window=schedule_window,
+            schedule_interval_minutes=_env_int(
+                "VAULT_SCHEDULE_INTERVAL_MINUTES", DEFAULT_SCHEDULE_INTERVAL_MINUTES
+            ),
+            schedule_client_stale_days=_env_int(
+                "VAULT_SCHEDULE_CLIENT_STALE_DAYS", DEFAULT_SCHEDULE_CLIENT_STALE_DAYS
+            ),
         )

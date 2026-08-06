@@ -37,7 +37,12 @@ import sqlite3
 #: existing pre-v5 ``apps`` table lacks the column), so this needs its own
 #: explicit ``ALTER TABLE ... ADD COLUMN`` step too (see
 #: ``_add_missing_app_columns``).
-SCHEMA_VERSION = 5
+#: v6 (WP 3.5): added ``schedule_state`` — the scheduler's single-row sweep
+#: bookkeeping (when the last sweep ran, and what it did). A brand-new TABLE,
+#: so unlike v4/v5 this one IS fully expressible as ``CREATE TABLE IF NOT
+#: EXISTS`` and needs no ALTER step: an older database simply gains the empty
+#: table, which reads as "never swept".
+SCHEMA_VERSION = 6
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -142,6 +147,32 @@ CREATE TABLE IF NOT EXISTS depot_manifests (
 -- (the shared-depot keep-set is a UNION across apps) -- the PK above only
 -- indexes appid-first.
 CREATE INDEX IF NOT EXISTS idx_depot_manifests_depotid ON depot_manifests (depotid);
+
+-- WP 3.5: the scheduler's sweep bookkeeping. Exactly ONE row, forced by the
+-- CHECK on the primary key -- this is process-wide state ("when did the last
+-- sweep run"), not a per-something record, and a table that can only hold one
+-- row cannot silently grow a second one that some future query then picks at
+-- random. Writers use INSERT ... ON CONFLICT(id) DO UPDATE.
+--
+-- It lives in the DATABASE rather than in memory for one specific reason
+-- (WP 3.5's crash-recovery rule): a restart in the middle of the window must
+-- not sweep again immediately. In-memory state would reset to "never swept"
+-- on every container restart, turning a crash loop -- or just an operator
+-- editing .env a few times -- into a burst of Steam logins.
+--
+-- last_sweep_at is a UTC 'YYYY-MM-DDTHH:MM:SSZ' string, the same format every
+-- other timestamp column in this database uses (jobs.utcnow_iso), so plain
+-- string comparison sorts chronologically. The two counters are NULLABLE and
+-- are deliberately set back to NULL when a sweep is claimed, then filled in
+-- when it finishes: NULL therefore means "that sweep is still running, or the
+-- process died part-way through it", which is honest, where a stale count
+-- left over from the previous sweep would not be.
+CREATE TABLE IF NOT EXISTS schedule_state (
+    id                  INTEGER PRIMARY KEY CHECK (id = 1),
+    last_sweep_at       TEXT,
+    last_sweep_targets  INTEGER,
+    last_sweep_enqueued INTEGER
+);
 """
 
 

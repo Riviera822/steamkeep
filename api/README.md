@@ -38,9 +38,9 @@ for later work packages.
 ```
 api/
 ├── vault_api/
-│   ├── main.py           # FastAPI app factory + lifespan (starts the worker)
+│   ├── main.py           # FastAPI app factory + lifespan (worker + scheduler)
 │   ├── config.py         # Settings, read once from env vars
-│   ├── db.py             # SQLite schema v2, idempotent init
+│   ├── db.py             # SQLite schema v6, idempotent init
 │   ├── auth.py           # X-Api-Key dependency (constant-time compare)
 │   ├── deps.py           # Shared FastAPI dependencies (db_opener)
 │   ├── mapping.py        # upsert_mapping() — the depot->app write path
@@ -54,6 +54,8 @@ api/
 │   ├── depot_manifests.py # depot_manifests table writes/reads (WP 3.2)
 │   ├── manifest_archive.py # durable .bin archive + retention (WP 3.2)
 │   ├── manifest_ingest.py  # scan temp-cache -> parse -> store -> archive (WP 3.2)
+│   ├── schedule_window.py # window parsing/containment, pure (WP 3.5)
+│   ├── scheduler.py      # the second background thread: sweeps (WP 3.5)
 │   ├── validation.py     # shared request types (AppId) — one coercion rule
 │   └── routers/
 │       ├── health.py     # GET /v1/health — the ONE public router
@@ -62,7 +64,8 @@ api/
 │       ├── jobs.py       # POST /v1/prefill, GET /v1/jobs[/{id}]
 │       ├── cache.py      # GET /v1/cache/summary, DELETE /v1/cache/{appid}
 │       ├── agent.py      # POST /v1/agent/installed
-│       └── clients.py    # GET /v1/clients (minimal v1, stats in Phase 3)
+│       ├── clients.py    # GET /v1/clients (minimal v1, stats in Phase 3)
+│       └── schedule.py   # GET /v1/schedule (read-only, env-only config)
 ├── tests/                # pytest (incl. tests/stub_prefill.py — fake CLI)
 ├── requirements.txt      # pinned, runtime only
 ├── requirements-dev.txt  # pinned, adds test-only deps (pytest, httpx)
@@ -89,6 +92,9 @@ Copy `.env.example` to `.env` and adjust:
 | `VAULT_STEAMPREFILL_CACHE_DIR`  | no       | platform default (see below) | SteamPrefill's own manifest temp-cache directory, scanned after a successful prefill job (see "Manifest ingestion") |
 | `VAULT_MANIFEST_ARCHIVE_DIR`    | no       | `<dir of VAULT_DB_PATH>/manifests` | Where archived manifest `.bin` files are copied durably |
 | `VAULT_MANIFEST_KEEP`           | no       | `3`          | Archived manifests kept per depot (total, current included); **must be >= 1** |
+| `VAULT_SCHEDULE_WINDOW`         | no       | *(empty — scheduler OFF)* | Daytime window the scheduler sweeps in, `HH:MM-HH:MM` **server-local** time (e.g. `09:00-17:00`, `22:00-06:00`). Unset/blank = disabled. See "Scheduler" |
+| `VAULT_SCHEDULE_INTERVAL_MINUTES` | no     | `180`        | Minimum spacing between two sweeps (plan §7's "every 3 h"); **must be > 0** |
+| `VAULT_SCHEDULE_CLIENT_STALE_DAYS` | no    | `7`          | A client whose newest agent report is older than this drops out of the sweep's target set; **must be > 0** |
 
 `VAULT_API_KEY` has no default. Starting the app without it raises
 `RuntimeError` immediately (`Settings.from_env`) — this is the "fail loudly"
@@ -120,7 +126,14 @@ is a `manifests` sibling of `VAULT_DB_PATH`'s directory (`config._default_manife
 — consistent with a single persistent volume holding both the database and
 the archive, same caveat about `deploy/` wiring.
 
-## Database schema (v5)
+The three `VAULT_SCHEDULE_*` settings are validated at **startup**, window
+included — a malformed window raises `RuntimeError` from `Settings.from_env`
+rather than failing on the first tick hours later inside a background thread
+where nobody is watching. The two numbers are validated even when no window is
+set, so a typo surfaces the day it is made rather than the day the scheduler
+is switched on.
+
+## Database schema (v6)
 
 Created idempotently at startup by `vault_api/db.py::init_db` (safe to call
 on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
@@ -134,6 +147,7 @@ on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
 | `jobs`           | `id` (PK autoincrement), `appid`, `type`, `status`, `created_at`, `started_at`, `finished_at`, `log_excerpt`, `updated`, `up_to_date`, `summary_parse_ok` | Prefill/GC job queue (plan §3, §6). The last three (**v4**, WP 3.3) are SteamPrefill's own summary-table counters — see "Job outcome honesty" above |
 | `agent_reports`  | `client_id`, `reported_at`, `appids` (JSON array of ints)                                    | One row per agent report — a full installed-app-ID snapshot at that timestamp (ADR-0002: the agent is stateless/dumb, always reports the complete list). vault-api derives additions/removals by diffing the two most recent rows per `client_id` |
 | `depot_manifests` | `appid`, `containing_appid`, `depotid`, `manifestid` (TEXT), `chunk_count`, `total_bytes`, `recorded_at`, `source`, PK `(appid, depotid)` | **Latest**-known manifest state per (app, depot) — WP 3.2, ADR-0006 decision 3. See "Manifest ingestion" below |
+| `schedule_state` | `id` (PK, `CHECK (id = 1)`), `last_sweep_at`, `last_sweep_targets`, `last_sweep_enqueued` | **v6**, WP 3.5. Single-row scheduler bookkeeping: when the last sweep started (UTC) and what it did. Persisted rather than in-memory so a restart mid-window does not re-sweep — see "Scheduler" below. The two counters are `NULL` while a sweep is in flight (or if the process died during one) |
 
 Indexes beyond the primary keys: `idx_depot_app_map_appid` on
 `depot_app_map(appid)` (plan §4's main lookup direction is appid → depots,
@@ -290,6 +304,7 @@ clients rows are implemented so far.
 | GET    | `/v1/cache/summary`                | `total_bytes` (disk usage of `depot/`, each depot counted once), `top_consumers` (top 10 `{appid, name, size_bytes}`, largest first), `unmapped_depots` (`{count, size_bytes}` for depot dirs on disk with no mapping row for any app), `free_disk_bytes` (free space on the cache filesystem, `null` if undeterminable) |
 | POST   | `/v1/agent/installed`              | Body `{"client_id": str, "appids": [int, ...]}` — store one **full-list** snapshot of a client's installed games. `200` with `{client_id, received, added, removed, first_report}`; `422` for a bad `client_id` (empty, > 64 chars, control characters, surrounding whitespace, `.`/`..`), an appid `< 1` or a boolean, a missing/non-list `appids`, more than 10 000 ids, or an unrecognized body field. See "Agent reports" below |
 | GET    | `/v1/clients`                      | One row per reporting client: `{client_id, first_seen, last_reported_at, app_count}`, sorted by `client_id`. **Minimal v1** — hit statistics and bypass warnings (plan §5/§6) arrive in Phase 3 as *additional* fields |
+| GET    | `/v1/schedule`                     | Scheduler config + last-sweep bookkeeping: `{enabled, window, overnight, interval_minutes, client_stale_days, server_timezone, last_sweep_at, last_sweep_targets, last_sweep_enqueued, next_eligible_at}`. **Read-only** — there is deliberately no write endpoint, see "Scheduler" below |
 
 ## Prefill orchestration (WP 1.4, job outcome honesty WP 3.3)
 
@@ -1516,6 +1531,221 @@ and `::test_log_cache_dir_canary_is_silent_for_known_sidecar_files`.
   volume mount and `VAULT_MANIFEST_ARCHIVE_DIR`'s persistent-volume wiring are
   explicitly a follow-up on top of WP 1.9's Compose file, not this package's
   scope.
+
+## Scheduler (WP 3.5)
+
+Plan A7 ("prefill updates automatically during the day") and plan §7 Phase 3's
+"configurable cron window (e.g. 09:00–17:00, every 3 h)". In one sentence:
+
+> inside a configurable daytime window, every `VAULT_SCHEDULE_INTERVAL_MINUTES`,
+> take the union of the app ids every gaming machine most recently reported as
+> installed and enqueue a normal prefill job for each one.
+
+**Off by default.** With `VAULT_SCHEDULE_WINDOW` unset, no thread is started
+and nothing is ever enqueued on vault-api's own initiative. A fresh install
+must not start Steam logins and downloads because nobody has read the docs
+yet; opt in by setting a window.
+
+### Window semantics
+
+`HH:MM-HH:MM`, zero-padded, 24-hour. Whitespace around the value and around
+the `-` is tolerated; anything else is rejected at startup.
+
+| Value | Meaning |
+|---|---|
+| `09:00-17:00` | 09:00:00 up to but **not including** 17:00:00, every day |
+| `22:00-06:00` | **Overnight** — 22:00 through midnight *and* midnight through 06:00, i.e. one contiguous night, recurring |
+| `18:00-00:00` | Evening until midnight (end earlier than start ⇒ read as overnight, the `[00:00, 00:00)` half being empty) |
+| `00:00-24:00` | Always open. `24:00` is accepted **as the end value only**, meaning end-of-day |
+| `09:00-09:00` | **Rejected** — ambiguous (zero minutes, or the whole day?). Use `00:00-24:00` |
+| `9:00-17:00`, `0900-1700`, `09:60-…`, `25:00-…`, `24:00-…` as a *start* | **Rejected** |
+
+Start inclusive, end exclusive; containment is decided on whole minutes, so
+16:59:59 is inside `09:00-17:00`.
+
+Overnight windows are supported deliberately rather than rejected: "prefill
+while nobody is gaming" is the natural homelab window and it crosses midnight.
+No calendar day is tracked — the window simply recurs.
+
+### Timezone
+
+The window is interpreted in **server-local time** — the machine's timezone,
+or the container's `TZ` if you set one. That is the useful reading for
+"09:00–17:00 while I'm at work". Every *timestamp* the scheduler stores or
+reports (`last_sweep_at`, `next_eligible_at`) is UTC in the project's standard
+`YYYY-MM-DDTHH:MM:SSZ` form, like every other timestamp in this database.
+`GET /v1/schedule` reports the server's current offset as `server_timezone`
+(e.g. `UTC+02:00`) so you can tell the two apart at a glance.
+
+DST needs no handling: the tick loop re-reads the clock and re-evaluates the
+window every minute, so a transition just shifts when the window opens and
+closes in UTC. On the "spring forward" night an overnight window is one hour
+shorter (one hour longer in autumn). The interval gate is UTC-based and
+unaffected. The only value that can be an hour out across a transition is the
+advisory `next_eligible_at`; nothing decides anything from it.
+
+### The target set — installed *is* the prefill set
+
+Plan A8. Every sweep recomputes the set from scratch:
+
+1. for each `client_id` in `agent_reports`, take that client's **latest**
+   snapshot (newest by `rowid`, i.e. insertion order — WP 2.4's rule, since
+   second-precision timestamps tie);
+2. drop clients that are **stale**, **unreadable**, or **undatable** (below);
+3. union the remaining app id lists.
+
+Intersected with nothing else in v1: no popularity heuristic, no size budget,
+no include/exclude list. Because only the *latest* snapshot counts, a game
+uninstalled on every machine simply stops being a target on the next sweep —
+its cached content is untouched (ADR-0002: removals are surfaced, never acted
+on; deleting stays a human/API decision).
+
+**Staleness bound** (`VAULT_SCHEDULE_CLIENT_STALE_DAYS`, default 7 days). A
+machine whose newest report is older than this is excluded. The target set is
+meant to be "what is installed on the gaming machines *right now*"; a PC that
+has been off for a week is not reporting anything right now, and continuing to
+keep its last-known library current quietly burns bandwidth and disk on a
+possibly decommissioned machine. Seven days is generous enough to survive a
+holiday without the Steam Deck dropping out.
+
+Two other exclusions, both fail-safe in the "prefill less" direction and both
+reported in the log (with the client id and the reason):
+
+- **unreadable snapshot** — that row's `appids` JSON is corrupt (the same
+  degradation `POST /v1/agent/installed` already applies);
+- **unreadable timestamp** — `reported_at` is not a parseable timestamp, which
+  makes the staleness question unanswerable. Excluded rather than assumed
+  fresh: never prefill on the strength of a value that could not be read.
+
+### Spacing: why enqueue-everything *is* the rate limiting
+
+ADR-0006's honest-limits section: each per-app check costs a Steam login
+(~3 s), so sweeps are "spaced across the cron window, not batched" — batching
+several apps into one SteamPrefill invocation would destroy per-app
+attribution (one exit code, one summary table, N apps), so it is explicitly
+not done.
+
+The spacing mechanism is **the queue plus the single worker**, not a limiter
+in the scheduler. There is exactly one worker thread running exactly one job
+at a time (plan §3), so a sweep that enqueues 60 apps produces 60 *sequential*
+runs, one Steam login at a time, and the next sweep cannot start until the
+interval has elapsed. Adding a sleep between enqueues would only slow the
+*queueing*, not the work, while breaking the queue's dedupe window and
+delaying shutdown.
+
+A sweep over an unchanged library is cheap for the same reason it is useful:
+a non-forced run for an already-current app is a ~3 s no-op (ADR-0006 decision
+1 — SteamPrefill's own up-to-date bookkeeping), and the non-forced run **is**
+the staleness check. Apps that already have a `queued`/`running` job are
+deduped by `jobs.enqueue_prefill` itself (WP 1.4) and reported separately from
+the newly created ones.
+
+`needs_force` is untouched by all of this: a scheduled run of an
+already-filled app is non-forced, and a scheduled *first* fill of a
+never-filled app still runs with `--force`, exactly as a button press would.
+The flag belongs to the app, not to whoever enqueued the job (see
+"needs_force lifecycle").
+
+### Sweep bookkeeping and the crash-recovery rule
+
+One row in `schedule_state` (schema v6), written **claim-then-work**:
+`last_sweep_at` is stamped inside a `BEGIN IMMEDIATE` transaction *before* any
+job is enqueued, and the two counters are filled in afterwards (they read
+`NULL` in between, which is honest — "in flight or interrupted" — where a
+stale count from the previous sweep would not be).
+
+The rule that follows, stated plainly: **a restart does not re-sweep.**
+`last_sweep_at` is in the database, not in memory, so a process that dies
+mid-window — or an operator who edits `.env` and restarts three times — waits
+out the remaining interval like any other sweep. Apps a crashed sweep never
+reached are picked up by the next one; nothing is resumed, because the target
+set is recomputed from scratch every time rather than being a work list.
+
+Two related behaviours:
+
+- **A sweep with zero targets still consumes the interval.** Otherwise an
+  installation with no agents (or only stale ones) would sweep on every tick.
+- **A `last_sweep_at` in the future** (the clock was stepped back, or a
+  previous boot had a wrong clock) blocks sweeps until real time catches up.
+  That is the deliberate direction to fail in: skipping is quiet and
+  recoverable, whereas treating a future timestamp as "long ago" would sweep
+  on every tick — a Steam login storm — until somebody noticed. An
+  *unparseable* `last_sweep_at`, by contrast, is treated as "never swept" and
+  logged: a corrupt value must not disable the scheduler permanently.
+
+The thread ticks once a minute (an implementation constant, not a setting) and
+sweeps only when the window and the interval both allow it. It ticks
+immediately on start rather than waiting out the first tick, and a failing
+tick is logged and retried — a bug there must never silently end scheduling.
+
+### Why there is no lock against `DELETE /v1/cache/{appid}`
+
+Because the scheduler is *just another client of the existing enqueue path*:
+it calls `jobs.enqueue_prefill`, exactly like `POST /v1/prefill` does for a
+button press (and like the Phase-3 miss trigger will). It never touches the
+filesystem, never claims a job, never runs SteamPrefill. So it introduces no
+interaction the already-reviewed WP 1.4/1.6/3.4 semantics do not cover:
+
+| Situation | Already handled by |
+|---|---|
+| App already has a queued/running job | `enqueue_prefill`'s dedupe inside `BEGIN IMMEDIATE` — the existing job is returned and counted as "already active" |
+| A `DELETE` is in flight for that app | `DELETE` refuses with `409` while a job is queued/running, and its own documented check-then-act window in the other direction has a stated, benign consequence (the job refills what was deleted) |
+| A `DELETE` lands while a swept job is running | WP 3.4's compare-and-swap in `jobs.clear_needs_force_if_unchanged` — the deletion's `needs_force = 1` survives, so the next run is forced |
+
+A lock would protect nothing that is not already protected, while adding a way
+for a stuck sweep to block deletions. The one operator-visible consequence
+worth knowing: during the window, a `DELETE` is more likely to hit the `409`
+and need a retry once the job finishes.
+
+### Threading and database access
+
+A second daemon thread next to the job worker, started and stopped by the
+FastAPI lifespan — started *after* the worker (a sweep is only useful if
+something drains the queue) and stopped *before* it (stop producing before
+stopping the consumer). It opens its own SQLite connection **inside its own
+thread** and closes it there, per this project's one-thread-one-connection
+rule (`vault_api/deps.py` documents the measured access violation that rule
+exists for). It shares nothing with the worker but the database file; WAL plus
+`busy_timeout` (`db.get_connection`) is what makes that safe.
+
+### `GET /v1/schedule`
+
+```jsonc
+{
+  "enabled": true,
+  "window": "09:00-17:00",       // exactly as configured; null when disabled
+  "overnight": false,
+  "interval_minutes": 180,
+  "client_stale_days": 7,
+  "server_timezone": "UTC+02:00", // the window is LOCAL; timestamps are UTC
+  "last_sweep_at": "2026-08-06T08:00:00Z",   // when it STARTED
+  "last_sweep_targets": 12,       // null while a sweep is in flight
+  "last_sweep_enqueued": 3,       // NEW jobs only (dedupe hits not counted)
+  "next_eligible_at": "2026-08-06T11:00:00Z" // estimate; interval then window
+}
+```
+
+**Read-only, and there is deliberately no write endpoint.** Every setting in
+vault-api comes from the environment and is read once at startup (plan §9). A
+config-write API would need persistence, precedence rules against the
+environment, and a validation path separate from the startup one — three
+moving parts to save one `docker compose up -d` after editing `.env`. Change
+the window in `.env` and restart.
+
+When the scheduler is disabled the endpoint still reports the configured
+interval and staleness bound, so an operator can see what enabling the window
+*would* do.
+
+### What this work package deliberately did NOT do
+
+- No miss-triggered prefill completion (ADR-0001's hybrid half) — a separate
+  work package.
+- No garbage collection (`3.6`/`3.7`) and no third-party manifest oracle
+  (`3.8`, ADR-0006 decision 4).
+- No config-write API, no per-app schedule overrides, no "sweep now" endpoint.
+- No `deploy/` changes — the new `VAULT_SCHEDULE_*` variables are documented
+  in `api/.env.example`; wiring them (and a `TZ`) into the Compose file is a
+  follow-up on top of WP 1.9.
 
 ## Auth
 

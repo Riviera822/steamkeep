@@ -168,6 +168,95 @@ def test_steamprefill_cache_dir_override(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert Settings.from_env().steamprefill_cache_dir == override
 
 
+def test_scheduler_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The safe default (WP 3.5): no window = vault-api schedules nothing.
+
+    A fresh install must not start Steam logins and downloads on its own just
+    because nobody read the docs yet.
+    """
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    for name in (
+        "VAULT_SCHEDULE_WINDOW",
+        "VAULT_SCHEDULE_INTERVAL_MINUTES",
+        "VAULT_SCHEDULE_CLIENT_STALE_DAYS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.schedule_window is None
+    assert settings.scheduler_enabled is False
+    # Plan §7 Phase 3's "every 3 h", and the documented staleness bound.
+    assert settings.schedule_interval_minutes == 180
+    assert settings.schedule_client_stale_days == 7
+
+
+def test_schedule_window_is_parsed_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_SCHEDULE_WINDOW", "09:00-17:00")
+    monkeypatch.setenv("VAULT_SCHEDULE_INTERVAL_MINUTES", "60")
+    monkeypatch.setenv("VAULT_SCHEDULE_CLIENT_STALE_DAYS", "3")
+
+    settings = Settings.from_env()
+
+    assert settings.scheduler_enabled is True
+    assert settings.schedule_window is not None
+    assert settings.schedule_window.raw == "09:00-17:00"
+    assert settings.schedule_window.overnight is False
+    assert settings.schedule_interval_minutes == 60
+    assert settings.schedule_client_stale_days == 3
+
+
+def test_an_overnight_window_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_SCHEDULE_WINDOW", "22:00-06:00")
+
+    window = Settings.from_env().schedule_window
+
+    assert window is not None and window.overnight is True
+
+
+def test_a_blank_window_disables_rather_than_failing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'unset' and 'set to spaces' must mean the same thing (a commented-out
+    line in .env that kept a trailing space is not a config error)."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_SCHEDULE_WINDOW", "   ")
+
+    assert Settings.from_env().scheduler_enabled is False
+
+
+def test_a_malformed_window_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not on the first tick, hours later, inside a background thread."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+
+    for bad in ("9-5", "09:00", "09:00-09:00", "24:00-06:00", "09:00-25:00"):
+        monkeypatch.setenv("VAULT_SCHEDULE_WINDOW", bad)
+        with pytest.raises(RuntimeError, match="VAULT_SCHEDULE_WINDOW is invalid"):
+            Settings.from_env()
+
+
+def test_bad_schedule_numbers_fail_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Validated even with no window set, so a typo surfaces on the day it is
+    made rather than the day the operator enables the scheduler."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.delenv("VAULT_SCHEDULE_WINDOW", raising=False)
+
+    monkeypatch.setenv("VAULT_SCHEDULE_INTERVAL_MINUTES", "0")
+    with pytest.raises(RuntimeError, match="VAULT_SCHEDULE_INTERVAL_MINUTES"):
+        Settings.from_env()
+
+    monkeypatch.setenv("VAULT_SCHEDULE_INTERVAL_MINUTES", "three hours")
+    with pytest.raises(RuntimeError, match="must be an integer"):
+        Settings.from_env()
+
+    monkeypatch.setenv("VAULT_SCHEDULE_INTERVAL_MINUTES", "180")
+    monkeypatch.setenv("VAULT_SCHEDULE_CLIENT_STALE_DAYS", "-1")
+    with pytest.raises(RuntimeError, match="VAULT_SCHEDULE_CLIENT_STALE_DAYS"):
+        Settings.from_env()
+
+
 def test_agent_report_keep_below_two_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
     """The diff needs the previous snapshot AND the new one — 1 is not a value.
 

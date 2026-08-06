@@ -21,7 +21,17 @@ from vault_api.config import Settings
 from vault_api.db import get_connection, init_db
 from vault_api.jobs import recover_stale_jobs
 from vault_api.manifest_ingest import log_cache_dir_canary
-from vault_api.routers import agent, cache, clients, games, health, jobs, mapping
+from vault_api.routers import (
+    agent,
+    cache,
+    clients,
+    games,
+    health,
+    jobs,
+    mapping,
+    schedule,
+)
+from vault_api.scheduler import PrefillScheduler
 from vault_api.sizes import SizeCache
 from vault_api.worker import PrefillWorker
 
@@ -30,7 +40,8 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Start/stop the single prefill job worker (WP 1.4).
+    """Start/stop the background threads: the prefill job worker (WP 1.4) and,
+    when a window is configured, the scheduler (WP 3.5).
 
     Startup order matters: stale-claim recovery runs BEFORE the worker starts,
     so a job left 'running' by a process that died mid-job is failed while
@@ -64,9 +75,38 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     worker = PrefillWorker(settings, size_cache=app.state.size_cache)
     app.state.worker = worker
     worker.start()
+
+    # WP 3.5: the second background thread. Started AFTER the worker (a sweep
+    # is only useful if something is there to drain the queue) and stopped
+    # BEFORE it (stop producing jobs before stopping the consumer). Only
+    # started when a window is configured — an unset VAULT_SCHEDULE_WINDOW
+    # means "off", the safe default, and then no thread exists at all.
+    scheduler: PrefillScheduler = app.state.scheduler
+    if scheduler.enabled:
+        window = settings.schedule_window
+        assert window is not None  # implied by scheduler_enabled
+        scheduler.start()
+        logger.info(
+            "Scheduler enabled: window %s (server-local time%s), sweeping "
+            "every %d minute(s); clients silent for more than %d day(s) are "
+            "excluded from the target set.",
+            window.raw,
+            ", overnight" if window.overnight else "",
+            settings.schedule_interval_minutes,
+            settings.schedule_client_stale_days,
+        )
+    else:
+        logger.info(
+            "Scheduler disabled (VAULT_SCHEDULE_WINDOW is unset). Prefills "
+            "only run when something asks for them (POST /v1/prefill). Set a "
+            "window like '09:00-17:00' to have vault-api keep the gaming "
+            "machines' installed apps current on its own."
+        )
+
     try:
         yield
     finally:
+        scheduler.stop()
         worker.stop()
 
 
@@ -91,6 +131,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # TestClient() too, the same reasoning as app.state.settings above —
     # size-reporting endpoints don't need the worker running to be testable.
     app.state.size_cache = SizeCache(ttl_seconds=settings.size_cache_ttl_seconds)
+    # WP 3.5: created here rather than in the lifespan (same reasoning as
+    # size_cache above) for two reasons: GET /v1/schedule needs it to answer
+    # even when the scheduler is disabled or the lifespan never ran (a plain
+    # TestClient()), and a test that wants a deterministic clock can replace
+    # app.state.scheduler before entering the lifespan, which then starts the
+    # replacement. Constructing it starts no thread.
+    app.state.scheduler = PrefillScheduler(settings)
     app.include_router(health.router)
     app.include_router(games.router)
     app.include_router(mapping.router)
@@ -98,4 +145,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(cache.router)
     app.include_router(agent.router)
     app.include_router(clients.router)
+    app.include_router(schedule.router)
     return app

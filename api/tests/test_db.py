@@ -11,6 +11,7 @@ EXPECTED_TABLES = {
     "jobs",
     "agent_reports",
     "depot_manifests",
+    "schedule_state",
 }
 
 
@@ -402,6 +403,69 @@ def test_apps_has_the_needs_force_column(tmp_path) -> None:
         conn.close()
 
     assert "needs_force" in columns
+
+
+def test_init_db_upgrades_a_pre_v6_database_by_adding_schedule_state(tmp_path) -> None:
+    """v5 -> v6 (WP 3.5) adds a brand-new TABLE, so plain CREATE TABLE IF NOT
+    EXISTS is the whole migration — no ALTER step, and existing data untouched.
+    """
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("INSERT INTO apps (appid, status) VALUES (440, 'done')")
+        conn.execute("DROP TABLE schedule_state")
+        conn.execute("UPDATE schema_version SET version = 5")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        (version,) = conn.execute("SELECT version FROM schema_version").fetchone()
+        tables = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        # An upgraded database reads as "never swept" — the empty table.
+        (sweeps,) = conn.execute("SELECT COUNT(*) FROM schedule_state").fetchone()
+        (appid,) = conn.execute("SELECT appid FROM apps").fetchone()
+    finally:
+        conn.close()
+
+    assert version == SCHEMA_VERSION
+    assert "schedule_state" in tables
+    assert sweeps == 0
+    assert appid == 440
+
+
+def test_schedule_state_rejects_a_second_row(tmp_path) -> None:
+    """CHECK (id = 1): "the single row" is enforced by the schema, not by
+    convention — a second row would make "when did the last sweep run"
+    ambiguous."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO schedule_state (id, last_sweep_at) "
+            "VALUES (1, '2026-08-06T10:00:00Z')"
+        )
+        conn.commit()
+        try:
+            conn.execute(
+                "INSERT INTO schedule_state (id, last_sweep_at) "
+                "VALUES (2, '2026-08-06T11:00:00Z')"
+            )
+            raise AssertionError("a second schedule_state row was accepted")
+        except sqlite3.IntegrityError:
+            pass
+    finally:
+        conn.close()
 
 
 def test_a_fresh_app_row_defaults_needs_force_to_one(tmp_path) -> None:
