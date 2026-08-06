@@ -16,6 +16,8 @@ anything.
 deploy/
 ├── compose.yaml            # the deployment
 ├── .env.example            # committed template -> copy to .env
+├── examples/
+│   └── truenas-scale-dockge.md   # NAS-specific layout (dedicated ZFS cache dataset, etc.)
 ├── tests/
 │   └── verify-stack.sh     # container verification suite (see "Verifying")
 └── VERIFICATION-*.md       # recorded evidence from a real run
@@ -163,11 +165,13 @@ network or a dedicated VLAN interface works equally well.
 
 ## Volumes and backup
 
-Three named volumes, created automatically:
+Three named volumes, created automatically (a fourth location,
+`vault-cache`, becomes a bind mount instead if `VAULT_CACHE_PATH` is set --
+see ["Using a dedicated cache mount"](#using-a-dedicated-cache-mount) above):
 
 | Volume               | Mounted at                 | Contains | Back up? |
 |----------------------|----------------------------|----------|----------|
-| `vault-cache`        | `/vault` in **both** vault-core and vault-api | the depot cache (`cache/depot/…`) plus nginx's `tmp/` | **No** — it is a cache; large, and re-fillable by prefilling again |
+| `vault-cache` (or `VAULT_CACHE_PATH` if set) | `/vault` in **both** vault-core and vault-api | the depot cache (`cache/depot/…`) plus nginx's `tmp/` | **No** — it is a cache; large, and re-fillable by prefilling again |
 | `vault-db`           | `/data` in vault-api       | `vault.db` — depot→app mapping, jobs, agent reports | **Yes** — small, and it is the knowledge the cache cannot rebuild |
 | `vault-steamprefill` | `/opt/steamprefill/Config` in vault-api | SteamPrefill's Steam **session** and selection state | **Yes**, and treat it as a secret |
 | `vault-steamprefill-home` | `/opt/steamprefill/home` in vault-api | `HOME` for the container user — SteamPrefill's manifest/depot cache | **No** — regenerable, and it grows |
@@ -214,19 +218,32 @@ slower, and briefly double the disk usage per chunk
 You do not have to remember this: vault-core compares the two directories'
 `st_dev` at every start and **refuses to boot** if they differ.
 
-### Using a bind mount for the cache
+### Using a dedicated cache mount
 
-To put the cache on a specific disk, replace the volume line for **both**
-services and prepare the directory first:
-
-```yaml
-    volumes:
-      - /srv/steamvault:/vault      # in vault-core AND vault-api
-```
+To put the cache on a specific disk -- a second drive, a NAS's own storage
+pool, anything other than wherever Docker keeps its named volumes -- set
+`VAULT_CACHE_PATH` in `deploy/.env` (`.env.example` documents it in full).
+No `compose.yaml` edit needed: both services' `/vault` mount is already
+`${VAULT_CACHE_PATH:-vault-cache}:/vault`, and Compose's volume short-syntax
+resolves a bare name (the default, unset case) as the named volume declared
+under `volumes:` and an absolute path as a bind mount to that path instead --
+so leaving the variable unset is byte-for-byte what this line always was.
 
 ```bash
-sudo mkdir -p /srv/steamvault/cache/depot /srv/steamvault/tmp
-sudo chown -R 101:101 /srv/steamvault
+# deploy/.env
+VAULT_CACHE_PATH=/srv/steamvault-cache
+```
+
+Prepare the directory **before the first start** -- a bind mount, unlike a
+fresh named volume, does not get seeded with the image's pre-created
+`cache/depot/` and `tmp/` (that seeding only happens for an empty named
+volume; see `core/Dockerfile`'s `VOLUME ["/vault"]` step). Skipping this
+step is not silent: vault-core's preflight will refuse to start with
+`/vault/cache is missing`.
+
+```bash
+sudo mkdir -p /srv/steamvault-cache/cache/depot /srv/steamvault-cache/tmp
+sudo chown -R 101:101 /srv/steamvault-cache
 ```
 
 **uid/gid 101 is required, not a suggestion.** It is the numeric identity of
@@ -234,6 +251,22 @@ the nginx image's worker user, and vault-api's container user is created with
 the same numbers so both services can write the shared cache. Named volumes
 get this right automatically; bind mounts do not. If you get it wrong,
 vault-core refuses to start and tells you the exact `chown` to run.
+
+**`VAULT_CACHE_PATH` must be an absolute path** (start with `/`). Compose
+treats anything else as a *named-volume reference* rather than a bind path;
+since only `vault-cache` is declared under the top-level `volumes:` key, a
+typo here fails loudly at `docker compose config`/`up` time (`refers to
+undefined volume ...: invalid compose project`), not silently.
+
+It always covers `cache/` **and** `tmp/` together, because it redirects the
+single `/vault` mount point both services already share -- the
+same-filesystem requirement below is only satisfiable by moving both at
+once, and there is no way to move just one with this variable.
+
+**TrueNAS SCALE + Dockge users:** `deploy/examples/truenas-scale-dockge.md`
+has the full recipe for putting this on a dedicated ZFS dataset, including
+`recordsize`/`atime`/`compression` reasoning specific to Steam depot chunks
+and the port-80/DNS gotchas that come up on a NAS specifically.
 
 ---
 
@@ -365,6 +398,8 @@ Component-level tests live with their components: `core/tests/test-core.ps1`,
 | `required variable VAULT_API_KEY is missing a value` | `.env` missing or the key not set. Copy `.env.example`. |
 | vault-core exits at boot with `FATAL: … DIFFERENT filesystems` | `cache/` and `tmp/` were split across two mounts. Mount one volume at `/vault`. |
 | vault-core exits with `FATAL: … not writable by the nginx worker user` | bind-mounted cache directory not owned by `101:101`. |
+| vault-core exits with `FATAL: /vault/cache is missing` | `VAULT_CACHE_PATH` is set but `<path>/cache/depot` and `<path>/tmp` weren't created first — a bind mount isn't seeded the way a fresh named volume is. See ["Using a dedicated cache mount"](#using-a-dedicated-cache-mount). |
+| `docker compose config`/`up` fails with `refers to undefined volume ...: invalid compose project` | `VAULT_CACHE_PATH` doesn't start with `/` — Compose parsed it as a named-volume reference instead of a bind path. Use an absolute path. |
 | vault-dns exits with `FATAL: CACHE_IP is not set` | the `dns` profile is enabled but `CACHE_IP` is empty in `.env`. |
 | Clients download at internet speed and the cache stays empty | DNS redirection isn't reaching them, or the AAAA leak is open. Check with `dig A` **and** `dig AAAA` against your resolver (`dns/README.md`). |
 | Prefill jobs fail with "A Steam account is required" | the one-time interactive login hasn't been done — see [First run](#first-run-the-one-time-steamprefill-login). |

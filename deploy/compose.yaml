@@ -72,7 +72,24 @@ services:
       # which is atomic only within a single filesystem (core/README.md
       # "Same-filesystem requirement"). Do not split these into two mounts --
       # the container's preflight compares st_dev and refuses to start if you do.
-      - vault-cache:/vault
+      #
+      # VAULT_CACHE_PATH (deploy/.env, empty by default) is the dedicated-cache-
+      # mount knob: leave it unset and this resolves to the plain string
+      # "vault-cache", i.e. the Docker-managed named volume declared under
+      # `volumes:` below -- byte-for-byte what this line always was, so a
+      # deployment that never touches VAULT_CACHE_PATH sees ZERO behaviour
+      # change. Set it to an ABSOLUTE host path (e.g. a ZFS dataset mount point)
+      # and Compose's short-syntax volume source disambiguates on the leading
+      # "/": the same string now bind-mounts that host directory at /vault
+      # instead -- cache/ AND tmp/ move together as one unit, because it is the
+      # single /vault mount point that is being redirected, not a sub-path
+      # underneath it. This is deliberate: the same-filesystem constraint above
+      # is only satisfiable by moving both at once, never one at a time.
+      # vault-api mounts the identical expression a few lines down -- both
+      # services must resolve to the SAME location, named-volume or bind-mount.
+      # See deploy/README.md "Using a dedicated cache mount" for the required
+      # host-side `mkdir` + `chown 101:101` before first start.
+      - ${VAULT_CACHE_PATH:-vault-cache}:/vault
     security_opt:
       # nginx's master drops privileges to uid 101 for its workers; nothing here
       # ever needs to gain privileges via a setuid binary.
@@ -111,7 +128,12 @@ services:
       # The same cache volume vault-core writes: vault-api reads it for per-game
       # sizes and deletes depot directories from it. Both containers use uid 101
       # so this works without loosening permissions.
-      - vault-cache:/vault
+      #
+      # Same VAULT_CACHE_PATH expression as vault-core above -- see the comment
+      # there. Both services must agree on named-volume vs. bind-mount and on the
+      # exact path; this line is kept textually identical to vault-core's on
+      # purpose.
+      - ${VAULT_CACHE_PATH:-vault-cache}:/vault
       # SQLite database (mapping, jobs, agent reports). Small; back this up.
       - vault-db:/data
       # SteamPrefill's Config/ -- the Steam SESSION lives here after the one-time
@@ -197,11 +219,16 @@ services:
     logging: *vault-logging
 
 volumes:
-  # Named volumes (not bind mounts) are the default because Docker creates them
-  # with the right ownership for uid 101 automatically. If you prefer bind mounts
-  # -- e.g. to put the cache on a specific big disk -- see deploy/README.md
-  # "Using a bind mount for the cache": you must chown the host directory to
-  # 101:101 yourself, and keep cache/ and tmp/ under ONE mount.
+  # This entry stays declared even when VAULT_CACHE_PATH is set: it is what the
+  # "${VAULT_CACHE_PATH:-vault-cache}:/vault" mount lines above fall back to by
+  # name when the variable is empty. Named volumes (not bind mounts) are the
+  # default because Docker creates them with the right ownership for uid 101
+  # automatically (the image seeds a fresh one -- see core/Dockerfile). To put
+  # the cache on a specific disk (e.g. a dedicated ZFS dataset), set
+  # VAULT_CACHE_PATH to that ABSOLUTE host path in deploy/.env instead of
+  # editing this file -- see deploy/README.md "Using a dedicated cache mount":
+  # you must mkdir + chown the host directory to 101:101 yourself first, and it
+  # always covers cache/ AND tmp/ together (one mount point, never split).
   vault-cache:
   vault-db:
   vault-steamprefill:
