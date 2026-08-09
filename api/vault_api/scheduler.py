@@ -96,7 +96,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from vault_api import agent_reports, event_sweep, jobs
+from vault_api import agent_reports, event_sweep, jobs, webhooks
 from vault_api.config import Settings
 from vault_api.db import get_connection
 
@@ -536,10 +536,15 @@ class PrefillScheduler:
         *,
         clock: Clock = local_now,
         tick_seconds: float = DEFAULT_TICK_SECONDS,
+        webhook_notifier: "webhooks.WebhookNotifier | None" = None,
     ) -> None:
         self._settings = settings
         self._clock = clock
         self._tick_seconds = tick_seconds
+        #: WP 3.13: threaded through to event_sweep.maybe_sweep's persist step
+        #: (client.bypass_suspected transitions). None in every existing
+        #: caller/test that predates the webhook feature.
+        self._webhook_notifier = webhook_notifier
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -643,7 +648,7 @@ class PrefillScheduler:
         """
         now = self._clock()
         try:
-            event_sweep.maybe_sweep(conn, self._settings, now)
+            event_sweep.maybe_sweep(conn, self._settings, now, self._webhook_notifier)
         except Exception:
             logger.exception(
                 "Cache-event sweep failed (WP 3.11). The thread survives and "

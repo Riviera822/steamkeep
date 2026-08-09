@@ -34,6 +34,7 @@ from vault_api.routers import (
 )
 from vault_api.scheduler import PrefillScheduler
 from vault_api.sizes import SizeCache
+from vault_api.webhooks import WebhookNotifier, redact_url
 from vault_api.worker import PrefillWorker
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # see manifest_ingest.log_cache_dir_canary's docstring.
     log_cache_dir_canary(settings.steamprefill_cache_dir)
 
-    worker = PrefillWorker(settings, size_cache=app.state.size_cache)
+    # WP 3.13: started before the worker so the worker's very first job
+    # finalization already has somewhere to enqueue a webhook. A no-op thread
+    # (start() itself checks settings.webhook_enabled) when VAULT_WEBHOOK_URL
+    # is unset — the default.
+    webhook_notifier: WebhookNotifier = app.state.webhook_notifier
+    webhook_notifier.start()
+
+    worker = PrefillWorker(
+        settings, size_cache=app.state.size_cache, webhook_notifier=webhook_notifier
+    )
     app.state.worker = worker
     worker.start()
 
@@ -130,11 +140,29 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             "event log (VAULT_EVENT_LOG on that side) to switch it on."
         )
 
+    # WP 3.13.
+    if settings.webhook_enabled:
+        logger.info(
+            "Webhook notifications enabled: %s, events=%s, timeout=%.1fs.",
+            redact_url(settings.webhook_url),
+            sorted(settings.webhook_events),
+            settings.webhook_timeout_seconds,
+        )
+    else:
+        logger.info(
+            "Webhook notifications disabled (VAULT_WEBHOOK_URL is unset)."
+        )
+
     try:
         yield
     finally:
         scheduler.stop()
         worker.stop()
+        # WP 3.13: stopped LAST — a job or sweep finalized microseconds before
+        # shutdown may have just enqueued an event, and this gives the
+        # delivery thread a last chance to send it rather than dropping it
+        # unsent.
+        webhook_notifier.stop()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -158,13 +186,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # TestClient() too, the same reasoning as app.state.settings above —
     # size-reporting endpoints don't need the worker running to be testable.
     app.state.size_cache = SizeCache(ttl_seconds=settings.size_cache_ttl_seconds)
+    # WP 3.13: same reasoning as size_cache — constructed unconditionally so
+    # it exists for a plain TestClient() too, but start() (called from the
+    # lifespan below) is itself a no-op unless VAULT_WEBHOOK_URL is set.
+    app.state.webhook_notifier = WebhookNotifier(settings)
     # WP 3.5: created here rather than in the lifespan (same reasoning as
     # size_cache above) for two reasons: GET /v1/schedule needs it to answer
     # even when the scheduler is disabled or the lifespan never ran (a plain
     # TestClient()), and a test that wants a deterministic clock can replace
     # app.state.scheduler before entering the lifespan, which then starts the
     # replacement. Constructing it starts no thread.
-    app.state.scheduler = PrefillScheduler(settings)
+    app.state.scheduler = PrefillScheduler(
+        settings, webhook_notifier=app.state.webhook_notifier
+    )
     app.include_router(health.router)
     app.include_router(games.router)
     app.include_router(mapping.router)

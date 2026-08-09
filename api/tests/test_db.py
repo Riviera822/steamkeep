@@ -772,6 +772,20 @@ def test_init_db_refuses_a_database_from_a_newer_vault_api(tmp_path) -> None:
         init_db(db_path)
 
 
+def test_client_bypass_state_table_exists(tmp_path) -> None:
+    """WP 3.13, schema v10: a brand-new table, additive, no ALTER step needed."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(client_bypass_state)")}
+    finally:
+        conn.close()
+
+    assert columns == {"client_id", "bypass_suspected", "updated_at"}
+
+
 def test_connections_are_thread_confined_by_default(tmp_path) -> None:
     """WP 1.4: check_same_thread must stay ON.
 

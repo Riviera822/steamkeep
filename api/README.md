@@ -59,6 +59,8 @@ api/
 │   ├── gc.py             # GC core: keep-set resolution + plan_gc, read-only (WP 3.7)
 │   ├── gc_execute.py     # GC execution: deletes what gc.py planned (WP 3.8),
 │   │                     #   minus what the grace window holds back (WP 3.8b)
+│   ├── webhooks.py       # generic webhook notifications: bounded queue + one
+│   │                     #   delivery thread, job/bypass event payloads (WP 3.13)
 │   ├── validation.py     # shared request types (AppId) — one coercion rule
 │   └── routers/
 │       ├── health.py     # GET /v1/health — the ONE public router
@@ -108,6 +110,10 @@ Copy `.env.example` to `.env` and adjust:
 | `VAULT_BYPASS_WINDOW_DAYS`      | no       | `3`          | Cache-log silence beyond this many days makes a still-reporting client `bypass_suspected`; **must be > 0** |
 | `VAULT_CLIENT_STATS_KEEP`       | no       | `48`         | Per-sweep statistics rows kept per client address; **must be > 0** |
 | `VAULT_EVENT_LOG_MAX_BYTES`     | no       | `67108864`   | Truncate the event log at/above this size once fully swept; `0` = never truncate; **must be >= 0** |
+| `VAULT_WEBHOOK_URL`             | no       | *(empty — webhooks OFF)* | Generic JSON webhook target (WP 3.13). Unset/blank = the whole feature is off. See "Webhooks" |
+| `VAULT_WEBHOOK_EVENTS`          | no       | *(all five)* | Comma list of events to send: `job.done`, `job.error`, `job.cancelled`, `client.bypass_suspected`, `client.bypass_resolved`. Unknown names or empty entries fail at startup |
+| `VAULT_WEBHOOK_TIMEOUT_SECONDS` | no       | `5`          | Per-attempt HTTP timeout for one delivery try; **must be > 0** |
+| `VAULT_NAME`                    | no       | *(empty)*    | Optional label carried as `"vault_name"` in every webhook payload — omitted entirely when unset. Purely cosmetic, for an operator running more than one SteamVault instance |
 
 **All fourteen numeric settings are parsed strictly (WP 3.12).** Twelve take a
 whole number (`VAULT_PREFILL_TIMEOUT_SECONDS`, `VAULT_AGENT_REPORT_KEEP`,
@@ -186,7 +192,7 @@ where nobody is watching. The two numbers are validated even when no window is
 set, so a typo surfaces the day it is made rather than the day the scheduler
 is switched on.
 
-## Database schema (v9)
+## Database schema (v10)
 
 Created idempotently at startup by `vault_api/db.py::init_db` (safe to call
 on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
@@ -205,6 +211,7 @@ on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
 | `client_cache_stats` | `client_addr`, `window_at`, `requests`, `hits`, `misses`, `bypasses`, `errors`, `bytes_served`, `last_seen`, PK `(client_addr, window_at)` | **v9**, WP 3.11. One row per client address per sweep window (plan §5/§6 "per-client hit stats"). `requests = hits + misses + bypasses + errors` by construction; the three cache counters and `bytes_served` include **2xx responses only** (event-log field 9). Retention: `VAULT_CLIENT_STATS_KEEP` windows per address |
 | `depot_miss_stats` | `depotid` (PK), `miss_count`, `mapped`, `first_seen`, `last_seen`   | **v9**, WP 3.11. Which depots are being MISSed, and whether a mapping existed at the last sighting. ADR-0008's "misses on unmapped depots are counted but trigger nothing" is what this table counts. Bounded to `event_sweep.MAX_DEPOT_MISS_ROWS` (500) least-recently-seen-first |
 | `miss_trigger_state` | `appid` (PK), `last_triggered_at`, `trigger_count`                | **v9**, WP 3.11. The miss trigger's per-app cooldown, persisted so a restart cannot become "re-trigger everything that misses next" |
+| `client_bypass_state` | `client_id` (PK), `bypass_suspected`, `updated_at`               | **v10**, WP 3.13. One row per client holding the LAST computed `bypass_suspected` verdict, so the cache-event sweep can fire `client.bypass_suspected`/`client.bypass_resolved` only on the TRANSITION (either direction), never on the steady state. Only populated when `VAULT_WEBHOOK_URL` is set and at least one of the two events is enabled — see "Webhooks" below |
 
 Indexes beyond the primary keys: `idx_depot_app_map_appid` on
 `depot_app_map(appid)` (plan §4's main lookup direction is appid → depots,
@@ -2515,12 +2522,217 @@ traffic, so one quiet day proves nothing.
   granting the write access rotation needs) is a parallel/follow-up package.
 - **No `core/` changes.** The producing side shipped in WP 3.10 and its format
   is consumed exactly as documented.
-- No webhooks (WP 3.13) and no third-party manifest oracle (WP 3.9).
+- No third-party manifest oracle (WP 3.9) — webhooks (WP 3.13) shipped
+  separately, see "Webhooks" below.
 - No config-write API and no "sweep now" endpoint — same reasoning as
   `GET /v1/schedule`'s read-only stance.
 - No content attribution from the event log. ADR-0008's boundary holds: the
   depot id is used to *look up* the mapping vault-api already owns, never to
   build it. Chunk→game attribution stays with manifests (ADR-0006/0007).
+
+## Webhooks (WP 3.13)
+
+`vault_api/webhooks.py` can POST a small, generic JSON notification to one
+operator-supplied URL when a job concludes or a client newly looks like it is
+bypassing the cache. Deliberately generic — there is no Discord/Slack/ntfy
+embed builder here, one stable schema for every receiver, and a receiver that
+wants a platform-specific look adapts on its own side (most chat webhook
+endpoints, and every ntfy/Slack/Discord-compatible relay, already ingest
+generic JSON).
+
+**The one switch is `VAULT_WEBHOOK_URL`.** Blank/unset — the default — means
+the whole feature is off: no background thread, no queue, no HTTP calls, and
+none of the code paths below even build a payload.
+
+### The envelope
+
+Every event is the same shape; only `payload` varies:
+
+```json
+{
+  "event": "job.done",
+  "timestamp": "2026-08-09T14:03:11Z",
+  "vault_name": "homelab",
+  "payload": { "id": 42, "type": "prefill", "appid": 440, "status": "done" }
+}
+```
+
+`timestamp` is when the notification was generated (not necessarily the
+job's own `finished_at`, which is already in the row `GET /v1/jobs/{id}`
+returns). `vault_name` is `VAULT_NAME` and is **omitted entirely** — not sent
+as `""` — when that variable is unset; it exists purely so an operator
+running more than one SteamVault instance behind the same receiver can tell
+notifications apart.
+
+### The five events
+
+| Event | Fires when | `payload` fields |
+|---|---|---|
+| `job.done` | A prefill or GC job finished successfully | `id`, `type`, `appid`, `status`, `mode` (GC only: `"execute"`/`"dry-run"`), `bytes` (GC only: `bytes_freed`, 0 for a dry run) |
+| `job.error` | A prefill or GC job finished as `error` (incl. an unrecognised job type, and a crash inside the worker) | same shape as `job.done` |
+| `job.cancelled` | An operator cancelled a job (`DELETE /v1/jobs/{id}`) — **not** sent for `paused`, which is not a conclusion | same shape as `job.done`, no `bytes` (a stopped run's byte count is not meaningful — see `worker._finish_stopped_prefill`) |
+| `client.bypass_suspected` | A client **newly** flips to `bypass_suspected` in the sense `GET /v1/clients` already reports (see "Cache-event sweep" above) | `client_id`, `address` (every address the client's retained agent reports arrived from), `last_seen` (its most recent cache-log timestamp, or `null`) |
+| `client.bypass_resolved` | The all-clear: a previously-`bypass_suspected` client's cache-log presence returned | same shape as `client.bypass_suspected` — `last_seen` is now a real timestamp (its return to the cache log is exactly what caused the flip back) |
+
+`client.bypass_suspected` and `client.bypass_resolved` are the two directions
+of the SAME verdict flip, never the steady state in either direction — see
+"Bypass transitions, not the steady state" below. Together they close the
+loop for an operator: get paged when a machine looks like it started
+bypassing the cache, get paged again when it stopped.
+
+Example `client.bypass_suspected` payload:
+
+```json
+{
+  "event": "client.bypass_suspected",
+  "timestamp": "2026-08-09T09:00:00Z",
+  "payload": {
+    "client_id": "steam-deck-01",
+    "address": ["192.168.1.55"],
+    "last_seen": null
+  }
+}
+```
+
+Example `client.bypass_resolved` payload (same shape, `last_seen` now populated):
+
+```json
+{
+  "event": "client.bypass_resolved",
+  "timestamp": "2026-08-09T15:00:00Z",
+  "payload": {
+    "client_id": "steam-deck-01",
+    "address": ["192.168.1.55"],
+    "last_seen": "2026-08-09T14:58:03Z"
+  }
+}
+```
+
+**`bytes` for a prefill job is never included.** SteamPrefill's own summary
+table reports a formatted string ("12.3 GB"), not a raw byte count, and
+parsing it back into an integer just for a webhook would not be the "cheaply
+available" value the work package asked for — it is omitted rather than
+guessed at.
+
+### Configuration
+
+`VAULT_WEBHOOK_EVENTS` is a comma list (default: all five); a name outside
+the table above, or an empty entry (a stray comma), fails loudly at startup —
+the same house rule every other list/enum setting in this project follows.
+`VAULT_WEBHOOK_TIMEOUT_SECONDS` (default `5`, must be `> 0`) bounds one HTTP
+attempt; see "Delivery semantics" for how attempts and timeouts interact.
+
+### Hook points — exactly one call site per event class
+
+**Job events** all go through `webhooks.finish_job_and_notify`, called
+immediately after every place a job concludes: `worker.py`'s prefill
+success/failure/unowned/exception/cancelled branches, its unknown-job-type
+guard, and `gc_execute.run_gc_job`'s crash and normal-completion paths.
+Deliberately **not** wired inside `jobs.finish_job` itself — that function is
+called directly, with no `Settings`/notifier in scope, by most of
+`tests/test_job_control.py` and friends, describing plenty of transitions
+(crash-recovery at startup, a synthetic test state) that were never real
+webhook-worthy events. Routing the hook through the callers, where a genuine
+worker/GC run is actually in progress, keeps "a job really just concluded" as
+the only thing that can fire it.
+
+**Bypass events** (both directions) go through
+`event_sweep.check_bypass_transitions`, called from `event_sweep.sweep_once`
+strictly *after* `commit_batch`/`maybe_truncate`. Both hook points share the
+same rule: a webhook fires only after the state it describes is already
+committed, never a state that could still roll back.
+
+### Bypass transitions, not the steady state
+
+A client that has been `bypass_suspected` for a week must not re-fire the
+webhook on every 5-minute sweep — and once it clears, it must not re-fire
+`client.bypass_resolved` on every sweep after that either. Schema v10 adds
+`client_bypass_state` — one row per `client_id` holding the LAST computed
+verdict — so `check_bypass_transitions` can tell "just became suspected" and
+"just cleared" apart from "no change" and only notify on the two flips, never
+on either steady state. The verdict itself (`event_sweep.bypass_suspected`)
+is the **same function** `GET /v1/clients` answers with (moved there from
+`routers/clients.py` in this work package), so the sweep's opinion and the
+API's opinion can never disagree.
+
+Both directions are always computed and persisted together once the checker
+runs at all — asking for only one of the two events in
+`VAULT_WEBHOOK_EVENTS` filters which webhook actually gets sent (in
+`WebhookNotifier.enqueue`), not which transition gets tracked, so enabling
+the missing event later produces correct transitions from that point on
+rather than a false first-sight event for every already-suspected client.
+The table is only ever written when `VAULT_WEBHOOK_URL` is set and at least
+one of `client.bypass_suspected`/`client.bypass_resolved` is a configured
+event — an installation that never asked for either webhook never gets a row
+in it.
+
+A full cycle, id by id: a client goes quiet (feed old enough, client still
+reporting, no cache-log presence) → `client.bypass_suspected` fires once →
+the client stays quiet for days, no further webhook → traffic resumes →
+`client.bypass_resolved` fires once → silence again until the next
+`bypass_suspected`, if any.
+
+### Delivery semantics: at-most-once, bounded retry, drops counted
+
+Every hook point above calls `WebhookNotifier.enqueue`, which never blocks
+and never raises: it JSON-encodes the payload and does a
+`queue.Queue.put_nowait` onto a bounded queue (`MAX_QUEUE_SIZE = 100`). Actual
+HTTP delivery happens on exactly one dedicated background thread, so a slow
+or hanging receiver can only ever delay *itself* — never the worker
+finishing a job or the scheduler sweeping the event log. That single-thread
+design is also why delivery is **serialized**: two events are never in
+flight at once, which is what keeps a receiver from being hit by concurrent
+requests from one vault-api process.
+
+- **At-most-once.** There is no persistent outbox; an event that was queued
+  when the process died is lost, and a delivery that fails after every retry
+  is simply dropped (logged, never re-queued days later). If you need
+  guaranteed delivery, front the URL with a message queue or a webhook relay
+  that persists on its own side.
+- **Bounded retry.** Up to `DELIVERY_ATTEMPTS = 3` HTTP attempts per event
+  with a short backoff between them (`RETRY_BACKOFF_SECONDS = (0.2, 0.5)`).
+  Giving up after the last attempt is one WARNING naming the event and the
+  reason — **never** a full traceback at ERROR for what is usually just "the
+  receiver is down right now", an operational fact about the other end, not
+  a bug in this code.
+- **Drops are counted, never silent.** A full queue means delivery is
+  falling behind the rate events are produced; `enqueue` drops the OLDEST
+  queued event (not the newest) to make room, logs it at WARNING, and counts
+  it (`WebhookNotifier.dropped_count`) — the same "no silent caps" rule
+  `docs/LEARNINGS.md` already applies to the miss trigger's per-sweep cap.
+- **Basic Auth in the URL works, and is redacted from logs.** If
+  `VAULT_WEBHOOK_URL` carries userinfo (`https://user:secret@host/path`), it
+  is converted into a real `Authorization: Basic` header before delivery
+  (`urllib.request` does not do this on its own — a userinfo-carrying URL
+  handed to it directly fails to even resolve, measured), and every LOG line
+  still renders the URL as `https://***@host/path` (`webhooks.redact_url`).
+  The header conversion is about making the convenient syntax actually work;
+  the redaction is about not leaking the credential into `docker logs` — see
+  "SSRF / trust posture" below.
+
+### SSRF / trust posture
+
+`VAULT_WEBHOOK_URL` is operator-supplied configuration, exactly like
+`VAULT_STEAMPREFILL_PATH` or `VAULT_CACHE_ROOT` — this project's threat model
+(plan §9, "Auth" below) is a single homelab operator running their own
+trusted stack, not a multi-tenant service accepting attacker-influenced
+URLs. There is deliberately **no allowlist, no DNS-rebinding defense, no
+blocking of loopback/RFC1918 targets**: the operator who sets this value is
+the same person who can already edit `.env` or run arbitrary code in the
+container, so treating their own configuration as untrusted input would be
+security theatre rather than a real mitigation.
+
+### What this work package deliberately did NOT do
+
+- **No `deploy/` changes.** `VAULT_WEBHOOK_URL`/`VAULT_WEBHOOK_EVENTS`/
+  `VAULT_WEBHOOK_TIMEOUT_SECONDS`/`VAULT_NAME` are documented in
+  `api/.env.example`; wiring them through `deploy/compose.yaml` is a
+  follow-up, same pattern as WP 3.11's event-log path.
+- **No persistent delivery queue / outbox.** At-most-once, in-process only —
+  see "Delivery semantics" above.
+- **No vendor-specific templates.** One schema; a receiver that wants a
+  Discord/Slack/ntfy-native look adapts it on its own side.
+- No UI for configuring or previewing webhooks (Phase 4 territory).
 
 ## Garbage-collection core (WP 3.7, ADR-0007)
 

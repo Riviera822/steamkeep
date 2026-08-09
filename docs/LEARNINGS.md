@@ -156,6 +156,14 @@ These are not style preferences; each entry cost a review round to learn.
   unterminated bytes (half-written lines would parse as fresh records),
   and never let a progress log line fire when nothing was consumed
   (WP 3.11).
+- `urllib.request` does not handle userinfo in URLs (`https://u:p@host/`
+  fails getaddrinfo) — strip it and send a real Basic Authorization
+  header; redact userinfo in every log line, and test the redaction
+  against `@` inside passwords and IPv6 hosts (WP 3.13).
+- Transition detectors: persist state changes in BOTH directions
+  regardless of which notifications are enabled — filtering belongs at
+  delivery, or enabling an event later fires falsely on first sight
+  (WP 3.13).
 - envsubst on config templates: a colliding env var REPLACES runtime
   variables with its value (not blanks) and `nginx -t` still passes —
   always restrict with an allowlist filter (WP 1.9).

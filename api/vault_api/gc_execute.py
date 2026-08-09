@@ -205,9 +205,10 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Mapping, Sequence
 
-from vault_api import deletion, gc, jobs
+from vault_api import deletion, gc, jobs, webhooks
 from vault_api.config import Settings
 from vault_api.sizes import SizeCache
+from vault_api.webhooks import WebhookNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -1470,6 +1471,7 @@ def run_gc_job(
     *,
     settings: Settings,
     size_cache: SizeCache | None = None,
+    webhook_notifier: WebhookNotifier | None = None,
 ) -> None:
     """Run one claimed ``gc`` job to completion and record its outcome.
 
@@ -1524,8 +1526,9 @@ def run_gc_job(
         # Last-resort net, same shape as the prefill path's. A crash here has
         # unknown on-disk consequences, so the job is 'error' and says so.
         logger.exception("GC job %s crashed", job_id)
-        jobs.finish_job(
+        webhooks.finish_job_and_notify(
             conn,
+            webhook_notifier,
             job_id,
             jobs.STATUS_ERROR,
             "[vault-api] Internal error while running this GC job. Some chunks may "
@@ -1544,7 +1547,10 @@ def run_gc_job(
         status = jobs.STATUS_CANCELLED
     else:
         status = jobs.STATUS_DONE if report.ok else jobs.STATUS_ERROR
-    jobs.finish_job(conn, job_id, status, report.log_text())
+    webhooks.finish_job_and_notify(
+        conn, webhook_notifier, job_id, status, report.log_text(),
+        bytes_freed=report.bytes_freed,
+    )
     logger.info(
         "GC job %s for appid %s finished '%s' (%s; %d byte(s) freed)",
         job_id, appid, status, "execute" if execute else "dry run",

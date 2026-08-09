@@ -49,10 +49,11 @@ import sqlite3
 import threading
 import traceback
 
-from vault_api import gc_execute, jobs, manifest_ingest, prefill, prefill_summary
+from vault_api import gc_execute, jobs, manifest_ingest, prefill, prefill_summary, webhooks
 from vault_api.config import Settings
 from vault_api.db import get_connection
 from vault_api.sizes import SizeCache
+from vault_api.webhooks import WebhookNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -65,12 +66,21 @@ SHUTDOWN_JOIN_TIMEOUT_SECONDS = 30.0
 class PrefillWorker:
     """Runs queued prefill jobs, strictly one at a time, in FIFO order."""
 
-    def __init__(self, settings: Settings, size_cache: SizeCache | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        size_cache: SizeCache | None = None,
+        webhook_notifier: WebhookNotifier | None = None,
+    ) -> None:
         self._settings = settings
         #: Invalidated after a successful prefill job (WP 1.5: plan §3's "du
         #: over depot folders, cached" needs an explicit invalidation hook,
         #: not polling). None in tests that don't care about size caching.
         self._size_cache = size_cache
+        #: WP 3.13: fires job.done/job.error/job.cancelled webhooks. None in
+        #: every existing test that does not care about webhooks — see
+        #: webhooks.notify_job_event's own None-is-a-no-op guard.
+        self._webhook_notifier = webhook_notifier
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -144,7 +154,11 @@ class PrefillWorker:
             # Owns its own error handling and never raises; it deliberately
             # does NOT touch apps.status (see gc_execute's module docstring).
             gc_execute.run_gc_job(
-                conn, job, settings=self._settings, size_cache=self._size_cache
+                conn,
+                job,
+                settings=self._settings,
+                size_cache=self._size_cache,
+                webhook_notifier=self._webhook_notifier,
             )
             return
         self._fail_unknown_job_type(conn, job, job_type)
@@ -158,8 +172,9 @@ class PrefillWorker:
             job_id, job_type,
         )
         try:
-            jobs.finish_job(
+            webhooks.finish_job_and_notify(
                 conn,
+                self._webhook_notifier,
                 job_id,
                 jobs.STATUS_ERROR,
                 f"[vault-api] Unknown job type {job_type!r}. This worker only runs "
@@ -293,8 +308,9 @@ class PrefillWorker:
                         "mapping and manifest state were NOT touched."
                     )
                     jobs.set_app_status(conn, appid, jobs.STATUS_ERROR)
-                    jobs.finish_job(
-                        conn, job_id, jobs.STATUS_ERROR, "\n".join(log_parts),
+                    webhooks.finish_job_and_notify(
+                        conn, self._webhook_notifier,
+                        job_id, jobs.STATUS_ERROR, "\n".join(log_parts),
                         updated=summary.updated,
                         up_to_date=summary.up_to_date,
                         summary_parse_ok=summary.parse_ok,
@@ -389,8 +405,9 @@ class PrefillWorker:
                 # in this job's excerpt.
                 self._maybe_queue_auto_gc(conn, job_id, appid, summary, log_parts)
 
-                jobs.finish_job(
-                    conn, job_id, jobs.STATUS_DONE, "\n".join(log_parts),
+                webhooks.finish_job_and_notify(
+                    conn, self._webhook_notifier,
+                    job_id, jobs.STATUS_DONE, "\n".join(log_parts),
                     updated=summary.updated,
                     up_to_date=summary.up_to_date,
                     summary_parse_ok=summary.parse_ok,
@@ -419,7 +436,10 @@ class PrefillWorker:
                 "was left unchanged."
             )
             jobs.set_app_status(conn, appid, jobs.STATUS_ERROR)
-            jobs.finish_job(conn, job_id, jobs.STATUS_ERROR, "\n".join(log_parts))
+            webhooks.finish_job_and_notify(
+                conn, self._webhook_notifier,
+                job_id, jobs.STATUS_ERROR, "\n".join(log_parts),
+            )
             logger.warning(
                 "Prefill job %s for appid %s failed (%s)",
                 job_id, appid, result.failure_reason,
@@ -434,7 +454,9 @@ class PrefillWorker:
             )
             try:
                 jobs.set_app_status(conn, appid, jobs.STATUS_ERROR)
-                jobs.finish_job(conn, job_id, jobs.STATUS_ERROR, message)
+                webhooks.finish_job_and_notify(
+                    conn, self._webhook_notifier, job_id, jobs.STATUS_ERROR, message
+                )
             except Exception:  # pragma: no cover - DB itself is broken
                 logger.exception("Could not even record the failure of job %s", job_id)
 
@@ -508,8 +530,9 @@ class PrefillWorker:
                 job_id, appid, result.exit_code, job_id,
             )
         else:
-            jobs.finish_job(
-                conn, job_id, jobs.STATUS_CANCELLED, "\n".join(log_parts)
+            webhooks.finish_job_and_notify(
+                conn, self._webhook_notifier,
+                job_id, jobs.STATUS_CANCELLED, "\n".join(log_parts),
             )
             logger.info(
                 "Prefill job %s for appid %s cancelled on request; "

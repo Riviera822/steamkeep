@@ -22,6 +22,14 @@ address its retained reports came from (``agent_reports.source_addrs_for``).
 
 Bypass detection, and why it fails toward NOT accusing
 ------------------------------------------------------
+**The rule itself lives in ``event_sweep.bypass_suspected`` (moved there in
+WP 3.13)**, shared with the cache-event sweep's own transition check
+(``event_sweep.check_bypass_transitions``, the webhook feature's persist
+step) — one definition read by both a live GET request and a background
+sweep, so they can never disagree about who is flagged. This module still
+computes the two feed-level inputs (``feed_can_accuse``, ``cutoff_iso``) and
+calls it per client.
+
 ``bypass_suspected`` answers plan §5's actual pain point: a machine that
 reports installed games but never appears at the cache is probably resolving
 Steam's CDN around vault-dns (IPv6 leak, hardcoded DNS, a VPN). A false
@@ -136,7 +144,7 @@ def list_clients(
             cache_misses=totals[summary.client_id].misses,
             bytes_served=totals[summary.client_id].bytes_served,
             last_seen_in_cache_log=totals[summary.client_id].last_seen,
-            bypass_suspected=_bypass_suspected(
+            bypass_suspected=event_sweep.bypass_suspected(
                 summary,
                 totals[summary.client_id],
                 feed_can_accuse=feed_can_accuse,
@@ -145,36 +153,3 @@ def list_clients(
         )
         for summary in summaries
     ]
-
-
-def _bypass_suspected(
-    summary: agent_reports.ClientSummary,
-    totals: event_sweep.AddrTotals,
-    *,
-    feed_can_accuse: bool,
-    cutoff_iso: str,
-) -> bool:
-    """The disqualification chain from the module docstring, in order.
-
-    Written as early returns rather than one boolean expression on purpose:
-    each ``return False`` is a distinct reason a client is NOT accused, and
-    each one is separately mutation-tested (flip it and a named test dies) per
-    docs/LEARNINGS.md's rule about pinning fail-safe DEFAULTS, not just the
-    happy path.
-    """
-    # 1 + 2: the feed is off, has never swept, or is younger than the window.
-    if not feed_can_accuse:
-        return False
-    # 3: the client itself has been silent longer than the window.
-    if summary.last_reported_at < cutoff_iso:
-        return False
-    # 4: nothing installed (or an unreadable snapshot) means nothing to bypass.
-    if not summary.app_count:
-        return False
-    # 5: no address on any retained report — correlation is impossible.
-    if not summary.source_addrs:
-        return False
-    # 6: it HAS been seen at the cache within the window.
-    if totals.last_seen is not None and totals.last_seen >= cutoff_iso:
-        return False
-    return True

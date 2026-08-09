@@ -145,9 +145,14 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from vault_api import jobs
-from vault_api.config import Settings
+from vault_api import agent_reports, jobs, webhooks
+from vault_api.config import (
+    WEBHOOK_EVENT_BYPASS_RESOLVED,
+    WEBHOOK_EVENT_BYPASS_SUSPECTED,
+    Settings,
+)
 from vault_api.jobs import immediate_transaction, parse_utc_iso, to_utc_iso
+from vault_api.webhooks import WebhookNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -1347,18 +1352,31 @@ class SweepOutcome:
 
 
 def sweep_once(
-    conn: sqlite3.Connection, settings: Settings, now: datetime
+    conn: sqlite3.Connection,
+    settings: Settings,
+    now: datetime,
+    notifier: "WebhookNotifier | None" = None,
 ) -> SweepOutcome:
-    """Read, trigger, commit, maybe truncate — the sweep proper, no gates.
+    """Read, trigger, commit, maybe truncate, check bypass transitions — the
+    sweep proper, no gates.
 
     Split out from ``maybe_sweep`` so every test can drive a sweep with an
     injected clock and without waiting for an interval, exactly as WP 3.5 split
     its own decision layer from its work.
 
     The ORDER is the contract (module docstring, "Idempotence"): read, then
-    enqueue, then commit statistics+cursor together, then truncate. Enqueue
-    before commit because a lost job is worse than a repeated one, and the
-    repeat is absorbed by the cooldown and the queue's dedupe.
+    enqueue, then commit statistics+cursor together, then truncate, THEN (WP
+    3.13) check for a bypass_suspected/bypass_resolved transition (either
+    direction) and fire its webhook. Enqueue before commit because a lost job
+    is worse than a repeated one, and
+    the repeat is absorbed by the cooldown and the queue's dedupe. The bypass
+    check runs last and reads only what is already committed, so it never
+    announces a state that could still roll back — see
+    ``check_bypass_transitions``.
+
+    ``notifier`` defaults to ``None`` (every existing caller/test that does
+    not pass one gets the pre-WP-3.13 behavior unchanged: no bypass webhook
+    lookup, no ``client_bypass_state`` writes).
     """
     now_iso = to_utc_iso(now)
     state = read_state(conn)
@@ -1410,6 +1428,11 @@ def sweep_once(
     # refused rotation must not affect anything above it.
     rotation = maybe_truncate(conn, settings, batch.new_cursor, now_iso)
     truncated = rotation.truncated
+
+    # WP 3.13's persist step: strictly AFTER the batch's own commit/truncate
+    # above, and a no-op unless a webhook is actually listening for it (see
+    # check_bypass_transitions).
+    check_bypass_transitions(conn, settings, notifier, now)
 
     if aggregate.unknown_versions:
         logger.warning(
@@ -1499,18 +1522,22 @@ def sweep_once(
 
 
 def maybe_sweep(
-    conn: sqlite3.Connection, settings: Settings, now: datetime
+    conn: sqlite3.Connection,
+    settings: Settings,
+    now: datetime,
+    notifier: "WebhookNotifier | None" = None,
 ) -> SweepOutcome:
     """One tick: decide, and sweep if due.
 
     Two gates only — no window gate, on purpose (see the module docstring and
-    ``config.DEFAULT_EVENT_SWEEP_INTERVAL_MINUTES``).
+    ``config.DEFAULT_EVENT_SWEEP_INTERVAL_MINUTES``). ``notifier`` (WP 3.13)
+    is threaded straight through to ``sweep_once``.
     """
     if not settings.event_sweep_enabled:
         return SweepOutcome(swept=False, skipped_reason="disabled")
     if not claim_sweep(conn, now, settings.event_sweep_interval_minutes):
         return SweepOutcome(swept=False, skipped_reason="interval-not-elapsed")
-    return sweep_once(conn, settings, now)
+    return sweep_once(conn, settings, now, notifier)
 
 
 # --------------------------------------------------------------------------
@@ -1627,3 +1654,216 @@ def feed_is_young(state: SweepState, settings: Settings, now: datetime) -> bool:
     if first is None:
         return True
     return now - timedelta(days=settings.bypass_window_days) < first
+
+
+def bypass_suspected(
+    summary: "agent_reports.ClientSummary",
+    totals: AddrTotals,
+    *,
+    feed_can_accuse: bool,
+    cutoff_iso: str,
+) -> bool:
+    """The disqualification chain (plan §5's DNS/IPv6-bypass pain point).
+
+    Moved here from ``routers/clients.py`` in WP 3.13 so both call sites —
+    ``GET /v1/clients`` (recomputed fresh on every request, read-only) and
+    ``check_bypass_transitions`` below (recomputed once per sweep, to detect
+    a NEW verdict worth a webhook) — share exactly one definition. Two copies
+    of a fail-toward-not-accusing rule are two places for them to quietly
+    drift apart, and a webhook that disagreed with what ``GET /v1/clients``
+    reports at the same moment would be a worse bug than either call site
+    alone.
+
+    Written as early returns rather than one boolean expression on purpose:
+    each ``return False`` is a distinct reason a client is NOT accused, and
+    each one is separately mutation-tested (flip it and a named test dies,
+    per docs/LEARNINGS.md's rule about pinning fail-safe DEFAULTS, not just
+    the happy path).
+    """
+    # 1 + 2: the feed is off, has never swept, or is younger than the window
+    # (both folded into feed_can_accuse by the caller).
+    if not feed_can_accuse:
+        return False
+    # 3: the client itself has been silent longer than the window.
+    if summary.last_reported_at < cutoff_iso:
+        return False
+    # 4: nothing installed (or an unreadable snapshot) means nothing to bypass.
+    if not summary.app_count:
+        return False
+    # 5: no address on any retained report — correlation is impossible.
+    if not summary.source_addrs:
+        return False
+    # 6: it HAS been seen at the cache within the window.
+    if totals.last_seen is not None and totals.last_seen >= cutoff_iso:
+        return False
+    return True
+
+
+# --------------------------------------------------------------------------
+# Bypass TRANSITION detection (WP 3.13) — the webhook's persist step
+# --------------------------------------------------------------------------
+
+
+def read_bypass_states(conn: sqlite3.Connection) -> dict[str, bool]:
+    """The LAST computed ``bypass_suspected`` verdict per client (schema v10).
+
+    Empty for a client never checked before (which reads as "was not
+    suspected", the correct starting assumption for the transition check
+    below — a client's first-ever observation can never itself be a NEW
+    transition).
+    """
+    rows = conn.execute(
+        "SELECT client_id, bypass_suspected FROM client_bypass_state"
+    ).fetchall()
+    return {str(row["client_id"]): bool(row["bypass_suspected"]) for row in rows}
+
+
+def _write_bypass_state(
+    conn: sqlite3.Connection, client_id: str, suspected: bool, now_iso: str
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO client_bypass_state (client_id, bypass_suspected, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(client_id) DO UPDATE SET
+            bypass_suspected = excluded.bypass_suspected,
+            updated_at       = excluded.updated_at
+        """,
+        (client_id, int(suspected), now_iso),
+    )
+
+
+@dataclass(frozen=True)
+class BypassTransition:
+    """One client's bypass verdict flip this tick — which way, and who."""
+
+    event: str
+    client_id: str
+
+
+def check_bypass_transitions(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    notifier: "WebhookNotifier | None",
+    now: datetime,
+) -> tuple[BypassTransition, ...]:
+    """Fire a bypass webhook for every client that JUST flipped, either way.
+
+    Two transitions, symmetric in every way that matters:
+
+    * ``client.bypass_suspected`` — a client NEWLY flags (was not suspected,
+      now is).
+    * ``client.bypass_resolved`` — the all-clear: a previously-suspected
+      client's cache-log presence returned (was suspected, now is not). This
+      closes the loop the ``suspected`` event opened — an operator who got
+      paged for a possible DNS/IPv6 bypass wants to know when it stopped
+      being true, not just when it started.
+
+    Called from ``sweep_once`` strictly AFTER ``commit_batch``/
+    ``maybe_truncate`` — this is the sweep's "persist step" the work package
+    means: the verdict computed below reads THIS sweep's already-committed
+    ``event_sweep_state``/``client_cache_stats``, so a webhook it fires
+    describes a state that has already landed and cannot roll back.
+
+    Runs once per SWEEP TICK, not once per event line: a client's own agent
+    reports going stale, or the bypass window simply aging past
+    ``last_seen_in_cache_log``, can flip the verdict (in either direction)
+    even when this particular batch had zero new lines in it. Skipping ticks
+    with no new lines would miss exactly the "quiet client sitting past the
+    window" (and its later "came back") cases the feature exists for.
+
+    Guarded so an installation that never asked for either event pays
+    nothing for it: no notifier, the webhook feature off, BOTH bypass events
+    excluded from ``VAULT_WEBHOOK_EVENTS``, or the cache-event sweep itself
+    disabled all skip touching ``agent_reports``/``client_bypass_state``
+    entirely. Once inside, both directions are always computed and
+    persisted together — ``client_bypass_state`` is the one durable verdict
+    per client, and asking for only one of the two events must not corrupt
+    it for the other (an operator who later adds the missing event to
+    ``VAULT_WEBHOOK_EVENTS`` gets correct transitions from that point on,
+    not a false first-sight event for every already-suspected client).
+    Per-event filtering happens where it always has, inside
+    ``WebhookNotifier.enqueue``.
+
+    Returns every transition this tick, in the order clients were visited
+    (diagnostic / test-observable; the caller does not currently use the
+    return value for anything but logging).
+    """
+    if notifier is None or not settings.webhook_enabled:
+        return ()
+    if not (
+        WEBHOOK_EVENT_BYPASS_SUSPECTED in settings.webhook_events
+        or WEBHOOK_EVENT_BYPASS_RESOLVED in settings.webhook_events
+    ):
+        return ()
+    # Same first gate routers/clients.py's feed_can_accuse applies: with the
+    # sweep itself off, event_sweep_state may be stale or entirely absent, and
+    # "no cache-log presence" would mean nothing.
+    if not settings.event_sweep_enabled:
+        return ()
+
+    state = read_state(conn)
+    feed_can_accuse = not feed_is_young(state, settings, now)
+    if not feed_can_accuse:
+        return ()
+
+    cutoff_iso = to_utc_iso(now - timedelta(days=settings.bypass_window_days))
+    now_iso = to_utc_iso(now)
+    previous_states = read_bypass_states(conn)
+
+    # Collected during the transaction, but the webhook itself is only fired
+    # AFTER it commits below (module docstring: never announce a state that
+    # could still roll back) — enqueue() only touches an in-process queue, so
+    # nothing is lost by deferring it the width of one Python block.
+    new_transitions: list[tuple[str, str, list[str], str | None]] = []
+    with immediate_transaction(conn):
+        for summary in agent_reports.list_clients(conn):
+            totals = totals_for_addrs(conn, summary.source_addrs)
+            suspected = bypass_suspected(
+                summary, totals, feed_can_accuse=True, cutoff_iso=cutoff_iso
+            )
+            was_suspected = previous_states.get(summary.client_id, False)
+
+            if suspected != was_suspected:
+                _write_bypass_state(conn, summary.client_id, suspected, now_iso)
+
+            if suspected and not was_suspected:
+                new_transitions.append(
+                    (
+                        WEBHOOK_EVENT_BYPASS_SUSPECTED,
+                        summary.client_id,
+                        summary.source_addrs,
+                        totals.last_seen,
+                    )
+                )
+            elif was_suspected and not suspected:
+                new_transitions.append(
+                    (
+                        WEBHOOK_EVENT_BYPASS_RESOLVED,
+                        summary.client_id,
+                        summary.source_addrs,
+                        totals.last_seen,
+                    )
+                )
+
+    transitioned = tuple(
+        BypassTransition(event=event, client_id=client_id)
+        for event, client_id, _addrs, _seen in new_transitions
+    )
+    for event, client_id, addresses, last_seen in new_transitions:
+        webhooks.notify_bypass_event(
+            notifier,
+            event=event,
+            client_id=client_id,
+            addresses=addresses,
+            last_seen=last_seen,
+        )
+
+    if transitioned:
+        logger.warning(
+            "event-sweep: %d client bypass transition(s) this sweep: %s",
+            len(transitioned),
+            [(t.event, t.client_id) for t in transitioned],
+        )
+
+    return transitioned

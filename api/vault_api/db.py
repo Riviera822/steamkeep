@@ -79,7 +79,17 @@ import sqlite3
 #: version — and that NULL is load-bearing, not cosmetic: a client whose
 #: address is unknown can never be ``bypass_suspected`` (see
 #: ``routers/clients.py``).
-SCHEMA_VERSION = 9
+#: v10 (WP 3.13): added ``client_bypass_state`` -- the generic-webhook
+#: feature's own bookkeeping, one row per ``client_id``, recording the LAST
+#: computed ``bypass_suspected`` verdict for that client. It exists so the
+#: cache-event sweep (``event_sweep.py``) can tell a NEW accusation (the
+#: transition worth a webhook) apart from the steady state (a client that has
+#: been flagged for days and would otherwise fire on every sweep tick) --
+#: without it there would be nowhere to remember "was this client already
+#: flagged the last time we checked" across restarts. A brand-new table, so
+#: like v6/v9's new tables this is fully expressible as ``CREATE TABLE IF NOT
+#: EXISTS`` and needs no ``ALTER`` step.
+SCHEMA_VERSION = 10
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -364,6 +374,22 @@ CREATE INDEX IF NOT EXISTS idx_client_cache_stats_addr
 -- recently seen ones. Both sort by last_seen.
 CREATE INDEX IF NOT EXISTS idx_depot_miss_stats_last_seen
     ON depot_miss_stats (last_seen);
+
+-- WP 3.13: generic webhook notifications. One row per client_id, holding the
+-- LAST bypass_suspected verdict the cache-event sweep computed for it. This
+-- is not user-facing state -- GET /v1/clients recomputes bypass_suspected
+-- fresh on every request, same as before this table existed -- it exists
+-- purely so a sweep can detect a client NEWLY flipping to bypass_suspected
+-- (the only moment worth a webhook) instead of a client that has been
+-- flagged for days firing again on every sweep tick. Populated only when
+-- VAULT_WEBHOOK_URL is set and 'client.bypass_suspected' is one of the
+-- configured VAULT_WEBHOOK_EVENTS -- an installation that never asked for
+-- this webhook never gets a row here.
+CREATE TABLE IF NOT EXISTS client_bypass_state (
+    client_id        TEXT PRIMARY KEY,
+    bypass_suspected INTEGER NOT NULL DEFAULT 0,
+    updated_at       TEXT NOT NULL
+);
 """
 
 

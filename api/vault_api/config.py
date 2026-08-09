@@ -212,6 +212,72 @@ DEFAULT_CLIENT_STATS_KEEP = 48
 DEFAULT_EVENT_LOG_MAX_BYTES = 64 * 1024 * 1024
 
 
+# --------------------------------------------------------------------------
+# WP 3.13 — generic webhook notifications. OFF by default: the whole feature
+# hangs off ``VAULT_WEBHOOK_URL`` being set, the same one-switch shape as
+# ``VAULT_EVENT_LOG_PATH`` above. See ``vault_api/webhooks.py`` for delivery.
+# --------------------------------------------------------------------------
+
+#: The five events a webhook can be told about — job outcomes (three, one per
+#: terminal ``jobs.status`` value that is not ``paused``) plus the two client
+#: bypass-detection TRANSITIONS (never the steady state in either direction):
+#: a client NEWLY flagged (``BYPASS_SUSPECTED``), and a previously-flagged
+#: client whose cache-log presence returned (``BYPASS_RESOLVED`) — the
+#: all-clear that closes the loop the suspected event opened. Named here, not
+#: in ``webhooks.py``, so ``config`` never has to import that module to
+#: validate ``VAULT_WEBHOOK_EVENTS`` at startup — ``webhooks.py`` imports
+#: these constants instead, keeping the dependency one-directional.
+WEBHOOK_EVENT_JOB_DONE = "job.done"
+WEBHOOK_EVENT_JOB_ERROR = "job.error"
+WEBHOOK_EVENT_JOB_CANCELLED = "job.cancelled"
+WEBHOOK_EVENT_BYPASS_SUSPECTED = "client.bypass_suspected"
+WEBHOOK_EVENT_BYPASS_RESOLVED = "client.bypass_resolved"
+WEBHOOK_EVENTS_ALL = (
+    WEBHOOK_EVENT_JOB_DONE,
+    WEBHOOK_EVENT_JOB_ERROR,
+    WEBHOOK_EVENT_JOB_CANCELLED,
+    WEBHOOK_EVENT_BYPASS_SUSPECTED,
+    WEBHOOK_EVENT_BYPASS_RESOLVED,
+)
+
+#: Default delivery timeout for one HTTP attempt. Short on purpose: a webhook
+#: receiver is expected to be a fast local/LAN endpoint (a chat bridge, a
+#: notification gateway), and delivery already retries — a long timeout here
+#: would only make a hanging receiver hold the delivery thread longer per
+#: attempt, never help correctness (see ``webhooks.py``'s single-thread design
+#: for why that thread, and only that thread, may block).
+DEFAULT_WEBHOOK_TIMEOUT_SECONDS = 5.0
+
+
+def _env_webhook_events(name: str = "VAULT_WEBHOOK_EVENTS") -> frozenset[str]:
+    """Read ``VAULT_WEBHOOK_EVENTS``: a comma list of event names, or blank
+    for "all five" (WP 3.13, extended to five in the same WP's review cycle).
+
+    Strict by the same house rule as every other list-shaped setting in this
+    module: a typo'd event name must fail loudly at startup, not silently
+    mean "this event is never sent" for the lifetime of the deployment. Empty
+    entries (a stray comma, ``"job.done,,job.error"``) are refused rather than
+    skipped for the same reason.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return frozenset(WEBHOOK_EVENTS_ALL)
+    tokens = [token.strip() for token in raw.split(",")]
+    if any(not token for token in tokens):
+        raise RuntimeError(
+            f"{name} must be a comma-separated list of event names with no "
+            f"empty entries (valid names: {', '.join(WEBHOOK_EVENTS_ALL)}). "
+            f"Got {raw!r}."
+        )
+    unknown = sorted(set(tokens) - set(WEBHOOK_EVENTS_ALL))
+    if unknown:
+        raise RuntimeError(
+            f"{name} contains unknown event name(s) {unknown!r}; valid names "
+            f"are {', '.join(WEBHOOK_EVENTS_ALL)}. Got {raw!r}."
+        )
+    return frozenset(tokens)
+
+
 def _default_steamprefill_cache_dir() -> str:
     """Platform default for SteamPrefill's manifest temp-cache directory
     (docs/research/phase3-manifests.md §1a): ``%LOCALAPPDATA%\\SteamPrefill\\v1``
@@ -479,6 +545,28 @@ class Settings:
     # WP 3.11. Truncate the event log at/above this size once fully consumed.
     # 0 = never truncate.
     event_log_max_bytes: int = DEFAULT_EVENT_LOG_MAX_BYTES
+    # WP 3.13. Generic webhook target. EMPTY = the whole feature is off — the
+    # one enable switch, same shape as event_log_path above.
+    webhook_url: str = ""
+    # WP 3.13. Which of WEBHOOK_EVENTS_ALL to actually send. Defaults to all
+    # five (an operator who turns the feature on almost always wants every
+    # event; opting OUT of one is the less common case and is what the comma
+    # list is for).
+    webhook_events: frozenset[str] = field(
+        default_factory=lambda: frozenset(WEBHOOK_EVENTS_ALL)
+    )
+    # WP 3.13. Per-attempt HTTP timeout for one delivery try.
+    webhook_timeout_seconds: float = DEFAULT_WEBHOOK_TIMEOUT_SECONDS
+    # WP 3.13. Optional operator-chosen label for this vault instance, carried
+    # in every webhook payload's "vault_name" field so a receiver aggregating
+    # several installs can tell them apart. Blank = the field is omitted
+    # entirely (see webhooks.py) rather than sent as "".
+    vault_name: str = ""
+
+    @property
+    def webhook_enabled(self) -> bool:
+        """True iff a webhook URL is configured — the one enable switch."""
+        return bool(self.webhook_url)
 
     @property
     def scheduler_enabled(self) -> bool:
@@ -643,4 +731,16 @@ class Settings:
             event_log_max_bytes=_env_int(
                 "VAULT_EVENT_LOG_MAX_BYTES", DEFAULT_EVENT_LOG_MAX_BYTES, minimum=0
             ),
+            # WP 3.13. Blank/unset = the whole webhook feature stays off. Not
+            # validated as a URL here beyond stripping: an operator-supplied
+            # target is trusted by definition (see webhooks.py's SSRF/trust
+            # posture note) and a malformed one fails per-delivery, at WARNING,
+            # exactly like a receiver that is merely unreachable — never a
+            # reason to refuse to boot.
+            webhook_url=os.environ.get("VAULT_WEBHOOK_URL", "").strip(),
+            webhook_events=_env_webhook_events(),
+            webhook_timeout_seconds=_env_float(
+                "VAULT_WEBHOOK_TIMEOUT_SECONDS", DEFAULT_WEBHOOK_TIMEOUT_SECONDS
+            ),
+            vault_name=os.environ.get("VAULT_NAME", "").strip(),
         )

@@ -760,3 +760,107 @@ def test_sloppy_sweep_numbers_are_refused_at_startup(
 
     with pytest.raises(RuntimeError, match=name):
         Settings.from_env()
+
+
+# ---------------------------------------------------------------------------
+# WP 3.13: generic webhook notifications
+# ---------------------------------------------------------------------------
+
+
+def _webhook_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    for name in (
+        "VAULT_WEBHOOK_URL",
+        "VAULT_WEBHOOK_EVENTS",
+        "VAULT_WEBHOOK_TIMEOUT_SECONDS",
+        "VAULT_NAME",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_webhooks_are_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vault_api.config import WEBHOOK_EVENTS_ALL
+
+    _webhook_env(monkeypatch)
+
+    settings = Settings.from_env()
+
+    assert settings.webhook_url == ""
+    assert settings.webhook_enabled is False
+    # Still populated with the "everything" default, so turning the URL on
+    # alone (no VAULT_WEBHOOK_EVENTS) sends all four events.
+    assert settings.webhook_events == frozenset(WEBHOOK_EVENTS_ALL)
+    assert settings.webhook_timeout_seconds == 5.0
+    assert settings.vault_name == ""
+
+
+def test_webhook_url_alone_enables_the_feature(monkeypatch: pytest.MonkeyPatch) -> None:
+    _webhook_env(monkeypatch)
+    monkeypatch.setenv("VAULT_WEBHOOK_URL", "https://example.invalid/hook")
+
+    settings = Settings.from_env()
+
+    assert settings.webhook_enabled is True
+
+
+def test_webhook_events_accepts_a_subset(monkeypatch: pytest.MonkeyPatch) -> None:
+    _webhook_env(monkeypatch)
+    monkeypatch.setenv("VAULT_WEBHOOK_EVENTS", "job.done, job.error")
+
+    settings = Settings.from_env()
+
+    assert settings.webhook_events == {"job.done", "job.error"}
+
+
+def test_webhook_events_rejects_an_unknown_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    _webhook_env(monkeypatch)
+    monkeypatch.setenv("VAULT_WEBHOOK_EVENTS", "job.done,job.finished")
+
+    with pytest.raises(RuntimeError, match="VAULT_WEBHOOK_EVENTS"):
+        Settings.from_env()
+
+
+def test_webhook_events_rejects_an_empty_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stray comma ('job.done,,job.error') must not silently become two
+    events — it is refused loudly, the same house rule as every other
+    list/enum setting in this module."""
+    _webhook_env(monkeypatch)
+    monkeypatch.setenv("VAULT_WEBHOOK_EVENTS", "job.done,,job.error")
+
+    with pytest.raises(RuntimeError, match="VAULT_WEBHOOK_EVENTS"):
+        Settings.from_env()
+
+
+def test_webhook_timeout_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    _webhook_env(monkeypatch)
+    monkeypatch.setenv("VAULT_WEBHOOK_TIMEOUT_SECONDS", "2.5")
+
+    assert Settings.from_env().webhook_timeout_seconds == 2.5
+
+
+def test_webhook_timeout_rejects_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    _webhook_env(monkeypatch)
+    monkeypatch.setenv("VAULT_WEBHOOK_TIMEOUT_SECONDS", "0")
+
+    with pytest.raises(RuntimeError, match="must be > 0"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize("sloppy", [" 5 ", "+5", "-5", "1_0", "٥", "nan", "inf"])
+def test_webhook_timeout_rejects_sloppy_values(
+    monkeypatch: pytest.MonkeyPatch, sloppy: str
+) -> None:
+    _webhook_env(monkeypatch)
+    monkeypatch.setenv("VAULT_WEBHOOK_TIMEOUT_SECONDS", sloppy)
+
+    with pytest.raises(RuntimeError, match="VAULT_WEBHOOK_TIMEOUT_SECONDS"):
+        Settings.from_env()
+
+
+def test_vault_name_defaults_to_empty_and_is_stripped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _webhook_env(monkeypatch)
+    monkeypatch.setenv("VAULT_NAME", "  homelab  ")
+
+    assert Settings.from_env().vault_name == "homelab"

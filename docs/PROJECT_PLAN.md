@@ -442,8 +442,15 @@ parallel/serial decisions, merge discipline, open user decisions):
       `GET /v1/stats`. Rotation is best-effort — in the shipped containers
       vault-api may read the log but not truncate it, which is handled,
       counted and surfaced rather than fatal)*
-- [ ] Optional generic webhook notifications (Discord/Slack/ntfy-compatible;
+- [x] Optional generic webhook notifications (Discord/Slack/ntfy-compatible;
       built as a generic webhook feature, not vendor-specific)
+      *(WP 3.13: five events — job.done/error/cancelled +
+      client.bypass_suspected/resolved (transition-only, state tracked in
+      both directions regardless of the delivery filter) — one generic
+      JSON schema, single delivery daemon thread with bounded drop-oldest
+      queue, measured zero worker latency against hanging receivers,
+      userinfo→Authorization-header conversion with redacted logging;
+      schema v10; suite 1102 green; Opus PASS + fix round)*
 
 ### Phase 4 — Frontends (user decision 2026-08-06: web first, then app)
 
