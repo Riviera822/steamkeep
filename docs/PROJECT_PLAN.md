@@ -376,7 +376,12 @@ for users who expose the API differently.
       titles (status update / optional cleanup hint, see ADR-0002)
       *(WP 2.4 report chains ordered by rowid + WP 3.5 window sweeps)*
 
-### Phase 3 — Scheduler & Update Logic
+### Phase 3 — Scheduler & Update Logic — COMPLETE 2026-08-09
+
+All packages merged: 3.1–3.6 (manifests, ingestion, summary, needs_force,
+scheduler, last-remnant), 3.7/3.8/3.8b (GC plan/execute/grace window),
+3.9 (oracle, branch session), 3.10 (event log), 3.11 (event sweep),
+3.12 (job control), 3.13 (webhooks). Suite at close: 1239 green.
 
 Closing plan (2026-08-09, user decision "implement everything"): remaining
 packages are 3.8b grace window (merged) · 3.9 oracle incl. open-beta
@@ -389,9 +394,12 @@ Branch-dispatch structure for ALL remaining phases (package briefs,
 parallel/serial decisions, merge discipline, open user decisions):
 `docs/WORKPACKAGES.md` (2026-08-09).
 
-- [ ] Miss-triggered prefill completion: a cache miss on an unknown/partial
+- [x] Miss-triggered prefill completion: a cache miss on an unknown/partial
       app queues a prefill job for that app (hybrid decision, ADR-0001;
       feed design decided in ADR-0008 → WP 3.10 core log + WP 3.11 sweep)
+      *(WP 3.11: non-forced enqueues under cap → active-job → cooldown →
+      cached-and-current guards; unmapped/shared/manifest misses counted,
+      never triggered)*
 - [x] Job outcome honesty: a prefill run that observed zero depots and has
       zero cached bytes must not end 'done' (WP 1.7 finding: SteamPrefill
       exits 0 for unowned apps → green badge for a never-cached game)
