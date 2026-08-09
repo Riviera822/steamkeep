@@ -22,11 +22,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import TEST_API_KEY, make_dir_link, make_junction
-from vault_api import deletion
+from vault_api import deletion, jobs
 from vault_api.config import Settings
 from vault_api.deletion import (
+    CoOwner,
     DeletedDepot,
     FailedDepot,
+    RemnantDepot,
     SharedDepot,
     UnsafeCacheRootError,
     UnsafeDepotTargetError,
@@ -340,6 +342,76 @@ def test_plan_deletion_treats_an_unreadable_co_owner_as_shared() -> None:
 
 
 # --------------------------------------------------------------------------
+# plan_deletion: last cached remnants (ADR-0003 addendum, WP 3.5)
+# --------------------------------------------------------------------------
+
+
+def test_plan_deletion_without_co_owner_states_reproduces_the_pre_addendum_behavior() -> None:
+    """Omitting ``co_owner_states`` entirely (the default, ``None``) must
+    behave EXACTLY like the pre-addendum "any other owner protects" rule —
+    no caller that hasn't been updated to supply state regresses into
+    deleting something it used to protect."""
+    rows = [(900, 440), (900, 730)]
+    plan = plan_deletion(rows, appid=440)
+
+    assert plan.remnant == []
+    assert [(s.depotid, s.shared_with) for s in plan.shared] == [(900, [730])]
+
+
+def test_plan_deletion_classifies_a_shared_depot_as_remnant_when_every_co_owner_is_uncached() -> None:
+    rows = [(900, 440), (900, 730)]
+    plan = plan_deletion(rows, appid=440, co_owner_states={730: False})
+
+    assert plan.exclusive == []
+    assert plan.shared == []
+    assert [(r.depotid, r.shared_with_uncached) for r in plan.remnant] == [(900, [730])]
+
+
+def test_plan_deletion_keeps_a_shared_depot_protected_when_any_co_owner_has_content() -> None:
+    rows = [(900, 440), (900, 730), (900, 570)]
+    plan = plan_deletion(rows, appid=440, co_owner_states={730: False, 570: True})
+
+    assert plan.remnant == []
+    assert [(s.depotid, s.shared_with) for s in plan.shared] == [(900, [570, 730])]
+
+
+def test_plan_deletion_treats_a_co_owner_missing_from_states_as_protected() -> None:
+    # 730 is a co-owner in `rows` but absent from co_owner_states (e.g. a
+    # caller that only looked up SOME of the ids, or the appid turned out to
+    # have no `apps` row and load_co_owner_states simply omitted it).
+    rows = [(900, 440), (900, 730)]
+    plan = plan_deletion(rows, appid=440, co_owner_states={})
+
+    assert plan.remnant == []
+    assert [(s.depotid, s.shared_with) for s in plan.shared] == [(900, [730])]
+
+
+def test_plan_deletion_never_classifies_a_depot_with_an_unreadable_co_owner_as_remnant() -> None:
+    # Even though the READABLE co-owner (730) is uncached, the unreadable
+    # mapping row protects unconditionally -- it is never eligible to become
+    # a remnant no matter what the other states say.
+    rows = [(900, 440), (900, 730), (900, None)]
+    plan = plan_deletion(rows, appid=440, co_owner_states={730: False})
+
+    assert plan.remnant == []
+    assert [(s.depotid, s.shared_with) for s in plan.shared] == [(900, [730])]
+
+
+def test_plan_deletion_three_way_share_needs_every_co_owner_uncached_to_become_remnant() -> None:
+    rows = [(900, 440), (900, 730), (900, 570)]
+
+    protected = plan_deletion(rows, appid=440, co_owner_states={730: False, 570: True})
+    assert protected.remnant == []
+    assert [(s.depotid, s.shared_with) for s in protected.shared] == [(900, [570, 730])]
+
+    remnant = plan_deletion(rows, appid=440, co_owner_states={730: False, 570: False})
+    assert remnant.shared == []
+    assert [(r.depotid, r.shared_with_uncached) for r in remnant.remnant] == [
+        (900, [570, 730])
+    ]
+
+
+# --------------------------------------------------------------------------
 # link safety on the real filesystem
 # --------------------------------------------------------------------------
 
@@ -463,7 +535,10 @@ def test_delete_app_depots_keeps_a_depot_that_became_shared_at_recheck_time(
     _write(depot_root / "442" / "chunk" / "aa", b"1" * 9)
 
     deleted, failed, late_shared = delete_app_depots(
-        str(depot_root), 440, [441, 442], co_owners=lambda d: [730] if d == 441 else []
+        str(depot_root),
+        440,
+        [441, 442],
+        co_owners=lambda d: [CoOwner(appid=730, has_content=True)] if d == 441 else [],
     )
 
     assert late_shared == [SharedDepot(depotid=441, shared_with=[730])]
@@ -485,6 +560,29 @@ def test_delete_app_depots_never_deletes_when_the_recheck_itself_fails(
 
     deleted, failed, late_shared = delete_app_depots(
         str(depot_root), 440, [441], co_owners=broken
+    )
+
+    assert deleted == []
+    assert late_shared == []
+    assert len(failed) == 1 and failed[0].depotid == 441
+    assert "re-check" in failed[0].error
+    assert (depot_root / "441").exists()
+
+
+def test_delete_app_depots_fails_closed_on_an_explicit_none_co_owners(
+    tmp_path: Path,
+) -> None:
+    """``co_owners=None`` is NOT a second, quieter spelling of "skip the
+    recheck" (WP 3.5 review) — calling ``None(depotid)`` raises ``TypeError``,
+    which is caught by the same "unknown ownership never resolves to delete"
+    path as any other recheck failure. The only supported opt-out remains
+    ``co_owners=lambda _depotid: []``, spelled out at the call site."""
+    depot_root = tmp_path / "depot"
+    depot_root.mkdir()
+    _write(depot_root / "441" / "chunk" / "aa", b"1" * 7)
+
+    deleted, failed, late_shared = delete_app_depots(
+        str(depot_root), 440, [441], co_owners=None  # type: ignore[arg-type]
     )
 
     assert deleted == []
@@ -565,6 +663,11 @@ def test_reset_app_after_deletion_leaves_needs_force_when_not_requested(
 
 
 def test_load_co_owners_returns_only_the_other_apps(tmp_path: Path) -> None:
+    """``upsert_mapping`` creates fresh ``apps`` rows at ``status='idle'`` with
+    no ``last_prefill_at`` and no job, so every co-owner here reads as
+    currently uncached (``has_content=False``) — the ADR-0003 addendum's
+    default state for a brand-new app, not yet the "protects" case tested
+    separately below."""
     from vault_api.db import get_connection, init_db
     from vault_api.mapping import upsert_mapping
 
@@ -577,8 +680,161 @@ def test_load_co_owners_returns_only_the_other_apps(tmp_path: Path) -> None:
         upsert_mapping(conn, depotid=900, appid=570, name=None)
         upsert_mapping(conn, depotid=441, appid=440, name=None)
 
-        assert deletion.load_co_owners(conn, 900, 440) == [570, 730]
+        assert deletion.load_co_owners(conn, 900, 440) == [
+            CoOwner(appid=570, has_content=False),
+            CoOwner(appid=730, has_content=False),
+        ]
         assert deletion.load_co_owners(conn, 441, 440) == []
+    finally:
+        conn.close()
+
+
+def test_load_co_owners_protects_for_a_co_owner_with_no_apps_row_at_all(
+    tmp_path: Path,
+) -> None:
+    """Pins the EXECUTE-time half of "no apps row -> protected" (WP 3.5
+    review, should-fix 1): ``load_co_owner_states``/``plan_deletion`` already
+    had this covered at plan time, but nothing exercised
+    ``load_co_owners``/``_has_cache_content`` itself — flipping the ``status
+    is None -> True`` default to ``False`` passed the whole suite before this
+    test existed. ``depot_app_map`` has no foreign key to ``apps``, so a bare
+    mapping row naming an appid that was never inserted into ``apps`` is a
+    real, reachable state, not a contrived one."""
+    from vault_api.db import get_connection, init_db
+    from vault_api.mapping import upsert_mapping
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        upsert_mapping(conn, depotid=900, appid=440, name=None)
+        # 730 maps depot 900 but never gets an `apps` row of its own.
+        conn.execute("INSERT INTO depot_app_map (depotid, appid) VALUES (900, 730)")
+        conn.commit()
+        assert conn.execute(
+            "SELECT 1 FROM apps WHERE appid = 730"
+        ).fetchone() is None, "precondition: 730 has no apps row"
+
+        assert deletion.load_co_owners(conn, 900, 440) == [
+            CoOwner(appid=730, has_content=True)
+        ]
+    finally:
+        conn.close()
+
+
+def test_load_co_owners_reports_has_content_per_adr0003_addendum_rule(
+    tmp_path: Path,
+) -> None:
+    """Each of the three protecting signals — non-idle status, a set
+    ``last_prefill_at``, an active job — makes ``has_content=True``
+    independently; a co-owner with none of them is ``has_content=False``."""
+    from vault_api.db import get_connection, init_db
+    from vault_api.mapping import upsert_mapping
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        upsert_mapping(conn, depotid=900, appid=440, name=None)
+        for appid in (100, 200, 300, 400):
+            upsert_mapping(conn, depotid=900, appid=appid, name=None)
+
+        conn.execute("UPDATE apps SET status = 'error' WHERE appid = 100")
+        conn.execute(
+            "UPDATE apps SET last_prefill_at = ? WHERE appid = 200",
+            ("2026-08-05T10:00:00Z",),
+        )
+        conn.execute(
+            "INSERT INTO jobs (appid, type, status, created_at) VALUES (300, 'prefill', 'queued', ?)",
+            (jobs.utcnow_iso(),),
+        )
+        # 400 stays idle/never-prefilled/job-free -> the only uncached one.
+        conn.commit()
+
+        owners = {co.appid: co.has_content for co in deletion.load_co_owners(conn, 900, 440)}
+        assert owners == {100: True, 200: True, 300: True, 400: False}
+    finally:
+        conn.close()
+
+
+def test_load_co_owner_states_matches_load_co_owners_conservative_default(
+    tmp_path: Path,
+) -> None:
+    """The plan-time bulk lookup and the execute-time per-depot lookup share
+    the same ``_has_cache_content`` rule — proven here by comparing them
+    directly on the same fixture, and by checking a missing ``apps`` row is
+    simply absent (not a KeyError, not a crash)."""
+    from vault_api.db import get_connection, init_db
+    from vault_api.mapping import upsert_mapping
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        upsert_mapping(conn, depotid=900, appid=440, name=None)
+        upsert_mapping(conn, depotid=900, appid=730, name=None)  # idle, uncached
+        conn.execute("UPDATE apps SET status = 'done' WHERE appid = 730")
+        conn.commit()
+
+        states = deletion.load_co_owner_states(conn, {730, 999999})
+        assert states == {730: True}  # 999999 has no apps row -> absent, not False
+
+        owners = deletion.load_co_owners(conn, 900, 440)
+        assert owners == [CoOwner(appid=730, has_content=True)]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("blocking_status", ["done", "stale", "error", "running"])
+def test_load_co_owners_protects_for_every_non_idle_status(
+    tmp_path: Path, blocking_status: str
+) -> None:
+    """Every non-'idle' status protects, including 'error' — a failed last
+    run does not mean "no content", just "last run failed" (ADR-0003
+    addendum: "error and unknown states protect")."""
+    from vault_api.db import get_connection, init_db
+    from vault_api.mapping import upsert_mapping
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        upsert_mapping(conn, depotid=900, appid=440, name=None)
+        upsert_mapping(conn, depotid=900, appid=730, name=None)
+        conn.execute("UPDATE apps SET status = ? WHERE appid = 730", (blocking_status,))
+        conn.commit()
+
+        assert deletion.load_co_owners(conn, 900, 440) == [
+            CoOwner(appid=730, has_content=True)
+        ]
+        assert deletion.load_co_owner_states(conn, {730}) == {730: True}
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("job_status", [jobs.STATUS_QUEUED, jobs.STATUS_RUNNING])
+def test_load_co_owners_protects_for_a_queued_or_running_job(
+    tmp_path: Path, job_status: str
+) -> None:
+    from vault_api.db import get_connection, init_db
+    from vault_api.mapping import upsert_mapping
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        upsert_mapping(conn, depotid=900, appid=440, name=None)
+        upsert_mapping(conn, depotid=900, appid=730, name=None)
+        conn.execute(
+            "INSERT INTO jobs (appid, type, status, created_at) VALUES (730, ?, ?, ?)",
+            (jobs.JOB_TYPE_PREFILL, job_status, jobs.utcnow_iso()),
+        )
+        conn.commit()
+
+        assert deletion.load_co_owners(conn, 900, 440) == [
+            CoOwner(appid=730, has_content=True)
+        ]
+        assert deletion.load_co_owner_states(conn, {730}) == {730: True}
     finally:
         conn.close()
 
@@ -628,8 +884,8 @@ def test_delete_removes_exclusive_depots_and_reports_freed_bytes(tmp_path: Path)
     assert body == {
         "appid": 440,
         "deleted_depots": [
-            {"depotid": 441, "size_bytes_freed": 10},
-            {"depotid": 442, "size_bytes_freed": 25},
+            {"depotid": 441, "size_bytes_freed": 10, "shared_with_uncached": []},
+            {"depotid": 442, "size_bytes_freed": 25, "shared_with_uncached": []},
         ],
         "skipped_shared": [],
         "failed": [],
@@ -644,7 +900,16 @@ def test_delete_removes_exclusive_depots_and_reports_freed_bytes(tmp_path: Path)
 def test_delete_keeps_a_shared_depot_and_reports_the_other_appids(
     tmp_path: Path,
 ) -> None:
-    """Plan §4: "2 depots shared with game Y, not deleted" — in both directions."""
+    """Plan §4: "2 depots shared with game Y, not deleted" — in both directions.
+
+    730 and 570 are given real cache content (``status='done'`` with a
+    ``last_prefill_at``) precisely so depot 900 stays PROTECTED throughout —
+    this is the "at least one co-owner still has content" regression case
+    (ADR-0003 addendum); see
+    ``test_delete_deletes_a_shared_depot_when_every_co_owner_is_uncached``
+    below for the addendum's new "all co-owners uncached" outcome on
+    otherwise-identical data.
+    """
     client, cache_root, settings = _make_app(tmp_path)
     _seed_mapping(client, depotid=441, appid=440, name="Team Fortress 2")
     _seed_mapping(client, depotid=900, appid=440)
@@ -652,20 +917,402 @@ def test_delete_keeps_a_shared_depot_and_reports_the_other_appids(
     _seed_mapping(client, depotid=900, appid=570, name="Dota 2")
     _seed_depot(cache_root, 441, 10)
     _seed_depot(cache_root, 900, 50)
+    _set_app_prefilled(settings, 730)
+    _set_app_prefilled(settings, 570)
 
     first = client.delete("/v1/cache/440", headers=AUTH).json()
-    assert first["deleted_depots"] == [{"depotid": 441, "size_bytes_freed": 10}]
+    assert first["deleted_depots"] == [
+        {"depotid": 441, "size_bytes_freed": 10, "shared_with_uncached": []}
+    ]
     assert first["skipped_shared"] == [{"depotid": 900, "shared_with": [570, 730]}]
     assert first["total_bytes_freed"] == 10
     assert (cache_root / "depot" / "900").exists(), "shared depot was deleted!"
 
     # Other direction: 730 still shares 900 with 440 and 570 (the mapping rows
-    # of the just-deleted app are kept on purpose), so it is protected again.
+    # of the just-deleted app are kept on purpose). 440 is uncached again by
+    # now (just reset to idle above), but 570 still has content, so 900 stays
+    # protected.
     second = client.delete("/v1/cache/730", headers=AUTH).json()
     assert second["deleted_depots"] == []
     assert second["skipped_shared"] == [{"depotid": 900, "shared_with": [440, 570]}]
     assert second["total_bytes_freed"] == 0
     assert (cache_root / "depot" / "900" / "chunk" / "aa").read_bytes() == b"1" * 50
+
+
+def test_delete_deletes_a_shared_depot_when_every_co_owner_is_uncached(
+    tmp_path: Path,
+) -> None:
+    """ADR-0003 addendum, both-uncached two-way share: A and B share a depot,
+    both idle/never-prefilled/job-free -> DELETE A removes it, flags it with
+    B's appid, counts its bytes, and sets B.needs_force=1."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=441, appid=440)
+    _seed_mapping(client, depotid=900, appid=440)
+    _seed_mapping(client, depotid=900, appid=730)
+    _seed_depot(cache_root, 441, 10)
+    _seed_depot(cache_root, 900, 50)
+    _clear_needs_force(settings, 730)
+    assert _app_row(settings, 730)["needs_force"] == 0
+
+    response = client.delete("/v1/cache/440", headers=AUTH)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["deleted_depots"] == [
+        {"depotid": 441, "size_bytes_freed": 10, "shared_with_uncached": []},
+        {"depotid": 900, "size_bytes_freed": 50, "shared_with_uncached": [730]},
+    ]
+    assert body["skipped_shared"] == []
+    assert body["failed"] == []
+    assert body["total_bytes_freed"] == 60
+    assert not (cache_root / "depot" / "900").exists(), "last remnant must be deleted"
+    assert _app_row(settings, 440)["status"] == "idle"
+    # B's own status/last_prefill_at are untouched -- only needs_force moves.
+    b_row = _app_row(settings, 730)
+    assert b_row["status"] == "idle"
+    assert b_row["last_prefill_at"] is None
+    assert b_row["needs_force"] == 1
+
+
+def test_delete_keeps_a_shared_depot_protected_when_one_co_owner_is_cached_and_leaves_its_needs_force_untouched(
+    tmp_path: Path,
+) -> None:
+    """One-cached regression: a single content-having co-owner is enough to
+    protect (reported in skipped_shared, never a remnant), and that
+    co-owner's OWN needs_force is never touched by another app's DELETE."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=900, appid=440)
+    _seed_mapping(client, depotid=900, appid=730)
+    _seed_depot(cache_root, 900, 50)
+    _set_app_prefilled(settings, 730)
+    _clear_needs_force(settings, 730)
+    assert _app_row(settings, 730)["needs_force"] == 0
+
+    response = client.delete("/v1/cache/440", headers=AUTH)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["deleted_depots"] == []
+    assert body["skipped_shared"] == [{"depotid": 900, "shared_with": [730]}]
+    assert (cache_root / "depot" / "900").exists(), "protected depot must survive"
+    assert _app_row(settings, 730)["needs_force"] == 0, "protected co-owner untouched"
+
+
+@pytest.mark.parametrize("blocking_status", ["error", "stale", "running"])
+def test_delete_protects_a_remnant_candidate_when_its_only_co_owner_has_a_non_idle_status(
+    tmp_path: Path, blocking_status: str
+) -> None:
+    """Status variants: 'error', 'stale' and 'running' each protect, exactly
+    like 'done' — only 'idle' with no last_prefill_at and no job counts as
+    uncached."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=900, appid=440)
+    _seed_mapping(client, depotid=900, appid=730)
+    _seed_depot(cache_root, 900, 50)
+    conn = sqlite3.connect(settings.db_path)
+    try:
+        conn.execute("UPDATE apps SET status = ? WHERE appid = 730", (blocking_status,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    response = client.delete("/v1/cache/440", headers=AUTH)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["deleted_depots"] == []
+    assert body["skipped_shared"] == [{"depotid": 900, "shared_with": [730]}]
+    assert (cache_root / "depot" / "900").exists()
+
+
+def test_delete_three_way_share_deletes_only_once_every_co_owner_is_uncached(
+    tmp_path: Path,
+) -> None:
+    """Three-way share: B (uncached) + C (cached) -> protected. Once C also
+    becomes uncached, B + C both uncached -> deleted, both flagged, both get
+    needs_force=1."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=900, appid=440)
+    _seed_mapping(client, depotid=900, appid=730)  # B
+    _seed_mapping(client, depotid=900, appid=570)  # C
+    _seed_depot(cache_root, 900, 50)
+    _set_app_prefilled(settings, 570)  # C is cached
+    _clear_needs_force(settings, 730)
+    _clear_needs_force(settings, 570)
+
+    first = client.delete("/v1/cache/440", headers=AUTH)
+    assert first.status_code == 200, first.text
+    first_body = first.json()
+    assert first_body["deleted_depots"] == []
+    # shared_with names EVERY other tracked owner (unchanged semantics), even
+    # though only 570 is the one actually keeping the depot protected here.
+    assert first_body["skipped_shared"] == [{"depotid": 900, "shared_with": [570, 730]}]
+    assert (cache_root / "depot" / "900").exists()
+    assert _app_row(settings, 730)["needs_force"] == 0
+    assert _app_row(settings, 570)["needs_force"] == 0
+
+    # C now becomes uncached too -> both co-owners uncached -> deletable.
+    conn = sqlite3.connect(settings.db_path)
+    try:
+        conn.execute(
+            "UPDATE apps SET status = 'idle', last_prefill_at = NULL WHERE appid = 570"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    second = client.delete("/v1/cache/440", headers=AUTH)
+    assert second.status_code == 200, second.text
+    body = second.json()
+    assert body["deleted_depots"] == [
+        {"depotid": 900, "size_bytes_freed": 50, "shared_with_uncached": [570, 730]}
+    ]
+    assert body["skipped_shared"] == []
+    assert not (cache_root / "depot" / "900").exists()
+    assert _app_row(settings, 730)["needs_force"] == 1
+    assert _app_row(settings, 570)["needs_force"] == 1
+
+
+def test_delete_protects_a_depot_whose_co_owner_has_no_apps_row_at_all(
+    tmp_path: Path,
+) -> None:
+    """The mapping table has no foreign key to ``apps``, so a
+    ``depot_app_map`` row can legitimately name an appid with no ``apps`` row
+    at all -- ADR-0003 addendum: protects, conservatively, same as an
+    unreadable owner."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=900, appid=440)
+    _seed_depot(cache_root, 900, 50)
+    conn = sqlite3.connect(settings.db_path)
+    try:
+        conn.execute("INSERT INTO depot_app_map (depotid, appid) VALUES (900, 730)")
+        conn.commit()
+        assert conn.execute(
+            "SELECT 1 FROM apps WHERE appid = 730"
+        ).fetchone() is None, "precondition: 730 has no apps row"
+    finally:
+        conn.close()
+
+    response = client.delete("/v1/cache/440", headers=AUTH)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["deleted_depots"] == []
+    assert body["skipped_shared"] == [{"depotid": 900, "shared_with": [730]}]
+    assert (cache_root / "depot" / "900").exists()
+
+
+def test_delete_protects_a_depot_with_a_poisoned_co_owner_row_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """A poisoned (non-integer) ``depot_app_map.appid`` -- SQLite's INTEGER
+    affinity does not enforce the column type -- protects unconditionally,
+    reported at plan time exactly like an unreadable co-owner always has
+    been (``shared_with`` empty, since the poisoned value cannot be named as
+    an owner id)."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=900, appid=440)
+    _seed_depot(cache_root, 900, 50)
+    conn = sqlite3.connect(settings.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO depot_app_map (depotid, appid) VALUES (900, ?)",
+            ("not-an-appid",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    response = client.delete("/v1/cache/440", headers=AUTH)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["deleted_depots"] == []
+    assert body["skipped_shared"] == [{"depotid": 900, "shared_with": []}]
+    assert (cache_root / "depot" / "900").exists()
+
+
+def test_delete_deletes_the_only_depot_when_it_is_an_all_shared_remnant(
+    tmp_path: Path,
+) -> None:
+    """An app whose ONLY mapped depot is a shared last-cached remnant: the
+    depot IS deleted, the requester still gets needs_force=1 and ends at
+    status='idle' -- this is NOT the pre-addendum "everything shared,
+    nothing to do" edge case, because "shared" alone no longer means
+    "untouched"."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=900, appid=440)
+    _seed_mapping(client, depotid=900, appid=730)
+    _seed_depot(cache_root, 900, 50)
+    _clear_needs_force(settings, 440)
+    assert _app_row(settings, 440)["needs_force"] == 0
+
+    response = client.delete("/v1/cache/440", headers=AUTH)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["deleted_depots"] == [
+        {"depotid": 900, "size_bytes_freed": 50, "shared_with_uncached": [730]}
+    ]
+    assert body["skipped_shared"] == []
+    assert not (cache_root / "depot" / "900").exists()
+    row = _app_row(settings, 440)
+    assert row["status"] == "idle"
+    assert row["needs_force"] == 1
+
+
+def test_retroactive_repair_of_a_pre_fix_orphaned_remnant(tmp_path: Path) -> None:
+    """Simulates the exact leak ADR-0003's addendum closes: A's own exclusive
+    depot is already absent on disk (as if a pre-fix DELETE already ran for
+    A), a shared depot D survived as "shared with the other", and both A and
+    B are uncached. Re-issuing DELETE for A must report the absent depot
+    (0 bytes) AND remove D -- no new endpoint is needed because mapping rows
+    survive and this DELETE re-reads current co-owner state every time."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=441, appid=440)  # A's own depot
+    _seed_mapping(client, depotid=900, appid=440)  # shared with B
+    _seed_mapping(client, depotid=900, appid=730)
+    _seed_depot(cache_root, 900, 50)
+    # 441 is deliberately NOT seeded on disk: simulates the pre-fix DELETE
+    # having already removed it, while 900 survived as an orphaned remnant.
+    assert not (cache_root / "depot" / "441").exists()
+    # Cleared explicitly (WP 3.5 review nit): needs_force's schema DEFAULT is
+    # already 1, so leaving this out would make the needs_force==1 assertion
+    # below pass whether or not this request actually set it.
+    _clear_needs_force(settings, 730)
+    assert _app_row(settings, 730)["needs_force"] == 0
+
+    response = client.delete("/v1/cache/440", headers=AUTH)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["deleted_depots"] == [
+        {"depotid": 441, "size_bytes_freed": 0, "shared_with_uncached": []},
+        {"depotid": 900, "size_bytes_freed": 50, "shared_with_uncached": [730]},
+    ]
+    assert body["failed"] == []
+    assert not (cache_root / "depot" / "900").exists(), (
+        "the orphaned remnant must be reclaimed"
+    )
+    assert _app_row(settings, 730)["needs_force"] == 1
+
+
+def test_an_already_absent_remnant_depot_still_reports_and_flags_its_co_owners(
+    tmp_path: Path,
+) -> None:
+    """The ALREADY-ABSENT branch (the mapping said this depot was here, and
+    it demonstrably wasn't) must carry ``shared_with_uncached`` exactly like
+    a real removal does, and its co-owner still gets ``needs_force=1`` (WP
+    3.5 review, should-fix 2) — dropping ``shared_with_uncached`` here passed
+    the whole suite before this test existed."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=900, appid=440)
+    _seed_mapping(client, depotid=900, appid=730)
+    # depot 900's directory is deliberately NEVER created on disk -- the
+    # mapping row exists, but there is nothing to remove.
+    (cache_root / "depot").mkdir(parents=True)
+    assert not (cache_root / "depot" / "900").exists()
+    _clear_needs_force(settings, 730)
+    assert _app_row(settings, 730)["needs_force"] == 0
+
+    response = client.delete("/v1/cache/440", headers=AUTH)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["deleted_depots"] == [
+        {"depotid": 900, "size_bytes_freed": 0, "shared_with_uncached": [730]}
+    ]
+    assert body["failed"] == []
+    assert _app_row(settings, 440)["status"] == "idle"
+    assert _app_row(settings, 730)["needs_force"] == 1
+
+
+def test_a_remnant_depot_whose_removal_fails_still_flags_its_co_owners_with_needs_force(
+    tmp_path: Path,
+) -> None:
+    """A remnant depot's removal FAILING still leaves its co-owners' on-disk
+    assumption uncertain -- they still get needs_force=1 -- and the
+    requesting app's own status still ends at 'error' (WP 1.6 rule: 'failed'
+    does not mean 'untouched')."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=900, appid=440)
+    _seed_mapping(client, depotid=900, appid=730)
+    depot900 = _seed_depot(cache_root, 900, 25)
+    _clear_needs_force(settings, 730)
+    assert _app_row(settings, 730)["needs_force"] == 0
+
+    if os.name == "nt":
+        blocker = open(depot900 / "chunk" / "aa", "rb")
+        restore = None
+    else:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("running as root: directory mode bits do not block unlink")
+        blocker = None
+        chunk_dir = depot900 / "chunk"
+        os.chmod(chunk_dir, 0o500)
+        restore = chunk_dir
+
+    try:
+        response = client.delete("/v1/cache/440", headers=AUTH)
+        assert response.status_code == 200, response.text
+        body = response.json()
+
+        assert body["deleted_depots"] == []
+        assert len(body["failed"]) == 1
+        assert body["failed"][0]["depotid"] == 900
+        assert _app_row(settings, 440)["status"] == "error"
+        assert _app_row(settings, 730)["needs_force"] == 1, (
+            "a remnant depot's co-owner still needs needs_force after a failed removal"
+        )
+    finally:
+        if blocker is not None:
+            blocker.close()
+        if restore is not None:
+            os.chmod(restore, 0o700)
+
+
+def test_a_remnant_depot_that_gains_a_content_having_co_owner_before_removal_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0003 addendum's own TOCTOU variant: ``plan_deletion`` classifies
+    depot 900 as a deletable remnant (co-owner 730 uncached at plan time),
+    and then -- before the directory is removed -- 730's prefill finishes (a
+    real concurrent job completing). The execute-time recheck must protect
+    it, exactly like a newly-mapped co-owner does for the pre-addendum
+    TOCTOU (see ``test_a_depot_that_becomes_shared_between_plan_and_removal_survives``).
+    """
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=441, appid=440)
+    _seed_mapping(client, depotid=900, appid=440)
+    _seed_mapping(client, depotid=900, appid=730)
+    _seed_depot(cache_root, 441, 10)
+    _seed_depot(cache_root, 900, 50)
+
+    real_plan_deletion = deletion.plan_deletion
+
+    def plan_then_730_gets_prefilled(rows, appid, co_owner_states=None):  # type: ignore[no-untyped-def]
+        plan = real_plan_deletion(rows, appid, co_owner_states)
+        assert any(r.depotid == 900 for r in plan.remnant), (
+            "precondition: 900 is a deletable remnant at plan time"
+        )
+        # The racing write lands here: after the plan, before any removal.
+        _set_app_prefilled(settings, 730)
+        return plan
+
+    monkeypatch.setattr(deletion, "plan_deletion", plan_then_730_gets_prefilled)
+
+    response = client.delete("/v1/cache/440", headers=AUTH)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["deleted_depots"] == [
+        {"depotid": 441, "size_bytes_freed": 10, "shared_with_uncached": []}
+    ]
+    assert body["skipped_shared"] == [{"depotid": 900, "shared_with": [730]}]
+    assert (cache_root / "depot" / "900" / "chunk" / "aa").read_bytes() == b"1" * 50, (
+        "another game's content was deleted through a stale remnant plan"
+    )
+    assert _app_row(settings, 440)["status"] == "idle"
 
 
 def test_delete_is_refused_with_409_while_a_prefill_job_is_queued(
@@ -772,7 +1419,9 @@ def test_delete_sets_needs_force_when_a_depot_is_already_absent(tmp_path: Path) 
 
     first = client.delete("/v1/cache/440", headers=AUTH)
     assert first.status_code == 200, first.text
-    assert first.json()["deleted_depots"] == [{"depotid": 441, "size_bytes_freed": 10}]
+    assert first.json()["deleted_depots"] == [
+        {"depotid": 441, "size_bytes_freed": 10, "shared_with_uncached": []}
+    ]
 
     _clear_needs_force(settings, 440)
     assert _app_row(settings, 440)["needs_force"] == 0
@@ -780,20 +1429,30 @@ def test_delete_sets_needs_force_when_a_depot_is_already_absent(tmp_path: Path) 
     second = client.delete("/v1/cache/440", headers=AUTH)
 
     assert second.status_code == 200, second.text
-    assert second.json()["deleted_depots"] == [{"depotid": 441, "size_bytes_freed": 0}]
+    assert second.json()["deleted_depots"] == [
+        {"depotid": 441, "size_bytes_freed": 0, "shared_with_uncached": []}
+    ]
     assert second.json()["failed"] == []
     assert _app_row(settings, 440)["needs_force"] == 1
 
 
-def test_delete_does_not_touch_needs_force_when_everything_is_shared(
+def test_delete_does_not_touch_needs_force_when_everything_is_shared_and_protected(
     tmp_path: Path,
 ) -> None:
-    """Nothing exclusive existed to delete -> nothing on disk changed for
-    this app -> needs_force is left exactly as it was, not reset to 1."""
+    """Nothing exclusive/remnant existed to delete -> nothing on disk changed
+    for this app -> needs_force is left exactly as it was, not reset to 1.
+
+    730 is given real content (ADR-0003 addendum) so depot 900 stays
+    PROTECTED rather than becoming a deletable remnant — see
+    ``test_delete_deletes_the_only_depot_when_it_is_an_all_shared_remnant``
+    for the addendum's own "all shared, but every co-owner uncached" case,
+    which this test is deliberately NOT testing.
+    """
     client, cache_root, settings = _make_app(tmp_path)
     _seed_mapping(client, depotid=900, appid=440)
     _seed_mapping(client, depotid=900, appid=730)
     _seed_depot(cache_root, 900, 50)
+    _set_app_prefilled(settings, 730)
     _clear_needs_force(settings, 440)
     assert _app_row(settings, 440)["needs_force"] == 0
 
@@ -802,6 +1461,7 @@ def test_delete_does_not_touch_needs_force_when_everything_is_shared(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["deleted_depots"] == []
+    assert body["skipped_shared"] == [{"depotid": 900, "shared_with": [730]}]
     assert body["failed"] == []
     assert _app_row(settings, 440)["needs_force"] == 0
 
@@ -821,6 +1481,31 @@ def test_delete_keeps_the_mapping_rows(tmp_path: Path) -> None:
     assert detail["depots"] == [{"depotid": 441, "shared": False, "size_bytes": None}]
     assert detail["size_bytes"] is None
     assert detail["name"] == "Team Fortress 2"
+
+
+def test_delete_keeps_the_mapping_row_of_a_deleted_remnant(tmp_path: Path) -> None:
+    """ADR-0003's main decision ("mapping rows are still kept") applies to a
+    remnant deletion exactly like an ordinary one — only the directory is
+    removed. The co-owner (730) keeps mapping the now-deleted depot too,
+    which is precisely what makes the retroactive-repair story work."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=900, appid=440)
+    _seed_mapping(client, depotid=900, appid=730, name="Counter-Strike 2")
+    _seed_depot(cache_root, 900, 50)
+
+    response = client.delete("/v1/cache/440", headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json()["deleted_depots"] == [
+        {"depotid": 900, "size_bytes_freed": 50, "shared_with_uncached": [730]}
+    ]
+
+    assert client.get("/v1/mapping", headers=AUTH).json() == [
+        {"depotid": 900, "appid": 440},
+        {"depotid": 900, "appid": 730},
+    ]
+    b_detail = client.get("/v1/games/730", headers=AUTH).json()
+    assert b_detail["depots"] == [{"depotid": 900, "shared": True, "size_bytes": None}]
+    assert b_detail["name"] == "Counter-Strike 2"
 
 
 def test_delete_invalidates_the_size_cache_immediately(tmp_path: Path) -> None:
@@ -858,7 +1543,9 @@ def test_deleting_twice_is_a_clean_no_op(tmp_path: Path) -> None:
     # The mapping row is kept, so the second call still targets depot 441 —
     # it is simply already gone: reported as deleted with 0 bytes freed, no
     # error, no exception.
-    assert body["deleted_depots"] == [{"depotid": 441, "size_bytes_freed": 0}]
+    assert body["deleted_depots"] == [
+        {"depotid": 441, "size_bytes_freed": 0, "shared_with_uncached": []}
+    ]
     assert body["failed"] == []
     assert body["total_bytes_freed"] == 0
 
@@ -890,6 +1577,72 @@ def test_two_racing_deletes_do_not_5xx_or_double_delete(tmp_path: Path) -> None:
         assert response.json()["failed"] == []
     assert not (cache_root / "depot" / "441").exists()
     assert not (cache_root / "depot" / "442").exists()
+
+
+def test_cross_app_remnant_race_does_not_5xx_and_mutually_flags_needs_force(
+    tmp_path: Path,
+) -> None:
+    """The cross-app version of the racing-deletes test above: depot 900 is
+    NOT one app racing itself, it is a last cached remnant SHARED by two
+    different apps (440 and 730), and both apps' own DELETE requests race
+    each other (4 requests, appids alternating). Fable second-pass rig
+    (WP 3.5): no 5xx, bytes freed at most once across ALL racing requests —
+    not just requests for the same app — and, the thing the same-app race
+    above cannot exercise at all, BOTH apps mutually end up needs_force=1,
+    whichever request actually removed the depot."""
+    client, cache_root, settings = _make_app(tmp_path)
+    _seed_mapping(client, depotid=900, appid=440)
+    _seed_mapping(client, depotid=900, appid=730)
+    _seed_depot(cache_root, 900, 100)
+    _clear_needs_force(settings, 440)
+    _clear_needs_force(settings, 730)
+    app = client.app
+
+    async def run() -> list[httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as async_client:
+            return await asyncio.gather(
+                *[
+                    async_client.delete(f"/v1/cache/{appid}", headers=AUTH)
+                    for appid in (440, 730, 440, 730)
+                ]
+            )
+
+    responses = asyncio.run(run())
+
+    assert [r.status_code for r in responses] == [200, 200, 200, 200], [
+        r.text for r in responses
+    ]
+    bodies = [r.json() for r in responses]
+    for body in bodies:
+        assert body["failed"] == [], body
+
+    # Bytes claimed AT MOST once across all four racing requests, whether the
+    # winner was a request for 440 or for 730 -- the whole point of the
+    # cross-app variant is that "raced against itself" is not the only race.
+    total_bytes_freed = sum(body["total_bytes_freed"] for body in bodies)
+    assert total_bytes_freed <= 100, bodies
+    depot_gone = not (cache_root / "depot" / "900").exists()
+    assert depot_gone or any(body["skipped_shared"] for body in bodies), (
+        "depot survived although nobody protected it and nobody reported it kept"
+    )
+
+    row_440 = _app_row(settings, 440)
+    row_730 = _app_row(settings, 730)
+    assert row_440["status"] == "idle", row_440
+    assert row_730["status"] == "idle", row_730
+    if depot_gone:
+        # Whichever app's OWN request actually touched depot 900 flags
+        # itself via the ordinary requester reset; the OTHER app is flagged
+        # via shared_with_uncached (deletion.set_needs_force_for_remnant_co_owners)
+        # by whoever's request performed the removal. Either way, once the
+        # depot is gone both apps must know their disk state changed --
+        # this is the assertion the same-app race test cannot make at all,
+        # since it only ever has one app in play.
+        assert row_440["needs_force"] == 1, row_440
+        assert row_730["needs_force"] == 1, row_730
 
 
 def test_delete_reports_a_partial_failure_without_claiming_success(
@@ -924,7 +1677,9 @@ def test_delete_reports_a_partial_failure_without_claiming_success(
         assert response.status_code == 200, response.text
         body = response.json()
 
-        assert body["deleted_depots"] == [{"depotid": 441, "size_bytes_freed": 10}]
+        assert body["deleted_depots"] == [
+            {"depotid": 441, "size_bytes_freed": 10, "shared_with_uncached": []}
+        ]
         assert body["total_bytes_freed"] == 10, "failed depot must not be counted"
         assert len(body["failed"]) == 1
         assert body["failed"][0]["depotid"] == 442
@@ -1011,18 +1766,22 @@ def test_a_depot_that_becomes_shared_between_plan_and_removal_survives(
 
     real_plan_deletion = deletion.plan_deletion
 
-    def plan_then_someone_else_maps_900(rows, appid):  # type: ignore[no-untyped-def]
-        plan = real_plan_deletion(rows, appid)
+    def plan_then_someone_else_maps_900(rows, appid, co_owner_states=None):  # type: ignore[no-untyped-def]
+        plan = real_plan_deletion(rows, appid, co_owner_states)
         assert 900 in plan.exclusive, "precondition: 900 is exclusive at plan time"
         # The racing write lands here: after the plan, before any removal.
+        # 730 is given real content (status='done' + last_prefill_at) so this
+        # test stays about the ORIGINAL TOCTOU (a co-owner appearing at all) —
+        # see test_a_remnant_depot_that_gains_a_content_having_co_owner_survives
+        # for the addendum's own "co-owner state changed" TOCTOU variant.
         conn = sqlite3.connect(settings.db_path)
         try:
             conn.execute(
                 "INSERT OR IGNORE INTO depot_app_map (depotid, appid) VALUES (900, 730)"
             )
             conn.execute(
-                "INSERT OR IGNORE INTO apps (appid, name, status) "
-                "VALUES (730, 'Counter-Strike 2', 'idle')"
+                "INSERT OR IGNORE INTO apps (appid, name, status, last_prefill_at) "
+                "VALUES (730, 'Counter-Strike 2', 'done', '2026-08-05T10:00:00Z')"
             )
             conn.commit()
         finally:
@@ -1035,7 +1794,9 @@ def test_a_depot_that_becomes_shared_between_plan_and_removal_survives(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["deleted_depots"] == [{"depotid": 441, "size_bytes_freed": 10}]
+    assert body["deleted_depots"] == [
+        {"depotid": 441, "size_bytes_freed": 10, "shared_with_uncached": []}
+    ]
     assert body["skipped_shared"] == [{"depotid": 900, "shared_with": [730]}], (
         "the depot that became shared must be reported as skipped, with the "
         "fresh owner list"
@@ -1066,9 +1827,9 @@ def test_delete_unlinks_a_linked_depot_dir_and_the_outside_target_survives(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["deleted_depots"] == [{"depotid": 441, "size_bytes_freed": 0}], (
-        f"a {kind} depot dir must report 0 freed bytes — its target is not freed"
-    )
+    assert body["deleted_depots"] == [
+        {"depotid": 441, "size_bytes_freed": 0, "shared_with_uncached": []}
+    ], f"a {kind} depot dir must report 0 freed bytes — its target is not freed"
     assert body["failed"] == []
     assert not os.path.lexists(cache_root / "depot" / "441"), "the link must be gone"
     assert (outside / "precious.bin").read_bytes() == b"1" * 4096, (
@@ -1100,7 +1861,9 @@ def test_delete_unlinks_a_junction_depot_dir_and_the_outside_target_survives(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["deleted_depots"] == [{"depotid": 441, "size_bytes_freed": 0}]
+    assert body["deleted_depots"] == [
+        {"depotid": 441, "size_bytes_freed": 0, "shared_with_uncached": []}
+    ]
     assert body["failed"] == []
     assert not os.path.lexists(cache_root / "depot" / "441"), "the junction must be gone"
     assert (outside / "precious.bin").read_bytes() == b"1" * 4096
@@ -1186,7 +1949,9 @@ def test_delete_reports_a_poisoned_mapping_row_and_still_deletes_the_good_depot(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["deleted_depots"] == [{"depotid": 441, "size_bytes_freed": 10}]
+    assert body["deleted_depots"] == [
+        {"depotid": 441, "size_bytes_freed": 10, "shared_with_uncached": []}
+    ]
     assert len(body["failed"]) == 1
     assert body["failed"][0]["depotid"] == 0
     assert "outside-the-cache.txt" in body["failed"][0]["error"]

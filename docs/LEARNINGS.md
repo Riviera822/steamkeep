@@ -133,6 +133,13 @@ These are not style preferences; each entry cost a review round to learn.
   "static binary" claims are false on the native target (WP 2.2).
 
 ## Testing discipline
+- Fail-closed defaults need tests that pin the DEFAULT direction: flip each
+  "unknown ⇒ protected" branch and watch a test die — two such flips passed
+  the entire 434-test suite unnoticed in review (WP 3.6 Opus).
+- A protection rule keyed on data that deletion deliberately preserves
+  (mapping rows, ADR-0003) leaks resources forever unless it has an explicit
+  last-remnant escape — audit every "skip if referenced" guard for the
+  all-referrers-gone end state (WP 3.6).
 - Flake-hunt concurrency tests: run the module isolated in a 20-40x loop —
   full-suite green means nothing for timing bugs (WP 1.6 Fable).
 - Enumerate the package's GUARANTEES and mutation-test each one by name —

@@ -189,6 +189,10 @@ DELETE /cache/{appid}
 Shared depots (redistributables, shared content): before deleting, check
 whether a depot ID is mapped to multiple tracked apps → skip those and
 report them in the result ("2 depots shared with game Y, not deleted").
+Exception (ADR-0003 addendum): a shared depot whose co-owning apps ALL have
+no cache content (idle, never prefilled, no active job) is the last cached
+remnant — it IS deleted and reported distinctly, otherwise its bytes would
+be unreclaimable forever once every co-owner has been deleted.
 
 ### Staleness / updates
 - vault-api stores the manifest ID of the last prefill per app

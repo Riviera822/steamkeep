@@ -18,12 +18,26 @@ database, and (b) written to the log as an audit trail. The layers:
    docstring for what ``shutil.rmtree`` actually does with a junction, measured
    rather than assumed.
 3. **The plan** — ``plan_deletion``. Splits an app's mapped depots into
-   *exclusive* (delete), *shared with another tracked app* (never delete, plan
-   §4) and *unusable mapping rows* (poisoned data, report). Pure function over
-   rows.
+   *exclusive* (delete), *shared and protected* (kept — at least one co-owner
+   currently has cache content, plan §4), *shared but a last cached remnant*
+   (deleted anyway — ADR-0003's addendum, see below) and *unusable mapping
+   rows* (poisoned data, report). Pure function over rows plus co-owner state
+   data; no database, no filesystem.
 4. **Execution** — ``delete_app_depots``. Per-depot ``try``/``except`` so one
    undeletable depot is reported, not turned into a half-reported success, and
    one INFO log line per depot decision.
+
+**A shared depot is not "never delete" (ADR-0003 addendum, 2026-08-06).** The
+original plan §4 rule protected any depot mapped to more than one tracked app,
+judged purely from ``depot_app_map`` rows — which survive deletion by design
+(ADR-0003's main decision). If two apps share a depot and both get deleted one
+after the other, that rule kept the depot "shared with the other" *both*
+times, leaking its bytes forever: neither app ever reports it cached again,
+and nothing ever reclaims the space. The fix: a shared depot may be deleted
+when **no co-owning app currently has cache content** (conservatively judged —
+see ``plan_deletion`` and ``delete_app_depots`` below), reported distinctly as
+a "last cached remnant" rather than merged with ordinary exclusive deletions.
+Mapping rows are still kept either way — that part of ADR-0003 is unchanged.
 
 What deliberately does NOT happen here: the depot→app **mapping rows are
 kept**. See ``routers/cache.py`` and api/README.md for that decision and its
@@ -37,9 +51,10 @@ import os
 import shutil
 import sqlite3
 import time
-from dataclasses import dataclass
-from typing import Callable, Iterable, Sequence
+from dataclasses import dataclass, field
+from typing import Callable, Iterable, Mapping, Sequence
 
+from vault_api import jobs
 from vault_api.sizes import is_link_like, walk_file_stats
 
 logger = logging.getLogger(__name__)
@@ -360,7 +375,8 @@ def remove_depot_dir_settling(path: str) -> tuple[bool, Exception | None]:
 
 @dataclass(frozen=True)
 class SharedDepot:
-    """A depot that is NOT deleted because another tracked app maps it too."""
+    """A depot that is NOT deleted because a co-owner currently has cache
+    content (plan §4; ADR-0003 addendum's "protected" outcome)."""
 
     depotid: int
     #: The other app ids that map this depot (plan §4: "2 depots shared with
@@ -369,9 +385,45 @@ class SharedDepot:
 
 
 @dataclass(frozen=True)
+class RemnantDepot:
+    """A shared depot classified as deletable: EVERY co-owner is verifiably
+    idle, never-prefilled and job-free (ADR-0003 addendum) at plan time.
+
+    Still subject to the execute-time recheck like any other candidate — see
+    ``delete_app_depots`` — so this is a *plan*, not a guarantee.
+    """
+
+    depotid: int
+    #: The co-owner app ids, all uncached at plan time (sorted). Carried
+    #: through so a caller can report/flag them even before the recheck runs
+    #: again with fresh data.
+    shared_with_uncached: list[int]
+
+
+@dataclass(frozen=True)
+class CoOwner:
+    """One other app mapping a depot, read fresh immediately before removal
+    (the execute-time half of ADR-0003's addendum, see ``load_co_owners``).
+
+    ``appid`` is ``0`` for an unusable (poisoned) mapping row — same
+    convention the pre-addendum code used for an unreadable owner — and such
+    a row always carries ``has_content=True``: unreadable ownership must never
+    resolve to "no content therefore deletable".
+    """
+
+    appid: int
+    has_content: bool
+
+
+@dataclass(frozen=True)
 class DeletedDepot:
     depotid: int
     size_bytes_freed: int
+    #: Co-owner app ids this depot was a last cached remnant for — non-empty
+    #: only for a remnant deletion (ADR-0003 addendum); empty for an ordinary
+    #: exclusive deletion. Every id here needs ``apps.needs_force = 1`` (see
+    #: ``set_needs_force_for_remnant_co_owners``).
+    shared_with_uncached: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -382,6 +434,13 @@ class FailedDepot:
 
     depotid: int
     error: str
+    #: Same meaning as ``DeletedDepot.shared_with_uncached`` — a remnant depot
+    #: whose removal FAILED still leaves its co-owners' on-disk assumption
+    #: uncertain (the tree may be half-gone), so they still need
+    #: ``needs_force = 1``. Empty for every failure that isn't a remnant
+    #: deletion attempt (path-guard refusals, a failed recheck — "unknown
+    #: ownership" never resolves to "these are the co-owners to flag").
+    shared_with_uncached: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -390,25 +449,51 @@ class DeletionPlan:
 
     #: Mapped only to this app -> may be deleted (sorted).
     exclusive: list[int]
-    #: Mapped to at least one other tracked app -> kept (sorted, plan §4).
+    #: Shared, but every co-owner is uncached -> deletable last remnant
+    #: (sorted by depotid; ADR-0003 addendum).
+    remnant: list[RemnantDepot]
+    #: Shared with at least one co-owner that currently has content -> kept
+    #: (sorted, plan §4).
     shared: list[SharedDepot]
     #: Mapping rows whose depot id is unusable -> nothing deleted, reported.
     unusable: list[FailedDepot]
 
 
-def plan_deletion(rows: Iterable[Sequence[object]], appid: int) -> DeletionPlan:
-    """Split ``appid``'s mapped depots into exclusive / shared / unusable.
+def plan_deletion(
+    rows: Iterable[Sequence[object]],
+    appid: int,
+    co_owner_states: Mapping[int, bool] | None = None,
+) -> DeletionPlan:
+    """Split ``appid``'s mapped depots into exclusive / remnant / shared / unusable.
 
     ``rows`` are ``(depotid, appid)`` pairs covering **every** app that maps
     any depot of this app (see ``load_mapping_rows``) — that is what makes the
-    shared decision possible from a single query. Pure function: no database,
-    no filesystem, so every branch below is directly unit-testable.
+    shared decision possible from a single query. ``co_owner_states`` is
+    ``{appid: has_content}`` for the co-owners worth asking about — built by
+    ``load_co_owner_states`` alongside ``load_mapping_rows`` precisely so this
+    function stays pure (no database, no filesystem): every branch below is
+    directly unit-testable with plain dicts and tuples.
 
-    Conservative in both unusual directions: a depot whose co-owner row has an
-    unusable *app* id counts as **shared** (something else references it —
-    refusing to delete is the safe reading), and a row with an unusable *depot*
-    id is reported rather than skipped silently.
+    Conservative in every unusual direction (ADR-0003 addendum, "unknown ⇒
+    protected"):
+
+    - a depot whose co-owner row has an unusable *app* id counts as
+      **shared** (protected) regardless of ``co_owner_states`` — something
+      else references it, and the reference is unreadable;
+    - a co-owner appid **absent** from ``co_owner_states`` (not looked up, or
+      looked up and found to have no ``apps`` row at all) defaults to
+      ``has_content=True`` — protected. This is also what makes an omitted
+      ``co_owner_states`` argument (``None``, the default) reproduce the
+      pre-addendum "any other owner protects" behavior exactly, with no
+      special-casing here: every lookup simply misses.
+    - a row with an unusable *depot* id is reported rather than skipped
+      silently (unchanged from before the addendum).
+
+    Only when a depot has at least one readable co-owner and **every one** of
+    them maps to ``has_content=False`` is it classified as ``remnant``
+    (deletable last-remnant) rather than ``shared`` (protected).
     """
+    states: Mapping[int, bool] = co_owner_states or {}
     own: set[int] = set()
     others: dict[int, set[int]] = {}
     unreadable_owner: set[int] = set()
@@ -437,11 +522,26 @@ def plan_deletion(rows: Iterable[Sequence[object]], appid: int) -> DeletionPlan:
         for depotid in own
         if depotid not in others and depotid not in unreadable_owner
     )
-    shared = [
-        SharedDepot(depotid=depotid, shared_with=sorted(others.get(depotid, ())))
-        for depotid in sorted(own & (set(others) | unreadable_owner))
-    ]
-    return DeletionPlan(exclusive=exclusive, shared=shared, unusable=unusable)
+
+    shared: list[SharedDepot] = []
+    remnant: list[RemnantDepot] = []
+    for depotid in sorted(own & (set(others) | unreadable_owner)):
+        if depotid in unreadable_owner:
+            # An unreadable co-owner row protects unconditionally — it is
+            # never eligible to become a remnant, no matter what the readable
+            # others' states say.
+            shared.append(
+                SharedDepot(depotid=depotid, shared_with=sorted(others.get(depotid, ())))
+            )
+            continue
+
+        owner_ids = sorted(others[depotid])
+        if all(not states.get(owner, True) for owner in owner_ids):
+            remnant.append(RemnantDepot(depotid=depotid, shared_with_uncached=owner_ids))
+        else:
+            shared.append(SharedDepot(depotid=depotid, shared_with=owner_ids))
+
+    return DeletionPlan(exclusive=exclusive, remnant=remnant, shared=shared, unusable=unusable)
 
 
 # --------------------------------------------------------------------------
@@ -454,9 +554,15 @@ def delete_app_depots(
     appid: int,
     depotids: Sequence[int],
     *,
-    co_owners: "Callable[[int], list[int]]",
+    co_owners: "Callable[[int], list[CoOwner]]",
 ) -> tuple[list[DeletedDepot], list[FailedDepot], list[SharedDepot]]:
     """Delete the given depot directories under ``depot_root``. Never raises.
+
+    ``depotids`` is the FULL set of candidates from the plan — both
+    ``DeletionPlan.exclusive`` and the depot ids of ``DeletionPlan.remnant``
+    (the caller, ``routers/cache.py``, concatenates them). Every one of them
+    gets the identical treatment below: this function does not trust the
+    plan's classification, it re-derives the outcome from fresh data.
 
     Returns ``(deleted, failed, late_shared)``.
 
@@ -466,36 +572,60 @@ def delete_app_depots(
     half-reported success — "deleted" for something still on disk — is the one
     outcome this must never produce.
 
-    **The shared-depot recheck (WP 1.6 review, TOCTOU fix).** ``plan_deletion``
-    decides exclusivity from a snapshot read at the start of the request, and no
-    lock is held across the filesystem work (deliberately — see
-    ``routers/cache.py``). A ``PUT /v1/mapping/{depotid}`` landing in that window
-    can make a depot shared *after* it was planned for deletion, and deleting it
-    then destroys another game's content — exactly the guarantee plan §4 makes.
-    So immediately before removing each depot, ``co_owners(depotid)`` re-reads
-    that one depot's other owners (one indexed lookup on
-    ``depot_app_map(depotid, …)``, no transaction); a depot that became shared
-    is moved to ``late_shared`` and left alone. The window is not closed by
-    magic — it is narrowed to the microseconds between the recheck and
-    ``remove_depot_dir``, which is the best a lock-free design can do, and the
-    remaining race is the same one a mapping written *during* an ``rmtree``
-    would lose anyway.
+    **The shared-depot recheck (WP 1.6 review, TOCTOU fix; extended for the
+    ADR-0003 addendum).** ``plan_deletion`` decides exclusivity/remnant status
+    from a snapshot read at the start of the request, and no lock is held
+    across the filesystem work (deliberately — see ``routers/cache.py``). A
+    ``PUT /v1/mapping/{depotid}`` landing in that window can make a depot
+    shared after it was planned for deletion; a co-owner's job being enqueued,
+    or a co-owner's prefill finishing, can turn a planned *remnant* deletion
+    into content destruction for another game — exactly the guarantee plan §4
+    (and its addendum) makes. So immediately before removing each depot,
+    ``co_owners(depotid)`` re-reads that one depot's other owners **and**
+    each one's current content state (one joined, indexed lookup — see
+    ``load_co_owners``), and the FULL rule is re-evaluated here, not just
+    "does anyone else map it":
+
+    - no other owners at all -> ordinary exclusive deletion, proceed.
+    - at least one owner with ``has_content=True`` (includes an unusable/
+      poisoned owner row, which always reports ``has_content=True``) -> moved
+      to ``late_shared`` and left alone.
+    - owners exist and every single one has ``has_content=False`` -> a last
+      cached remnant, proceed to delete it, and remember the (sorted) owner
+      appids in the resulting ``DeletedDepot``/``FailedDepot`` — see
+      ``DeletedDepot.shared_with_uncached``.
+
+    The window is not closed by magic — it is narrowed to the microseconds
+    between the recheck and ``remove_depot_dir``, which is the best a
+    lock-free design can do, and the remaining race is the same one a mapping
+    or a job written *during* an ``rmtree`` would lose anyway.
 
     If the recheck itself fails (a database error), the depot is **not** deleted
     and is reported as failed: "unknown ownership" must never resolve to
-    "delete it".
+    "delete it" — and, consistently, never resolves to "these are its
+    co-owners to flag" either, so ``shared_with_uncached`` is empty on that
+    failure.
 
     ``co_owners`` is a **required keyword argument** with no default (WP 1.6
     second-stage review): a future caller — Phase 3's garbage collection is the
     obvious one — must not be able to silently opt out of the shared-depot
     recheck by forgetting an argument. Skipping the check has to be spelled out
     at the call site (``co_owners=lambda _depotid: []``), which is a thing a
-    reviewer can see.
+    reviewer can see. An explicit ``co_owners=None`` is deliberately NOT a
+    second, quieter way to skip the recheck (WP 3.5 review) — there is no
+    ``is not None`` guard here, so calling ``None(depotid)`` raises
+    ``TypeError``, which the surrounding ``except Exception`` below turns into
+    an ordinary "could not re-check" failure (fail-closed, not a 500). The
+    lambda spelling is the only way to say "no recheck" on purpose, and it now
+    has to be true of MORE than it did pre-addendum: it opts out of the
+    remnant rule too, not just the plain shared-depot check.
 
     Every decision is logged at INFO (failures at ERROR) with the
     ``cache-delete`` prefix: that log is the audit trail for an operation that
     destroys user data, and it records the *resolved absolute path* that was
-    removed, not just the depot id.
+    removed, not just the depot id. A remnant deletion is logged distinctly
+    ("DELETED (last remnant): ...") so it never blends into an ordinary
+    exclusive deletion in the audit trail.
 
     Honest limitation on the reported byte counts: ``shutil.rmtree`` may remove
     part of a tree before failing, and that depot then contributes ``0`` to the
@@ -531,47 +661,74 @@ def delete_app_depots(
             failed.append(FailedDepot(depotid=depotid, error=str(exc)))
             continue
 
-        # Last look before destroying anything: did this depot become shared
-        # since the plan was made? (TOCTOU fix, see the docstring.)
-        if co_owners is not None:
-            try:
-                owners = co_owners(depotid)
-            except Exception as exc:  # noqa: BLE001 - unknown ownership != delete
-                logger.error(
-                    "cache-delete appid=%s depot=%s NOT DELETED: could not re-check "
-                    "its owners before removal: %s: %s",
-                    appid, depotid, type(exc).__name__, exc,
+        # Last look before destroying anything: is this depot still exclusive,
+        # a still-valid last remnant, or did a co-owner's state change since
+        # the plan was made? (TOCTOU fix, see the docstring — full rule, not
+        # just "does anyone else map it".) No ``is not None`` guard here on
+        # purpose (WP 3.5 review): ``co_owners`` is a required, non-Optional
+        # keyword argument (see the docstring below), so a caller passing an
+        # explicit ``None`` is not a supported "skip the recheck" spelling —
+        # it would silently bypass strictly more than the pre-addendum WP 1.6
+        # recheck now does (the remnant rule AND the fail-closed error path
+        # below), which is exactly the kind of silent opt-out the required-
+        # kwarg design exists to prevent. A caller that means "no recheck"
+        # must still say so explicitly: ``co_owners=lambda _depotid: []``.
+        shared_with_uncached: list[int] = []
+        try:
+            owners = co_owners(depotid)
+        except Exception as exc:  # noqa: BLE001 - unknown ownership != delete
+            logger.error(
+                "cache-delete appid=%s depot=%s NOT DELETED: could not re-check "
+                "its owners before removal: %s: %s",
+                appid, depotid, type(exc).__name__, exc,
+            )
+            failed.append(
+                FailedDepot(
+                    depotid=depotid,
+                    error=(
+                        "could not re-check whether this depot is shared with "
+                        f"another app before deleting it ({type(exc).__name__}: "
+                        f"{exc}), so it was left alone."
+                    ),
                 )
-                failed.append(
-                    FailedDepot(
-                        depotid=depotid,
-                        error=(
-                            "could not re-check whether this depot is shared with "
-                            f"another app before deleting it ({type(exc).__name__}: "
-                            f"{exc}), so it was left alone."
-                        ),
-                    )
-                )
-                continue
-            if owners:
+            )
+            continue
+        if owners:
+            if any(co.has_content for co in owners):
+                owner_ids = sorted({co.appid for co in owners})
                 logger.info(
-                    "cache-delete appid=%s depot=%s KEPT (late recheck): became "
-                    "shared with app(s) %s after the deletion was planned",
-                    appid, depotid, owners,
+                    "cache-delete appid=%s depot=%s KEPT (late recheck): shared "
+                    "with app(s) %s that currently have cache content",
+                    appid, depotid, owner_ids,
                 )
                 late_shared.append(
-                    SharedDepot(depotid=depotid, shared_with=sorted(owners))
+                    SharedDepot(depotid=depotid, shared_with=owner_ids)
                 )
                 continue
+            # Every co-owner is verifiably uncached right now -> last
+            # cached remnant (ADR-0003 addendum). Proceed to delete below,
+            # but remember who to flag with needs_force afterwards.
+            shared_with_uncached = sorted({co.appid for co in owners})
+
+        remnant_suffix = (
+            f" (last remnant, shared with uncached app(s) {shared_with_uncached})"
+            if shared_with_uncached
+            else ""
+        )
 
         # lexists, not exists: a broken link must be removed, not declared absent.
         if not os.path.lexists(path):
             logger.info(
                 "cache-delete appid=%s depot=%s ALREADY-ABSENT path=%s "
-                "(nothing on disk; mapping row kept)",
-                appid, depotid, path,
+                "(nothing on disk; mapping row kept)%s",
+                appid, depotid, path, remnant_suffix,
             )
-            deleted.append(DeletedDepot(depotid=depotid, size_bytes_freed=0))
+            deleted.append(
+                DeletedDepot(
+                    depotid=depotid, size_bytes_freed=0,
+                    shared_with_uncached=shared_with_uncached,
+                )
+            )
             continue
 
         linked = is_link_like(path)
@@ -580,11 +737,14 @@ def delete_app_depots(
 
         if error is not None:
             logger.error(
-                "cache-delete appid=%s depot=%s FAILED path=%s: %s: %s",
-                appid, depotid, path, type(error).__name__, error,
+                "cache-delete appid=%s depot=%s FAILED path=%s: %s: %s%s",
+                appid, depotid, path, type(error).__name__, error, remnant_suffix,
             )
             failed.append(
-                FailedDepot(depotid=depotid, error=f"{type(error).__name__}: {error}")
+                FailedDepot(
+                    depotid=depotid, error=f"{type(error).__name__}: {error}",
+                    shared_with_uncached=shared_with_uncached,
+                )
             )
             continue
 
@@ -592,17 +752,34 @@ def delete_app_depots(
             logger.info(
                 "cache-delete appid=%s depot=%s ALREADY-ABSENT path=%s (a "
                 "concurrent deletion removed it; 0 bytes attributed to this "
-                "request so the freed total is not counted twice)",
-                appid, depotid, path,
+                "request so the freed total is not counted twice)%s",
+                appid, depotid, path, remnant_suffix,
             )
-            deleted.append(DeletedDepot(depotid=depotid, size_bytes_freed=0))
+            deleted.append(
+                DeletedDepot(
+                    depotid=depotid, size_bytes_freed=0,
+                    shared_with_uncached=shared_with_uncached,
+                )
+            )
             continue
 
-        logger.info(
-            "cache-delete appid=%s depot=%s DELETED path=%s bytes_freed=%d link=%s",
-            appid, depotid, path, size_bytes, linked,
+        if shared_with_uncached:
+            logger.info(
+                "cache-delete appid=%s depot=%s DELETED (last remnant): shared "
+                "with uncached app(s) %s path=%s bytes_freed=%d link=%s",
+                appid, depotid, shared_with_uncached, path, size_bytes, linked,
+            )
+        else:
+            logger.info(
+                "cache-delete appid=%s depot=%s DELETED path=%s bytes_freed=%d link=%s",
+                appid, depotid, path, size_bytes, linked,
+            )
+        deleted.append(
+            DeletedDepot(
+                depotid=depotid, size_bytes_freed=size_bytes,
+                shared_with_uncached=shared_with_uncached,
+            )
         )
-        deleted.append(DeletedDepot(depotid=depotid, size_bytes_freed=size_bytes))
 
     return deleted, failed, late_shared
 
@@ -621,28 +798,189 @@ def log_kept_depots(appid: int, shared: Sequence[SharedDepot]) -> None:
 # --------------------------------------------------------------------------
 
 
-def load_co_owners(conn: sqlite3.Connection, depotid: int, appid: int) -> list[int]:
-    """Apps *other than* ``appid`` that map ``depotid`` — read right now.
+def _has_cache_content(
+    status: object, last_prefill_at: object, has_active_job: object
+) -> bool:
+    """The ADR-0003 addendum rule, in one place so the plan-time bulk query
+    (``load_co_owner_states``) and the execute-time per-depot query
+    (``load_co_owners``) share exactly one definition of "has content".
 
-    The execute-time half of the shared-depot protection (WP 1.6 review): one
-    lookup per depot, immediately before that depot is removed, so a mapping
-    written after ``plan_deletion`` ran still protects the depot. Served by
-    ``depot_app_map``'s primary key, which is ``(depotid, appid)`` — i.e. this
-    is an index seek, not a scan, and it is the reason a per-depot recheck is
-    affordable at all.
-
-    Unusable co-owner ids (poisoned rows) are reported as owner ``0`` rather
-    than dropped: the caller must treat "somebody unreadable owns this" as
-    shared, not as free to delete.
+    ``True`` (protects) unless ALL three signals say "never touched, idle,
+    job-free": ``status is None`` means no ``apps`` row exists at all for
+    this owner (a ``LEFT JOIN``/missing-key miss), which the addendum lists
+    as its own protecting case, so that alone short-circuits to ``True``.
     """
-    owners: list[int] = []
-    for row in conn.execute(
-        "SELECT appid FROM depot_app_map WHERE depotid = ? AND appid != ?",
-        (depotid, appid),
-    ).fetchall():
-        owner = coerce_positive_id(row["appid"])
-        owners.append(owner if owner is not None else 0)
-    return sorted(set(owners))
+    if status is None:
+        return True
+    idle = status == jobs.STATUS_IDLE
+    never_prefilled = last_prefill_at is None
+    job_free = not bool(has_active_job)
+    return not (idle and never_prefilled and job_free)
+
+
+#: Shared by every query below that needs "does this appid have a queued or
+#: running job right now" as a correlated EXISTS — keeps the placeholder
+#: count and the bound values trivially in sync with jobs.ACTIVE_STATUSES.
+_ACTIVE_JOB_PLACEHOLDERS = ",".join("?" for _ in jobs.ACTIVE_STATUSES)
+
+
+def load_co_owners(conn: sqlite3.Connection, depotid: int, appid: int) -> list[CoOwner]:
+    """Apps *other than* ``appid`` that map ``depotid`` right now, each tagged
+    with whether it currently has cache content (ADR-0003 addendum).
+
+    The execute-time half of the shared-depot protection (WP 1.6 review,
+    extended by the addendum): one **joined** lookup per depot, immediately
+    before that depot is removed, so a mapping written — or a co-owner's
+    status/last_prefill_at/job changed — after ``plan_deletion`` ran still
+    protects the depot. Still a seek, not a scan, despite the join: the
+    ``WHERE`` clause is served by ``depot_app_map``'s primary key
+    ``(depotid, appid)``, the ``LEFT JOIN`` by ``apps``'s primary key
+    (``appid``), and the correlated ``EXISTS`` by ``idx_jobs_appid_status`` —
+    each co-owner row costs three index seeks, not a table scan, which is
+    what keeps a per-depot recheck affordable at all.
+
+    Unusable co-owner ids (poisoned rows) are reported as
+    ``CoOwner(appid=0, has_content=True)`` rather than dropped: the caller
+    must treat "somebody unreadable owns this" as protected, never as free to
+    delete — the same convention the pre-addendum code used for owner ``0``.
+    """
+    rows = conn.execute(
+        f"""
+        SELECT
+            dam.appid AS owner_appid,
+            ap.status AS status,
+            ap.last_prefill_at AS last_prefill_at,
+            EXISTS (
+                SELECT 1 FROM jobs j
+                WHERE j.appid = dam.appid AND j.status IN ({_ACTIVE_JOB_PLACEHOLDERS})
+            ) AS has_active_job
+        FROM depot_app_map dam
+        LEFT JOIN apps ap ON ap.appid = dam.appid
+        WHERE dam.depotid = ? AND dam.appid != ?
+        """,
+        (*jobs.ACTIVE_STATUSES, depotid, appid),
+    ).fetchall()
+
+    owners: dict[int, bool] = {}
+    for row in rows:
+        owner = coerce_positive_id(row["owner_appid"])
+        if owner is None:
+            owners[0] = True
+            continue
+        has_content = _has_cache_content(
+            row["status"], row["last_prefill_at"], row["has_active_job"]
+        )
+        # If the same (poisoned-elsewhere-aside) owner id somehow appears
+        # twice, protect wins — content-having is sticky, not overwritten by
+        # a later uncached row for the same appid (shouldn't happen given the
+        # (depotid, appid) primary key, but this stays correct if it did).
+        owners[owner] = owners.get(owner, False) or has_content
+    return [CoOwner(appid=aid, has_content=has_content) for aid, has_content in sorted(owners.items())]
+
+
+def other_owner_ids(rows: Iterable[Sequence[object]], appid: int) -> set[int]:
+    """The set of usable co-owner appids across ``load_mapping_rows`` output,
+    excluding ``appid`` itself.
+
+    Kept separate from ``plan_deletion`` (which stays pure, no I/O) so a
+    caller — ``routers/cache.py`` — knows exactly which appids are worth
+    asking ``load_co_owner_states`` about before building the plan.
+    """
+    ids: set[int] = set()
+    for row in rows:
+        owner = coerce_positive_id(row[1])
+        if owner is not None and owner != appid:
+            ids.add(owner)
+    return ids
+
+
+def load_co_owner_states(
+    conn: sqlite3.Connection, owner_appids: Iterable[int]
+) -> dict[int, bool]:
+    """``{appid: has_content}`` for the given co-owner appids (ADR-0003
+    addendum), fed into ``plan_deletion`` so it can stay pure and DB-free.
+
+    One bulk query for however many co-owners the request's mapping rows
+    named (typically a handful), served by ``apps``'s primary key for the
+    ``IN (...)`` and ``idx_jobs_appid_status`` for the correlated ``EXISTS``
+    — the same index shapes ``load_co_owners`` relies on, just batched across
+    appids instead of per-depot.
+
+    An appid with no ``apps`` row at all is simply **absent** from the
+    returned dict — ``plan_deletion``'s own conservative default (missing ⇒
+    ``has_content=True``) is what turns "no apps row" into "protected", so
+    this function does not need to special-case it, and callers that pass an
+    id which turns out unusable never regress into "considered cached" by
+    accident (they are filtered out below, so they end up as an equally-safe
+    "missing" entry).
+    """
+    owner_ids = sorted({o for o in owner_appids if isinstance(o, int) and o > 0})
+    if not owner_ids:
+        return {}
+
+    id_placeholders = ",".join("?" for _ in owner_ids)
+    rows = conn.execute(
+        f"""
+        SELECT
+            appid,
+            status,
+            last_prefill_at,
+            EXISTS (
+                SELECT 1 FROM jobs j
+                WHERE j.appid = apps.appid AND j.status IN ({_ACTIVE_JOB_PLACEHOLDERS})
+            ) AS has_active_job
+        FROM apps
+        WHERE appid IN ({id_placeholders})
+        """,
+        (*jobs.ACTIVE_STATUSES, *owner_ids),
+    ).fetchall()
+    return {
+        row["appid"]: _has_cache_content(
+            row["status"], row["last_prefill_at"], row["has_active_job"]
+        )
+        for row in rows
+    }
+
+
+def set_needs_force_for_remnant_co_owners(
+    conn: sqlite3.Connection, appids: Iterable[int]
+) -> None:
+    """Flag every co-owner of a deleted/removal-attempted last-remnant depot
+    with ``needs_force = 1`` (ADR-0003 addendum consequence #2), leaving
+    ``status`` and ``last_prefill_at`` untouched.
+
+    These apps are, by the precondition that got them into this set at all
+    (``delete_app_depots``'s recheck proved ``has_content=False`` for each of
+    them), currently ``status='idle'`` with ``last_prefill_at IS NULL`` — the
+    honesty rule this mirrors (WP 3.4, ``reset_app_after_deletion``) is about
+    *disk* state, not app lifecycle state, and their lifecycle state did not
+    change: a depot THEY still map just lost bytes out from under them, so
+    their own next prefill must not trust SteamPrefill's stale
+    ``successfullyDownloadedDepots.json`` bookkeeping for that depot.
+
+    **Race note, and why an unconditional ``UPDATE ... SET needs_force = 1``
+    is still correct here (not a CAS).** A job for one of these co-owners
+    could be claimed by the worker in the microseconds between
+    ``delete_app_depots``'s recheck (which proved it job-free a moment ago)
+    and this write landing. That is benign, not a repeat of the WP 3.4 bug:
+    the WP 3.4 race was about *clearing* ``needs_force`` racing a write that
+    *set* it, and it stays closed by ``jobs.clear_needs_force_if_unchanged``'s
+    compare-and-swap on the value the job itself observed at claim time —
+    unaffected by how ``needs_force`` came to be ``1`` here. If that newly
+    claimed job finishes and tries to clear the flag, its CAS compares
+    against the value it read at claim time (before this write), which no
+    longer matches the current value (this write set it to ``1``), so the
+    clear is skipped and ``needs_force`` correctly survives at ``1`` — the
+    very self-healing path WP 3.4 built. Setting to ``1`` unconditionally
+    therefore needs no CAS of its own: unlike a *clear*, a *set* can never be
+    "wrongly" applied — worst case is one redundant ``--force`` run.
+    """
+    ids = sorted({int(a) for a in appids if a})
+    if not ids:
+        return
+    placeholders = ",".join("?" for _ in ids)
+    conn.execute(f"UPDATE apps SET needs_force = 1 WHERE appid IN ({placeholders})", ids)
+    conn.commit()
 
 
 def load_mapping_rows(conn: sqlite3.Connection, appid: int) -> list[tuple[object, object]]:
