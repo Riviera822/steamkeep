@@ -476,6 +476,17 @@ parallel/serial decisions, merge discipline, open user decisions):
       2026 SteamVault contributors")*
 - [ ] CI: GitHub Actions — lint, tests, multi-arch image build (amd64/arm64),
       publish to ghcr.io with pinned version tags
+      *(WP 5.1 done 2026-08-09 — the test/lint half: api pytest (Linux),
+      agent go build/vet/test (Linux+Windows matrix), core `nginx -t`
+      through the image's REAL entrypoint render path (pinned upstream
+      image derived from core/Dockerfile) + config-drift check +
+      shellcheck, PS 5.1 parser/pure-ASCII gate + PSScriptAnalyzer
+      PSUseCompatibleSyntax(5.1); actions SHA-pinned, contents:read,
+      NO publishing. Manual/network harnesses documented as CI-excluded.
+      First gate exposed a real WP 3.10 bug — 25-vault-eventlog.sh's
+      survivor check made vault-core unable to start in its default
+      config; fixed in a separate fix(core) commit. Image build/publish
+      remains WP 5.5, user-gated. Opus PASS + delta-confirmed.)*
 - [x] CONTRIBUTING.md, issue templates, example configs
       *(WP 5.4: root `CONTRIBUTING.md` with verified per-component test
       commands (api pytest: 704 passed/1 skipped; agent go build/vet/test:
