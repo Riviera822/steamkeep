@@ -52,6 +52,28 @@ Resolves the open note at the end of ADR-0003's addendum. In `plan_gc`:
   `needs_force` bookkeeping); GC does not grow a second, weaker deletion
   path for the same state.
 
+## Addendum (2026-08-09): beta-branch protection — user decision A+B
+
+Opt-in Steam beta branches reach the cache only via store-on-miss (real
+client downloads; SteamPrefill has no branch selection), and their chunks
+are absent from every `public` manifest — plain manifest-diff GC would
+collect them and force a re-download. User decision 2026-08-09: implement
+both protections:
+
+- **A — recently-stored grace window:** chunks stored within the last N
+  days are never orphan candidates, implemented as a `ChunkExclusion`
+  predicate on the existing hook in `gc_execute`. Recency MUST come from
+  the inode change time (st_ctime, set by nginx's store-time rename), NOT
+  mtime — proxy_store stamps mtime with the upstream `Last-Modified`
+  (publish time, see Rejected section). Linux/container semantics;
+  documented limitation on plain Windows dev runs.
+- **B — oracle branch manifests (extends WP 3.9):** when the opt-in
+  manifest oracle is enabled, manifest gids of open (non-passworded) beta
+  branches join the depot's keep set. Passworded branches stay encrypted
+  and uncoverable — the grace window remains their only protection.
+
+Fully-EA titles need nothing: their EA build IS the `public` branch.
+
 ## Honest limits
 
 GC can delete chunks a client pinned to an unrecorded/beta manifest still

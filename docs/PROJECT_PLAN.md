@@ -376,6 +376,10 @@ for users who expose the API differently.
       candidates; 86 tests, mutation-tested fail-closed directions,
       verified against the real PoC cache (0 orphans, research-doc parity).
       Endpoint + execution = WP 3.8, Opus + Fable mandatory)*
+- [ ] Beta-branch protection for GC (user decision 2026-08-09, ADR-0007
+      addendum): (A) recently-stored grace window via st_ctime as a
+      ChunkExclusion predicate; (B) open-beta branch manifests join the
+      keep set when the oracle (WP 3.9) is enabled
 - [ ] Per-client hit statistics + bypass detection (`/v1/clients`)
 - [ ] Optional generic webhook notifications (Discord/Slack/ntfy-compatible;
       built as a generic webhook feature, not vendor-specific)
