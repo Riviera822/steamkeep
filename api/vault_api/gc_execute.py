@@ -57,9 +57,31 @@ and its consequences benign:
 
 ## Racing removals (the WP 1.6 lessons, applied to files)
 
-``DELETE /v1/cache/{appid}`` runs in a request thread, not on the worker, so it
-*can* run concurrently with a GC job and ``rmtree`` a depot this module is
-unlinking chunks out of. Every removal therefore goes through
+``DELETE /v1/cache/{appid}`` runs in a request thread, not on the worker, so
+nothing *structural* keeps it out of this module's way: it can ``rmtree`` a
+depot while this code unlinks chunks out of it. What narrows that hazard —
+and the complete reason the GC endpoint needs no 409 guard of its own:
+
+- **Same app: already refused.** ``jobs.active_job_for_app`` is
+  **type-agnostic** — it returns the app's oldest ``queued``/``running`` job
+  whatever its type. A GC job for app 440 therefore makes
+  ``DELETE /v1/cache/440`` answer 409 through the *existing* WP 1.6 guard, with
+  no GC-specific code, and the reverse pairing (delete first, GC second) is
+  serialized by the same guard on the enqueue side.
+- **A co-owner's DELETE: closed by the deletion rules, not by luck.** Nothing
+  stops ``DELETE /v1/cache/730`` while GC runs for 440, and both may map depot
+  D. ADR-0003's shared-depot protection keeps D unless *every* readable
+  co-owner is verifiably uncached — and ``deletion._has_cache_content`` treats
+  an app with an **active job** as having content (``load_co_owner_states``
+  asks for exactly that, again type-agnostically). The GC job that is running
+  right now is 440's active job, so 440 counts as content, so D is ``shared``
+  and protected rather than a deletable last remnant.
+- **What is left** is a delete of a depot GC is not touching, or the same depot
+  through a path the two bullets above do not cover (a poisoned row, a mapping
+  written mid-run). That residue is handled below rather than prevented, and it
+  is why every removal here still goes through the settle-and-recheck path.
+
+Every removal therefore goes through
 ``deletion.remove_file_settling``, which decides the outcome from the settled
 filesystem state rather than from the exception: a racing delete surfaces as
 ``FileNotFoundError`` **or**, on Windows, as ``PermissionError [WinError 5]``
@@ -151,15 +173,25 @@ permanently incomplete cache reported as complete.
   depot's bytes just changed under all of its co-owners, which is precisely
   the reasoning ADR-0003's addendum already applies to remnant deletions.
 
-## The exclusion hook
+## The exclusion hook, and the grace window that now uses it
 
-A decision is pending on whether recently-stored chunks (a beta-branch grace
-window) should be protected from GC. It is deliberately **not implemented**
-here — but the orphan set is consumed through ``orphans_to_delete``, which
-takes a sequence of ``ChunkExclusion`` predicates and reports what they held
-back. Adding that rule later is writing one predicate and passing it in; it is
-not surgery on the deletion loop, and the "protected" bookkeeping it will need
-already exists.
+The orphan set is consumed through ``orphans_to_delete``, which takes a
+sequence of ``ChunkExclusion`` predicates and reports what they held back.
+Exclusions can only ever **shrink** the delete set — there is no hook that adds
+to it — so the worst a broken predicate can do is leave bytes on disk.
+
+``RecentlyStoredGrace`` (WP 3.8b, ADR-0007's beta-branch addendum, decision A)
+is the first and, for now, only one: a chunk stored within the last
+``VAULT_GC_GRACE_DAYS`` days is held back. It exists because opt-in beta
+branches reach the cache only through store-on-miss and appear in no ``public``
+manifest, so the planner correctly calls their chunks orphans and this layer
+correctly declines to act on that.
+
+**The separation is deliberate: the plan still names them; the execution holds
+them back.** ``gc.plan_gc`` stays a pure statement about manifests ("these
+chunks are in no counting app's current manifest"), which is what makes it
+testable and what makes the dry run's orphan numbers mean one thing. Time is a
+policy on top of that statement, not part of it.
 """
 
 from __future__ import annotations
@@ -168,6 +200,7 @@ import logging
 import os
 import sqlite3
 import stat as stat_module
+import time
 import traceback
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Mapping, Sequence
@@ -294,9 +327,223 @@ class FileRemoval:
 ChunkExclusion = Callable[[str, gc.DepotGcPlan], "str | None"]
 
 #: The default: no extra rules, the plan governs. Named rather than written as
-#: a bare ``()`` at each call site so the pending beta-chunk grace-window
-#: decision has one obvious place to land.
+#: a bare ``()`` at each call site, and what ``VAULT_GC_GRACE_DAYS=0`` resolves
+#: to: with the window disabled the predicate is not constructed at all.
 NO_EXCLUSIONS: tuple[ChunkExclusion, ...] = ()
+
+#: Seconds per day, spelled once. The grace window is configured in days
+#: because that is how an operator thinks about a beta test; every comparison
+#: below happens in seconds.
+SECONDS_PER_DAY = 86400.0
+
+
+class RecentlyStoredGrace:
+    """Hold back any orphan chunk **stored** within the last ``grace_days`` days.
+
+    ADR-0007's beta-branch addendum, decision A. Opt-in Steam beta branches
+    only ever reach the cache through store-on-miss (SteamPrefill has no branch
+    selection) and their chunks are in no ``public`` manifest, so manifest-diff
+    GC plans every one of them as an orphan. This predicate is what stops the
+    tester who downloaded a beta build on Monday from re-downloading it after
+    Tuesday night's collection. It is not a completeness guarantee: after the
+    window passes, an unrecorded manifest's chunks are collectable again, and
+    ADR-0007's honest limit (consequence = re-download, never corruption)
+    stands unchanged.
+
+    ## Recency comes from ``st_ctime``, and what that means on each platform
+
+    **Not ``st_mtime``.** nginx ``proxy_store`` stamps a stored file's mtime
+    with the *upstream* ``Last-Modified``, i.e. Steam's content publish time —
+    months old for a freshly downloaded chunk of an old build. That is the
+    measured reason ADR-0007 rejected time-based attribution outright, and it
+    is why an mtime-based grace window would protect nothing.
+
+    ``st_ctime`` instead, whose meaning honestly differs by platform:
+
+    - **Linux / the container (the deployment target):** the inode *change*
+      time. ``proxy_store`` writes to a temp file and ``rename()``s it into
+      place; the rename sets ctime on the target inode, so ctime is the
+      store time. The known caveat: ``chmod``/``chown``/a hardlink count
+      change also bumps ctime. Nothing touches cache chunk files that way —
+      vault-core writes them, vault-api deletes them, and neither changes
+      permissions — so the caveat is real but not reachable here. If an
+      operator does run a recursive ``chown`` over the cache, the effect is
+      that everything looks freshly stored and GC frees less for one window:
+      the safe direction.
+    - **Windows (dev runs only):** the file *creation* time, which for a
+      store-on-miss write is also the store time. One quirk worth naming:
+      NTFS "file system tunneling" hands a recreated file its predecessor's
+      creation time when the recreate follows the delete within ~15 s, so a
+      re-stored chunk can look older than it is and lose protection early.
+      Windows is not the deployment target, and a chunk deleted and re-fetched
+      inside 15 s is not a case this cache produces.
+
+    Cheap either way: one ``lstat`` per **orphan** chunk, not per cached
+    chunk. Reading the times during ``gc.scan_depot_chunks`` would save that
+    stat, and is deliberately not done — the planner stays a statement about
+    manifests (module docstring).
+
+    ## The two decisions worth naming
+
+    **Boundary: ``age < window`` holds back, so exactly N days is deleted.**
+    The window is the half-open interval "stored less than N days ago". A
+    chunk whose age is exactly ``grace_days`` has served the full window and
+    is released. The alternative (``<=``) would make the release time depend
+    on stat resolution rather than on the number the operator configured.
+
+    **Fail-closed on an unreadable age.** A chunk whose ``lstat`` fails is
+    held back — an age we cannot read must protect, not expose. What that
+    branch really does is permission/ACL refusals (``EACCES``) and transient
+    I/O errors; a Windows delete-pending name is **not** one of its cases, see
+    the next paragraph. Two failures are deliberately *not* routed through it:
+
+    - ``FileNotFoundError`` — the file is unambiguously gone, so there is
+      nothing to protect. The plan stands and ``remove_one_file`` reports it
+      as ``ALREADY_GONE`` with 0 bytes, WP 1.6's accurate accounting for a
+      chunk a concurrent ``DELETE`` removed.
+
+      **A Windows delete-pending name lands here, and that is correct.** Worth
+      stating because WP 1.6's ``PermissionError [WinError 5]`` finding invites
+      the opposite guess: measured on Windows 11 (open a handle with
+      ``FILE_SHARE_DELETE``, unlink the name while the handle lives, then stat
+      it), ``os.lstat`` on a delete-pending name raises ``FileNotFoundError
+      [WinError 2]``. WP 1.6's access-denied observation was about ``unlink``
+      — a different syscall — and applies to the removal path, not to this
+      one. The outcome is the right one anyway: a delete-pending name has
+      already been successfully unlinked and nothing can bring it back, so
+      "gone, 0 bytes" is the honest report and protecting it would be a
+      fiction.
+
+      Note this decision is made from the **error type**, not from an
+      ``os.path.lexists`` recheck the way ``remove_one_file`` makes its
+      equivalent call: ``lexists`` is itself ``lstat``-based and swallows every
+      ``OSError`` into ``False``, so consulting it here would collapse "cannot
+      read" into "gone" — turning the protective branch into a deletion.
+      ``remove_one_file`` can afford that recheck because both of its answers
+      keep the file; this one cannot.
+    - the chunk id is **not a valid chunk filename**: that is an anomaly, not
+      an age question, and holding it back would hide it. The plan stands and
+      ``_remove_planned_chunk`` refuses it as ``REFUSED_UNSAFE_NAME`` — a
+      reported problem that makes the job ``error``. Nothing is deleted on
+      either route; the difference is only whether an operator sees it.
+
+    A clock that runs backwards (a chunk whose ctime is in the future) yields
+    a negative age, which is ``< window`` and therefore held back. Protective,
+    and the reported age is clamped at 0 rather than printed as "-0.3 days".
+    """
+
+    def __init__(
+        self,
+        *,
+        cache_root: str,
+        grace_days: int,
+        now: Callable[[], float] = time.time,
+    ) -> None:
+        """Never raises for a filesystem problem — see ``_depot_root_error``.
+
+        ``now`` is injectable for the tests, which cannot manufacture an old
+        ``ctime``: ``os.utime`` sets atime/mtime and explicitly NOT ctime, and
+        the alternative (sleeping) would be a slow, flaky test. The tests
+        therefore create real files and move the *clock*, which exercises the
+        same comparison with the same real ``st_ctime`` on both platforms.
+        """
+        if grace_days <= 0:
+            raise ValueError(
+                "RecentlyStoredGrace needs grace_days > 0; a disabled window is "
+                "expressed by not constructing the predicate at all "
+                "(see grace_window_exclusions)."
+            )
+        self.grace_days = int(grace_days)
+        self.grace_seconds = self.grace_days * SECONDS_PER_DAY
+        self._now = now
+        # Resolved once, here, rather than per chunk: it is a realpath + isdir
+        # check. A failure is REMEMBERED, not raised — this object is built by
+        # ``run_gc_job``, whose contract is that it never raises — and it makes
+        # every chunk fail closed. In the wiring it is also unreachable: the
+        # same guard runs at the top of ``run_gc`` against the same cache root
+        # and aborts the whole run before any predicate is consulted.
+        try:
+            self._depot_root = deletion.resolve_depot_root(cache_root)
+            self._depot_root_error = ""
+        except deletion.DeletionGuardError as exc:
+            self._depot_root = ""
+            self._depot_root_error = str(exc)
+
+    def __call__(self, chunk_id: str, depot_plan: gc.DepotGcPlan) -> str | None:
+        """Reason to hold ``chunk_id`` back, or ``None`` to let the plan stand.
+
+        Reasons about **only the chunk the plan named**: the path is rebuilt
+        from the depot id in the plan through the very same guards
+        ``execute_depot`` uses (``deletion.depot_dir_path`` →
+        ``deletion.safe_child_path``), so there is no second path builder to
+        keep in sync with the first.
+        """
+        if not gc.is_chunk_filename(chunk_id):
+            return None  # an anomaly for the executor to refuse and report
+
+        path = self._chunk_path(depot_plan.depotid, chunk_id)
+        if path is None:
+            return self._unreadable_age_reason(
+                self._depot_root_error
+                or f"its path under depot {depot_plan.depotid} could not be rebuilt"
+            )
+
+        try:
+            stored_at = os.lstat(path).st_ctime
+        except FileNotFoundError:
+            # Unambiguously gone: nothing to protect. The plan stands and the
+            # removal path reports ALREADY_GONE / 0 bytes, which is WP 1.6's
+            # accurate accounting for a chunk a concurrent DELETE removed.
+            # A Windows delete-pending name arrives HERE (measured: lstat
+            # raises FileNotFoundError [WinError 2] for it; WP 1.6's
+            # PermissionError was unlink's answer, not lstat's) — correctly,
+            # since such a name is already unlinked for good.
+            return None
+        except OSError as exc:
+            # A permission/ACL refusal or a transient I/O error: the file may
+            # well be there and young, so it is protected rather than deleted.
+            return self._unreadable_age_reason(f"{type(exc).__name__}: {exc}")
+
+        age_seconds = self._now() - stored_at
+        if age_seconds < self.grace_seconds:
+            age_days = max(age_seconds, 0.0) / SECONDS_PER_DAY
+            return (
+                f"stored {age_days:.1f} days ago, grace window is "
+                f"{self.grace_days} days"
+            )
+        return None
+
+    def _chunk_path(self, depotid: int, chunk_id: str) -> str | None:
+        """``depot/<id>/chunk/<chunk id>``, or ``None`` if a guard refused it."""
+        try:
+            depot_dir = deletion.depot_dir_path(self._depot_root, depotid)
+            chunk_dir = deletion.safe_child_path(depot_dir, gc.CHUNK_DIRNAME)
+            return deletion.safe_child_path(chunk_dir, chunk_id)
+        except deletion.DeletionGuardError:
+            return None
+
+    def _unreadable_age_reason(self, detail: str) -> str:
+        return (
+            f"its store time could not be read ({detail}), and the "
+            f"{self.grace_days}-day grace window holds back what it cannot age"
+        )
+
+
+def grace_window_exclusions(settings: Settings) -> tuple[ChunkExclusion, ...]:
+    """The exclusions one GC run should apply, per configuration.
+
+    ``VAULT_GC_GRACE_DAYS=0`` returns ``NO_EXCLUSIONS`` — the predicate is not
+    constructed, nothing stats anything, and the executor behaves exactly as it
+    did before WP 3.8b. That is the one switch; there is no second "enabled"
+    flag to get out of sync with it.
+    """
+    if settings.gc_grace_days <= 0:
+        return NO_EXCLUSIONS
+    return (
+        RecentlyStoredGrace(
+            cache_root=settings.cache_root, grace_days=settings.gc_grace_days
+        ),
+    )
 
 
 def orphans_to_delete(
@@ -345,10 +592,13 @@ def remove_one_file(path: str, *, name: str) -> FileRemoval:
     Order of checks, each of which can only make the outcome *less*
     destructive:
 
-    1. ``os.lstat`` — a missing file is ``ALREADY_GONE``, not an error. An
-       ``lstat`` that fails some other way (Windows delete-pending reports
-       ``PermissionError``) is re-decided by ``os.path.lexists``, which is the
-       same "settled state has the last word" rule the removal helper uses.
+    1. ``os.lstat`` — a missing file is ``ALREADY_GONE``, not an error, and a
+       Windows delete-pending name is measurably one of those (``lstat`` raises
+       ``FileNotFoundError [WinError 2]`` for it; the ``PermissionError
+       [WinError 5]`` WP 1.6 recorded is what ``unlink`` answers, a different
+       syscall — corrected in WP 3.8b, measured). An ``lstat`` that fails some
+       other way is re-decided by ``os.path.lexists``, which is the same
+       "settled state has the last word" rule the removal helper uses.
     2. link check — refused, never unlinked (see ``REFUSED_LINK``). Both the
        ``S_ISLNK`` bit and ``deletion.is_link_like`` are consulted: measured on
        Windows (WP 1.6, docs/LEARNINGS.md) a **junction** is not
@@ -451,9 +701,15 @@ class DepotGcResult:
     removed_count: int = 0
     removed_bytes: int = 0
     already_gone_count: int = 0
-    #: chunk id -> reason, from the ``ChunkExclusion`` hook. Always empty until
-    #: the pending beta-chunk decision is made.
+    #: chunk id -> reason, from the ``ChunkExclusion`` hook (WP 3.8b: the
+    #: recently-stored grace window). Filled for a **dry run too** — an
+    #: operator reading a plan needs to see why the bytes it counts will not
+    #: all come back.
     held_back: dict[str, str] = field(default_factory=dict)
+    #: The plan's byte sizes for exactly those chunks. Part of the same
+    #: honesty: "orphans=900 bytes, held_back=700 bytes" is an explanation,
+    #: "orphans=900 bytes" followed by 200 freed is a puzzle.
+    held_back_bytes: int = 0
     problems: list[FileRemoval] = field(default_factory=list)
 
     dedupe_removed_count: int = 0
@@ -564,6 +820,7 @@ def execute_depot(
         removed_bytes=sum(r.bytes_freed for r in removed),
         already_gone_count=sum(1 for r in removals if r.outcome == ALREADY_GONE),
         held_back=held_back,
+        held_back_bytes=_held_back_bytes(depot_plan, held_back),
         problems=[r for r in removals if r.is_problem],
         dedupe_removed_count=len(dedupe_removed),
         dedupe_removed_bytes=sum(r.bytes_freed for r in dedupe_removed),
@@ -591,6 +848,19 @@ def execute_depot(
             "cache-gc depot=%s NOT REMOVED %s", depot_plan.depotid, problem.describe()
         )
     return result
+
+
+def _held_back_bytes(
+    depot_plan: gc.DepotGcPlan, held_back: Mapping[str, str]
+) -> int:
+    """Plan bytes of the held-back chunks.
+
+    From the **plan's** sizes, not from a fresh ``lstat``: nothing was deleted,
+    so this is a statement about what stayed, not about what was freed — the
+    opposite of ``bytes_freed``, which is measured immediately before each
+    unlink precisely because it claims something happened.
+    """
+    return sum(depot_plan.orphan_chunks.get(chunk_id, 0) for chunk_id in held_back)
 
 
 def _remove_planned_chunk(chunk_dir: str, chunk_id: str) -> FileRemoval:
@@ -838,6 +1108,20 @@ class GcRunReport:
         return sum(len(d.held_back) for d in self.depots)
 
     @property
+    def held_back_bytes(self) -> int:
+        return sum(d.held_back_bytes for d in self.depots)
+
+    @property
+    def deletable_orphan_count(self) -> int:
+        """Planned orphans MINUS the ones an exclusion holds back — i.e. what an
+        execute run would actually attempt right now."""
+        return self.planned_orphan_count - self.held_back_count
+
+    @property
+    def deletable_orphan_bytes(self) -> int:
+        return self.planned_orphan_bytes - self.held_back_bytes
+
+    @property
     def dedupe_removed_count(self) -> int:
         return sum(d.dedupe_removed_count for d in self.depots)
 
@@ -887,9 +1171,15 @@ class GcRunReport:
 
         for depot in self.depots:
             lines.append(_depot_line(depot))
-            # '!' = something went wrong, '-' = GC declined on purpose. Two
-            # markers because they mean opposite things to an operator, and a
-            # single "not reclaimed" list would hide that.
+            # '!' = something went wrong, '-' = GC declined on purpose,
+            # '~' = an exclusion held a planned orphan back (WP 3.8b's grace
+            # window). Three markers because they mean different things to an
+            # operator, and a single "not reclaimed" list would hide that.
+            for chunk_id in sorted(depot.held_back)[:MAX_REPORTED_PROBLEMS]:
+                lines.append(f"    ~ {chunk_id}: {depot.held_back[chunk_id]}")
+            extra = len(depot.held_back) - MAX_REPORTED_PROBLEMS
+            if extra > 0:
+                lines.append(f"    ~ ... and {extra} more held back")
             for problem in depot.all_problems[:MAX_REPORTED_PROBLEMS]:
                 lines.append(f"    ! {problem.describe()}")
             extra = len(depot.all_problems) - MAX_REPORTED_PROBLEMS
@@ -909,7 +1199,7 @@ class GcRunReport:
                 f"dedupe_bytes_freed={self.dedupe_removed_bytes} "
                 f"total_bytes_freed={self.bytes_freed} "
                 f"problems={len(self.problems)} declined={len(self.declined)} "
-                f"held_back={self.held_back_count} "
+                f"held_back={self.held_back_count} ({self.held_back_bytes} bytes) "
                 f"depots_touched={self.touched_depots} "
                 f"needs_force_set_for={self.flagged_appids}"
             )
@@ -922,7 +1212,10 @@ class GcRunReport:
         else:
             lines.append(
                 f"[vault-api] GC totals (DRY RUN): orphans={self.planned_orphan_count} "
-                f"({self.planned_orphan_bytes} bytes) reclaimable_dedupe_bytes="
+                f"({self.planned_orphan_bytes} bytes) "
+                f"held_back={self.held_back_count} ({self.held_back_bytes} bytes) "
+                f"would_delete={self.deletable_orphan_count} "
+                f"({self.deletable_orphan_bytes} bytes) reclaimable_dedupe_bytes="
                 f"{self.planned_dedupe_bytes} planned_depots={self.planned_depots}. "
                 "NOTHING was deleted — re-run with {\"execute\": true} to reclaim it."
             )
@@ -937,7 +1230,8 @@ def _depot_line(depot: DepotGcResult) -> str:
     if not depot.executed:
         return (
             f"  depot {depot.depotid} planned: orphans={depot.planned_orphan_count} "
-            f"({depot.planned_orphan_bytes} bytes) kept={depot.kept_count} "
+            f"({depot.planned_orphan_bytes} bytes) held_back={len(depot.held_back)} "
+            f"({depot.held_back_bytes} bytes) kept={depot.kept_count} "
             f"({depot.kept_bytes} bytes) dedupe_candidates={depot.planned_dedupe_count} "
             f"({depot.planned_dedupe_bytes} bytes)"
         )
@@ -945,7 +1239,8 @@ def _depot_line(depot: DepotGcResult) -> str:
         f"  depot {depot.depotid} planned: orphans={depot.planned_orphan_count} "
         f"({depot.planned_orphan_bytes} bytes) -> removed={depot.removed_count} "
         f"({depot.removed_bytes} bytes) already_gone={depot.already_gone_count} "
-        f"held_back={len(depot.held_back)} problems={len(depot.all_problems)} "
+        f"held_back={len(depot.held_back)} ({depot.held_back_bytes} bytes) "
+        f"problems={len(depot.all_problems)} "
         f"kept={depot.kept_count} ({depot.kept_bytes} bytes) "
         f"dedupe_removed={depot.dedupe_removed_count} "
         f"({depot.dedupe_removed_bytes} bytes) "
@@ -969,6 +1264,12 @@ def run_gc(
     ``jobs.enqueue_gc`` for why the one flag that decides whether files are
     deleted is never allowed to be implicit.
 
+    ``exclusions`` can only shrink what gets deleted (see ``ChunkExclusion``).
+    They are applied to a **dry run as well**, where they delete nothing and
+    only populate ``held_back`` — a preview that ignored them would predict
+    bytes the execute run then refuses to free. ``run_gc_job`` supplies the
+    configured grace window via ``grace_window_exclusions``.
+
     There is deliberately **no ``plan`` parameter**. The plan is built here,
     from a fresh database read and a fresh filesystem scan, every single time —
     that is what makes "GC never executes an enqueue-time plan" a property of
@@ -991,11 +1292,14 @@ def run_gc(
     plan = gc.plan_gc(appid, inputs, depot_root=depot_root, archive_dir=archive_dir)
 
     if not execute:
-        return GcRunReport(
-            appid=appid,
-            requested_execute=False,
-            executed=False,
-            depots=[
+        # The exclusions run here too (WP 3.8b). A dry run is the operator's
+        # preview of an execute run, and one that reported 700 orphan bytes
+        # which an execute run then refused to free would be a preview of
+        # something else. Predicates only read; running them changes nothing.
+        dry: list[DepotGcResult] = []
+        for depot in plan.depots:
+            _, held_back = orphans_to_delete(depot, exclusions=exclusions)
+            dry.append(
                 DepotGcResult(
                     depotid=depot.depotid,
                     status=depot.status,
@@ -1006,10 +1310,16 @@ def run_gc(
                     kept_bytes=depot.kept_bytes,
                     planned_dedupe_count=sum(len(c.duplicates) for c in depot.dedupe),
                     planned_dedupe_bytes=depot.dedupe_bytes,
+                    held_back=held_back,
+                    held_back_bytes=_held_back_bytes(depot, held_back),
                     note=depot.note,
                 )
-                for depot in plan.depots
-            ],
+            )
+        return GcRunReport(
+            appid=appid,
+            requested_execute=False,
+            executed=False,
+            depots=dry,
         )
 
     results = [
@@ -1029,11 +1339,12 @@ def run_gc(
     )
     logger.info(
         "cache-gc appid=%s finished: removed=%d chunk(s) / %d byte(s), dedupe "
-        "removed=%d / %d byte(s), already_gone=%d, problems=%d, depots_touched=%s, "
-        "needs_force set for %s",
+        "removed=%d / %d byte(s), already_gone=%d, held_back=%d / %d byte(s), "
+        "problems=%d, depots_touched=%s, needs_force set for %s",
         appid, report.removed_count, report.removed_bytes,
         report.dedupe_removed_count, report.dedupe_removed_bytes,
-        report.already_gone_count, len(report.problems), touched, flagged,
+        report.already_gone_count, report.held_back_count, report.held_back_bytes,
+        len(report.problems), touched, flagged,
     )
     return report
 
@@ -1117,6 +1428,9 @@ def run_gc_job(
             cache_root=settings.cache_root,
             archive_dir=settings.manifest_archive_dir,
             execute=execute,
+            # WP 3.8b: the configured grace window, applied to dry runs and
+            # execute runs alike so the preview matches what would happen.
+            exclusions=grace_window_exclusions(settings),
         )
     except Exception:
         # Last-resort net, same shape as the prefill path's. A crash here has

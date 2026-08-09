@@ -68,6 +68,25 @@ DEFAULT_MANIFEST_KEEP = 3
 #: defeats the point of archiving at all.
 MIN_MANIFEST_KEEP = 1
 
+#: How long chunks are protected from garbage collection after they were
+#: stored (WP 3.8b, ADR-0007's beta-branch addendum, decision A).
+#:
+#: **Why this exists.** Opt-in Steam beta branches reach the cache only via
+#: store-on-miss — SteamPrefill has no branch selection — and their chunks
+#: appear in no ``public`` manifest, so plain manifest-diff GC classifies every
+#: one of them as an orphan and collects it. The same is true of anything else
+#: a real client pulled through vault-core against a manifest vault-api never
+#: recorded. The window buys those chunks time: whatever was stored in the last
+#: N days is held back, so the beta tester who downloaded a build on Monday
+#: still has it after Tuesday night's GC.
+#:
+#: 14 days is chosen to cover a normal beta/demo test cycle plus a weekend,
+#: while still letting a stale one-off download age out within a fortnight.
+#: ``0`` disables the window entirely (the predicate is then not even
+#: constructed) — the pre-WP-3.8b behaviour, i.e. every orphan the plan names
+#: is deleted.
+DEFAULT_GC_GRACE_DAYS = 14
+
 #: How long the scheduler waits between sweeps of the installed list (WP 3.5).
 #: Plan §7 Phase 3 spells the cron window out as "e.g. 09:00-17:00, every 3 h"
 #: — 180 minutes is that "every 3 h", verbatim.
@@ -196,6 +215,9 @@ class Settings:
     # construction re-reads LOCALAPPDATA/HOME at call time, same as
     # `from_env()` does when the env var is unset.
     steamprefill_cache_dir: str = field(default_factory=_default_steamprefill_cache_dir)
+    # WP 3.8b. Days a stored chunk is protected from GC (ADR-0007 beta-branch
+    # addendum, decision A). 0 = no window, every planned orphan is deleted.
+    gc_grace_days: int = DEFAULT_GC_GRACE_DAYS
     # WP 3.5. The daytime window the scheduler sweeps in (plan §7 Phase 3).
     # ``None`` = scheduler disabled, and that is the DEFAULT on purpose: the
     # scheduler starts Steam logins and downloads on its own schedule, which
@@ -275,6 +297,12 @@ class Settings:
             ),
             steamprefill_cache_dir=steamprefill_cache_dir
             or _default_steamprefill_cache_dir(),
+            # minimum=0 because 0 is a meaningful value here ("no grace
+            # window"), unlike VAULT_MANIFEST_KEEP where 0 would defeat the
+            # feature. A negative value or anything non-integer is still
+            # refused at startup — a typo must not silently become "protect
+            # nothing" on a deletion path.
+            gc_grace_days=_env_int("VAULT_GC_GRACE_DAYS", DEFAULT_GC_GRACE_DAYS, minimum=0),
             schedule_window=schedule_window,
             schedule_interval_minutes=_env_int(
                 "VAULT_SCHEDULE_INTERVAL_MINUTES", DEFAULT_SCHEDULE_INTERVAL_MINUTES

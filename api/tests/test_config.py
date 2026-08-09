@@ -257,6 +257,55 @@ def test_bad_schedule_numbers_fail_loudly(monkeypatch: pytest.MonkeyPatch) -> No
         Settings.from_env()
 
 
+def test_gc_grace_days_defaults_to_fourteen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WP 3.8b / ADR-0007 addendum A: the grace window is ON by default.
+
+    This is the one setting in this file whose default is a *protection*, so
+    the default itself is the feature: an operator who never reads the docs
+    still keeps beta-branch and other store-on-miss content for a fortnight.
+    """
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.delenv("VAULT_GC_GRACE_DAYS", raising=False)
+
+    assert Settings.from_env().gc_grace_days == 14
+
+    monkeypatch.setenv("VAULT_GC_GRACE_DAYS", "30")
+    assert Settings.from_env().gc_grace_days == 30
+
+
+def test_gc_grace_days_zero_is_a_valid_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unlike VAULT_MANIFEST_KEEP, 0 means something here: no window at all.
+
+    It must therefore be *accepted*, not rejected as "below the floor" — and
+    the executor turns it into "no predicate is constructed"
+    (``gc_execute.grace_window_exclusions``).
+    """
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_GC_GRACE_DAYS", "0")
+
+    assert Settings.from_env().gc_grace_days == 0
+
+
+def test_a_bad_gc_grace_days_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A typo in a deletion-path setting must not silently become "protect
+    nothing". Rejected at startup, where somebody is looking."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+
+    for bad in ("-1", "-14"):
+        monkeypatch.setenv("VAULT_GC_GRACE_DAYS", bad)
+        with pytest.raises(RuntimeError, match=r"must be >= 0"):
+            Settings.from_env()
+
+    for garbage in ("fourteen", "14 days", "", " ", "1.5"):
+        monkeypatch.setenv("VAULT_GC_GRACE_DAYS", garbage)
+        if garbage.strip() == "":
+            # Blank is "unset" everywhere in this module, not an error.
+            assert Settings.from_env().gc_grace_days == 14
+            continue
+        with pytest.raises(RuntimeError, match="must be an integer"):
+            Settings.from_env()
+
+
 def test_agent_report_keep_below_two_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
     """The diff needs the previous snapshot AND the new one — 1 is not a value.
 

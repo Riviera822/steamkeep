@@ -31,6 +31,7 @@ import os
 import sqlite3
 import threading
 from pathlib import Path
+from typing import Sequence
 
 import pytest
 from fastapi.testclient import TestClient
@@ -67,7 +68,19 @@ CURRENT_MANIFEST = "900"
 # --------------------------------------------------------------------------
 
 
-def make_settings(tmp_path: Path) -> Settings:
+def make_settings(tmp_path: Path, *, grace_days: int = 0) -> Settings:
+    """Settings for one scenario, with the WP 3.8b grace window **off** unless
+    a test asks for it.
+
+    Every chunk these tests write to disk is seconds old, so the shipped
+    default (``VAULT_GC_GRACE_DAYS=14``) would hold back every orphan in the
+    file and turn the WP 3.8 deletion tests into tests of the window. Those
+    tests are about the executor — what it deletes, what it refuses, how it
+    reports — so they say ``0`` and keep meaning what they were written to
+    mean. The grace-window section at the bottom of this file turns it on and
+    pins the default itself (see
+    ``test_the_shipped_default_protects_a_freshly_stored_chunk``).
+    """
     return Settings(
         vault_api_key=TEST_API_KEY,
         db_path=str(tmp_path / "vault.db"),
@@ -78,6 +91,7 @@ def make_settings(tmp_path: Path) -> Settings:
         # Points at a directory that never exists: manifest ingestion is not
         # part of this work package and must not run.
         steamprefill_cache_dir=str(tmp_path / "unused-steamprefill-cache"),
+        gc_grace_days=grace_days,
     )
 
 
@@ -149,14 +163,14 @@ def snapshot(root: Path) -> dict[str, int]:
     return found
 
 
-def build_world(tmp_path: Path) -> Settings:
+def build_world(tmp_path: Path, *, grace_days: int = 0) -> Settings:
     """The standard scenario: app 440 -> depot 441, two kept + two orphan chunks.
 
     Also drops an unrelated, unmapped depot 999 into the tree: every "nothing
     else was touched" assertion then has something to be about that GC has no
     business knowing at all.
     """
-    settings = make_settings(tmp_path)
+    settings = make_settings(tmp_path, grace_days=grace_days)
     root = cache_root(settings)
     (root / "depot").mkdir(parents=True)
 
@@ -179,7 +193,13 @@ def build_world(tmp_path: Path) -> Settings:
     return settings
 
 
-def run(settings: Settings, appid: int = 440, *, execute: bool) -> gc_execute.GcRunReport:
+def run(
+    settings: Settings,
+    appid: int = 440,
+    *,
+    execute: bool,
+    exclusions: "Sequence[gc_execute.ChunkExclusion]" = gc_execute.NO_EXCLUSIONS,
+) -> gc_execute.GcRunReport:
     conn = open_db(settings)
     try:
         return gc_execute.run_gc(
@@ -188,6 +208,7 @@ def run(settings: Settings, appid: int = 440, *, execute: bool) -> gc_execute.Gc
             cache_root=settings.cache_root,
             archive_dir=settings.manifest_archive_dir,
             execute=execute,
+            exclusions=exclusions,
         )
     finally:
         conn.close()
@@ -1355,6 +1376,482 @@ def test_an_exclusion_predicate_can_only_shrink_what_gets_deleted(
     assert chunk_path(settings, 441, ORPHAN_A).exists()
     assert not chunk_path(settings, 441, ORPHAN_B).exists()
     assert result.ok is True
+
+
+# ==========================================================================
+# The recently-stored grace window (WP 3.8b, ADR-0007 beta-branch addendum A)
+# ==========================================================================
+#
+# How these tests move time, and why that way. The window reads ``st_ctime``,
+# and ``os.utime`` sets atime/mtime — explicitly NOT ctime — so a test cannot
+# manufacture an old chunk by touching it. The two honest options are sleeping
+# (slow, flaky, and it can only produce *seconds* of age) or moving the clock.
+# These tests create real files, read their real ``st_ctime`` back off the
+# disk, and inject a fake ``now``. The comparison under test is exercised with
+# a genuine platform ctime on both Windows and Linux; only the reference point
+# is synthetic, which is also the only value a deployment's clock supplies.
+
+
+def grace(
+    settings: Settings, *, days: int = 14, now=None
+) -> gc_execute.RecentlyStoredGrace:
+    return gc_execute.RecentlyStoredGrace(
+        cache_root=settings.cache_root,
+        grace_days=days,
+        **({} if now is None else {"now": now}),
+    )
+
+
+def stored_at(settings: Settings, chunk_id: str, depotid: int = 441) -> float:
+    """The chunk's real on-disk ``st_ctime`` — the value the predicate reads."""
+    return os.lstat(str(chunk_path(settings, depotid, chunk_id))).st_ctime
+
+
+def at(base: float, *, days: float = 0.0, seconds: float = 0.0):
+    """A fake clock reading ``base + days + seconds``."""
+    return lambda: base + days * 86400.0 + seconds
+
+
+def test_a_chunk_stored_inside_the_window_survives_an_execute_run(
+    tmp_path: Path,
+) -> None:
+    """The whole point of decision A: a beta-branch chunk downloaded today is
+    an orphan by manifest diff, and an execute run leaves it exactly where it
+    is — byte for byte, not merely "a file of that name still exists".
+
+    Mutation target: flipping the comparison to ``age > window`` (or dropping
+    the predicate from ``orphans_to_delete``) deletes both chunks and kills
+    this test.
+    """
+    settings = build_world(tmp_path)
+    before = snapshot(cache_root(settings)) | snapshot(archive_dir(settings))
+    orphan_bytes = {
+        chunk_id: chunk_path(settings, 441, chunk_id).read_bytes()
+        for chunk_id in (ORPHAN_A, ORPHAN_B)
+    }
+
+    report = run(settings, execute=True, exclusions=[grace(settings, days=14)])
+
+    assert report.ok is True
+    assert report.removed_count == 0
+    assert report.bytes_freed == 0
+    assert report.problems == []
+    # It still PLANNED them — the separation ADR-0007 asks for: the plan names
+    # the orphans, the execution holds them back.
+    assert report.planned_orphan_count == 2
+    assert report.held_back_count == 2
+    assert report.held_back_bytes == 700
+    assert report.deletable_orphan_bytes == 0
+    held = report.depots[0].held_back
+    assert sorted(held) == sorted([ORPHAN_A, ORPHAN_B])
+    for chunk_id in (ORPHAN_A, ORPHAN_B):
+        assert held[chunk_id] == "stored 0.0 days ago, grace window is 14 days"
+
+    # Nothing under the cache root or the archive changed at all...
+    assert snapshot(cache_root(settings)) | snapshot(archive_dir(settings)) == before
+    # ...and the protected chunks are byte-for-byte what they were.
+    for chunk_id, content in orphan_bytes.items():
+        assert chunk_path(settings, 441, chunk_id).read_bytes() == content
+
+
+def test_a_chunk_older_than_the_window_is_deleted(tmp_path: Path) -> None:
+    """The window releases. A chunk stored 30 days ago with a 14-day window is
+    collected exactly as it was before WP 3.8b."""
+    settings = build_world(tmp_path)
+    base = stored_at(settings, ORPHAN_A)
+
+    report = run(
+        settings,
+        execute=True,
+        exclusions=[grace(settings, days=14, now=at(base, days=30))],
+    )
+
+    assert report.removed_count == 2
+    assert report.removed_bytes == 700
+    assert report.held_back_count == 0
+    assert not chunk_path(settings, 441, ORPHAN_A).exists()
+    assert not chunk_path(settings, 441, ORPHAN_B).exists()
+    # And the chunks the manifest still needs are untouched, as always.
+    for chunk_id in KEEP_SIZES:
+        assert chunk_path(settings, 441, chunk_id).exists()
+
+
+def test_the_boundary_is_half_open_exactly_n_days_old_is_deleted(
+    tmp_path: Path,
+) -> None:
+    """**The boundary decision, pinned here rather than left to a reader.**
+
+    The window is "stored LESS than N days ago" (``age < window``): a chunk
+    whose age is exactly N days has served the full window and is released.
+    One second younger and it is held. The alternative (``<=``) would make the
+    release moment depend on stat resolution instead of on the number the
+    operator configured.
+
+    The third case is clock skew: a ctime in the *future* gives a negative age,
+    which is inside the window, so the chunk is protected — and the reported
+    age is clamped at 0 rather than printed as a negative number of days.
+    """
+    settings = build_world(tmp_path)
+    # The two orphans are written microseconds apart, so the clock is anchored
+    # on the NEWEST of them: at ``base + 14d`` both are then at least 14 days
+    # old, and the youngest one is exactly 14 days old.
+    ages = {chunk: stored_at(settings, chunk) for chunk in (ORPHAN_A, ORPHAN_B)}
+    youngest = max(ages, key=lambda chunk: ages[chunk])
+    base = ages[youngest]
+    plan_only = dict(execute=False)
+
+    exactly = run(
+        settings, exclusions=[grace(settings, days=14, now=at(base, days=14))],
+        **plan_only,
+    )
+    assert exactly.held_back_count == 0, "exactly N days old must be collectable"
+
+    one_second_younger = run(
+        settings,
+        exclusions=[grace(settings, days=14, now=at(base, days=14, seconds=-1))],
+        **plan_only,
+    )
+    assert youngest in one_second_younger.depots[0].held_back
+    assert one_second_younger.depots[0].held_back[youngest] == (
+        "stored 14.0 days ago, grace window is 14 days"
+    )
+
+    skewed = run(
+        settings,
+        exclusions=[grace(settings, days=14, now=at(base, seconds=-3600))],
+        **plan_only,
+    )
+    assert skewed.held_back_count == 2, "a future ctime must protect, not expose"
+    assert skewed.depots[0].held_back[youngest] == (
+        "stored 0.0 days ago, grace window is 14 days"
+    )
+
+
+def test_a_chunk_whose_age_cannot_be_read_is_held_back(tmp_path: Path) -> None:
+    """**Fail-closed, the primary direction of this package.** The file is
+    there and its ``lstat`` fails — a permission/ACL refusal or a transient
+    I/O error — and an age we cannot read must protect, not expose. (A Windows
+    *delete-pending* name is deliberately not in that list: measured, ``lstat``
+    raises ``FileNotFoundError`` for one, so it takes the plan-stands branch
+    the next test pins. WP 1.6's ``PermissionError`` came from ``unlink``.)
+
+    Mutation target: replacing the hold-back in ``RecentlyStoredGrace``'s
+    ``except OSError`` branch with ``return None`` deletes the unreadable
+    chunk and kills this test. So does re-adding an ``os.path.lexists``
+    recheck in front of it — ``lexists`` is ``lstat``-based and swallows this
+    very ``PermissionError`` into ``False``, which is exactly why the branch
+    decides on the error *type* instead. Its twin below (an unambiguously
+    absent file ⇒ NOT held back) pins the other direction.
+    """
+    settings = build_world(tmp_path)
+    stuck = os.path.normpath(str(chunk_path(settings, 441, ORPHAN_A)))
+    real_lstat = os.lstat
+
+    def failing_lstat(path, *args, **kwargs):
+        if os.path.normpath(str(path)) == stuck:
+            raise PermissionError(13, "held by another process")
+        return real_lstat(path, *args, **kwargs)
+
+    base = stored_at(settings, ORPHAN_B)
+    predicate = grace(settings, days=14, now=at(base, days=365))
+    gc_execute.os.lstat = failing_lstat  # type: ignore[assignment]
+    try:
+        report = run(settings, execute=True, exclusions=[predicate])
+    finally:
+        gc_execute.os.lstat = real_lstat  # type: ignore[assignment]
+
+    # ORPHAN_A: unreadable age -> held back, still on disk.
+    assert list(report.depots[0].held_back) == [ORPHAN_A]
+    assert "could not be read" in report.depots[0].held_back[ORPHAN_A]
+    assert "PermissionError" in report.depots[0].held_back[ORPHAN_A]
+    assert chunk_path(settings, 441, ORPHAN_A).exists()
+    # ORPHAN_B: a year old and readable -> collected. The failure protected
+    # exactly one chunk, not the whole run.
+    assert report.removed_count == 1
+    assert not chunk_path(settings, 441, ORPHAN_B).exists()
+    assert report.ok is True
+
+
+def test_a_chunk_that_is_already_gone_is_reported_gone_not_held_back(
+    tmp_path: Path,
+) -> None:
+    """The other half of the fail-closed branch: ``lstat`` fails for a file a
+    concurrent ``DELETE`` removed too, and there is nothing to protect there.
+    Holding it back would replace WP 1.6's accurate ``already_gone`` /
+    0-bytes accounting with a claim that a nonexistent file was protected.
+
+    The plan is built while both orphans exist and one of them vanishes before
+    execution — the same shape as
+    ``test_a_chunk_removed_by_someone_else_frees_zero_bytes``, because a plan
+    built afterwards would simply not name the missing chunk.
+
+    Mutation target: widening the ``FileNotFoundError`` branch to every
+    ``OSError`` (or holding back unconditionally) kills this test.
+    """
+    settings = build_world(tmp_path)
+    depot_root = deletion.resolve_depot_root(settings.cache_root)
+    conn = open_db(settings)
+    try:
+        plan = gc.plan_gc(
+            440,
+            gc.load_gc_inputs(conn, 440),
+            depot_root=depot_root,
+            archive_dir=settings.manifest_archive_dir,
+        )
+    finally:
+        conn.close()
+    base = stored_at(settings, ORPHAN_B)
+    chunk_path(settings, 441, ORPHAN_A).unlink()
+
+    result = gc_execute.execute_depot(
+        plan.depots[0],
+        depot_root=depot_root,
+        exclusions=[grace(settings, days=14, now=at(base, days=365))],
+    )
+
+    assert result.planned_orphan_count == 2
+    assert result.held_back == {}
+    assert result.already_gone_count == 1
+    assert result.removed_count == 1
+    assert result.removed_bytes == 400, "the vanished chunk contributes 0 bytes"
+    assert result.ok is True
+
+
+def test_an_unsafe_chunk_name_is_refused_and_reported_not_quietly_held_back(
+    tmp_path: Path,
+) -> None:
+    """A name the planner could never produce is an anomaly, not an age
+    question. The window declines to answer, the executor refuses it as
+    ``REFUSED_UNSAFE_NAME``, and the job goes ``error`` — with the window ON,
+    which is the configuration that could have hidden it.
+
+    Mutation target: making ``RecentlyStoredGrace`` fail closed on an invalid
+    chunk id turns this loud refusal into a silent "held back" and kills this
+    test.
+    """
+    settings = build_world(tmp_path)
+    depot_root = deletion.resolve_depot_root(settings.cache_root)
+
+    result = gc_execute.execute_depot(
+        gc.DepotGcPlan(
+            depotid=441,
+            status=gc.STATUS_PLANNED,
+            orphan_chunks={"../../../../etc/passwd": 1, ORPHAN_A.upper(): 1},
+        ),
+        depot_root=depot_root,
+        exclusions=[grace(settings, days=14)],
+    )
+
+    assert result.held_back == {}
+    assert [p.outcome for p in result.problems] == [
+        gc_execute.REFUSED_UNSAFE_NAME,
+        gc_execute.REFUSED_UNSAFE_NAME,
+    ]
+    assert result.ok is False
+
+
+def test_the_predicate_holds_everything_back_if_it_cannot_resolve_the_root(
+    tmp_path: Path,
+) -> None:
+    """Constructing the predicate never raises — ``run_gc_job`` must not crash
+    on a misconfigured cache root — and a predicate that could not resolve one
+    protects everything instead of silently permitting everything.
+
+    (Unreachable through the wiring: ``run_gc`` applies the same guard to the
+    same cache root and aborts the run before any predicate is consulted. This
+    is the guard that keeps it unreachable *by construction*.)
+    """
+    settings = build_world(tmp_path)
+    broken = gc_execute.RecentlyStoredGrace(cache_root="", grace_days=14)
+
+    reason = broken(ORPHAN_A, gc.DepotGcPlan(depotid=441, status=gc.STATUS_PLANNED))
+
+    assert reason is not None
+    assert "could not be read" in reason
+    assert "VAULT_CACHE_ROOT is empty" in reason
+    assert chunk_path(settings, 441, ORPHAN_A).exists()
+
+
+def test_the_window_reasons_only_about_the_depot_the_plan_named(
+    tmp_path: Path,
+) -> None:
+    """The predicate resolves ``depot/<id>/chunk/<chunk id>`` from the plan's
+    own depot id through the executor's guards — it never scans, and a chunk
+    id that exists under a *different* depot is not what it stats. Depot 999
+    holds a chunk of its own; asked about it under depot 441's plan, the
+    predicate finds nothing to protect there."""
+    settings = build_world(tmp_path)
+    foreign = _cid(0xF1)  # exists under depot 999, not under 441
+    assert (depot_dir(cache_root(settings), 999) / "chunk" / foreign).exists()
+    predicate = grace(settings, days=14)
+
+    under_441 = predicate(
+        foreign, gc.DepotGcPlan(depotid=441, status=gc.STATUS_PLANNED)
+    )
+    under_999 = predicate(
+        foreign, gc.DepotGcPlan(depotid=999, status=gc.STATUS_PLANNED)
+    )
+
+    assert under_441 is None, "a file that is not there is not protected"
+    assert under_999 is not None and "0.0 days ago" in under_999
+
+
+def test_a_dry_run_reports_what_would_be_held_back_and_deletes_nothing(
+    tmp_path: Path,
+) -> None:
+    """An operator reading a dry run has to be able to see why the orphan bytes
+    it counts will not come back. The plan still counts them as orphans; the
+    report says how many of those the window is sitting on, and what an execute
+    run would really delete.
+
+    Mutation target: dropping the exclusions from ``run_gc``'s dry-run branch
+    makes ``held_back`` empty here and kills this test.
+    """
+    settings = build_world(tmp_path)
+    before = snapshot(cache_root(settings))
+    base = stored_at(settings, ORPHAN_A)
+
+    # ORPHAN_A/B are the same age; move the clock so the window covers both.
+    report = run(
+        settings, execute=False, exclusions=[grace(settings, days=14, now=at(base))]
+    )
+
+    assert report.executed is False
+    assert report.planned_orphan_count == 2
+    assert report.planned_orphan_bytes == 700
+    assert report.held_back_count == 2
+    assert report.held_back_bytes == 700
+    assert report.deletable_orphan_count == 0
+    assert report.deletable_orphan_bytes == 0
+
+    text = report.log_text()
+    assert "held_back=2 (700 bytes)" in text
+    assert "would_delete=0 (0 bytes)" in text
+    assert f"~ {ORPHAN_A}: stored 0.0 days ago, grace window is 14 days" in text
+    assert "NOTHING was deleted" in text
+    assert snapshot(cache_root(settings)) == before
+
+
+def test_the_held_back_list_in_the_log_is_bounded(tmp_path: Path) -> None:
+    """A beta branch can hold back thousands of chunks; the job log keeps only
+    its last 4 KiB, so an unbounded list would push the totals out of it."""
+    settings = build_world(tmp_path)
+    many = {_cid(0xD000 + index): 10 for index in range(25)}
+    write_chunks(cache_root(settings), 441, many)
+
+    report = run(settings, execute=False, exclusions=[grace(settings, days=14)])
+
+    text = report.log_text()
+    assert text.count("    ~ ") == gc_execute.MAX_REPORTED_PROBLEMS + 1  # + the tail
+    assert f"~ ... and {27 - gc_execute.MAX_REPORTED_PROBLEMS} more held back" in text
+    assert "GC totals (DRY RUN)" in text.splitlines()[-1]
+
+
+# --------------------------------------------------------------------------
+# Configuration and wiring: VAULT_GC_GRACE_DAYS -> the job
+# --------------------------------------------------------------------------
+
+
+def test_grace_days_zero_disables_the_window_entirely(tmp_path: Path) -> None:
+    """``0`` means the predicate is not even constructed, and the executor
+    behaves exactly as it did before WP 3.8b.
+
+    Mutation target: making ``grace_window_exclusions`` build the predicate
+    regardless of the setting (or comparing ``!= 0`` on a negative value)
+    leaves the freshly written orphans on disk and kills this test.
+    """
+    settings = build_world(tmp_path, grace_days=0)
+
+    assert gc_execute.grace_window_exclusions(settings) == gc_execute.NO_EXCLUSIONS
+
+    conn = open_db(settings)
+    try:
+        jobs.enqueue_gc(conn, 440, execute=True)
+        job = jobs.claim_next_job(conn)
+        gc_execute.run_gc_job(conn, job, settings=settings)
+        finished = jobs.get_job(conn, int(job["id"]))
+    finally:
+        conn.close()
+
+    assert finished["status"] == "done", finished["log_excerpt"]
+    assert "chunks_removed=2" in finished["log_excerpt"]
+    assert "held_back=0 (0 bytes)" in finished["log_excerpt"]
+    assert not chunk_path(settings, 441, ORPHAN_A).exists()
+
+
+def test_the_configured_window_reaches_a_queued_job(tmp_path: Path) -> None:
+    """End to end through the queue with ``VAULT_GC_GRACE_DAYS=14``: the job
+    finishes ``done`` (holding chunks back is not a failure), frees nothing,
+    and says why.
+
+    Mutation target: dropping ``exclusions=grace_window_exclusions(settings)``
+    from ``run_gc_job`` deletes the chunks and kills this test.
+    """
+    settings = build_world(tmp_path, grace_days=14)
+
+    conn = open_db(settings)
+    try:
+        jobs.enqueue_gc(conn, 440, execute=True)
+        job = jobs.claim_next_job(conn)
+        gc_execute.run_gc_job(conn, job, settings=settings)
+        finished = jobs.get_job(conn, int(job["id"]))
+    finally:
+        conn.close()
+
+    assert finished["status"] == "done", finished["log_excerpt"]
+    assert "chunks_removed=0" in finished["log_excerpt"]
+    assert "held_back=2 (700 bytes)" in finished["log_excerpt"]
+    assert "grace window is 14 days" in finished["log_excerpt"]
+    assert chunk_path(settings, 441, ORPHAN_A).exists()
+    assert chunk_path(settings, 441, ORPHAN_B).exists()
+    # Nothing was reclaimed, so nothing about the app's state became uncertain.
+    conn = open_db(settings)
+    try:
+        assert needs_force_of(conn, 440) == 0
+    finally:
+        conn.close()
+
+
+def test_the_shipped_default_protects_a_freshly_stored_chunk(tmp_path: Path) -> None:
+    """The default that actually ships (14 days, not 0) is what a deployment
+    runs, so it is pinned from ``Settings``' own default rather than from a
+    value this test file chose.
+
+    Mutation target: changing ``DEFAULT_GC_GRACE_DAYS`` to 0 kills this test.
+    """
+    settings = build_world(tmp_path)
+    shipped = Settings(
+        vault_api_key=TEST_API_KEY,
+        db_path=settings.db_path,
+        cache_root=settings.cache_root,
+        log_level="INFO",
+        manifest_archive_dir=settings.manifest_archive_dir,
+    )  # gc_grace_days deliberately not passed
+
+    assert shipped.gc_grace_days == 14
+    exclusions = gc_execute.grace_window_exclusions(shipped)
+    assert len(exclusions) == 1
+
+    conn = open_db(shipped)
+    try:
+        jobs.enqueue_gc(conn, 440, execute=True)
+        job = jobs.claim_next_job(conn)
+        gc_execute.run_gc_job(conn, job, settings=shipped)
+    finally:
+        conn.close()
+
+    assert chunk_path(settings, 441, ORPHAN_A).exists()
+    assert chunk_path(settings, 441, ORPHAN_B).exists()
+
+
+def test_a_disabled_window_is_expressed_by_not_building_the_predicate() -> None:
+    """``RecentlyStoredGrace(grace_days=0)`` is a programming error, not a
+    quiet no-op predicate that returns ``None`` for everything: "off" has
+    exactly one representation (no predicate), so there is no second switch to
+    fall out of sync with ``VAULT_GC_GRACE_DAYS``."""
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="grace_days > 0"):
+            gc_execute.RecentlyStoredGrace(cache_root="./cache", grace_days=bad)
 
 
 # ==========================================================================

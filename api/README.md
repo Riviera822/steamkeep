@@ -57,7 +57,8 @@ api/
 │   ├── schedule_window.py # window parsing/containment, pure (WP 3.5)
 │   ├── scheduler.py      # the second background thread: sweeps (WP 3.5)
 │   ├── gc.py             # GC core: keep-set resolution + plan_gc, read-only (WP 3.7)
-│   ├── gc_execute.py     # GC execution: deletes what gc.py planned (WP 3.8)
+│   ├── gc_execute.py     # GC execution: deletes what gc.py planned (WP 3.8),
+│   │                     #   minus what the grace window holds back (WP 3.8b)
 │   ├── validation.py     # shared request types (AppId) — one coercion rule
 │   └── routers/
 │       ├── health.py     # GET /v1/health — the ONE public router
@@ -95,6 +96,7 @@ Copy `.env.example` to `.env` and adjust:
 | `VAULT_STEAMPREFILL_CACHE_DIR`  | no       | platform default (see below) | SteamPrefill's own manifest temp-cache directory, scanned after a successful prefill job (see "Manifest ingestion") |
 | `VAULT_MANIFEST_ARCHIVE_DIR`    | no       | `<dir of VAULT_DB_PATH>/manifests` | Where archived manifest `.bin` files are copied durably |
 | `VAULT_MANIFEST_KEEP`           | no       | `3`          | Archived manifests kept per depot (total, current included); **must be >= 1** |
+| `VAULT_GC_GRACE_DAYS`           | no       | `14`         | Days a stored chunk is protected from GC, by store time (`ctime`); `0` disables the window; **must be >= 0**. See "Garbage collection → The recently-stored grace window" |
 | `VAULT_SCHEDULE_WINDOW`         | no       | *(empty — scheduler OFF)* | Daytime window the scheduler sweeps in, `HH:MM-HH:MM` **server-local** time (e.g. `09:00-17:00`, `22:00-06:00`). Unset/blank = disabled. See "Scheduler" |
 | `VAULT_SCHEDULE_INTERVAL_MINUTES` | no     | `180`        | Minimum spacing between two sweeps (plan §7's "every 3 h"); **must be > 0** |
 | `VAULT_SCHEDULE_CLIENT_STALE_DAYS` | no    | `7`          | A client whose newest agent report is older than this drops out of the sweep's target set; **must be > 0** |
@@ -2107,6 +2109,7 @@ body field, and for anything but a literal JSON boolean in `execute`.
 | Never touches | any chunk the plan did not name; any name that is not exactly 40 lowercase hex characters; anything outside `depot/<id>/chunk/` |
 | Never touches | a symlink or a Windows junction — it is refused, never unlinked (the plan named a *file*, and a name that points elsewhere is not that file) |
 | Never touches | the `manifest/` subtree beyond the duplicate copies above, the archive, other depots, or the depot directory itself |
+| Never touches | a chunk stored within the last `VAULT_GC_GRACE_DAYS` days, or one whose store time cannot be read (WP 3.8b — see "The recently-stored grace window") |
 | Never touches | `apps.status`, `apps.last_prefill_at`, mapping rows, `depot_manifests` |
 
 Both the "only a `planned` depot" and the "only a 40-hex name the planner
@@ -2164,8 +2167,92 @@ its summary truncated away.
   depot 900 skipped_no_manifest: ADR-0007 readiness gate: no current manifest ...
 [vault-api] GC totals (EXECUTED): chunks_removed=2 bytes_freed=700 already_gone=0
   dedupe_removed=2 dedupe_bytes_freed=1234 total_bytes_freed=1934 problems=0
-  declined=0 held_back=0 depots_touched=[441] needs_force_set_for=[440, 730]
+  declined=0 held_back=0 (0 bytes) depots_touched=[441]
+  needs_force_set_for=[440, 730]
 ```
+
+### The recently-stored grace window (`VAULT_GC_GRACE_DAYS`, WP 3.8b)
+
+**What it protects.** GC decides what is dead by diffing the cache against the
+*current manifests it knows about*. Content that reached the cache only because
+a real client pulled it through vault-core is in none of them: an opt-in Steam
+**beta branch** (SteamPrefill has no branch selection, so vault-api can never
+prefill one), a **demo**, or any build downloaded against a manifest vault-api
+never recorded. Manifest-diff GC is not wrong about those chunks — they really
+are absent from every counting app's current manifest — it is simply too eager,
+and the tester who downloaded a beta build on Monday would re-download it after
+Tuesday's collection. The window holds back anything stored in the last N days.
+
+**Where it lives, and why not in the planner.** It is a `ChunkExclusion`
+predicate (`gc_execute.RecentlyStoredGrace`) on the hook WP 3.8 left open:
+`gc.plan_gc` still names those chunks as orphans, and the *execution* holds them
+back. That separation is deliberate — the planner stays a pure statement about
+manifests, and time is a policy layered on top of it. Exclusions can only ever
+**shrink** the delete set; there is no hook that adds to it.
+
+**`ctime`, not `mtime`.** nginx `proxy_store` stamps a stored file's mtime with
+the *upstream* `Last-Modified`, i.e. Steam's publish time — months old for a
+freshly stored chunk of an old build. That measured fact is why ADR-0007
+rejected time-based attribution in the first place, and an mtime-based window
+would protect nothing. `st_ctime` means:
+
+- **Linux / the container (the deployment target):** the inode *change* time.
+  `proxy_store` renames its temp file into place and the rename sets ctime, so
+  ctime is the store time. Known caveat: `chmod`/`chown` also bump ctime.
+  Nothing touches cache chunk files that way — but if an operator does run a
+  recursive `chown` over the cache, everything looks freshly stored and GC frees
+  less for one window, which is the safe direction.
+- **Windows (dev runs only):** the file creation time, which for a
+  store-on-miss write is also the store time. NTFS "file system tunneling" can
+  hand a recreated file its predecessor's creation time within ~15 s of a
+  delete; not the deployment target, and not a case this cache produces.
+
+**Semantics, pinned:** the window is half-open — `age < N days` is held back, so
+a chunk exactly N days old is released. Age is read with one `os.lstat` per
+*orphan* (never following links, on the path rebuilt through the same
+`deletion.safe_child_path` guards the deletion loop uses). A chunk whose age
+**cannot be read** — a permission/ACL refusal, a transient I/O error — is held
+back: fail-closed, an unreadable age must protect, not expose. Two cases are
+deliberately not that: a file that is unambiguously **gone**
+(`FileNotFoundError`) is left to the normal `already_gone` / 0-bytes
+accounting, and an **invalid chunk id** is left to the executor's loud
+`refused_unsafe_name` refusal rather than being quietly "held back".
+
+A Windows **delete-pending** name belongs to the first of those, which is worth
+saying because WP 1.6's `PermissionError [WinError 5]` note invites the
+opposite guess: measured on Windows 11 (a handle opened with
+`FILE_SHARE_DELETE`, the name unlinked while the handle lives), `os.lstat`
+raises `FileNotFoundError [WinError 2]` for such a name. WP 1.6's access-denied
+result was `unlink`'s answer, a *different* syscall, and applies to the removal
+path rather than to this one. Landing on the plan-stands side is right anyway:
+the name has already been unlinked for good, so "gone, 0 bytes" is the accurate
+report and protecting it would be a fiction.
+
+**Tuning.** `VAULT_GC_GRACE_DAYS=0` disables the window entirely — the predicate
+is not even constructed and GC behaves exactly as it did before WP 3.8b. Raise
+it for a long beta cycle. Note the window is not a completeness guarantee: after
+it passes, an unrecorded manifest's chunks are collectable again and ADR-0007's
+honest limit (consequence = re-download, never corruption) stands. The second
+half of that protection — beta manifests joining the keep set via the opt-in
+oracle (ADR-0007 addendum, decision B) — is WP 3.9's scope, not this one's.
+
+**What you see.** A **dry run applies the window too**, so a preview cannot
+promise bytes an execute run would refuse to free:
+
+```
+[vault-api] GC for app 440: DRY RUN.
+  depot 441 planned: orphans=2 (700 bytes) held_back=2 (700 bytes) kept=2 ...
+    ~ 00..b1: stored 0.3 days ago, grace window is 14 days
+[vault-api] GC totals (DRY RUN): orphans=2 (700 bytes) held_back=2 (700 bytes)
+  would_delete=0 (0 bytes) reclaimable_dedupe_bytes=0 planned_depots=[441]. ...
+```
+
+Held-back chunks are listed with a `~` marker (bounded like the `!` and `-`
+lists, so a beta branch holding thousands of chunks cannot push the totals out
+of the 4 KiB log excerpt), and the totals of an execute run carry
+`held_back=<n> (<bytes> bytes)`. Holding chunks back is never a failure: a run
+that freed nothing because everything was young is `done`, and — since nothing
+was reclaimed — it sets no `needs_force`.
 
 ### Duplicate stored manifests: identical only
 
@@ -2236,12 +2323,12 @@ tempting:
 ### Honest limits (ADR-0007, echoed)
 
 - GC can delete chunks a client pinned to an **unrecorded or beta-branch
-  manifest** still wants. The consequence is a **re-download**, never
-  corruption. (A decision on protecting recently-stored chunks with a grace
-  window is pending and is deliberately **not** implemented here — the orphan
-  set is consumed through `gc_execute.orphans_to_delete`, which already takes a
-  sequence of `ChunkExclusion` predicates and reports what they held back, so
-  that rule is one predicate away rather than surgery on the deletion loop.)
+  manifest** still wants **once they are older than `VAULT_GC_GRACE_DAYS`**.
+  The consequence is a **re-download**, never corruption. The grace window
+  (WP 3.8b, above) narrows the exposure to content older than the window; the
+  keep-set half of the protection (open beta branches via the manifest oracle,
+  ADR-0007 addendum decision B) is WP 3.9. Passworded branches stay encrypted
+  and uncoverable — the window is their only protection, ever.
 - Unknown-manifest, unmapped and unreadable-owner depots are **skipped and
   reported**, never collected on partial knowledge.
 - GC reclaims space; it does not certify that a depot is complete or correct.
@@ -2255,8 +2342,19 @@ tempting:
 - No third-party manifest oracle (ADR-0006 decision 4, gated).
 - No job pause/resume/cancel, and no way to stop a GC job once it is running
   beyond stopping the worker.
-- No beta-chunk grace window (pending decision, see above).
 - No changes outside `api/`.
+
+### What WP 3.8b (the grace window) deliberately did NOT do
+
+- No change to `plan_gc`: the plan still names recently-stored chunks as
+  orphans and the execution holds them back — see above for why that
+  separation is the point rather than an oversight.
+- No manifest oracle and no beta-branch keep sets (ADR-0007 addendum decision
+  B = WP 3.9).
+- No `VAULT_GC_GRACE_DAYS` wiring in `deploy/compose.yaml` / `deploy/.env.example`
+  (outside `api/`; the setting has a working default, so a deployment that does
+  not pass it is protected, not broken).
+- No per-app or per-depot window, and no way to exempt one depot from it.
 
 ## Auth
 
@@ -2932,3 +3030,40 @@ deletion-class code, so the emphasis is on what must NOT happen:
   keeper verification, `job_deletes`' NULL handling, the already-gone
   accounting, `parse_bin_payload`'s now-required expected ids, and the worker's
   refusal to guess an unknown job type.
+
+WP 3.8b additions (`tests/test_gc_execute.py` +14, `tests/test_config.py` +3):
+
+- **How time is faked, and why that way.** `os.utime` sets atime/mtime and
+  explicitly **not** ctime, so a test cannot age a file into the past. Sleeping
+  would be slow, flaky and could only produce seconds of age. These tests
+  therefore write real chunk files, read their **real** `st_ctime` back off the
+  disk, and inject a fake `now` into the predicate: the comparison under test
+  runs against a genuine platform ctime on both Windows and Linux, and only the
+  reference point — the one value a deployment's clock supplies anyway — is
+  synthetic. The boundary test anchors the clock on the *newest* of the two
+  orphans, since files written microseconds apart do not share a ctime.
+- **Young survives byte-for-byte**: whole-tree snapshot plus a content
+  comparison of the protected chunks, with the reason string pinned verbatim
+  (`stored 0.0 days ago, grace window is 14 days`). **Old is deleted.**
+- **The boundary is half-open**: exactly 14 days old is collected, one second
+  younger is held, and a *future* ctime (clock skew) is held with a clamped
+  `0.0 days` reading rather than a negative one.
+- **Fail-closed both ways**: an `lstat` that fails on a file that is there holds
+  the chunk back; an unambiguously absent file (plan built first, chunk removed
+  before execution) is still reported `already_gone` with 0 bytes rather than
+  "protected"; an invalid chunk id is still the loud `refused_unsafe_name`
+  problem that makes the job `error`, not a quiet hold-back.
+- **Dry runs report it**: `held_back`/`would_delete` totals, per-chunk `~` lines
+  with reasons, the bounded list (25 extra orphans → 10 lines plus an "and N
+  more" tail with the totals still last), and nothing deleted.
+- **The wiring**: `VAULT_GC_GRACE_DAYS=0` → `NO_EXCLUSIONS` and the old
+  behaviour end-to-end through a queued job; `=14` → the job finishes `done`,
+  frees nothing, sets no `needs_force`, and says why; and the **shipped
+  default** (taken from `Settings`' own default, not from a value the test file
+  chose) protects a freshly stored chunk.
+- **Ten mutations, each killed by a named test**: the fail-closed stat branch
+  (→ `return None`, and → re-adding an `os.path.lexists` recheck, which
+  `lexists` would collapse into "gone"), the comparison direction
+  (`<` → `>`), the boundary (`<` → `<=`), the `N=0` bypass, the invalid-name
+  route, the dry-run exclusions, `run_gc_job`'s `exclusions=` argument, the
+  broken-cache-root protection, and `DEFAULT_GC_GRACE_DAYS` itself.

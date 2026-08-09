@@ -52,6 +52,14 @@ These are not style preferences; each entry cost a review round to learn.
   `DirEntry.is_dir(follow_symlinks=False)` is True — use an
   islink-OR-isjunction helper; rmtree refuses links (target survives) but
   removal code must unlink links itself, never traverse (WP 1.6).
+- `os.path.lexists` swallows EVERY `OSError` into False ("gone") — a
+  protective branch keyed on it collapses "unreadable" into "deletable".
+  Decide on the error TYPE: only `FileNotFoundError` means gone
+  (WP 3.8b).
+- Attribute Windows errors per SYSCALL: a delete-pending name answers
+  `lstat` with `FileNotFoundError [WinError 2]` but `unlink` with
+  `PermissionError [WinError 5]` — WP 1.6's finding is about unlink only;
+  measured with a FILE_SHARE_DELETE handle rig (WP 3.8b).
 
 ## PowerShell 5.1 (dev/test harnesses)
 - `2>&1` on native commands wraps stderr lines in NativeCommandError and
