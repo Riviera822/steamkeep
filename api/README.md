@@ -530,12 +530,15 @@ cheap for an app whose chunks are already large.
 **The fix:** a per-app `apps.needs_force` flag (schema v5) decides, at the
 start of every job, whether `run_prefill` is called with `use_force=True`.
 `jobs.get_app_needs_force` reads it; `jobs.clear_needs_force_if_unchanged`
-(the worker's end-of-job clear, see "Concurrent DELETE" below) and
+(the worker's end-of-job clear, see "Concurrent DELETE" below),
 `deletion.reset_app_after_deletion(..., set_needs_force=...)` (the deletion
-path's set) are the only two writers — `set_app_status` deliberately has
-**no** `needs_force` parameter at all, so there is no unconditional-write path
-left for a future call site to accidentally reintroduce the race described
-next. The lifecycle:
+path's set for the *requesting* app) and
+`deletion.set_needs_force_for_remnant_co_owners` (the deletion path's set for
+a last-remnant depot's *co-owners* — ADR-0003 addendum, see "Per-game
+deletion" below) are the only three writers — `set_app_status` deliberately
+has **no** `needs_force` parameter at all, so there is no unconditional-write
+path left for a future call site to accidentally reintroduce the race
+described next. The lifecycle:
 
 | Event | `needs_force` after |
 |---|---|
@@ -545,7 +548,8 @@ next. The lifecycle:
 | Any failure (non-zero exit, timeout, aborted, not-logged-in, internal error) | unchanged |
 | `DELETE /v1/cache/{appid}` removed ≥1 depot, or reported a depot ALREADY-ABSENT | `1` |
 | `DELETE /v1/cache/{appid}` — any depot landed in `failed` (partial deletion; cache state now unknown) | `1` |
-| `DELETE /v1/cache/{appid}` — nothing exclusive existed to delete (every mapped depot was shared) | unchanged |
+| `DELETE /v1/cache/{appid}` — nothing exclusive/remnant existed to delete (every mapped depot was shared and protected) | unchanged |
+| `DELETE /v1/cache/{appid}` deleted (or attempted, or found already-absent) a last-remnant depot — every **other** app still mapping it (ADR-0003 addendum) | `1` |
 
 Why deletion sets it rather than clearing it (this is the WP 1.4 rationale
 ADR-0006 decision 2 explicitly preserves): SteamPrefill's own
@@ -682,9 +686,13 @@ pair doesn't exist.
 `"shared": true` if `depot_app_map` has any other `appid` row for the same
 `depotid` (a single correlated `EXISTS` subquery per the full depot list,
 not a per-depot round-trip). Plan §4: shared depots (redistributables,
-shared content) must be skipped on deletion and reported, not silently
-removed — this endpoint is what surfaces that fact before a deletion is
-even attempted.
+shared content) are protected from deletion and reported, not silently
+removed, **as long as at least one of the other mapped apps currently has
+cache content** — this endpoint is what surfaces that fact before a deletion
+is even attempted. `"shared": true` is therefore no longer synonymous with
+"never deleted": since the ADR-0003 addendum (WP 3.5), a shared depot whose
+every *other* mapped app is currently uncached is deleted anyway as a "last
+cached remnant" — see "Last cached remnants" below for the exact rule.
 
 ### Input validation on the manual fallback endpoints (WP 1.3 review, should-fix)
 
@@ -824,8 +832,10 @@ per tracked game is less data than the mapping query already reads.
 
 `DELETE /v1/cache/{appid}` implements plan §4's "Deletion" section:
 `appid → [depotids] → remove those depot directories → reset status to idle`,
-with **shared-depot protection**. The mechanics live in
-`vault_api/deletion.py`, the HTTP shape in `vault_api/routers/cache.py`.
+with **shared-depot protection** — extended by the ADR-0003 addendum
+(2026-08-06, WP 3.5) so a shared depot no longer leaks forever once every
+co-owner has been deleted (see "Last cached remnants" below). The mechanics
+live in `vault_api/deletion.py`, the HTTP shape in `vault_api/routers/cache.py`.
 
 ### Semantics
 
@@ -841,21 +851,38 @@ with **shared-depot protection**. The mechanics live in
 ```json
 {
   "appid": 440,
-  "deleted_depots":  [{"depotid": 441, "size_bytes_freed": 1000000}],
-  "skipped_shared":  [{"depotid": 900, "shared_with": [730]}],
+  "deleted_depots":  [
+    {"depotid": 441, "size_bytes_freed": 1000000, "shared_with_uncached": []},
+    {"depotid": 900, "size_bytes_freed": 50000, "shared_with_uncached": [730]}
+  ],
+  "skipped_shared":  [],
   "failed":          [],
-  "total_bytes_freed": 1000000
+  "total_bytes_freed": 1050000
 }
 ```
 
-- **Shared depots are never deleted.** A depot that any *other* tracked app also
-  maps is skipped and reported with the other app ids (plan §4: "2 depots shared
-  with game Y, not deleted"). This holds in both directions — after deleting
-  game A, deleting game B still finds depot 900 shared, because A's mapping rows
-  are kept (see below). Exclusivity is decided **twice**: once when the plan is
-  built, and again immediately before each individual depot is removed (see
-  "Concurrency" below) — a depot that only became shared in between is kept and
-  reported in `skipped_shared` with its fresh owner list.
+(Depot 900 above is a **last cached remnant**: app 730 still maps it, but 730
+is idle/never-prefilled/job-free, so its bytes would otherwise be
+unreclaimable forever — see "Last cached remnants" below. `shared_with_uncached`
+is `[]` on depot 441, an ordinary exclusive deletion, and would be omitted
+from `skipped_shared` entirely, not listed there, once it's gone — that field
+now means "protected", see next bullet.)
+
+- **A shared depot is protected only while it has cache content somewhere else
+  (ADR-0003 addendum) — not simply "shared".** A depot that any *other* tracked
+  app also maps is skipped and reported with the other app ids (plan §4: "2
+  depots shared with game Y, not deleted") **as long as at least one of those
+  other apps currently has cache content** (see "Last cached remnants" below
+  for the exact rule and what happens when none of them do). Before the
+  addendum this held unconditionally; now it holds only for a "live" share.
+  This still holds in both directions for a live share — after deleting game A,
+  deleting game B still finds a depot shared with a *third*, still-cached app C
+  protected, because A's mapping rows are kept (see below). Exclusivity/remnant
+  status is decided **twice**: once when the plan is built, and again
+  immediately before each individual depot is removed (see "Concurrency"
+  below) — a depot whose co-owner state changed in between (became shared, or
+  a co-owner gained content or a job) is kept and reported in `skipped_shared`
+  with its fresh owner list.
 - **A depot that is already gone** counts as `deleted` with
   `size_bytes_freed: 0` rather than as an error: the endpoint is idempotent, so a
   repeated `DELETE` (or a racing second one) answers `200` with zeros instead of
@@ -881,10 +908,14 @@ with **shared-depot protection**. The mechanics live in
   the honest state: the app UI surfaces it, and a re-prefill (which runs with
   `--force`) repairs the cache. Clearing `last_prefill_at` is unconditional for
   the same reason — that timestamp is no longer true either way. (Honest edge
-  case: an app whose depots are *all* shared has nothing deleted and is still
-  reset to `idle`, even though its content remains on disk inside the shared
-  depots. `GET /v1/games` still reports its real `size_bytes`, so the operator
-  sees the truth.)
+  case: an app whose depots are *all* shared **and protected** has nothing
+  deleted and is still reset to `idle`, even though its content remains on
+  disk inside the shared depots. `GET /v1/games` still reports its real
+  `size_bytes`, so the operator sees the truth. An app whose only depot is a
+  last cached remnant is the opposite edge case — everything mapped IS
+  deleted, `needs_force` is set exactly as for any other deletion, see
+  `test_delete_deletes_the_only_depot_when_it_is_an_all_shared_remnant` in
+  `tests/test_cache_delete.py`.)
 - **The `SizeCache` is invalidated** right after the deletion
   (`sizes.SizeCache.invalidate()`, the hook WP 1.5 exported for exactly this),
   so `GET /v1/games` and `GET /v1/cache/summary` never serve pre-deletion sizes
@@ -894,10 +925,103 @@ with **shared-depot protection**. The mechanics live in
   (including the ALREADY-ABSENT case) or `failed` — so the app's next prefill
   runs with `--force` instead of trusting SteamPrefill's own now-stale
   bookkeeping (schema v5, WP 3.4, ADR-0006 decision 2 — see "needs_force"
-  above). Left untouched in the all-shared edge case just above, since
-  nothing on disk actually changed for this app. This is also the documented
-  way to force a re-fill: `DELETE` then `POST /v1/prefill`, no separate flag
-  on the prefill API.
+  above). Left untouched in the all-shared-and-protected edge case just above,
+  since nothing on disk actually changed for this app. This is also the
+  documented way to force a re-fill: `DELETE` then `POST /v1/prefill`, no
+  separate flag on the prefill API. **Every co-owner app id in a
+  `shared_with_uncached` list also gets `needs_force = 1`** (ADR-0003
+  addendum) — their own `status`/`last_prefill_at` are left untouched, only
+  the force flag, since a depot they still map just changed under them; see
+  "Last cached remnants" below.
+
+### Last cached remnants (ADR-0003 addendum, WP 3.5)
+
+**The problem this closes.** The original plan §4 rule protected any depot
+mapped to more than one tracked app, judged purely from `depot_app_map` rows —
+which survive deletion by design (see "The mapping rows are KEPT" below). If
+apps A and B share depot D and both are deleted, one after the other, that
+rule kept D "shared with the other" **both** times: neither app ever reports
+D cached again, `GET /v1/cache/summary` attributes D's size to apps that say
+"not cached", and nothing ever reclaims the space. Found during the Phase-4
+mockup review; full decision in `docs/adr/0003-additive-depot-mapping.md`'s
+addendum.
+
+**The rule.** A shared depot may be deleted when **no co-owning app currently
+has cache content** — judged conservatively (unknown ⇒ protected), so the
+depot stays protected (kept, reported in `skipped_shared`) if ANY co-owner:
+
+- has `apps.status != 'idle'` (`done`/`stale`/`error`/`running` all protect —
+  even `error`, since that state doesn't mean "no content", just "last run
+  failed"), or
+- has `last_prefill_at` set (non-`NULL`), or
+- has a queued or running job (`jobs.ACTIVE_STATUSES`), or
+- is unreadable (a poisoned mapping row — reported as owner `0`, same
+  convention as the pre-addendum code), or
+- has no `apps` row at all (the mapping table has no foreign key to `apps`,
+  so this can genuinely happen).
+
+Only when **every** co-owner is verifiably `status='idle'`,
+`last_prefill_at IS NULL`, and job-free is the depot deleted as a "last cached
+remnant". **Mapping rows are still kept** either way — that part of ADR-0003
+is unchanged; only the *directory* is removed.
+
+**Two-stage decision, same shape as the shared-depot TOCTOU recheck.** At plan
+time (`deletion.plan_deletion`), every co-owner named in the app's mapping
+rows has its `status`/`last_prefill_at`/active-job state read up front
+(`deletion.load_co_owner_states`, one bulk query) and handed in as plain data
+— `plan_deletion` itself stays a pure function with no database access, so
+every classification branch is directly unit-testable with dicts and tuples.
+Immediately before each candidate depot is actually removed, the **full**
+rule is re-evaluated from fresh data (`deletion.load_co_owners`, one joined,
+indexed query per depot — still a handful of index seeks, not a scan: served
+by `depot_app_map`'s primary key, `apps`'s primary key, and
+`idx_jobs_appid_status`). A co-owner that became non-idle, gained a
+`last_prefill_at`, or had a job enqueued in the window between planning and
+removal protects the depot at execute time exactly like the pre-addendum
+TOCTOU recheck protected a depot that became newly *mapped* in that window —
+the depot lands in `skipped_shared` (or `late_shared` internally) instead of
+being deleted. A recheck failure (a database error) still means "not
+deleted, reported failed": unknown ownership never resolves to delete, and
+never resolves to "these are the co-owners to flag" either.
+
+**Reporting.** A remnant deletion appears in `deleted_depots` exactly like an
+ordinary exclusive deletion, plus a non-empty `shared_with_uncached` field
+naming the co-owner app ids it was shared with (see the example response
+above) — additive only, every existing field keeps its exact prior meaning.
+`skipped_shared` keeps its pre-addendum meaning unchanged: "shared with at
+least one content-having co-owner". The audit log distinguishes a remnant
+deletion from an ordinary one (`DELETED (last remnant): shared with uncached
+app(s) [...]`, see "Audit trail" below).
+
+**`needs_force` on the co-owners.** Every co-owner appid a removed (or
+removal-attempted, or found-already-absent) remnant depot was shared with
+gets `apps.needs_force = 1` — see the needs_force bullet above and
+`deletion.set_needs_force_for_remnant_co_owners`'s docstring for the race
+analysis (a co-owner's job claimed between the recheck and this write is
+handled correctly by the *existing* `jobs.clear_needs_force_if_unchanged`
+compare-and-swap, unmodified by this addendum). Their `status` and
+`last_prefill_at` are deliberately **not** touched — the precondition for
+landing in this set is that they are already `'idle'`/`NULL`, and this write
+is only about disk state, not app lifecycle. **This is log-only when the
+remnant removal itself FAILS**: `failed[]` entries in the response never
+carry `shared_with_uncached` (only `deleted_depots[]` does — additive-only
+per the decision above), so an operator watching the API alone cannot see
+*which* co-owners were flagged for a failed remnant depot, only that they
+were (via their own `GET /v1/games/{appid}.needs_force`); the reason —
+"which depot, shared with which app ids" — is in the `cache-delete` audit
+log line for that failure, not in the HTTP response.
+
+**Retroactive repair needs no new endpoint.** Because mapping rows survive
+deletion, an already-orphaned remnant (created by the pre-fix code, or by a
+deletion that happened before this addendum shipped) self-heals the next time
+*any* co-owning app is deleted again: `DELETE /v1/cache/{appid}` re-reads the
+current mapping and co-owner state every time, so it has no memory of "already
+decided this was shared" to work around.
+
+**Worst case of the conservative judgment being wrong** (store-on-miss
+content a client is actively using gets deleted because vault-api's tracked
+state hadn't caught up yet): a re-download, never corruption — the same
+honest limit ADR-0007's garbage collection accepts.
 
 ### The mapping rows are KEPT (decision)
 
@@ -944,8 +1068,10 @@ functions with direct unit tests (`tests/test_cache_delete.py`):
   `failed` (with `depotid: 0`, since it cannot be named) and nothing is touched
   for it.
 - A mapping row whose *co-owner* app id is unreadable makes the depot count as
-  **shared** — something references it, so refusing to delete is the safe
-  reading.
+  **shared and protected** — something references it, so refusing to delete is
+  the safe reading. Unconditional: such a depot is never eligible for the
+  "last cached remnant" classification either, no matter what the *readable*
+  co-owners' content state says (ADR-0003 addendum).
 - String depot ids must be **exactly ASCII digits** (`isascii() and isdigit()`),
   not "whatever `int()` accepts" (WP 1.6 review). `int()` parses `" 441 "`,
   `"1_0"` and Arabic-Indic `"٤٤١"` perfectly happily; none of those is a depot id
@@ -985,14 +1111,15 @@ future CPython regression surfaces in this suite instead of in a user's data.
 Every decision goes to the standard `logging` module at INFO (failures at ERROR),
 prefixed `cache-delete`, and records the **resolved absolute path** rather than
 just the depot id — this is the audit trail for an operation that destroys user
-data. Real output from the live verification below:
+data. Real output from the live verification below (app 440 maps an exclusive
+depot 441/442 each, plus depot 900 shared with a still-cached app 730):
 
 ```
-INFO vault_api.routers.cache: cache-delete appid=440 starting: depot_root=...\cache\depot exclusive=[441, 442] shared=[900] unusable_rows=0
+INFO vault_api.routers.cache: cache-delete appid=440 starting: depot_root=...\cache\depot exclusive=[441, 442] remnant=[] shared=[900] unusable_rows=0
 INFO vault_api.deletion:      cache-delete appid=440 depot=900 KEPT: shared with app(s) [730]
 INFO vault_api.deletion:      cache-delete appid=440 depot=441 DELETED path=...\cache\depot\441 bytes_freed=1000000 link=False
 INFO vault_api.deletion:      cache-delete appid=440 depot=442 DELETED path=...\cache\depot\442 bytes_freed=2000000 link=False
-INFO vault_api.routers.cache: cache-delete appid=440 finished: deleted=2 skipped_shared=1 (of which 0 late) failed=0 bytes_freed=3000000; status set to 'idle', last_prefill_at cleared; mapping rows kept
+INFO vault_api.routers.cache: cache-delete appid=440 finished: deleted=2 (of which 0 last-remnant) skipped_shared=1 (of which 0 late) failed=0 bytes_freed=3000000; status set to 'idle', last_prefill_at cleared, needs_force=1; remnant co-owners flagged=[]; mapping rows kept
 ```
 
 A depot that was already gone logs `ALREADY-ABSENT`, a path-guard rejection logs
@@ -1002,6 +1129,24 @@ with the reason, a depot that became shared between plan and removal logs
 `KEPT (late recheck)`, and a refused cache root logs
 `REFUSED (cache root guard)`.
 
+**Last cached remnant (ADR-0003 addendum, WP 3.5)**, illustrating the same
+depot 900 once app 730 has ALSO been deleted or was never prefilled, so 900
+becomes the last cached remnant instead of a protected share (exact format
+strings from `deletion.delete_app_depots`/`routers/cache.py`):
+
+```
+INFO vault_api.routers.cache: cache-delete appid=440 starting: depot_root=...\cache\depot exclusive=[441] remnant=[900] shared=[] unusable_rows=0
+INFO vault_api.deletion:      cache-delete appid=440 depot=900 DELETED (last remnant): shared with uncached app(s) [730] path=...\cache\depot\900 bytes_freed=50000 link=False
+INFO vault_api.deletion:      cache-delete appid=440 depot=441 DELETED path=...\cache\depot\441 bytes_freed=1000000 link=False
+INFO vault_api.routers.cache: cache-delete appid=440 finished: deleted=2 (of which 1 last-remnant) skipped_shared=0 (of which 0 late) failed=0 bytes_freed=1050000; status set to 'idle', last_prefill_at cleared, needs_force=1; remnant co-owners flagged=[730]; mapping rows kept
+```
+
+A remnant depot whose removal *fails* still logs the remnant context in its
+`FAILED`/`ALREADY-ABSENT` line (e.g. `FAILED path=... OSError: ... (last
+remnant, shared with uncached app(s) [730])`), and app 730 still gets
+`needs_force = 1` — see "Last cached remnants" above for why a failed or
+already-absent remnant removal still counts.
+
 ### Concurrency, transactions and cancellation
 
 - **No database transaction is held across the filesystem work.** The endpoint
@@ -1010,21 +1155,29 @@ with the reason, a depot that became shared between plan and removal logs
   keeps the `deps.db_opener` rule intact (a connection never leaves the thread
   that created it, see "Connection handling") and means a long `rmtree` cannot
   block writers.
-- **The shared-depot decision is rechecked at execute time (TOCTOU).** The plan
-  is built from one snapshot at the start of the request, and no lock is held
-  across the filesystem work — so a `PUT /v1/mapping/{depotid}` landing in that
-  window could make a depot shared *after* it was planned for deletion, and
-  deleting it would then destroy another game's content, breaking plan §4's
-  guarantee. Immediately before removing **each** depot, its owners are re-read
-  with one indexed lookup on `depot_app_map(depotid, appid)` (its primary key —
-  an index seek, no transaction, which is what makes a per-depot recheck
-  affordable); a depot that became shared is kept, logged as `KEPT (late
-  recheck)` and reported in `skipped_shared`. If the recheck itself fails, the
-  depot is **not** deleted and is reported in `failed` — "unknown ownership"
-  must never resolve to "delete it". This narrows the window to the microseconds
-  between the recheck and `remove_depot_dir`; a mapping written *during* the
-  `rmtree` was always going to lose that race, and closing that last gap would
-  need a lock held across filesystem work.
+- **The shared-depot decision is rechecked at execute time (TOCTOU), and since
+  the ADR-0003 addendum that recheck covers the FULL remnant rule, not just
+  "does anyone else map it".** The plan is built from one snapshot at the
+  start of the request, and no lock is held across the filesystem work — so a
+  `PUT /v1/mapping/{depotid}` landing in that window could make a depot shared
+  *after* it was planned for deletion, or a co-owner's job/prefill/status
+  could change in that window and turn a planned last-remnant deletion into
+  content destruction for another game — either way breaking plan §4's (and
+  its addendum's) guarantee. Immediately before removing **each** depot —
+  whether it was planned as exclusive or as a remnant, both go through the
+  identical check — its owners AND their current content state are re-read
+  with one **joined** indexed lookup (`depot_app_map`'s primary key, `apps`'s
+  primary key, `idx_jobs_appid_status`'s correlated `EXISTS` — three index
+  seeks, not a scan, which is what keeps a per-depot recheck affordable). A
+  depot with at least one currently-content-having owner is kept, logged as
+  `KEPT (late recheck)` and reported in `skipped_shared`; a depot whose every
+  owner is (still, or newly) uncached is deleted as a remnant. If the recheck
+  itself fails, the depot is **not** deleted and is reported in `failed` —
+  "unknown ownership" must never resolve to "delete it", and never resolves
+  to "these are the co-owners to flag" either. This narrows the window to the
+  microseconds between the recheck and `remove_depot_dir`; a mapping or a job
+  written *during* the `rmtree` was always going to lose that race, and
+  closing that last gap would need a lock held across filesystem work.
 - **The 409 guard is check-then-act, and that is stated rather than hidden.** A
   prefill job enqueued in the microseconds after the check would still race the
   deletion. Single-worker operation keeps the window tiny and the outcome is

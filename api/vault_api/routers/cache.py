@@ -97,6 +97,13 @@ class DeletedDepotOut(BaseModel):
     #: depot that was already absent, and 0 for a symlinked/junctioned depot
     #: directory (only the link is removed — its target's bytes are not freed).
     size_bytes_freed: int
+    #: Non-empty ONLY for a "last cached remnant" deletion (ADR-0003 addendum):
+    #: this depot was still mapped to these other, currently-uncached app ids
+    #: when it was removed. Empty ``[]`` for an ordinary exclusive deletion
+    #: (the ONLY case before this addendum, and still the common case). Every
+    #: id listed here has had ``apps.needs_force`` set to 1 as a side effect of
+    #: this request — see api/README.md "Per-game deletion".
+    shared_with_uncached: list[int] = []
 
 
 class SkippedSharedDepotOut(BaseModel):
@@ -104,7 +111,11 @@ class SkippedSharedDepotOut(BaseModel):
     #: The other tracked app ids that map this depot (plan §4: "2 depots shared
     #: with game Y, not deleted"). A depot that only *became* shared after the
     #: deletion was planned appears here too, with its fresh owner list — see
-    #: the recheck in deletion.delete_app_depots.
+    #: the recheck in deletion.delete_app_depots. Meaning UNCHANGED by the
+    #: ADR-0003 addendum: a depot only appears here when AT LEAST ONE of these
+    #: owners currently has cache content. A shared depot whose every co-owner
+    #: is uncached is no longer reported here — see ``deleted_depots``'s
+    #: ``shared_with_uncached`` for that case instead.
     shared_with: list[int]
 
 
@@ -150,8 +161,12 @@ def delete_cached_app(
     4. ``500`` if the cache-root guards refuse (``deletion.resolve_depot_root``
        — empty / filesystem root / no ``depot/`` directory). Nothing was
        deleted.
-    5. Otherwise ``200``: exclusive depots deleted, shared depots reported and
-       kept, per-depot failures reported in ``failed``.
+    5. Otherwise ``200``: exclusive depots deleted, protected shared depots
+       reported and kept, per-depot failures reported in ``failed`` — AND
+       (ADR-0003 addendum) a shared depot deleted anyway when every co-owning
+       app currently has no cache content (a "last cached remnant"), flagged
+       distinctly in ``deleted_depots`` via ``shared_with_uncached`` rather
+       than merged with an ordinary exclusive deletion.
 
     Deliberately **200, not 207**, when some depots failed: the response body
     already distinguishes deleted / skipped / failed per depot, and a
@@ -179,9 +194,24 @@ def delete_cached_app(
     case) or ``failed`` — so the next prefill for this app runs with
     ``--force`` rather than trusting SteamPrefill's own now-stale bookkeeping.
     Left untouched when nothing exclusive existed to delete (every mapped
-    depot was shared). This is also the documented way an operator forces a
-    re-fill: ``DELETE`` then ``POST /v1/prefill`` — no separate "force" flag
-    on the prefill API itself (see api/README.md's "needs_force lifecycle").
+    depot was shared and protected). This is also the documented way an
+    operator forces a re-fill: ``DELETE`` then ``POST /v1/prefill`` — no
+    separate "force" flag on the prefill API itself (see api/README.md's
+    "needs_force lifecycle").
+
+    **ADR-0003 addendum — last cached remnants.** A shared depot is not
+    "never delete": it may be removed when NO co-owning app currently has
+    cache content (conservatively judged — see ``deletion.plan_deletion`` and
+    ``deletion.delete_app_depots``), because otherwise its bytes become
+    unreclaimable the moment every co-owner has independently been deleted
+    (mapping rows survive deletion by design, so the old "shared -> never
+    delete" rule kept such a depot forever, attributed to no app). Every
+    co-owner appid that was uncached at the moment ITS depot was removed
+    (or removal was attempted and failed, or it was found already absent)
+    gets ``apps.needs_force = 1`` — same honesty rule as the requesting app's
+    own reset above, because a depot they still map just changed under them —
+    but their ``status``/``last_prefill_at`` are left untouched (see
+    ``deletion.set_needs_force_for_remnant_co_owners``).
     """
     with open_db() as conn:
         app_row = conn.execute(
@@ -207,6 +237,14 @@ def delete_cached_app(
                 ),
             )
 
+        # ADR-0003 addendum: read every co-owner's current content state
+        # (status/last_prefill_at/active job) up front, in the same
+        # connection as the mapping read, so plan_deletion below can stay a
+        # pure function over plain data.
+        co_owner_states = deletion.load_co_owner_states(
+            conn, deletion.other_owner_ids(rows, appid)
+        )
+
         active_job = jobs.active_job_for_app(conn, appid)
 
     if active_job is not None:
@@ -225,7 +263,7 @@ def delete_cached_app(
             ),
         )
 
-    plan = deletion.plan_deletion(rows, appid)
+    plan = deletion.plan_deletion(rows, appid, co_owner_states)
 
     try:
         depot_root = deletion.resolve_depot_root(cache_root)
@@ -236,14 +274,15 @@ def delete_cached_app(
         ) from exc
 
     logger.info(
-        "cache-delete appid=%s starting: depot_root=%s exclusive=%s shared=%s "
-        "unusable_rows=%d",
+        "cache-delete appid=%s starting: depot_root=%s exclusive=%s remnant=%s "
+        "shared=%s unusable_rows=%d",
         appid, depot_root, plan.exclusive,
+        [depot.depotid for depot in plan.remnant],
         [depot.depotid for depot in plan.shared], len(plan.unusable),
     )
     deletion.log_kept_depots(appid, plan.shared)
 
-    def current_co_owners(depotid: int) -> list[int]:
+    def current_co_owners(depotid: int) -> list[deletion.CoOwner]:
         """Re-read one depot's other owners immediately before it is removed.
 
         A fresh short-lived connection per depot, opened and closed inside this
@@ -254,13 +293,37 @@ def delete_cached_app(
         with open_db() as conn:
             return deletion.load_co_owners(conn, depotid, appid)
 
+    # Both plan.exclusive AND plan.remnant go through the identical execute-
+    # time recheck below — delete_app_depots does not trust either
+    # classification, it re-derives the outcome from fresh co-owner data
+    # (ADR-0003 addendum's TOCTOU close, see that function's docstring).
+    # Sorted (WP 3.5 review nit): `deleted`/`failed` are built by
+    # `delete_app_depots` in the order it iterates this list, and
+    # `plan.exclusive + [...]` is not globally sorted by depotid on its own
+    # (each half is, the concatenation isn't) — sorting here keeps
+    # `deleted_depots` in the same depotid order `skipped_shared` already is.
+    candidate_depotids = sorted(
+        plan.exclusive + [depot.depotid for depot in plan.remnant]
+    )
     deleted, failed, late_shared = deletion.delete_app_depots(
-        depot_root, appid, plan.exclusive, co_owners=current_co_owners
+        depot_root, appid, candidate_depotids, co_owners=current_co_owners
     )
     failed = plan.unusable + failed
     skipped_shared = sorted(
         plan.shared + late_shared, key=lambda depot: depot.depotid
     )
+
+    # ADR-0003 addendum consequence #2: every co-owner a remnant depot was
+    # shared with — whether the removal succeeded, failed mid-tree, or found
+    # the depot already absent — needs its own needs_force set, because a
+    # depot IT still maps just changed (or its state became uncertain) out
+    # from under it. Gathered from both deleted and failed so a partial
+    # failure still flags the co-owners of the depots that WERE touched.
+    remnant_co_owner_appids: set[int] = set()
+    for depot in deleted:
+        remnant_co_owner_appids.update(depot.shared_with_uncached)
+    for depot in failed:
+        remnant_co_owner_appids.update(depot.shared_with_uncached)
 
     # Disk content changed (or may have) — the size cache must not keep serving
     # pre-deletion sizes for up to VAULT_SIZE_CACHE_TTL seconds. This is the
@@ -287,23 +350,42 @@ def delete_cached_app(
     # exactly as it was — nothing on disk changed for this app.
     set_needs_force = bool(deleted) or bool(failed)
     with open_db() as conn:
+        # Two separate statements, each committing on its own (both
+        # `reset_app_after_deletion` and `set_needs_force_for_remnant_co_owners`
+        # call `conn.commit()` internally) — a crash between them would leave
+        # the requesting app's reset durable but the remnant co-owners'
+        # needs_force not yet set. Accepted, not closed, for the same reason
+        # WP 3.4 accepted the equivalent window around `reset_app_after_deletion`
+        # itself: the filesystem work (which already happened, durably, before
+        # either commit) is the side effect that actually matters, and the
+        # worst case here is a co-owner's next prefill trusting SteamPrefill's
+        # own bookkeeping one run longer than ideal, not data loss or a wrong
+        # deletion — the depot in question is already gone either way.
         deletion.reset_app_after_deletion(
             conn, appid, new_status, set_needs_force=set_needs_force
         )
+        deletion.set_needs_force_for_remnant_co_owners(conn, remnant_co_owner_appids)
 
     total_bytes_freed = sum(depot.size_bytes_freed for depot in deleted)
+    remnant_deleted_count = sum(1 for d in deleted if d.shared_with_uncached)
     logger.info(
-        "cache-delete appid=%s finished: deleted=%d skipped_shared=%d (of which "
-        "%d late) failed=%d bytes_freed=%d; status set to '%s', last_prefill_at "
-        "cleared, needs_force=%s; mapping rows kept",
-        appid, len(deleted), len(skipped_shared), len(late_shared), len(failed),
-        total_bytes_freed, new_status, "1" if set_needs_force else "unchanged",
+        "cache-delete appid=%s finished: deleted=%d (of which %d last-remnant) "
+        "skipped_shared=%d (of which %d late) failed=%d bytes_freed=%d; status "
+        "set to '%s', last_prefill_at cleared, needs_force=%s; remnant "
+        "co-owners flagged=%s; mapping rows kept",
+        appid, len(deleted), remnant_deleted_count, len(skipped_shared),
+        len(late_shared), len(failed), total_bytes_freed, new_status,
+        "1" if set_needs_force else "unchanged", sorted(remnant_co_owner_appids),
     )
 
     return CacheDeletionOut(
         appid=appid,
         deleted_depots=[
-            DeletedDepotOut(depotid=d.depotid, size_bytes_freed=d.size_bytes_freed)
+            DeletedDepotOut(
+                depotid=d.depotid,
+                size_bytes_freed=d.size_bytes_freed,
+                shared_with_uncached=d.shared_with_uncached,
+            )
             for d in deleted
         ],
         skipped_shared=[

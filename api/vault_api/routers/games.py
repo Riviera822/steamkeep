@@ -39,8 +39,11 @@ class GameSummary(BaseModel):
 
 class DepotEntry(BaseModel):
     depotid: int
-    # True if this depot is also mapped to at least one other app (plan
-    # §4 shared-depot semantics: shared depots are skipped on deletion).
+    # True if this depot is also mapped to at least one other app (plan §4
+    # shared-depot semantics). NOT the same as "never deleted" any more
+    # (ADR-0003 addendum, WP 3.5): a shared=true depot whose every OTHER
+    # mapped app currently has no cache content is deleted anyway as a "last
+    # cached remnant" — see api/README.md "Last cached remnants".
     shared: bool
     # Bytes on disk for this one depot (WP 1.5), null if never written yet.
     size_bytes: int | None = None
