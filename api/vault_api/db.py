@@ -42,7 +42,19 @@ import sqlite3
 #: so unlike v4/v5 this one IS fully expressible as ``CREATE TABLE IF NOT
 #: EXISTS`` and needs no ALTER step: an older database simply gains the empty
 #: table, which reads as "never swept".
-SCHEMA_VERSION = 6
+#: v7 (WP 3.8): added ``jobs.gc_execute`` — the one bit that separates a GC
+#: **dry run** from a GC that actually deletes (ADR-0007: "dry-run by
+#: default"). It lives in the job row rather than in memory because the
+#: request thread that accepts ``POST /v1/cache/{appid}/gc`` and the worker
+#: thread that runs it are different threads, possibly different *processes*
+#: across a restart, and "did the operator ask for deletions?" must survive
+#: that gap unambiguously — and stay auditable afterwards, which an in-memory
+#: flag would not be. ``NULL`` for every non-GC job, 0 = dry run, 1 = execute.
+#: Same not-expressible-as-``CREATE TABLE IF NOT EXISTS`` situation as v4/v5,
+#: so it reuses v4's explicit ``ALTER TABLE ... ADD COLUMN`` step (see
+#: ``_add_missing_job_columns``, which is per-column guarded and therefore
+#: correct for a database at any version from v1 to v6).
+SCHEMA_VERSION = 7
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -91,7 +103,14 @@ CREATE TABLE IF NOT EXISTS jobs (
     -- 0 means "parse failed", 1 means "parsed".
     updated           INTEGER,
     up_to_date        INTEGER,
-    summary_parse_ok  INTEGER
+    summary_parse_ok  INTEGER,
+    -- v7 (WP 3.8): GC jobs only (ADR-0007's "dry-run by default"). NULL for
+    -- every other job type, 0 = plan and report but delete NOTHING, 1 = the
+    -- operator explicitly opted in to deletion via {"execute": true}. The
+    -- worker reads THIS column, not a request-scoped variable, so a queued
+    -- job that outlives a restart still carries the mode it was created with
+    -- and an old job row still says which mode it ran in.
+    gc_execute        INTEGER
 );
 
 -- The job worker polls "give me the oldest queued job" on every tick and the
@@ -254,7 +273,11 @@ def init_db(db_path: str) -> None:
         # executescript so the two migration mechanisms (ALTER here, CREATE
         # ... IF NOT EXISTS below) never depend on ordering relative to each
         # other.
-        if row is not None and row["version"] < 4:
+        # v7 (WP 3.8) reuses the same step: `_add_missing_job_columns` is
+        # guarded per column, so one call brings a `jobs` table at ANY version
+        # from v1 to v6 up to the current column set (a v6 database is missing
+        # only `gc_execute`; a v1 database is missing all four).
+        if row is not None and row["version"] < 7:
             _add_missing_job_columns(conn)
 
         # v5 (WP 3.4): same situation as the v4 step above -- an existing
@@ -278,16 +301,22 @@ def init_db(db_path: str) -> None:
 
 
 def _add_missing_job_columns(conn: sqlite3.Connection) -> None:
-    """v1->v4 migration step: add ``jobs.updated``/``up_to_date``/``summary_parse_ok``.
+    """v1->v7 migration step: add every ``jobs`` column added after v1.
+
+    ``updated``/``up_to_date``/``summary_parse_ok`` came with v4 (WP 3.3),
+    ``gc_execute`` with v7 (WP 3.8). All four are plain nullable ``INTEGER``
+    columns with no default, so one guarded loop covers them.
 
     Guarded per-column via ``PRAGMA table_info`` (not just per-version) so
-    calling ``init_db`` twice against the same pre-v4 file — or against a file
-    some *other* future migration already partially touched — never raises
+    calling ``init_db`` twice against the same older file — or against a file
+    some *other* migration already partially touched — never raises
     ``duplicate column name`` instead of silently doing nothing on the second
     call, matching the idempotency the rest of ``init_db`` already promises.
+    That per-column guard is also what lets ONE step serve every version from
+    v1 to v6: a v6 database simply gains ``gc_execute`` and nothing else.
     """
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
-    for column in ("updated", "up_to_date", "summary_parse_ok"):
+    for column in ("updated", "up_to_date", "summary_parse_ok", "gc_execute"):
         if column not in existing:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} INTEGER")
 

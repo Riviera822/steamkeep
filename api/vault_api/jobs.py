@@ -23,12 +23,24 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Iterator
+from typing import Iterator, Mapping
 
-#: The only job type WP 1.4 creates. ``jobs.type`` exists because plan §6 also
-#: lists a GC job (``POST /v1/cache/{appid}/gc``, Phase 3) that will share this
-#: queue.
+#: The job type WP 1.4 creates. ``jobs.type`` exists because plan §6 also
+#: lists a GC job (``POST /v1/cache/{appid}/gc``) sharing this queue.
 JOB_TYPE_PREFILL = "prefill"
+
+#: Garbage collection (WP 3.8, ADR-0007). Shares this queue *on purpose*: the
+#: single worker then serializes GC against prefills, so chunks are never
+#: unlinked while SteamPrefill is downloading into the same depot — the same
+#: hazard ``DELETE /v1/cache/{appid}`` has to refuse with a 409, avoided here
+#: structurally rather than by a check-then-act guard.
+#:
+#: The dry-run/execute distinction is NOT encoded in this string (no
+#: ``"gc_execute"`` type): ``type`` names *what work* a job is, and one kind of
+#: work with two modes is what ``jobs.gc_execute`` (schema v7) is for. Two
+#: types would also have quietly changed what every existing ``type = ?``
+#: query means.
+JOB_TYPE_GC = "gc"
 
 #: ``apps.status`` only (never a job status): the schema default, and what
 #: deleting a game from the cache resets an app to (plan §4, WP 1.6).
@@ -47,9 +59,12 @@ ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_RUNNING)
 #: ``up_to_date``/``summary_parse_ok`` (schema v4, WP 3.3) are SteamPrefill's
 #: own summary-table counters (ADR-0006 decision 1) — small scalars, so unlike
 #: ``log_excerpt`` they ARE included in the list query too.
+#: ``gc_execute`` (schema v7, WP 3.8) is included everywhere — list included —
+#: for the same reason as those three: it is a single small scalar, and it is
+#: the one field that says whether a GC job deletes or only reports.
 _JOB_COLUMNS = (
     "id, appid, type, status, created_at, started_at, finished_at, log_excerpt, "
-    "updated, up_to_date, summary_parse_ok"
+    "updated, up_to_date, summary_parse_ok, gc_execute"
 )
 
 #: Cap on stored log excerpts. 4 KiB is enough to show the tail of a
@@ -289,6 +304,80 @@ def enqueue_prefill(conn: sqlite3.Connection, appid: int) -> tuple[dict[str, obj
         return _row_to_dict(row), True
 
 
+def enqueue_gc(
+    conn: sqlite3.Connection, appid: int, *, execute: bool
+) -> tuple[dict[str, object], bool]:
+    """Queue a GC job for ``appid`` (WP 3.8, ADR-0007). Returns ``(job, created)``.
+
+    ``execute`` is a **required keyword argument with no default** — the same
+    device ``deletion.delete_app_depots``'s ``co_owners`` and
+    ``deletion.reset_app_after_deletion``'s ``set_needs_force`` use. A default
+    of ``False`` would be safe here, but it would also make "which mode is
+    this job?" a question a call site does not have to answer, and this is the
+    one flag that decides whether a job deletes files. It is spelled out at
+    every call site, where a reviewer can see it.
+
+    **Dedupe is per (app, mode), not per app.** ``enqueue_prefill`` folds a
+    second request for the same app into the in-flight job because running the
+    same prefill twice only re-downloads nothing. That reasoning does not carry
+    over: a dry run and an execute run are different operations with different
+    consequences, so folding one into the other would either silently downgrade
+    an execute request to a report (dishonest) or — far worse — silently answer
+    a dry-run request with a job that deletes files. So an in-flight job is
+    reused only when its ``gc_execute`` value matches the request exactly;
+    otherwise a second job is queued and the two run in turn on the single
+    worker.
+
+    ``ensure_app_row`` is deliberately NOT called: unlike ``POST /v1/prefill``
+    (which may legitimately target an app vault-api has never seen), GC only
+    makes sense for an app that already has cache state, and the endpoint
+    404s on an unknown app before ever reaching this function. Queueing GC
+    must not be a way to create app rows.
+    """
+    with immediate_transaction(conn):
+        existing = conn.execute(
+            f"""
+            SELECT {_JOB_COLUMNS} FROM jobs
+            WHERE appid = ? AND type = ? AND status IN (?, ?) AND gc_execute = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (appid, JOB_TYPE_GC, STATUS_QUEUED, STATUS_RUNNING, int(execute)),
+        ).fetchone()
+        if existing is not None:
+            return _row_to_dict(existing), False
+
+        cursor = conn.execute(
+            """
+            INSERT INTO jobs (appid, type, status, created_at, gc_execute)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (appid, JOB_TYPE_GC, STATUS_QUEUED, utcnow_iso(), int(execute)),
+        )
+        job_id = int(cursor.lastrowid)
+
+        row = conn.execute(
+            f"SELECT {_JOB_COLUMNS} FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        return _row_to_dict(row), True
+
+
+def job_deletes(job: Mapping[str, object]) -> bool:
+    """Does this job row mean "delete", i.e. is it a GC job in execute mode?
+
+    The one place the ``(type, gc_execute)`` pair is turned into a yes/no, so
+    the fail-closed direction is written down exactly once: **anything that is
+    not unambiguously a GC job with ``gc_execute`` truthy is a no.** A row
+    whose ``gc_execute`` is ``NULL`` (every prefill job, and any GC row written
+    by a version of this code that predates the column) reads as "dry run",
+    never as "delete" — a missing mode must never resolve to the destructive
+    one.
+    """
+    if str(job.get("type")) != JOB_TYPE_GC:
+        return False
+    return bool(job.get("gc_execute"))
+
+
 def get_job(conn: sqlite3.Connection, job_id: int) -> dict[str, object] | None:
     """One job incl. its log excerpt, or None if the id is unknown."""
     row = conn.execute(
@@ -332,7 +421,7 @@ def list_jobs(conn: sqlite3.Connection, limit: int) -> list[dict[str, object]]:
     rows = conn.execute(
         """
         SELECT id, appid, type, status, created_at, started_at, finished_at,
-               updated, up_to_date, summary_parse_ok
+               updated, up_to_date, summary_parse_ok, gc_execute
         FROM jobs
         ORDER BY id DESC
         LIMIT ?

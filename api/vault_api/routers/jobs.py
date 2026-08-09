@@ -59,6 +59,12 @@ class JobSummary(BaseModel):
     updated: int | None = None
     up_to_date: int | None = None
     summary_parse_ok: bool | None = None
+    #: GC jobs only (schema v7, WP 3.8, ADR-0007's "dry-run by default"):
+    #: ``false`` = this job planned and reported but deleted nothing,
+    #: ``true`` = it was allowed to delete. ``null`` for every ``prefill``
+    #: job — the field is not applicable, which is a different thing from
+    #: "dry run" and is reported as such.
+    gc_execute: bool | None = None
 
 
 class JobDetail(JobSummary):

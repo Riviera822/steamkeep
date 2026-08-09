@@ -57,13 +57,15 @@ api/
 │   ├── schedule_window.py # window parsing/containment, pure (WP 3.5)
 │   ├── scheduler.py      # the second background thread: sweeps (WP 3.5)
 │   ├── gc.py             # GC core: keep-set resolution + plan_gc, read-only (WP 3.7)
+│   ├── gc_execute.py     # GC execution: deletes what gc.py planned (WP 3.8)
 │   ├── validation.py     # shared request types (AppId) — one coercion rule
 │   └── routers/
 │       ├── health.py     # GET /v1/health — the ONE public router
 │       ├── games.py      # GET /v1/games, GET /v1/games/{appid}
 │       ├── mapping.py    # PUT /v1/mapping/{depotid}, GET /v1/mapping
 │       ├── jobs.py       # POST /v1/prefill, GET /v1/jobs[/{id}]
-│       ├── cache.py      # GET /v1/cache/summary, DELETE /v1/cache/{appid}
+│       ├── cache.py      # GET /v1/cache/summary, DELETE /v1/cache/{appid},
+│       │                 #   POST /v1/cache/{appid}/gc
 │       ├── agent.py      # POST /v1/agent/installed
 │       ├── clients.py    # GET /v1/clients (minimal v1, stats in Phase 3)
 │       └── schedule.py   # GET /v1/schedule (read-only, env-only config)
@@ -134,7 +136,7 @@ where nobody is watching. The two numbers are validated even when no window is
 set, so a typo surfaces the day it is made rather than the day the scheduler
 is switched on.
 
-## Database schema (v6)
+## Database schema (v7)
 
 Created idempotently at startup by `vault_api/db.py::init_db` (safe to call
 on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
@@ -145,7 +147,7 @@ on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
 | `schema_version` | `version`                                                                                   | Single-row marker for future migrations |
 | `apps`           | `appid` (PK), `name`, `status`, `last_prefill_at`, `last_manifest_check`, `needs_force`     | One row per tracked Steam app. `needs_force` (**v5**, WP 3.4) is ADR-0006 decision 2's per-app flag — see "needs_force" below |
 | `depot_app_map`  | `depotid`, `appid`, PK `(depotid, appid)`                                                   | Depot→app mapping; a depot can map to multiple apps (shared depots, plan §4) |
-| `jobs`           | `id` (PK autoincrement), `appid`, `type`, `status`, `created_at`, `started_at`, `finished_at`, `log_excerpt`, `updated`, `up_to_date`, `summary_parse_ok` | Prefill/GC job queue (plan §3, §6). The last three (**v4**, WP 3.3) are SteamPrefill's own summary-table counters — see "Job outcome honesty" above |
+| `jobs`           | `id` (PK autoincrement), `appid`, `type`, `status`, `created_at`, `started_at`, `finished_at`, `log_excerpt`, `updated`, `up_to_date`, `summary_parse_ok`, `gc_execute` | Prefill/GC job queue (plan §3, §6). `updated`/`up_to_date`/`summary_parse_ok` (**v4**, WP 3.3) are SteamPrefill's own summary-table counters — see "Job outcome honesty" above. `gc_execute` (**v7**, WP 3.8) is the GC dry-run/execute bit: `NULL` for every non-GC job, `0` = report only, `1` = delete — see "Garbage collection" below |
 | `agent_reports`  | `client_id`, `reported_at`, `appids` (JSON array of ints)                                    | One row per agent report — a full installed-app-ID snapshot at that timestamp (ADR-0002: the agent is stateless/dumb, always reports the complete list). vault-api derives additions/removals by diffing the two most recent rows per `client_id` |
 | `depot_manifests` | `appid`, `containing_appid`, `depotid`, `manifestid` (TEXT), `chunk_count`, `total_bytes`, `recorded_at`, `source`, PK `(appid, depotid)` | **Latest**-known manifest state per (app, depot) — WP 3.2, ADR-0006 decision 3. See "Manifest ingestion" below |
 | `schedule_state` | `id` (PK, `CHECK (id = 1)`), `last_sweep_at`, `last_sweep_targets`, `last_sweep_enqueued` | **v6**, WP 3.5. Single-row scheduler bookkeeping: when the last sweep started (UTC) and what it did. Persisted rather than in-memory so a restart mid-window does not re-sweep — see "Scheduler" below. The two counters are `NULL` while a sweep is in flight (or if the process died during one) |
@@ -285,7 +287,7 @@ appid both saw "no row" and both inserted; the loser got
 is now `INSERT OR IGNORE` plus a conditional name `UPDATE`, pinned by
 `tests/test_mapping.py::test_concurrent_upsert_of_the_same_new_appid_does_not_500`.
 
-## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4)
+## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4 + 3.5 + 3.8)
 
 All routes below require `X-Api-Key` (see "Auth"). Full API table:
 `docs/PROJECT_PLAN.md` §6; the games, mapping, prefill, jobs, cache, agent and
@@ -299,9 +301,10 @@ clients rows are implemented so far.
 | GET    | `/v1/mapping`                      | Full depot→app mapping table: list of `{depotid, appid}` |
 | DELETE | `/v1/mapping/{depotid}/{appid}`    | Remove one mapping pair (correction path for the additive `PUT`, see below); `204` on success, `404` if the pair doesn't exist, `422` for non-positive ids |
 | POST   | `/v1/prefill`                      | Body `{"appids": [int, ...]}` — queue one prefill job per app id. `202` with a list of `{appid, job_id, status, deduplicated}`. `422` for an empty list, an appid `< 1`, a non-list, or an unrecognized body field |
-| GET    | `/v1/jobs`                         | Recent jobs, newest first. `?limit=` 1–200, default 20 (`422` outside that range). Omits `log_excerpt` on purpose — this is the polling list. Includes `updated`, `up_to_date`, `summary_parse_ok` (schema v4, WP 3.3 — see "Job outcome honesty" below; `null` until the job finishes or if the summary couldn't be parsed) |
-| GET    | `/v1/jobs/{id}`                    | One job incl. `log_excerpt` plus the same `updated`/`up_to_date`/`summary_parse_ok` fields; `404` for an unknown id |
-| DELETE | `/v1/cache/{appid}`                | Delete this game's depot directories. `200` with `{appid, deleted_depots[], skipped_shared[], failed[], total_bytes_freed}`; `404` unknown appid or no mappings; `409` while a prefill job for the app is queued/running; `422` for `appid < 1`; `500` if the cache-root guards refuse. See "Per-game deletion" below |
+| GET    | `/v1/jobs`                         | Recent jobs, newest first. `?limit=` 1–200, default 20 (`422` outside that range). Omits `log_excerpt` on purpose — this is the polling list. Includes `updated`, `up_to_date`, `summary_parse_ok` (schema v4, WP 3.3 — see "Job outcome honesty" below; `null` until the job finishes or if the summary couldn't be parsed), plus `gc_execute` (schema v7, WP 3.8 — `null` for a prefill job, `false`/`true` for a GC job's mode) |
+| GET    | `/v1/jobs/{id}`                    | One job incl. `log_excerpt` plus the same `updated`/`up_to_date`/`summary_parse_ok`/`gc_execute` fields; `404` for an unknown id |
+| DELETE | `/v1/cache/{appid}`                | Delete this game's depot directories. `200` with `{appid, deleted_depots[], skipped_shared[], failed[], total_bytes_freed}`; `404` unknown appid or no mappings; `409` while a prefill **or GC** job for the app is queued/running; `422` for `appid < 1`; `500` if the cache-root guards refuse. See "Per-game deletion" below |
+| POST   | `/v1/cache/{appid}/gc`             | Queue a garbage-collection job. Body optional; `{"execute": true}` (a literal JSON boolean) is the only way to delete — **dry run by default**. `202` with `{appid, job_id, status, type, mode, execute, deduplicated}`; `404` unknown appid or no mappings; `422` for `appid < 1`, a non-boolean `execute`, or an unrecognized body field. See "Garbage collection" below |
 | GET    | `/v1/cache/summary`                | `total_bytes` (disk usage of `depot/`, each depot counted once), `top_consumers` (top 10 `{appid, name, size_bytes}`, largest first), `unmapped_depots` (`{count, size_bytes}` for depot dirs on disk with no mapping row for any app), `free_disk_bytes` (free space on the cache filesystem, `null` if undeterminable) |
 | POST   | `/v1/agent/installed`              | Body `{"client_id": str, "appids": [int, ...]}` — store one **full-list** snapshot of a client's installed games. `200` with `{client_id, received, added, removed, first_report}`; `422` for a bad `client_id` (empty, > 64 chars, control characters, surrounding whitespace, `.`/`..`), an appid `< 1` or a boolean, a missing/non-list `appids`, more than 10 000 ids, or an unrecognized body field. See "Agent reports" below |
 | GET    | `/v1/clients`                      | One row per reporting client: `{client_id, first_seen, last_reported_at, app_count}`, sorted by `client_id`. **Minimal v1** — hit statistics and bypass warnings (plan §5/§6) arrive in Phase 3 as *additional* fields |
@@ -2054,6 +2057,207 @@ how much it wants to check before removing anything.
 - No third-party manifest oracle (ADR-0006 decision 4, gated) — the sources
   are vault-api's own record, its own archive, and the cache tree.
 
+## Garbage collection — `POST /v1/cache/{appid}/gc` (WP 3.8, ADR-0007)
+
+The acting half of the feature whose deciding half is documented above.
+`vault_api/gc.py` produces the plan and mutates nothing; `vault_api/gc_execute.py`
+carries it out; this endpoint only queues the job.
+
+```
+POST /v1/cache/440/gc                      -> dry run  (deletes NOTHING)
+POST /v1/cache/440/gc  {"execute": false}  -> dry run
+POST /v1/cache/440/gc  {"execute": true}   -> deletes
+```
+
+Response (`202`), which never leaves the mode in doubt:
+
+```json
+{"appid":440,"job_id":7,"status":"queued","type":"gc",
+ "mode":"dry-run","execute":false,"deduplicated":false}
+```
+
+`404` for an unknown app or an app with no depot mappings (same reasoning and
+wording as `DELETE /v1/cache/{appid}`); `422` for `appid < 1`, for an unknown
+body field, and for anything but a literal JSON boolean in `execute`.
+
+### Dry run is the default, in three independent places
+
+1. **The request.** `execute` defaults to `false`, and there is no query-string
+   or header alternative. It is a `StrictBool`, so `"true"`, `"yes"`, `"on"` and
+   `1` are all `422` — pydantic's lax mode would have accepted every one of
+   them (docs/LEARNINGS.md records the int-field version of that coercion), and
+   the one flag that turns a report into a deletion is not a place for a
+   generous parser. `extra="forbid"` makes `{"exceute": true}` a `422` rather
+   than a silently ignored typo.
+2. **The job row.** The mode is stored in `jobs.gc_execute` (**schema v7**), not
+   held in the request thread — the worker may pick the job up minutes later, or
+   after a restart. `NULL` (every prefill job, and any GC row written before
+   v7) reads as *dry run*: `jobs.job_deletes` resolves a missing mode to the
+   non-destructive one, never the other way round.
+3. **The executor.** `gc_execute.run_gc` deletes only when handed
+   `execute=True`, a required keyword argument with no default.
+
+### What an executing run does — and what it never touches
+
+| | |
+|---|---|
+| Deletes | orphaned chunk **files** in `depot/<id>/chunk/` of a `planned` depot |
+| Deletes | redundant **copies** of a stored manifest (same `(depot, manifest id)`), keeping the newest — and only when the duplicate is byte-identical to it |
+| Never touches | a depot whose plan status is not `planned` — not its chunks, not its duplicate manifests, nothing |
+| Never touches | any chunk the plan did not name; any name that is not exactly 40 lowercase hex characters; anything outside `depot/<id>/chunk/` |
+| Never touches | a symlink or a Windows junction — it is refused, never unlinked (the plan named a *file*, and a name that points elsewhere is not that file) |
+| Never touches | the `manifest/` subtree beyond the duplicate copies above, the archive, other depots, or the depot directory itself |
+| Never touches | `apps.status`, `apps.last_prefill_at`, mapping rows, `depot_manifests` |
+
+Both the "only a `planned` depot" and the "only a 40-hex name the planner
+produced" rules are enforced *again* in the executor rather than trusted from
+the planner: they are the two guarantees that keep a future change to `gc.py`
+from becoming a deletion bug, so they live with the code that deletes.
+
+### The plan is built when the job runs
+
+The endpoint stores an app id and a mode. **No plan is computed at enqueue
+time, and `run_gc` has no parameter through which one could be passed in** — it
+loads the database inputs and scans the cache tree itself, every run. A game
+that updates while the job waits in the queue is therefore collected against
+its *new* manifest, and a chunk that was an orphan when the request was made
+but belongs to the current manifest by the time the job runs is kept.
+
+The residual window is plan → unlink, inside one job:
+
+- A prefill can never be in it: GC shares the single worker queue, so a
+  download and a collection of the same depot cannot overlap. (That is the
+  hazard `DELETE /v1/cache/{appid}` has to refuse with a `409`; here it is
+  structural, which is why the GC endpoint has no such guard.)
+- A `PUT /v1/mapping/{depotid}` or a client fetch can be. Consequence: a
+  re-download, never corruption — ADR-0007's accepted limit.
+
+`DELETE /v1/cache/{appid}` *does* run concurrently (it works in the request
+thread), so every removal goes through the WP 1.6 settle-and-recheck path
+(`deletion.remove_file_settling`): the outcome is decided by the settled
+filesystem state, not by the exception, because a racing removal surfaces as
+`FileNotFoundError` **or** as `PermissionError [WinError 5]` on Windows
+("delete pending"), and `lexists` has the last word. A file that turned out
+gone but was not removed by this run contributes **0 bytes**, so two racing
+actors never both claim the same reclaimed space.
+
+### Job outcome: exact, or `error`
+
+> An executing GC job is `done` only when **every chunk it planned to delete is
+> gone** — removed by this run, or found already removed.
+
+Anything else is `error`, with the exact counts in the log either way. Bytes
+are read by an `lstat` taken immediately before each unlink, never taken from
+the plan, so `bytes_freed` is what was really freed. A dry run is `done`
+whenever the plan could be built at all; a depot *skip* is a reported,
+deliberate outcome (the readiness gate doing its job), not a failure. A run
+that could not even build a plan (an unusable `VAULT_CACHE_ROOT`) is `error`
+and says that nothing was planned, inspected or deleted.
+
+The job log puts per-depot lines first and the totals **last**, because
+`jobs.finish_job` keeps the last 4 KiB — a run over many depots must not have
+its summary truncated away.
+
+```
+[vault-api] GC for app 440: EXECUTE.
+  depot 441 planned: orphans=2 (700 bytes) -> removed=2 (700 bytes) already_gone=0 ...
+  depot 900 skipped_no_manifest: ADR-0007 readiness gate: no current manifest ...
+[vault-api] GC totals (EXECUTED): chunks_removed=2 bytes_freed=700 already_gone=0
+  dedupe_removed=2 dedupe_bytes_freed=1234 total_bytes_freed=1934 problems=0
+  declined=0 held_back=0 depots_touched=[441] needs_force_set_for=[440, 730]
+```
+
+### Duplicate stored manifests: identical only
+
+`gc.dedupe_candidates` marks the newest copy `keep` and the rest `duplicates`,
+and deliberately does not verify that they hold the same bytes — it carries
+their sizes so this side can decide how much to check. It checks: a duplicate
+is removed only if it is **byte-identical** to the kept copy. Same manifest id
+is a strong reason to expect identical content, but a truncated store-on-miss
+write is real, and if the *newest* copy happened to be the truncated one, blind
+dedupe would delete the good older copy and leave the corrupt one as the
+depot's only manifest evidence. A duplicate that differs (or cannot be read for
+comparison) is kept and reported — a finding, not a failure, so it does not
+make the job `error`. If the copy that would be *kept* is missing or unusable
+at execute time, the whole group is left alone: dedupe never ends with zero
+copies, and that too is a finding rather than a failure (its realistic cause is
+a concurrent `DELETE` taking the depot away mid-run, and a racing deleter must
+not drag an otherwise-clean run to `error` — the WP 1.6 rule). The rule in one
+line: **a decision GC made on purpose is never an `error`; a thing GC could not
+do is.** Declines are listed in the log with a `-` marker, problems with `!`.
+
+### State bookkeeping (the decision this package had to make)
+
+**`apps.status` / `apps.last_prefill_at`: untouched.** They describe the app's
+*prefill lifecycle*. GC reclaims bytes that are by construction not part of any
+counting app's current manifest, so a `done` app is still done. Turning a green
+badge red because one chunk file was locked would report a prefill problem that
+does not exist.
+
+**Size cache: invalidated** after an execute run that actually freed something
+(the `sizes.SizeCache.invalidate` hook, WP 1.5) — reclaimed space that
+`GET /v1/games` keeps hiding for up to `VAULT_SIZE_CACHE_TTL` seconds would
+make GC's one visible effect look like it did not happen. Not invalidated for a
+dry run.
+
+**`apps.needs_force`: set to 1 for every app mapped to a depot the run actually
+removed chunks from.** The full argument, including why the opposite answer was
+tempting:
+
+- *Why it looks unnecessary.* `needs_force` (ADR-0006 decision 2) exists
+  because a non-forced run trusts SteamPrefill's own
+  `successfullyDownloadedDepots.json` ("depot D was downloaded at manifest M").
+  GC's keep set **is** the union of the current manifests — and for an app
+  vault-api prefilled itself, "current manifest" is literally what SteamPrefill
+  downloaded, since `depot_manifests` is ingested from its own `.bin` files
+  (WP 3.2). Under that identity every chunk of M survives GC, SteamPrefill's
+  claim stays true, and the next non-forced run is honest with no flag at all.
+- *Why it is set anyway.* That identity is an assumption about two records
+  agreeing, and there are reachable states where they do not:
+  `manifest_ingest.ingest_after_prefill` is wrapped in its own `try`/`except`
+  in `worker.py`, so a crash there leaves the prefill `done` with
+  `depot_manifests` still naming the *previous* manifest while the disk holds
+  the *new* chunks; and an app with no `depot_manifests` row falls back to the
+  newest *cache-stored* manifest, which a client may have written earlier than
+  SteamPrefill's fetch. In both, a non-forced follow-up would skip the depot and
+  leave the cache silently incomplete, with no self-healing path — the exact
+  wedge shape the WP 3.4 review reproduced and rejected. Being wrong in the
+  "set it" direction costs one redundant `--force` run (re-requests served from
+  cache at disk speed); being wrong in the "leave it" direction costs a
+  permanently incomplete cache reported as complete.
+- *Kept minimal.* Never on a dry run. Never for a depot that lost no chunk
+  (skipped, zero orphans, or every removal failed). Never for a **dedupe-only**
+  removal — a redundant manifest copy is not chunk content and changes nothing
+  about whether a depot is completely downloaded. And when it does fire, it
+  fires for **every app mapped to that depot**, not just the requester: a shared
+  depot's bytes just changed under all of its co-owners (ADR-0003 addendum's own
+  reasoning).
+
+### Honest limits (ADR-0007, echoed)
+
+- GC can delete chunks a client pinned to an **unrecorded or beta-branch
+  manifest** still wants. The consequence is a **re-download**, never
+  corruption. (A decision on protecting recently-stored chunks with a grace
+  window is pending and is deliberately **not** implemented here — the orphan
+  set is consumed through `gc_execute.orphans_to_delete`, which already takes a
+  sequence of `ChunkExclusion` predicates and reports what they held back, so
+  that rule is one predicate away rather than surgery on the deletion loop.)
+- Unknown-manifest, unmapped and unreadable-owner depots are **skipped and
+  reported**, never collected on partial knowledge.
+- GC reclaims space; it does not certify that a depot is complete or correct.
+- No atomicity against concurrent client writes (benign: re-fetch).
+- No unmapped-depot GC and no *old*-manifest deletion — see the WP 3.7 section's
+  "deliberately does NOT do" list, which still holds.
+
+### What this work package deliberately did NOT do
+
+- No auto-GC after update prefills (the config wiring is a later package).
+- No third-party manifest oracle (ADR-0006 decision 4, gated).
+- No job pause/resume/cancel, and no way to stop a GC job once it is running
+  beyond stopping the worker.
+- No beta-chunk grace window (pending decision, see above).
+- No changes outside `api/`.
+
 ## Auth
 
 Every endpoint requires the header `X-Api-Key: <VAULT_API_KEY>`, checked
@@ -2695,3 +2899,36 @@ temporarily reverting the fix and re-running the affected tests: the
 symlinked-depot test, the junction-walk test and the three link-deletion tests
 all fail against the pre-fix code, so they are genuine regression guards rather
 than tests that happen to pass.
+
+WP 3.8 additions (`tests/test_gc_execute.py`, 76 tests) — this is
+deletion-class code, so the emphasis is on what must NOT happen:
+
+- **Dry run really deletes nothing**: the whole cache tree *and* the manifest
+  archive are snapshotted (path → size) before and after, and compared. The
+  same snapshot technique proves "deleted exactly the planned set and nothing
+  else" for an executing run — the set difference must be exactly the two
+  planned orphan files, byte-for-byte.
+- **Skipped depots lose no file of any kind**, chunks and redundant manifest
+  copies alike; a poisoned co-owner row likewise leaves the depot untouched.
+- **TOCTOU**: an end-to-end test queues an execute job, then changes the world
+  (a new manifest is archived and recorded that needs a chunk which *was* an
+  orphan, while a previously-kept chunk drops out), then runs the job — and
+  asserts the *fresh* plan governed, i.e. the exact opposite of the
+  enqueue-time picture for both files. A second, structural test asserts
+  `run_gc` has no `plan` parameter at all.
+- **Racing removals**: a concurrent depot-wide removal is released from a
+  `threading.Barrier` against a live GC run, parametrized 10x and flake-hunted
+  by running the module isolated **30x** (30/30 green — full-suite green means
+  nothing for timing bugs, docs/LEARNINGS.md). The deterministic half asserts a
+  chunk removed by somebody else frees **0** bytes for this run.
+- **Partial-failure honesty**: one orphan is made undeletable, the other is
+  removed; the run must report `error` with `chunks_removed=1
+  bytes_freed=400` — the bytes it claims freed really were freed, and the file
+  it reports as failed really is still on disk.
+- **Fourteen mutations, each killed by a named test** (the list is in the work
+  package report): the endpoint's dry-run default, both status gates, the
+  chunk-id re-validation, the link refusal, the `ok` rule, `run_gc`'s execute
+  branch, the `needs_force` scoping, dedupe's byte-identity check, dedupe's
+  keeper verification, `job_deletes`' NULL handling, the already-gone
+  accounting, `parse_bin_payload`'s now-required expected ids, and the worker's
+  refusal to guess an unknown job type.

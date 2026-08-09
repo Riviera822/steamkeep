@@ -436,8 +436,8 @@ def parse_bin_filename(path: str) -> tuple[int, int, int, int]:
 def parse_bin_payload(
     path: str,
     *,
-    filename_depot_id: int | None = None,
-    filename_manifest_id: int | None = None,
+    filename_depot_id: int,
+    filename_manifest_id: int,
 ) -> "PrefillManifest":
     """Parse a SteamPrefill-**format** ``.bin`` manifest whose filename this
     function does not itself interpret.
@@ -455,10 +455,19 @@ def parse_bin_payload(
     for and passes them, so the corruption cross-check is preserved rather
     than dropped.
 
-    ``filename_depot_id``/``filename_manifest_id`` are optional only so a
-    caller with genuinely no expectation can parse a payload; every caller in
-    this codebase passes both, and skipping them means giving up the
-    corruption signal.
+    ``filename_depot_id``/``filename_manifest_id`` are **required keyword
+    arguments with no default** (WP 3.8, closing a WP 3.7 review nitpick).
+    They started out optional, which made "give up the corruption
+    cross-check" something a caller could do by simply not typing it — the
+    quietest possible way to lose a safety property, and one no reviewer can
+    see at a call site. Every caller knows which (depot, manifest) pair it
+    asked for: ``parse_steamprefill_bin`` scrapes them out of SteamPrefill's
+    four-segment filename, and ``vault_api.gc`` has them from
+    ``depot_manifests``. The comparisons below are correspondingly
+    unconditional — the same rule ``deletion.delete_app_depots`` applies to
+    its ``co_owners`` argument: passing ``None`` explicitly is not a second,
+    quieter spelling of "skip the check", it simply fails the parse (``id !=
+    None`` is true), which is the fail-closed direction.
 
     Raises ``ManifestParseError`` for: a file that can't be read, an empty
     file, a file bigger than ``MAX_MESSAGE_SIZE``, any malformed/truncated
@@ -483,12 +492,12 @@ def parse_bin_payload(
     manifest_id = _first_varint(top_fields, 2, "manifest id", context=context)
     depot_id = _first_varint(top_fields, 4, "depot id", context=context)
 
-    if filename_depot_id is not None and depot_id != filename_depot_id:
+    if depot_id != filename_depot_id:
         raise ManifestParseError(
             f"{context}: payload depot id {depot_id} does not match filename depot id "
             f"{filename_depot_id} (corruption signal)"
         )
-    if filename_manifest_id is not None and manifest_id != filename_manifest_id:
+    if manifest_id != filename_manifest_id:
         raise ManifestParseError(
             f"{context}: payload manifest id {manifest_id} does not match filename "
             f"manifest id {filename_manifest_id} (corruption signal)"

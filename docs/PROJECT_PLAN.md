@@ -376,6 +376,14 @@ for users who expose the API differently.
       candidates; 86 tests, mutation-tested fail-closed directions,
       verified against the real PoC cache (0 orphans, research-doc parity).
       Endpoint + execution = WP 3.8, Opus + Fable mandatory)*
+      *(WP 3.8 done: POST /v1/cache/{appid}/gc as queued job, dry-run by
+      default at every layer (StrictBool opt-in, NULL job rows read as
+      dry-run), execute-time re-plan by construction (run_gc takes no plan),
+      WP 1.6 guard path reused (safe_child_path, remove_file_settling),
+      keep-newest dedupe with byte-identity check, needs_force for touched
+      depots' owners, partial-failure honesty; schema v7; 687 tests green;
+      Opus PASS + Fable PASS. Optional auto-GC after update prefills still
+      open)*
 - [ ] Beta-branch protection for GC (user decision 2026-08-09, ADR-0007
       addendum): (A) recently-stored grace window via st_ctime as a
       ChunkExclusion predicate; (B) open-beta branch manifests join the

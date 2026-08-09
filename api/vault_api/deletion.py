@@ -237,6 +237,71 @@ def depot_dir_path(depot_root: str, depotid: object) -> str:
     return candidate
 
 
+def safe_child_path(parent: str, name: str) -> str:
+    """``<parent>/<name>``, verified to be exactly one level below ``parent``.
+
+    The **file-level twin** of ``depot_dir_path``'s strict-child check, added
+    in WP 3.8 because garbage collection deletes individual *files*
+    (``depot/<id>/chunk/<chunkid>``, ``depot/<id>/manifest/<mid>/5/<code>``)
+    rather than whole depot directories, and a second, less careful path
+    builder for that is exactly what this module exists to prevent.
+
+    ``depot_dir_path`` above is deliberately left as it is rather than being
+    re-expressed in terms of this function: it carries its own id coercion and
+    its own error wording, both covered by WP 1.6's reviewed tests, and
+    re-plumbing reviewed deletion-path code to save four lines is a bad trade.
+    The checks are identical in substance and both raise
+    ``UnsafeDepotTargetError``, so a caller cannot be confused about what a
+    refusal means.
+
+    "Strict child" is checked as *exactly one level below*
+    (``dirname(candidate) == parent`` and ``basename(candidate) == name``), not
+    as a prefix match: ``startswith`` would accept ``…/chunk-evil`` and a
+    ``commonpath`` check would accept arbitrarily deep paths. ``name`` is
+    additionally required to be a bare path component up front, so ``".."``,
+    ``"a/b"``, ``"a\\b"`` and an absolute path are refused by name rather than
+    only by where they happen to land.
+
+    **The two checks are redundant, and that is stated rather than implied**
+    (measured on Windows 11 / CPython 3.12.10 for ``".."``, ``"."``, ``""``,
+    ``"a/b"``, ``"a\\b"``, ``"441\\"``, ``"/etc/passwd"``, ``"C:x"`` and
+    ``"a:b"``: every one of them fails *both*). Two of those are worth naming,
+    because they are the cases where ``os.path.join`` does something
+    surprising rather than something obviously wrong: ``join(parent, "C:x")``
+    silently drops the drive and yields ``parent\\x``, and
+    ``join(parent, "a:b")`` returns ``"a:b"`` — the parent is discarded
+    entirely, because ``ntpath`` reads ``"a:"`` as a drive. Both are then
+    caught by the ``basename(candidate) != name`` arm below. The up-front
+    check is kept anyway: it costs nothing, it says what a caller is expected
+    to pass, and it produces the error message that names the actual problem
+    instead of one about a path that no longer resembles the input.
+
+    Links are deliberately NOT resolved here — same reason as
+    ``depot_dir_path``: resolving would report a legitimately-linked cache as
+    "outside itself". Refusing to *follow* a link is the removal helper's job
+    (``remove_file_settling``'s caller checks ``is_link_like`` first).
+    """
+    if not os.path.isabs(parent):  # pragma: no cover - defensive
+        raise UnsafeDepotTargetError(
+            f"{parent!r} is not an absolute path; refusing to build a deletion "
+            "target from it."
+        )
+    if not name or name in (".", "..") or os.path.basename(name) != name:
+        raise UnsafeDepotTargetError(
+            f"{name!r} is not a plain filename (it contains a path separator, or is "
+            "a relative marker), so it cannot be a direct child of "
+            f"{parent!r}. Refusing to delete anything for it."
+        )
+
+    candidate = os.path.normpath(os.path.join(parent, name))
+    if os.path.dirname(candidate) != parent or os.path.basename(candidate) != name:
+        raise UnsafeDepotTargetError(
+            f"{name!r} under {parent!r} would resolve to {candidate!r}, which is not "
+            "a direct child of it. Refusing to delete it."
+        )
+    return candidate
+
+
 # --------------------------------------------------------------------------
 # Measuring and removing one depot directory
 # --------------------------------------------------------------------------
@@ -352,6 +417,78 @@ def remove_depot_dir_settling(path: str) -> tuple[bool, Exception | None]:
     for attempt in range(CONCURRENT_REMOVAL_ATTEMPTS):
         try:
             remove_depot_dir(path)
+            return True, None
+        except OSError as exc:
+            last_error = exc
+            if not os.path.lexists(path):
+                return False, None
+            if attempt + 1 < CONCURRENT_REMOVAL_ATTEMPTS:
+                time.sleep(CONCURRENT_REMOVAL_PAUSE_SECONDS)
+        except Exception as exc:  # noqa: BLE001 - any failure is data, not a 500
+            last_error = exc
+            break
+
+    if not os.path.lexists(path):
+        return False, None
+    return False, last_error
+
+
+def remove_file_settling(path: str) -> tuple[bool, Exception | None]:
+    """Unlink ONE file, tolerating a concurrent deleter. Never recurses.
+
+    The single-file counterpart of ``remove_depot_dir_settling`` above, added
+    for WP 3.8's garbage collection, which removes orphaned chunk files and
+    redundant stored-manifest copies one at a time. Same return contract, and
+    it must be read the same way:
+
+    - ``(True, None)`` — this call removed the file, so its bytes may be
+      attributed to this run.
+    - ``(False, None)`` — the file is **gone**, but this call did not remove
+      it: it was already absent, or a concurrent actor
+      (``DELETE /v1/cache/{appid}`` running an ``rmtree`` over the same depot,
+      another GC job, an operator) removed it underneath us. The caller must
+      attribute **0** bytes to itself, otherwise two racing runs would both
+      claim the same reclaimed space.
+    - ``(False, exc)`` — the file is **still there**: a real failure (an open
+      handle, a permissions problem). Nothing was freed.
+
+    The three WP 1.6 lessons this inherits, each of which cost a review round
+    there and applies verbatim to a single ``unlink`` (docs/LEARNINGS.md):
+
+    1. **The settled filesystem state decides, not the exception.** A racing
+       removal makes ``os.unlink`` raise even though the outcome is perfectly
+       clean, so every ``OSError`` is followed by an ``os.path.lexists`` check
+       and, while the tiny budget lasts, another attempt (unlink is
+       idempotent). ``lexists`` — not ``exists`` — has the last word, so a
+       dangling symlink counts as present and a removed file is never reported
+       as a failure.
+    2. **Every ``OSError`` is retried, not just ``FileNotFoundError``.** On
+       Windows a file deleted while a handle is still open enters "delete
+       pending" state, and any further access reports ``PermissionError
+       [WinError 5] Access denied`` rather than not-found — measured in WP
+       1.6, where retrying only ``FileNotFoundError`` still flaked roughly 1
+       run in 40. Note delete-pending also makes ``lexists`` answer ``False``
+       (``os.lstat`` raises ``PermissionError``, which ``lexists`` swallows),
+       which is the correct reading here: the name is on its way out and
+       nothing this caller does will bring it back.
+    3. **A genuine lock is not a race.** A real failure costs at most
+       ``CONCURRENT_REMOVAL_ATTEMPTS * CONCURRENT_REMOVAL_PAUSE_SECONDS``
+       (~80 ms) extra and is then reported as a failure — a handle that is
+       really held does not disappear in 80 ms. Non-``OSError`` exceptions are
+       never retried.
+
+    **This function does not check for links** — its caller must, *before*
+    calling, and refuse rather than delete (see ``vault_api.gc_execute``). It
+    is kept out of here on purpose: ``os.unlink`` on a symlink removes the
+    link and not its target, so unlinking a link would be *safe* but *wrong* —
+    GC plans the deletion of a chunk file, and a name that has become a link
+    is no longer that file. The decision "this is not what I planned to
+    delete" belongs to the planner's consumer, not to the syscall wrapper.
+    """
+    last_error: Exception | None = None
+    for attempt in range(CONCURRENT_REMOVAL_ATTEMPTS):
+        try:
+            os.unlink(path)
             return True, None
         except OSError as exc:
             last_error = exc
@@ -974,6 +1111,26 @@ def set_needs_force_for_remnant_co_owners(
     very self-healing path WP 3.4 built. Setting to ``1`` unconditionally
     therefore needs no CAS of its own: unlike a *clear*, a *set* can never be
     "wrongly" applied — worst case is one redundant ``--force`` run.
+    """
+    set_needs_force(conn, appids)
+
+
+def set_needs_force(conn: sqlite3.Connection, appids: Iterable[int]) -> None:
+    """``UPDATE apps SET needs_force = 1`` for the given app ids. Commits.
+
+    The one primitive behind every "this app's on-disk state changed or became
+    uncertain, so its next prefill must not trust SteamPrefill's own
+    bookkeeping" write (ADR-0006 decision 2). Extracted in WP 3.8 so garbage
+    collection flags apps through exactly the statement the deletion path
+    already uses instead of growing a second copy that could drift.
+
+    An app id with no ``apps`` row simply matches nothing — which is the right
+    outcome, not a silent miss: the column's ``DEFAULT 1`` means a row created
+    later starts out forced anyway.
+
+    Setting the flag needs no compare-and-swap (unlike *clearing* it, see
+    ``jobs.clear_needs_force_if_unchanged``): a set can never be wrongly
+    applied — the worst case is one redundant ``--force`` run.
     """
     ids = sorted({int(a) for a in appids if a})
     if not ids:

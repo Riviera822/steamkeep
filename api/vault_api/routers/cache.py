@@ -1,12 +1,15 @@
-"""Cache endpoints (plan §6): ``GET /v1/cache/summary``, ``DELETE /v1/cache/{appid}``.
+"""Cache endpoints (plan §6): ``GET /v1/cache/summary``, ``DELETE /v1/cache/{appid}``,
+``POST /v1/cache/{appid}/gc``.
 
 Auth is attached at the router level (secure-by-default pattern, see
 api/README.md "Auth" section) — every route added here is authenticated
-automatically. Garbage collection (``POST /v1/cache/{appid}/gc``) is Phase 3.
+automatically.
 
 The deletion endpoint's semantics, decisions and failure modes are documented
 in api/README.md ("Per-game deletion"); the safety-critical mechanics live in
-``vault_api/deletion.py``.
+``vault_api/deletion.py``. Garbage collection is documented under "Garbage
+collection" there, plans in ``vault_api/gc.py`` and executes in
+``vault_api/gc_execute.py`` — this file only queues the job.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Path, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, StrictBool
 
 from vault_api import deletion, jobs
 from vault_api.auth import require_api_key
@@ -253,13 +256,21 @@ def delete_cached_app(
         # operation keeps the window tiny and the consequence is benign (the
         # job refills what was deleted), so this stays a guard rather than a
         # lock that would have to be held across the filesystem work.
+        # The label follows the job's own type (WP 3.8): GC jobs share this
+        # queue, so "Prefill job N" would now be a lie for half the cases —
+        # and an operator who reads "prefill" and goes looking for a download
+        # that isn't running has been sent the wrong way.
+        job_label = (
+            "GC" if str(active_job["type"]) == jobs.JOB_TYPE_GC else "Prefill"
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                f"Prefill job {active_job['id']} for app {appid} is "
+                f"{job_label} job {active_job['id']} for app {appid} is "
                 f"{active_job['status']}. Deleting depots while they are being "
-                "downloaded would delete under an active write — retry once that "
-                "job has finished (poll GET /v1/jobs/{id})."
+                "downloaded (or garbage-collected) would delete under an active "
+                "write — retry once that job has finished (poll "
+                "GET /v1/jobs/{id})."
             ),
         )
 
@@ -394,4 +405,155 @@ def delete_cached_app(
         ],
         failed=[FailedDepotOut(depotid=f.depotid, error=f.error) for f in failed],
         total_bytes_freed=total_bytes_freed,
+    )
+
+
+# --------------------------------------------------------------------------
+# POST /v1/cache/{appid}/gc — plan §6, ADR-0007
+# --------------------------------------------------------------------------
+
+#: The two words this API uses for the two modes, in the response and nowhere
+#: else in logic — ``execute`` is the boolean that decides anything.
+MODE_DRY_RUN = "dry-run"
+MODE_EXECUTE = "execute"
+
+
+class GcRequest(BaseModel):
+    """Body of ``POST /v1/cache/{appid}/gc``. Optional — omitting it is a dry run.
+
+    ``extra="forbid"`` for the same reason as ``PrefillRequest`` and the
+    mapping endpoints, and with more at stake: a typo'd field name must 422
+    rather than be silently dropped. (Dropping ``{"exceute": true}`` would land
+    on the *safe* side — a dry run — but an operator who then believes the
+    cache was cleaned is exactly as misinformed as one who did not want a
+    deletion, and a 422 is free.)
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: ``StrictBool``, not ``bool``: pydantic's lax mode would accept
+    #: ``"true"``, ``"yes"``, ``"on"`` and ``1`` here (docs/LEARNINGS.md
+    #: records the int-field version of the same coercion). For the one flag
+    #: that turns a report into a deletion, the only accepted spelling is a
+    #: literal JSON ``true`` — a client that sends a string got its request
+    #: rejected rather than half-understood.
+    execute: StrictBool = False
+
+
+class GcJobRef(BaseModel):
+    """Which job was queued, and — unmistakably — in which mode."""
+
+    appid: int
+    job_id: int
+    status: str
+    #: Always ``"gc"``; present so a client that stores this response has the
+    #: same ``type`` value ``GET /v1/jobs`` will report for the job.
+    type: str
+    #: ``"dry-run"`` or ``"execute"``. Redundant with ``execute`` below on
+    #: purpose: the boolean is what the code acts on, the word is what a human
+    #: reads in a terminal, and a UI that shows either one cannot get the mode
+    #: wrong by accident.
+    mode: str
+    #: True only when this job will actually delete files.
+    execute: bool
+    #: True when an existing queued/running GC job **in the same mode** was
+    #: returned instead of a second one being created (see
+    #: ``jobs.enqueue_gc``: a dry run and an execute run never dedupe into
+    #: each other).
+    deduplicated: bool
+
+
+@router.post(
+    "/v1/cache/{appid}/gc",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=GcJobRef,
+)
+def create_gc_job(
+    appid: int = Path(ge=1, description="Steam app id whose depots to collect"),
+    body: GcRequest | None = None,
+    open_db: DbOpener = Depends(db_opener),
+) -> GcJobRef:
+    """Queue a garbage-collection job for one game (plan §6, ADR-0007). 202.
+
+    > For one depot, the chunks worth keeping are the UNION of the current
+    > manifests of every app that has a claim on that depot; everything else in
+    > that depot's ``chunk/`` directory is an orphan left behind by a game
+    > update.
+
+    **Dry run by default (ADR-0007).** With no body, or with
+    ``{"execute": false}``, the job plans and reports and deletes **nothing**.
+    Deletion requires the explicit opt-in ``{"execute": true}`` — a literal
+    JSON boolean, see ``GcRequest.execute``. The mode is stored on the job row
+    (``jobs.gc_execute``, schema v7), so it survives the queue wait and a
+    restart, and an old job row still says which mode it ran in.
+
+    Order of decisions:
+
+    1. ``404`` if the app has no row in ``apps`` — vault-api tracks no such
+       app, so there is nothing to collect.
+    2. ``404`` if the app maps no depots — nothing to collect (same reasoning
+       and same wording style as ``DELETE /v1/cache/{appid}``).
+    3. ``202`` otherwise, with the job reference. The work happens on the
+       single background worker.
+
+    **No ``409`` for an active job, and that is not an oversight.** The
+    equivalent guard on ``DELETE /v1/cache/{appid}`` exists because that
+    endpoint deletes in the *request thread*, so it really can race a running
+    download. GC runs *on the worker*, which executes one job at a time, so a
+    GC job physically cannot overlap a prefill of the same app — it simply
+    waits its turn. Serialization is the guard (ADR-0007: "runs as a queued
+    job, serialized with prefills on the single worker").
+
+    **The plan is built when the job runs, never here.** This endpoint stores
+    an app id and a mode; the worker plans against a fresh database read and a
+    fresh filesystem scan at execution time. A game that updates while the job
+    sits in the queue is therefore collected against its new manifest — see
+    ``vault_api/gc_execute.py``'s "TOCTOU" section.
+
+    What a GC job does to app state: **nothing** to ``apps.status`` or
+    ``last_prefill_at``; an *executing* run that actually reclaimed chunks
+    invalidates the size cache and sets ``apps.needs_force = 1`` for every app
+    mapped to a depot it took chunks from. The full argument (including why
+    the "obvious" answer of not setting it was rejected) is in
+    ``vault_api/gc_execute.py``'s module docstring and in api/README.md.
+    """
+    execute = bool(body.execute) if body is not None else False
+
+    with open_db() as conn:
+        app_row = conn.execute(
+            "SELECT appid FROM apps WHERE appid = ?", (appid,)
+        ).fetchone()
+        if app_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"Unknown appid {appid} — vault-api tracks no such app, so there "
+                    "is nothing to garbage-collect."
+                ),
+            )
+
+        if not deletion.load_mapping_rows(conn, appid):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"App {appid} has no depot mappings, so there is nothing to "
+                    "garbage-collect. Mappings are created by a successful prefill "
+                    "or via PUT /v1/mapping/{depotid}."
+                ),
+            )
+
+        job, created = jobs.enqueue_gc(conn, appid, execute=execute)
+
+    logger.info(
+        "cache-gc appid=%s queued job %s in %s mode (deduplicated=%s)",
+        appid, job["id"], MODE_EXECUTE if execute else MODE_DRY_RUN, not created,
+    )
+    return GcJobRef(
+        appid=appid,
+        job_id=int(job["id"]),  # type: ignore[arg-type]
+        status=str(job["status"]),
+        type=str(job["type"]),
+        mode=MODE_EXECUTE if execute else MODE_DRY_RUN,
+        execute=execute,
+        deduplicated=not created,
     )

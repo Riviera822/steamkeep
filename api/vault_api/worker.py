@@ -4,6 +4,11 @@ One ``threading.Thread`` started by the FastAPI lifespan, polling the ``jobs``
 table. No Celery, no APScheduler, no second process — plan §9's simplicity
 stance, and the queue only ever executes one job at a time anyway.
 
+Two job types share that queue: ``prefill`` (WP 1.4, the body of this file) and
+``gc`` (WP 3.8, executed by ``vault_api.gc_execute``). Sharing is the point —
+one worker means a GC job can never unlink chunks out of a depot SteamPrefill
+is downloading into.
+
 Lifecycle
 ---------
 startup  ->  ``jobs.recover_stale_jobs`` (fail orphaned 'running' rows from a
@@ -23,7 +28,7 @@ import sqlite3
 import threading
 import traceback
 
-from vault_api import jobs, manifest_ingest, prefill, prefill_summary
+from vault_api import gc_execute, jobs, manifest_ingest, prefill, prefill_summary
 from vault_api.config import Settings
 from vault_api.db import get_connection
 from vault_api.sizes import SizeCache
@@ -102,6 +107,48 @@ class PrefillWorker:
             conn.close()
 
     def _execute(self, conn: sqlite3.Connection, job: dict[str, object]) -> None:
+        """Dispatch one claimed job to the code that knows how to run it.
+
+        Deliberately an exhaustive match rather than "prefill unless it says
+        gc" (WP 3.8): an unrecognised ``type`` is failed with a clear message,
+        never guessed at. Guessing would mean a typo'd or future job type
+        silently running SteamPrefill against an app id, and the queue is
+        shared with a job type that deletes files.
+        """
+        job_type = str(job["type"])
+        if job_type == jobs.JOB_TYPE_PREFILL:
+            self._execute_prefill(conn, job)
+            return
+        if job_type == jobs.JOB_TYPE_GC:
+            # Owns its own error handling and never raises; it deliberately
+            # does NOT touch apps.status (see gc_execute's module docstring).
+            gc_execute.run_gc_job(
+                conn, job, settings=self._settings, size_cache=self._size_cache
+            )
+            return
+        self._fail_unknown_job_type(conn, job, job_type)
+
+    def _fail_unknown_job_type(
+        self, conn: sqlite3.Connection, job: dict[str, object], job_type: str
+    ) -> None:
+        job_id = int(job["id"])  # type: ignore[arg-type]
+        logger.error(
+            "Job %s has unknown type %r; failing it rather than guessing what to run.",
+            job_id, job_type,
+        )
+        try:
+            jobs.finish_job(
+                conn,
+                job_id,
+                jobs.STATUS_ERROR,
+                f"[vault-api] Unknown job type {job_type!r}. This worker only runs "
+                f"{jobs.JOB_TYPE_PREFILL!r} and {jobs.JOB_TYPE_GC!r} jobs, and does "
+                "not guess: nothing was executed for this job.",
+            )
+        except Exception:  # pragma: no cover - DB itself is broken
+            logger.exception("Could not even record the failure of job %s", job_id)
+
+    def _execute_prefill(self, conn: sqlite3.Connection, job: dict[str, object]) -> None:
         job_id = int(job["id"])  # type: ignore[arg-type]
         appid = int(job["appid"])  # type: ignore[arg-type]
         logger.info("Starting prefill job %s for appid %s", job_id, appid)

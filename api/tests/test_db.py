@@ -442,6 +442,65 @@ def test_init_db_upgrades_a_pre_v6_database_by_adding_schedule_state(tmp_path) -
     assert appid == 440
 
 
+def test_init_db_upgrades_a_pre_v7_database_by_adding_gc_execute(tmp_path) -> None:
+    """v6 -> v7 (WP 3.8) adds ``jobs.gc_execute`` — ADR-0007's dry-run/execute
+    bit. Same ALTER-guarded shape as v4, reusing the same per-column step, and
+    an existing job row must come out with the column NULL: a pre-v7 job was
+    never a GC job, and "not applicable" is not "dry run".
+    """
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        # Recreated in its exact pre-v7 shape rather than ALTER ... DROP
+        # COLUMN, for the same reason the pre-v4 test above does it: DROP
+        # COLUMN rewrites the table's stored CREATE TABLE text and trips over
+        # _DDL's multi-line `--` comment block ("incomplete input").
+        conn.execute("DROP TABLE jobs")
+        conn.execute(
+            """
+            CREATE TABLE jobs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                appid       INTEGER NOT NULL,
+                type        TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'idle',
+                created_at  TEXT NOT NULL,
+                started_at  TEXT,
+                finished_at TEXT,
+                log_excerpt TEXT,
+                updated           INTEGER,
+                up_to_date        INTEGER,
+                summary_parse_ok  INTEGER
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO jobs (id, appid, type, status, created_at) "
+            "VALUES (1, 440, 'prefill', 'done', '2026-08-09T00:00:00Z')"
+        )
+        conn.execute("UPDATE schema_version SET version = 6")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+    init_db(db_path)  # idempotent: must not raise 'duplicate column name'
+
+    conn = get_connection(db_path)
+    try:
+        (version,) = conn.execute("SELECT version FROM schema_version").fetchone()
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        row = conn.execute("SELECT * FROM jobs WHERE id = 1").fetchone()
+    finally:
+        conn.close()
+
+    assert version == SCHEMA_VERSION
+    assert "gc_execute" in columns
+    assert row["appid"] == 440
+    assert row["gc_execute"] is None
+
+
 def test_schedule_state_rejects_a_second_row(tmp_path) -> None:
     """CHECK (id = 1): "the single row" is enforced by the schema, not by
     convention — a second row would make "when did the last sweep run"

@@ -640,12 +640,27 @@ class _ManifestReader:
     ) -> ParsedManifest | ManifestParseError:
         """Parse an archived ``{depotid}_{manifestid}.bin``, cross-checking the
         payload's own ids against the pair we asked for (the corruption signal
-        ``parse_steamprefill_bin`` keeps for the ingestion path)."""
+        ``parse_steamprefill_bin`` keeps for the ingestion path).
+
+        ``manifestid`` arrives as a ``str`` here and as an ``int`` there, so
+        it is converted — see the call site's comment for why that conversion
+        cannot raise.
+        """
         return self._read(
             path,
             lambda p: parse_bin_payload(
                 p,
                 filename_depot_id=depotid,
+                # int() is safe ONLY because valid_manifest_id ran first: every
+                # path into this method (`_resolve_app_manifest`, both the
+                # recorded-id branch and the newest-stored-manifest fallback)
+                # has already passed `manifestid` through `valid_manifest_id`,
+                # which admits nothing but a leading-zero-free string of at
+                # most 20 ASCII digits. Without that guarantee this would be
+                # exactly the liberal-int() trap docs/LEARNINGS.md records
+                # (" 4 ", "+4", "1_0", non-ASCII digits) — and a raw ValueError
+                # escaping here would crash the plan run rather than being
+                # reported as an unresolved manifest.
                 filename_manifest_id=int(manifestid),
             ),
         )

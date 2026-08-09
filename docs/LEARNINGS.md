@@ -96,6 +96,12 @@ These are not style preferences; each entry cost a review round to learn.
   filename-contract validation separable, with the caller supplying the
   expected ids so the corruption cross-check survives (WP 3.7).
 
+- `ntpath.join` has two surprising drive cases: `join(parent, "C:x")`
+  silently drops the drive (yields `parent\x`) and `join(parent, "a:b")`
+  discards the parent entirely — strict-child path guards must compare
+  `dirname`/`basename` equality on the joined result, never prefixes
+  (WP 3.8, measured).
+
 ## Containers
 - A non-root container user needs a real, writable HOME — tools that
   write caches (SteamPrefill: $HOME/.cache) crash on /nonexistent before
