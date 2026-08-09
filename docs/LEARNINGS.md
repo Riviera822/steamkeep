@@ -35,6 +35,12 @@ These are not style preferences; each entry cost a review round to learn.
   proxy_cache-only or `$upstream_status` variables (WP 3.10).
 - PCRE `.` stops at newlines — regexes bounding DECODED URIs need `(?s)`
   or an embedded %0A silently truncates the match (WP 3.10).
+- A guard grepping a log_format NAME also matches the `log_format`
+  declaration and every `map` named after it — anchor config guards to the
+  DIRECTIVE (`^\s*access_log\s.*name`). WP 3.10 shipped a fail-closed hook
+  that failed 100% of the time in the default (event-log-off) deployment;
+  container hooks without a container-level test stayed unexecuted until
+  WP 5.1's first CI gate exposed it (WP 5.1 blocker).
 
 ## SQLite / FastAPI / vault-api
 - Connections must be created, used, and closed in ONE thread. A generator
@@ -92,6 +98,22 @@ These are not style preferences; each entry cost a review round to learn.
   `[TimeSpan]::MaxValue` repetition durations; em dashes in BOM-less UTF-8
   break the PS 5.1 parser under the system codepage — packaging scripts
   are pure ASCII (WP 2.6).
+
+## CI / GitHub Actions
+- The stock nginx image entrypoint soft-fails: `20-envsubst-on-templates.sh`
+  returns 0 WITHOUT rendering when the template dir is missing or the output
+  dir is unwritable, and the image ships its own nginx.conf — a gate driving
+  the real entrypoint must assert the rendered config is actually ours
+  (grep a repo-owned token like the log_format name) or it green-lights the
+  stock config (WP 5.1 reviewer catch).
+- Values hand-copied from a Dockerfile into CI (image ref, ENV wiring) are
+  drift surfaces — derive them (`sed -n 's/^FROM[[:space:]]\{1,\}//p'`) or
+  grep-assert they still match before use, and require `@sha256:` (WP 5.1).
+- PSScriptAnalyzer's PSUseCompatibleSyntax checks the AST against stored
+  version profiles — it does not need to run UNDER 5.1; only the raw
+  `Parser::ParseFile` check does. Split: parser under `shell: powershell`,
+  analyzer under `pwsh` (5.1 hosts may not see the runner's preinstalled
+  module path) (WP 5.1).
 
 ## dnsmasq / vault-dns
 - `address=/zone/ip` alone FORWARDS AAAA upstream on modern dnsmasq —

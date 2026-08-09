@@ -1,0 +1,113 @@
+name: CI
+
+# WP 5.1 (Phase 5, release track). Scope, deliberately: build/test gates only.
+# NO image publishing and NO ghcr.io here -- that is WP 5.5, user-gated
+# (docs/WORKPACKAGES.md). Real-Steam-CDN / real-machine tests
+# (core/tests/test-core.ps1, agent/packaging/windows/tests/
+# test-install-uninstall.ps1, agent/tests/sandbox/*, dns/tests/
+# test-dnsmasq-config.ps1) are intentionally NOT run here -- they need the
+# real network / a real machine's Task Scheduler and are documented as
+# local-only, run-by-hand harnesses at their own doc comments. Skipping
+# them is therefore not a CI gap to "fix": there is nothing in this repo's
+# test suites today that needs a pytest/go-test skip marker to stay honest
+# about it (see the WP 5.1 coder report for the audit that confirmed this).
+# The two PowerShell ones are still parse-checked (never executed) by the
+# powershell-syntax job below.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Only the read access every job below actually needs (checkout). No job
+# publishes anything, so nothing needs write permissions anywhere.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-tests:
+    name: api / pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # Matches the interpreter pinned in api/Dockerfile
+          # (python:3.13.14-slim-trixie) -- keep both in sync.
+          python-version: "3.13"
+      - name: Install dependencies
+        working-directory: api
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: pytest
+        working-directory: api
+        # -ra: a compact summary line per skip/xfail at the end, so a skip
+        # is visible in the log instead of only showing up as a bare count.
+        run: python -m pytest -v -ra
+
+  agent-go:
+    name: agent / go (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: agent/go/go.mod
+      - name: go build ./...
+        working-directory: agent/go
+        run: go build ./...
+      - name: go vet ./...
+        working-directory: agent/go
+        run: go vet ./...
+      - name: go test ./...
+        working-directory: agent/go
+        # -v surfaces the t.Skip()s that fire on this OS (e.g. hostsfile's
+        # admin/root-only and Windows-vs-POSIX branches, agentconfig's
+        # $HOME-dependent case) so a skip is visible in the log, not silent.
+        run: go test -v ./...
+
+  core-nginx-config:
+    name: core / nginx -t (rendered container config)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: shellcheck
+        # Preinstalled on ubuntu-latest (actions/runner-images) -- lints
+        # this job's own script before spending time on docker pull/run.
+        run: shellcheck .github/scripts/verify-core-nginx.sh
+      - name: Render core/docker/nginx.conf.template and run nginx -t
+        run: bash .github/scripts/verify-core-nginx.sh
+
+  powershell-syntax:
+    name: agent / PowerShell 5.1 syntax
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Parser + pure-ASCII check (real Windows PowerShell 5.1)
+        # Explicit Windows PowerShell (5.1), not pwsh/PowerShell 7 --
+        # agent/packaging/windows's real deployment target only ever has
+        # 5.1 available, so the parser check must run under 5.1's own
+        # parser. Also covers core/tests/test-core.ps1 and dns/tests/
+        # test-dnsmasq-config.ps1 (parse-only, never executed -- see the
+        # script's own header).
+        shell: powershell
+        run: .\.github\scripts\verify-ps-parse.ps1
+      - name: PSUseCompatibleSyntax(5.1) check (pwsh)
+        # Split from the parser check (review round 2, S5): this rule
+        # analyzes against stored version-profile data, not the host's own
+        # edition, so it doesn't need to run under 5.1 itself -- and pwsh is
+        # where PSScriptAnalyzer is reliably discoverable on this runner
+        # image. See verify-ps-analyze.ps1's header for the full reasoning.
+        shell: pwsh
+        run: ./.github/scripts/verify-ps-analyze.ps1

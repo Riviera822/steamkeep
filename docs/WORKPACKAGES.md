@@ -194,7 +194,7 @@ OpenID in a Custom Tab; the PHONE fetches the library from Valve
 
 ## Phase 5 — Community release (track: release)
 
-- **WP 5.1 — CI** (`.github/`) — **dispatchable NOW, parallel to everything**:
+- **WP 5.1 — CI** (`.github/`) — **DONE 2026-08-09** (was: dispatchable NOW, parallel to everything):
   GitHub Actions running api pytest (Linux), agent `go build/vet/test`
   (Linux + Windows), `nginx -t` on rendered core templates, PS 5.1 syntax
   checks for packaging scripts. NO image publishing here. Container-network
