@@ -109,10 +109,15 @@ vault-api as static files. No node toolchain: keeps `compose up` the whole
 deploy story (plan §9) and CI trivial. Revisit only if a package hits a
 hard wall and then via ADR.
 
-The interactive mockup (Artifact "SteamVault — App Mockup", scratchpad
-`vault-app-mockup.html` + NOTES) is the design source of truth: status-icon
-system, capsule pills, in-place tick patching (round 7), bulk semantics,
-stale-requires-cache invariant, notification model.
+The interactive mockup — **approved by the user at round 7 (2026-08-09)
+and frozen** — is the design source of truth:
+`docs/design/vault-app-mockup.html` + `vault-app-mockup-NOTES.md` (open the
+HTML in any browser). It carries the status-icon system, capsule pills,
+in-place tick patching (round 7), bulk semantics, stale-requires-cache
+invariant and the notification model. One accepted divergence: the mockup
+shows a paused job holding the worker slot; the WP 3.12 backend releases
+it — UI packages follow the BACKEND semantics. Remaining polish is
+expected to surface through real use, not further mockup rounds.
 
 ### WP 4a.1 — Static serving + app shell (api/ + web/) — **first, serial**
 - vault-api mounts `web/` (StaticFiles, SPA fallback, sane CSP/security
