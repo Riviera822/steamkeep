@@ -67,11 +67,33 @@ expect_once() {
     fi
 }
 
+# expect_count <file> <expected-count> <fixed-string> <human description>
+# Same as expect_once but for deltas that legitimately appear more than
+# once -- the WP 3.10 event-log access_log line is declared once in
+# location /depot/ and once in location @miss (see core/README.md "Cache
+# event log" and the CONTAINER DELTA comments at each site), so "found 1"
+# would be just as much a drift signal there as "found 0".
+expect_count() {
+    n=$(grep -F -c -x -- "$3" "$1" || true)
+    if [ "$n" != "$2" ]; then
+        echo "check-config-drift: FAIL: expected exactly $2 occurrence(s) of '$3' in $1 ($4), found $n" >&2
+        fail=1
+    fi
+}
+
 expect_once "$work/template.norm" "user nginx;"                                "delta 1: explicit worker user"
 expect_once "$work/template.norm" "pid /var/run/nginx.pid;"                    "delta 2: pid outside the volume"
 expect_once "$work/template.norm" "error_log /dev/stderr warn;"                "delta 3: error log to stderr"
 expect_once "$work/template.norm" 'resolver ${VAULT_RESOLVER} ipv6=off valid=30s;' "delta 4: resolver placeholder"
-expect_once "$work/template.norm" "access_log /dev/stdout vault;"              "delta 5: access log to stdout"
+# delta 5 appears 3 times: once at http level (inherited by /health,
+# /lancache-heartbeat, /tmp/) and once each re-stated inside location
+# /depot/ and location @miss (WP 3.10 blocker fix -- declaring the event
+# log's own access_log in those locations REPLACES, not adds to, the
+# inherited one unless the "vault" log is re-stated alongside it; see the
+# blocker-fix comments at both sites in nginx.conf.template).
+expect_count "$work/template.norm" 3 "access_log /dev/stdout vault;"           "delta 5: access log to stdout (http level + re-stated in /depot/ and @miss)"
+expect_count "$work/template.norm" 2 'access_log ${VAULT_EVENT_LOG} vault_event buffer=64k flush=5s; # VAULT_EVENT_LOG_LINE' \
+    "delta 6: WP 3.10 cache-event log placeholder, one per location (/depot/, @miss)"
 
 # The native config must NOT already contain the container forms (would mean the
 # two files drifted in the other direction, e.g. someone containerised the
@@ -79,7 +101,9 @@ expect_once "$work/template.norm" "access_log /dev/stdout vault;"              "
 expect_once "$work/native.norm" "pid logs/nginx.pid;"                          "native: pid under the prefix"
 expect_once "$work/native.norm" "error_log logs/error.log warn;"               "native: error log to a file"
 expect_once "$work/native.norm" "resolver 1.1.1.1 ipv6=off valid=30s;"         "native: literal resolver"
-expect_once "$work/native.norm" "access_log logs/access.log vault;"            "native: access log to a file"
+expect_count "$work/native.norm" 3 "access_log logs/access.log vault;"         "native: access log to a file (http level + re-stated in /depot/ and @miss)"
+expect_count "$work/native.norm" 2 "access_log logs/event.log vault_event buffer=64k flush=5s;" \
+    "native: WP 3.10 cache-event log, hardcoded ON, one per location (/depot/, @miss)"
 
 [ "$fail" = "0" ] || exit 1
 
@@ -89,6 +113,7 @@ sed \
     -e 's|^error_log /dev/stderr warn;$|error_log logs/error.log warn;|' \
     -e 's|^resolver \${VAULT_RESOLVER} ipv6=off valid=30s;$|resolver 1.1.1.1 ipv6=off valid=30s;|' \
     -e 's|^access_log /dev/stdout vault;$|access_log logs/access.log vault;|' \
+    -e 's|^access_log \${VAULT_EVENT_LOG} vault_event buffer=64k flush=5s; # VAULT_EVENT_LOG_LINE$|access_log logs/event.log vault_event buffer=64k flush=5s;|' \
     "$work/template.norm" > "$work/template.unapplied"
 
 # --- 3. diff -----------------------------------------------------------------

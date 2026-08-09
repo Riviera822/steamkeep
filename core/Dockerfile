@@ -33,6 +33,7 @@ LABEL org.opencontainers.image.title="SteamVault vault-core" \
 # mechanism and core/docker/check-config-drift.sh for the contract that keeps
 # this template in sync with core/nginx/nginx.conf.
 COPY docker/nginx.conf.template /etc/nginx/templates/nginx.conf.template
+COPY docker/25-vault-eventlog.sh /docker-entrypoint.d/25-vault-eventlog.sh
 COPY docker/40-vault-preflight.sh /docker-entrypoint.d/40-vault-preflight.sh
 
 # Shipped for auditability: the running image can prove its own config matches
@@ -43,30 +44,40 @@ COPY docker/40-vault-preflight.sh /docker-entrypoint.d/40-vault-preflight.sh
 COPY docker/check-config-drift.sh /opt/vault/check-config-drift.sh
 
 RUN set -eux; \
-    chmod 0755 /docker-entrypoint.d/40-vault-preflight.sh /opt/vault/check-config-drift.sh; \
+    chmod 0755 /docker-entrypoint.d/25-vault-eventlog.sh /docker-entrypoint.d/40-vault-preflight.sh /opt/vault/check-config-drift.sh; \
     # The stock image's demo vhost would otherwise be rendered pointless anyway
     # (our nginx.conf does not include conf.d/*), but removing it keeps the
     # image honest about what it serves.
     rm -f /etc/nginx/conf.d/default.conf; \
     # --- The one volume ------------------------------------------------------
-    # cache/ and tmp/ are created HERE, inside one directory, so that a fresh
-    # named volume mounted at /vault is seeded with both -- with the right
-    # ownership -- and therefore automatically satisfies the binding
+    # cache/, tmp/ and logs/ are created HERE, inside one directory, so that a
+    # fresh named volume mounted at /vault is seeded with all three -- with the
+    # right ownership -- and therefore automatically satisfies the binding
     # same-filesystem requirement (core/README.md): proxy_store completes each
     # object by rename()-ing from tmp/ into cache/depot/..., which is atomic only
     # within one filesystem.
     #   cache/depot/ is pre-created because vault-api's deletion guard
     #   (DELETE /v1/cache/{appid}) refuses a cache root that has no depot/ dir,
     #   and vault-api mounts this same volume.
-    mkdir -p /vault/cache/depot /vault/tmp; \
+    #   logs/ is pre-created (WP 3.10, ADR-0008) so that turning on
+    #   VAULT_EVENT_LOG=/vault/logs/event.log needs no host-side mkdir/chown --
+    #   same "named volumes get this right automatically" property cache/ and
+    #   tmp/ already have. Harmless when the feature stays off (empty dir).
+    mkdir -p /vault/cache/depot /vault/tmp /vault/logs; \
     # uid/gid 101 = the stock nginx image's `nginx` user, which the workers run
     # as. vault-api's container user is created with the SAME numeric uid/gid so
     # both services can write this shared volume -- see api/Dockerfile.
     chown -R nginx:nginx /vault; \
-    chmod 0755 /vault /vault/cache /vault/cache/depot /vault/tmp; \
+    chmod 0755 /vault /vault/cache /vault/cache/depot /vault/tmp /vault/logs; \
     # Fail the BUILD, not the first deployment, if the template ever loses its
     # placeholder or gains an unexpected one.
-    grep -q '\${VAULT_RESOLVER}' /etc/nginx/templates/nginx.conf.template
+    grep -q '\${VAULT_RESOLVER}' /etc/nginx/templates/nginx.conf.template; \
+    # Same for the WP 3.10 event-log placeholder -- it must appear exactly
+    # twice (location /depot/ and location @miss, see
+    # core/docker/check-config-drift.sh "delta 6"), each carrying the
+    # trailing marker comment 25-vault-eventlog.sh depends on to find it.
+    grep -q '\${VAULT_EVENT_LOG}' /etc/nginx/templates/nginx.conf.template; \
+    [ "$(grep -c '# VAULT_EVENT_LOG_LINE' /etc/nginx/templates/nginx.conf.template)" = "2" ]
 
 # Declared so that a plain `docker run` without -v cannot silently fill the
 # container's writable layer with depot chunks, and so that the default is one
@@ -100,7 +111,20 @@ ENV NGINX_ENVSUBST_TEMPLATE_DIR=/etc/nginx/templates \
     # ADR-0001 req 4. Overridable per deployment (deploy/.env). Must be a real
     # upstream resolver -- never vault-dns, which would answer *.steamcontent.com
     # with vault-core's own address and loop every miss back into this server.
-    VAULT_RESOLVER=1.1.1.1
+    VAULT_RESOLVER=1.1.1.1 \
+    # WP 3.10 (ADR-0008): path for the optional cache-event log. DEFAULT EMPTY
+    # -- feature OFF -- deliberately, not "on by default with a sane path":
+    # the ADR explicitly frames this feed as "optional at runtime", and
+    # nothing in this image rotates or truncates the file once it exists
+    # (that is WP 3.11's sweeper, api/, not yet shipped as of this work
+    # package) -- defaulting it on here would grow an unbounded file on every
+    # vault-core deployment that hasn't also deployed the sweeper. Set it to
+    # an absolute path under the /vault volume (e.g.
+    # /vault/logs/event.log -- logs/ is pre-created below) in deploy/.env to
+    # enable it once a consumer exists. /docker-entrypoint.d/25-vault-eventlog.sh
+    # validates the value and either strips the feature entirely (empty) or
+    # prepares the target directory (non-empty) before nginx starts.
+    VAULT_EVENT_LOG=
 
 WORKDIR /vault
 

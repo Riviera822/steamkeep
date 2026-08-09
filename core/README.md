@@ -327,6 +327,238 @@ regardless of whether the multi-IP-retry path fires -- worst case without
 it, a request still fails fast (bounded by `proxy_next_upstream_timeout`)
 instead of hanging.
 
+## Cache-event log (WP 3.10, ADR-0008)
+
+A second, dedicated, machine-readable `access_log` alongside the
+human-oriented `vault` log above. See
+[`docs/adr/0008-cache-event-feed.md`](../docs/adr/0008-cache-event-feed.md)
+for WHY it exists (feeding WP 3.11's miss-triggered prefill completion and
+per-client bypass detection without making vault-core's serving path depend
+on vault-api being alive) -- this section documents the format and the
+decisions pinned by evidence gathered for this work package. The reasoning
+also lives as comments at the implementation site in `core/nginx/nginx.conf`
+/ `core/docker/nginx.conf.template` (search for "WP 3.10").
+
+### Format
+
+Tab-separated (`\t`), one line per logged request, `escape=default`,
+version-prefixed:
+
+**Finalized before its first consumer.** The `$status` field (#9) was added
+by review finding N3 after the rest of this format was already implemented
+and tested, but *before* anything ever consumed it -- WP 3.11 (the
+sweeper) does not exist yet, so there was no shipped reader to break. The
+version field therefore stayed `v1`: this IS v1's definition, changed in
+place while it was still pre-release. The version field's job is to catch
+*future* format changes made after a consumer exists, not this one -- see
+field 1 below.
+
+| # | Field | Source | Notes |
+|---|---|---|---|
+| 1 | format version | literal `v1` | WP 3.11's sweeper MUST reject any line whose first field isn't exactly `v1` instead of guessing at a changed layout |
+| 2 | time | `$time_iso8601` | e.g. `2026-08-09T14:03:11+02:00` |
+| 3 | client address | `$remote_addr` | direct TCP peer; no `X-Forwarded-For` trust (vault-core is never behind another proxy) |
+| 4 | cache status | `$vault_event_status` | `HIT` / `MISS` / `BYPASS` -- see "Cache-status truth" below |
+| 5 | depot id | `$vault_event_depot` | digits captured from `/depot/<id>/...`, else `-` |
+| 6 | URI path | `$vault_event_uri` | `$uri` (decoded, query-string-free), bounded to 300 characters |
+| 7 | bytes sent | `$bytes_sent` | same variable/semantics as the `vault` log's `bytes_sent` field |
+| 8 | host | `$host` | lowercased, port-stripped |
+| 9 | HTTP status | `$status` | the response status code. Without it, hit statistics would count a 403 (Host-allowlist rejection), a 404, or a 502 the same as genuinely served traffic -- `cache_status` (field 4) says HIT/MISS/BYPASS but nothing about whether the response actually succeeded, and `bytes_sent` (field 7) includes error-body bytes too. WP 3.11's sweeper needs to filter to 2xx/206 before treating a line as served traffic or as evidence a depot is now cached |
+
+Example line (tabs shown as `→` for readability):
+
+```
+v1→2026-08-09T14:03:11+02:00→192.168.1.42→MISS→70403→/depot/70403/chunk/773d10050d99b2544665873ec2125b3bf273e8b2→999232→lancache.steamcontent.com→200
+```
+
+### Escaping: `escape=default`, not `escape=json`
+
+This is a TSV, not JSON-lines: `escape=json`'s dialect (`\u00XX`, JSON
+quoting rules) buys a byte-oriented `line.split("\t")` parser nothing and
+makes the field-count guarantee below harder to reason about.
+`escape=default` does exactly what a tab-separated format needs -- it
+escapes control characters (`0x00`-`0x1F`, `0x7F`) as a printable `\xXX`
+sequence and escapes a literal `"` and `\` the same way. Concretely this
+means a hostile request path containing a percent-encoded tab or newline
+(`%09`, `%0A`) -- which nginx decodes into `$uri` as a literal control byte
+before this log format ever sees it -- comes out as `\x09`/`\x0A` in the
+log line, **not** as a real tab or newline. The only real tab bytes on the
+line are the ones the `log_format` string itself inserts between fields, so
+a naive tab-split in WP 3.11's sweeper always gets exactly 9 fields.
+
+**Pinned empirically** (`core/tests/test-core.ps1`, WP 3.10 test group):
+a request whose path contains `%09%22%0A%C3%A9` (encoded tab, quote,
+newline, and a non-ASCII UTF-8 character) still produces an event-log line
+that splits into exactly 9 tab-separated fields with field 1 == `v1`.
+
+### Cache-status truth: not `$upstream_status`, not `$upstream_cache_status`
+
+`$upstream_status` becomes a comma-separated retry list on a
+`proxy_next_upstream` retry (LEARNINGS, e.g. `"502, 200"`) -- a status field
+fed from it directly would need the same `"~, 200$"`-style last-attempt
+parsing the store-guard map already does, and would still only describe the
+upstream HTTP status code, not "was this object served from local disk or
+fetched". `$upstream_cache_status` does not help either: it belongs to the
+`proxy_cache` module, which this config never enables (it uses `proxy_store`
+exclusively). **Measured, not assumed**, for this work package: with real
+requests through the local test rig, `$upstream_cache_status` read back as
+the literal string `-` on BOTH the `try_files`-HIT path (no upstream module
+ever invoked for that request) and the `proxy_store` MISS path -- it carries
+no HIT/MISS signal at all in this config, confirming the ADR's explicit
+warning that it "does NOT apply to proxy_store setups".
+
+`$vault_cache_status` -- the marker this config already sets via `set` in
+`location /depot/` (`HIT`) and `location @miss` (`MISS`), used by the
+existing human-readable `vault` log too -- has neither problem: it reflects
+**which location block actually served the request**, a structural fact
+fixed before any upstream I/O happens, not a parsed status code. A request
+that retries `502` then `200` inside `@miss` is still, and was always going
+to be, an `@miss` request -- MISS -- regardless of how many upstream
+attempts that took. This is the "FINAL attempt's meaning" the comma-list
+problem asks for, pinned by construction rather than by parsing.
+
+`$vault_event_status` layers exactly one more distinction on top:
+`?nocache=1` requests (ADR req 3) are BYPASS-intent, not a plain miss --
+SteamPrefill's speed probes should be identifiable as such without WP 3.11
+re-deriving `$arg_nocache` itself. Since `$vault_try_target` already forces
+every `nocache=1` request through `@miss` (it can never resolve as a HIT),
+only the `MISS:1 -> BYPASS` branch is reachable today; `HIT:1 -> BYPASS` is
+mapped anyway, defensively, matching this file's existing style of keeping
+branches that "can't currently happen" explicit (see the `/tmp/` location
+and the store-path guard's 301/302 branch above).
+
+### Scope: what produces a line, what doesn't
+
+The `access_log ... vault_event ...` directive is declared **per-location**
+(inside `location /depot/` and `location @miss`), not at `server`/`http`
+level. `/health`, `/lancache-heartbeat` and `location ^~ /tmp/` never
+declare it at all, so they produce **zero** event-log lines -- not a typed
+"heartbeat" line the sweeper has to recognize and skip, but no line at all,
+which is the cheapest possible thing to skip. A request that `try_files`
+resolves locally never reaches `@miss` (nginx switches the request's
+"current location" on an internal redirect, including for the log phase),
+so exactly one of the two directives fires per request -- never both, never
+neither, for anything reaching `/depot/`.
+
+### Performance: `buffer=64k flush=5s`
+
+Keeps the write off the request's hot path: nginx appends into an
+in-memory buffer and only issues a `write()` syscall when the buffer fills
+or 5 seconds have elapsed since the last flush, whichever comes first.
+**Implication for WP 3.11's sweeper:** a line can sit unflushed in memory
+for up to 5 seconds after the request that produced it. The sweeper's
+cadence (WP 3.5, coarser than seconds) already tolerates this trivially --
+but a same-second "did the sweeper see this MISS yet" test or expectation
+would be flaky against a live server; don't write one. (`test-core.ps1`'s
+event-log tests read the file directly after the request completes and are
+therefore unaffected -- flush latency only matters for a process reading
+the file concurrently with traffic, which is exactly WP 3.11's situation.)
+
+### Rotation and the USR1 contract
+
+Per ADR-0008, **the sweeper (WP 3.11, `api/`) owns the cursor and
+truncation** -- nothing in `core/` rotates this file. Two consequences worth
+being explicit about:
+
+- nginx's stock `USR1`-reopen behavior (`kill -USR1 <master pid>`, or
+  `nginx -s reopen`) already covers every open `access_log` file handle,
+  including this one, for free -- no code in this work package changes
+  that. If a future rotation strategy ever renames the file instead of
+  truncating it in place, the sweeper (or whatever triggers rotation) MUST
+  signal vault-core's master process afterwards, or nginx keeps writing to
+  the renamed (now effectively deleted-on-most-filesystems) inode. This is
+  a boundary note, not something WP 3.10 needed to implement: the ADR's
+  chosen design is cursor+truncate, not rename.
+- Truncate-in-place is actually safe against nginx's own writer without any
+  reopen at all, and it's worth recording why: nginx opens `access_log`
+  files with `O_APPEND`, under which every `write()` targets the file's
+  *current* end-of-file as tracked by the kernel, not an offset cached by
+  the writing process. Truncating the file to zero bytes while nginx holds
+  it open changes that current end-of-file too, so the next line nginx
+  writes lands at the new offset 0 -- no gap, no sparse hole, no reopen
+  needed. This is *why* ADR-0008 could choose "sweep, then truncate" as the
+  whole rotation story instead of a logrotate-style rename dance.
+
+### Docker: `VAULT_EVENT_LOG` (optional, default OFF)
+
+`core/docker/nginx.conf.template` renders the two `access_log` lines'
+path from `${VAULT_EVENT_LOG}` (envsubst, `NGINX_ENVSUBST_FILTER=^VAULT_`,
+same mechanism as `VAULT_RESOLVER`). Default in `core/Dockerfile`: **empty
+(feature off)**, deliberately -- ADR-0008 frames the feed as "optional at
+runtime", and as of this work package nothing consumes or rotates the file
+yet (WP 3.11 ships that). Defaulting it on would grow an unbounded file on
+every vault-core deployment that hasn't also deployed the sweeper.
+
+Turning it on is a single `deploy/.env` value once a consumer exists (that
+wiring -- exposing `VAULT_EVENT_LOG` through `deploy/compose.yaml` /
+`deploy/.env.example` -- is explicitly **out of scope for WP 3.10**, which
+touches `core/` only; see "What this work package does NOT cover" below):
+
+```
+VAULT_EVENT_LOG=/vault/logs/event.log
+```
+
+`/vault/logs/` is pre-created (owned by the `nginx` user) by
+`core/Dockerfile`, the same "named volumes get this right automatically"
+treatment `cache/` and `tmp/` already get -- turning the feature on needs
+no host-side `mkdir`/`chown` even on a fresh volume.
+
+Because plain envsubst can't express "empty means: delete this directive
+entirely" (an empty substitution leaves a syntactically broken
+`access_log`, not a clean no-op -- see the comments in
+`core/docker/nginx.conf.template` and `core/docker/25-vault-eventlog.sh`),
+a small additional entrypoint hook,
+**`core/docker/25-vault-eventlog.sh`** (runs after `20-envsubst-...`, before
+`40-vault-preflight.sh`), does the rest:
+
+- `VAULT_EVENT_LOG` empty/unset: deletes both `access_log ... vault_event
+  ...` lines from the rendered config entirely (found via a stable trailing
+  marker comment, `# VAULT_EVENT_LOG_LINE`, not by re-parsing the
+  substituted path) -- verified no marker line survives, **and** (review
+  finding N1, hardening added after initial review) verified no line
+  referencing `vault_event` survives EITHER, independent of the marker: a
+  marker-only check would pass with `rc=0` even if some future edit left a
+  live event-log `access_log` directive that had simply lost its trailing
+  comment. Either check failing refuses to start rather than boot
+  half-disabled. The Dockerfile's build-time marker-count assertion (`core/
+  Dockerfile`, "Same for the WP 3.10 event-log placeholder") is the FIRST
+  line of defense, catching a template edit before the image even ships;
+  this pair of runtime checks is the second.
+- `VAULT_EVENT_LOG` non-empty: validated against a strict character
+  allowlist (letters, digits, `/`, `_`, `-`, `.`, must start with `/`) --
+  same class of guard `40-vault-preflight.sh` already applies to
+  `VAULT_RESOLVER`, because this value is also substituted verbatim into
+  `nginx.conf` and a `;`/`{`/`}` in it would be config injection. **Also
+  required (review finding N2): the path must be under `/vault/`.** The
+  character allowlist alone accepts any syntactically clean absolute path,
+  and this script `mkdir -p`s and `chown`s the value's PARENT directory to
+  the `nginx` worker user -- unconstrained, `VAULT_EVENT_LOG=/etc/nginx/x.log`
+  would hand `/etc/nginx` itself to that user. The feature only ever needs
+  to write somewhere on the `/vault` volume (alongside `cache/` and `tmp/`),
+  so anything outside it is refused with a clear message rather than acted
+  on. The marker comment is stripped (cosmetic only) once both checks pass,
+  and the target directory is `mkdir -p`'d and `chown`'d to the `nginx`
+  user.
+
+`core/docker/check-config-drift.sh` was extended with a 6th recognized
+delta for the two event-log lines (native: hardcoded ON at
+`logs/event.log`, since native dev mode has no runtime env-var mechanism
+and is never the deployed target anyway; container: the `${VAULT_EVENT_LOG}`
+placeholder) -- everything else about the two lines must stay
+byte-identical, same contract as the other five deltas.
+
+**Known gap, honestly flagged:** this work package's environment has no
+Docker available (dev-machine constraint) and could not run the actual
+image end-to-end. The `25-vault-eventlog.sh` sed/validation logic was
+verified directly against synthetic rendered-config fixtures under
+`sh` (both the empty and non-empty paths, plus rejecting a relative path
+and an injection attempt), and `check-config-drift.sh` was verified to both
+pass on the real files and fail on an injected mismatch -- but the full
+`envsubst` render -> `25-vault-eventlog.sh` -> `40-vault-preflight.sh` ->
+`nginx -t` chain inside the real Alpine image was not independently
+re-run here, matching the same documented constraint prior work packages
+in this repo have flagged when Docker wasn't available.
+
 ## Log rotation
 
 `access_log logs/access.log vault;` and `error_log logs/error.log warn;`
@@ -416,3 +648,19 @@ touching either file.
 - Per-client bypass detection (Phase 3, requirement A12)
 - Changes to `poc/` (frozen as Phase-0 evidence; its nginx is only
   stopped/started by `test-core.ps1`, never its config or code)
+
+**WP 3.10 (cache-event log, ADR-0008) additionally does NOT cover**, by
+explicit scope boundary (this work package touches `core/` only):
+
+- The sweeper that reads this log, the byte-offset cursor, truncation, the
+  miss-trigger rule, or any per-client statistics -- all WP 3.11, `api/`.
+- Exposing `VAULT_EVENT_LOG` through `deploy/compose.yaml` /
+  `deploy/.env.example` so an operator can actually set it via Compose --
+  those files live under `deploy/`, out of this work package's scope. Today
+  the Dockerfile's baked-in empty default is the only value a plain
+  `docker compose up` gets; a deployment wanting the feature on needs a
+  `deploy/` change first (expected to land alongside WP 3.11, which is the
+  first thing that would actually consume the file).
+- A real end-to-end Docker build/run of the container template + the new
+  `25-vault-eventlog.sh` hook (no Docker available in this work package's
+  environment -- see "Known gap, honestly flagged" above).

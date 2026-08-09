@@ -35,6 +35,28 @@
       9. S3 temp-path regression - GET /tmp/proxy/... returns 404, not an
                                   in-flight (or leftover) temp file's bytes
 
+    Plus five test groups for the WP 3.10 (ADR-0008) cache-event log
+    (core/README.md "Cache-event log" has the full field spec/reasoning):
+      10. MISS-then-HIT          - a MISS writes a tab-separated v1 line
+                                  with the depot id and a positive byte
+                                  count; the follow-up warm request writes
+                                  a HIT line
+      11. nocache=1 BYPASS       - a ?nocache=1 request is typed BYPASS,
+                                  not MISS, and its logged uri excludes the
+                                  query string
+      12. heartbeat exclusion    - /lancache-heartbeat produces ZERO
+                                  cache-event log lines (the location never
+                                  declares the directive)
+      13. hostile URI            - a path containing percent-encoded
+                                  tab/quote/newline/non-ASCII produces
+                                  exactly one well-formed 9-field line with
+                                  the control characters escaped as \xXX,
+                                  not raw
+      14. feature off            - a fixture config with the directive
+                                  entirely absent (fixtures/eventlog-off.conf)
+                                  stays `nginx -t` green and creates no
+                                  event.log file
+
     IMPORTANT -- port 80 contention: a live Steam client may be using the
     Phase-0 PoC's nginx on port 80. This script:
       1. Stops whatever nginx is currently running (poc/stop.ps1 -- safe/
@@ -246,6 +268,41 @@ function Get-NewLogLines([int]$sinceCount) {
 function Get-LogLineCount {
     if (-not (Test-Path $LogFile)) { return 0 }
     return (Get-Content $LogFile | Measure-Object -Line).Lines
+}
+
+# --- WP 3.10 (ADR-0008) cache-event log helpers -------------------------------
+# core/nginx/nginx.conf writes this SECOND, machine-readable log
+# (core/README.md "Cache-event log") to logs/event.log, tab-separated,
+# version-prefixed ("v1"). buffer=64k flush=5s means a line can sit
+# unflushed in nginx's memory for up to 5 seconds after the request that
+# produced it (see the config comment at the access_log directive) -- so
+# every test below that expects new event-log lines POLLS for them instead
+# of reading immediately, exactly the flakiness trap that comment warns
+# against.
+$EventLogFile = Join-Path $CoreRoot "logs\event.log"
+
+function Get-EventLineCount {
+    if (-not (Test-Path $EventLogFile)) { return 0 }
+    return (Get-Content $EventLogFile | Measure-Object -Line).Lines
+}
+
+function Get-EventNewLines([int]$sinceCount) {
+    if (-not (Test-Path $EventLogFile)) { return @() }
+    return Get-Content $EventLogFile | Select-Object -Skip $sinceCount
+}
+
+# Polls until at least $MinNewLines new lines appear (or $TimeoutSec
+# elapses), tolerating the buffer=64k flush=5s latency documented above
+# instead of racing it.
+function Wait-EventNewLines([int]$SinceCount, [int]$MinNewLines = 1, [int]$TimeoutSec = 8) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $lines = @()
+    do {
+        $lines = @(Get-EventNewLines $SinceCount)
+        if ($lines.Count -ge $MinNewLines) { return $lines }
+        Start-Sleep -Milliseconds 300
+    } while ((Get-Date) -lt $deadline)
+    return $lines
 }
 
 # ==============================================================================
@@ -651,6 +708,262 @@ try {
     }
     else {
         Fail "GET /tmp/proxy/whatever returned HTTP $code9, expected 404"
+    }
+
+    # --- 10. WP 3.10 cache-event log: MISS-then-store, HIT ---------------------
+    Write-Host ""
+    Write-Host "-- Test: cache-event log (WP 3.10 / ADR-0008) -- MISS then HIT --"
+    if (Test-Path $CacheFile) { Remove-Item -Force $CacheFile }
+    Info "cache file removed - object is cold for the event-log test"
+
+    $eventBaseline10 = Get-EventLineCount
+    try {
+        $r10a = Invoke-WebRequest -Uri "$BaseUrl$RequestPath" -Headers @{Host = $ValidHost} `
+            -UseBasicParsing -TimeoutSec 30
+        if ($r10a.StatusCode -ne 200) { Fail "event-log MISS request returned HTTP $($r10a.StatusCode), expected 200" }
+    }
+    catch { Fail "event-log MISS request threw: $_" }
+
+    # Wrapped in @(...) at the CALL SITE, not just inside the helper: a
+    # PowerShell function's `return` re-flattens a single-element array back
+    # to a bare scalar on its way out through the pipeline, same trap the
+    # $newLines/$nocacheLogLines/$passLogLines helpers above already guard
+    # against -- confirmed by this test failing with "1 fields" (indexing
+    # the STRING's first character, "v") instead of the real 8-tab-field
+    # line before this wrap was added here.
+    $missLines = @(Wait-EventNewLines -SinceCount $eventBaseline10 -MinNewLines 1)
+    if ($missLines.Count -lt 1) {
+        Fail "no new cache-event log line appeared for the MISS request within the poll window (logs/event.log missing or empty: $(Test-Path $EventLogFile))"
+    }
+    else {
+        $missFields = $missLines[0] -split "`t"
+        if ($missFields.Count -ne 9) {
+            Fail "MISS event-log line has $($missFields.Count) fields, expected 9 (review finding N3 added `$status as field 9): $($missLines[0])"
+        }
+        elseif ($missFields[0] -ne "v1") {
+            Fail "MISS event-log line field 1 (version) was '$($missFields[0])', expected 'v1'"
+        }
+        elseif ($missFields[3] -ne "MISS") {
+            Fail "MISS event-log line field 4 (cache status) was '$($missFields[3])', expected 'MISS'"
+        }
+        elseif ($missFields[4] -ne $DepotId) {
+            Fail "MISS event-log line field 5 (depot id) was '$($missFields[4])', expected '$DepotId'"
+        }
+        elseif ([int]$missFields[6] -le 0) {
+            Fail "MISS event-log line field 7 (bytes sent) was '$($missFields[6])', expected a positive number"
+        }
+        elseif ($missFields[8] -ne "200") {
+            Fail "MISS event-log line field 9 (HTTP status) was '$($missFields[8])', expected '200'"
+        }
+        else {
+            Pass "MISS event-log line: v1, depot=$($missFields[4]), bytes=$($missFields[6]), status=MISS, http_status=$($missFields[8]) ($($missLines[0]))"
+        }
+    }
+
+    $eventBaseline10b = Get-EventLineCount
+    try {
+        $r10b = Invoke-WebRequest -Uri "$BaseUrl$RequestPath" -Headers @{Host = $ValidHost} `
+            -UseBasicParsing -TimeoutSec 30
+        if ($r10b.StatusCode -ne 200) { Fail "event-log HIT request returned HTTP $($r10b.StatusCode), expected 200" }
+    }
+    catch { Fail "event-log HIT request threw: $_" }
+
+    $hitLines = @(Wait-EventNewLines -SinceCount $eventBaseline10b -MinNewLines 1)
+    if ($hitLines.Count -lt 1) {
+        Fail "no new cache-event log line appeared for the follow-up HIT request within the poll window"
+    }
+    else {
+        $hitFields = $hitLines[0] -split "`t"
+        if ($hitFields.Count -ne 9) {
+            Fail "HIT event-log line has $($hitFields.Count) fields, expected 9 (review finding N3 added `$status as field 9): $($hitLines[0])"
+        }
+        elseif ($hitFields[3] -ne "HIT") {
+            Fail "HIT event-log line field 4 (cache status) was '$($hitFields[3])', expected 'HIT'"
+        }
+        elseif ($hitFields[4] -ne $DepotId) {
+            Fail "HIT event-log line field 5 (depot id) was '$($hitFields[4])', expected '$DepotId'"
+        }
+        elseif ($hitFields[8] -ne "200") {
+            Fail "HIT event-log line field 9 (HTTP status) was '$($hitFields[8])', expected '200'"
+        }
+        else {
+            Pass "HIT event-log line: v1, depot=$($hitFields[4]), bytes=$($hitFields[6]), status=HIT, http_status=$($hitFields[8]) ($($hitLines[0]))"
+        }
+    }
+
+    # --- 11. WP 3.10 cache-event log: ?nocache=1 is BYPASS-typed ---------------
+    Write-Host ""
+    Write-Host "-- Test: cache-event log -- nocache=1 identifiable as BYPASS --"
+    $eventBaseline11 = Get-EventLineCount
+    try {
+        $r11 = Invoke-WebRequest -Uri "$BaseUrl$NocacheRequestPath" -Headers @{Host = $ValidHost} `
+            -UseBasicParsing -TimeoutSec 30
+        if ($r11.StatusCode -ne 200) { Fail "event-log nocache=1 request returned HTTP $($r11.StatusCode), expected 200" }
+    }
+    catch { Fail "event-log nocache=1 request threw: $_" }
+
+    $bypassLines = @(Wait-EventNewLines -SinceCount $eventBaseline11 -MinNewLines 1)
+    if ($bypassLines.Count -lt 1) {
+        Fail "no new cache-event log line appeared for the ?nocache=1 request within the poll window"
+    }
+    else {
+        $bypassFields = $bypassLines[0] -split "`t"
+        if ($bypassFields.Count -ne 9) {
+            Fail "nocache=1 event-log line has $($bypassFields.Count) fields, expected 9 (review finding N3 added `$status as field 9): $($bypassLines[0])"
+        }
+        elseif ($bypassFields[3] -ne "BYPASS") {
+            Fail "nocache=1 event-log line field 4 (cache status) was '$($bypassFields[3])', expected 'BYPASS': $($bypassLines[0])"
+        }
+        elseif ($bypassFields[5] -ne $RequestPath) {
+            Fail "nocache=1 event-log line field 6 (uri) was '$($bypassFields[5])', expected '$RequestPath' (query string must not appear -- `$uri already strips it)"
+        }
+        elseif ($bypassFields[8] -ne "200") {
+            Fail "nocache=1 event-log line field 9 (HTTP status) was '$($bypassFields[8])', expected '200'"
+        }
+        else {
+            Pass "nocache=1 event-log line correctly typed BYPASS, uri=$($bypassFields[5]) has no query string, http_status=$($bypassFields[8]) ($($bypassLines[0]))"
+        }
+    }
+
+    # --- 12. WP 3.10 cache-event log: heartbeat produces no line ---------------
+    Write-Host ""
+    Write-Host "-- Test: cache-event log -- /lancache-heartbeat produces NO line --"
+    $eventBaseline12 = Get-EventLineCount
+    try {
+        $r12 = Invoke-WebRequest -Uri "$BaseUrl/lancache-heartbeat" -UseBasicParsing -TimeoutSec 10
+        if ($r12.StatusCode -ne 200) { Fail "heartbeat request (event-log test) returned HTTP $($r12.StatusCode), expected 200" }
+    }
+    catch { Fail "heartbeat request (event-log test) threw: $_" }
+    Start-Sleep -Seconds 1
+    $heartbeatLines = @(Get-EventNewLines $eventBaseline12)
+    if ($heartbeatLines.Count -eq 0) {
+        Pass "/lancache-heartbeat produced zero cache-event log lines (location never declares the directive)"
+    }
+    else {
+        Fail "/lancache-heartbeat produced $($heartbeatLines.Count) unexpected cache-event log line(s): $heartbeatLines"
+    }
+
+    # --- 13. WP 3.10 cache-event log: hostile URI keeps the line format stable -
+    Write-Host ""
+    Write-Host "-- Test: cache-event log -- hostile URI (tab/quote/newline/non-ASCII) --"
+    # %09=tab, %22=quote, %0A=newline, %C3%A9=UTF-8 'e' -- all percent-encoded
+    # so they travel as a syntactically valid HTTP request line, then nginx
+    # decodes them INTO $uri before this log format ever sees them. curl.exe
+    # is used (not Invoke-WebRequest) for the same reason test 3/8 use it:
+    # no risk of .NET's Uri class silently re-normalizing/rejecting the
+    # crafted path before it reaches the wire.
+    $hostileUri = "/depot/1/chunk/AAAA%09%22%0A%C3%A9BBBB"
+    $eventBaseline13 = Get-EventLineCount
+    $hostileOut = Join-Path $TestTmpDir "hostile.bin"
+    $hostileCode = & curl.exe -s -o $hostileOut -w "%{http_code}" -H "Host: $ValidHost" "$BaseUrl$hostileUri"
+    Info "hostile-URI request completed with client-visible HTTP $hostileCode (any status is fine -- this test targets log-line integrity, not a successful fetch)"
+
+    $hostileLines = @(Wait-EventNewLines -SinceCount $eventBaseline13 -MinNewLines 1)
+    if ($hostileLines.Count -lt 1) {
+        Fail "no cache-event log line appeared for the hostile-URI request within the poll window"
+    }
+    else {
+        # Exactly ONE new line is required, not just "at least one": a raw,
+        # unescaped tab/newline reaching the file would SPLIT what should be
+        # one logical event into extra physical lines -- which is precisely
+        # the corruption escape=default exists to prevent (core/README.md
+        # "Escaping"). Asserting the count itself, not just field-splitting
+        # the first line, is what actually pins that guarantee.
+        if ($hostileLines.Count -ne 1) {
+            Fail "hostile-URI request produced $($hostileLines.Count) new event-log lines, expected exactly 1 -- an embedded control character likely broke the line format: $hostileLines"
+        }
+        else {
+            $hostileFields = $hostileLines[0] -split "`t"
+            if ($hostileFields.Count -ne 9) {
+                Fail "hostile-URI event-log line has $($hostileFields.Count) fields, expected 9 (embedded tab was not escaped away, or review finding N3's `$status field is missing): $($hostileLines[0])"
+            }
+            elseif ($hostileFields[0] -ne "v1") {
+                Fail "hostile-URI event-log line field 1 (version) was '$($hostileFields[0])', expected 'v1' -- format/version field did not survive"
+            }
+            elseif ($hostileFields[5] -notmatch '\\x09' -or $hostileFields[5] -notmatch '\\x0A') {
+                Fail "hostile-URI event-log line's uri field does not show escaped \x09/\x0A -- escape=default may not be escaping control characters as expected: $($hostileFields[5])"
+            }
+            elseif ($hostileFields[8] -ne $hostileCode) {
+                Fail "hostile-URI event-log line field 9 (HTTP status) was '$($hostileFields[8])', expected '$hostileCode' (the client-visible status curl reported) -- this is exactly the field N3 exists for: a non-2xx response must be identifiable, not counted as served traffic"
+            }
+            else {
+                Pass "hostile URI produced exactly 1 well-formed line: 9 fields, version=v1, control characters escaped as \xXX, not raw, http_status=$($hostileFields[8]) correctly non-2xx: uri=$($hostileFields[5])"
+            }
+        }
+    }
+
+    # --- 14. WP 3.10 cache-event log: feature-off produces no file, config stays valid -
+    Write-Host ""
+    Write-Host "-- Test: cache-event log -- feature OFF (no directive) stays nginx -t green, no file --"
+    $offFixtureConf = Join-Path $PSScriptRoot "fixtures\eventlog-off.conf"
+    $offRigRoot = Join-Path $CoreRoot "_testcore_tmp\eventlog-off-rig"
+    try {
+        foreach ($dir in @(
+            (Join-Path $offRigRoot "cache"),
+            (Join-Path $offRigRoot "tmp\client_body"),
+            (Join-Path $offRigRoot "tmp\proxy"),
+            (Join-Path $offRigRoot "tmp\fastcgi"),
+            (Join-Path $offRigRoot "tmp\uwsgi"),
+            (Join-Path $offRigRoot "tmp\scgi"),
+            (Join-Path $offRigRoot "logs")
+        )) {
+            if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        }
+
+        # LEARNINGS (PowerShell 5.1) says "2>&1 on native commands wraps
+        # stderr lines in NativeCommandError and kills the script under
+        # $ErrorActionPreference=Stop" -- but empirically (measured while
+        # fixing this test, not assumed from that wording) the trap is
+        # BROADER than the "&1" merge case it names: `2>$null` and even
+        # `2> file` ALSO raise a terminating NativeCommandError under Stop
+        # the moment the native process writes anything to stderr, no
+        # matter where that stream is redirected TO -- only NOT redirecting
+        # stderr at all avoids it. nginx -t writes its "syntax is
+        # ok"/"test is successful" result to stderr by design (confirmed:
+        # a bare, unredirected call prints it and returns cleanly with
+        # $LASTEXITCODE readable), so this call needs a LOCAL, restored
+        # override to a non-terminating ErrorActionPreference around it
+        # rather than a redirect -- redirecting is what breaks it here, not
+        # what fixes it.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & $NginxExe -p "`"$offRigRoot`"" -c "`"$offFixtureConf`"" -t 2>$null
+            $offTestExit = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $prevEap
+        }
+        if ($offTestExit -eq 0) {
+            Pass "nginx -t is green (exit 0) for a config with the cache-event access_log directive absent (feature off)"
+        }
+        else {
+            Fail "nginx -t failed (exit $offTestExit) for the feature-off fixture"
+        }
+
+        Start-Process -FilePath $NginxExe `
+            -ArgumentList @("-p", "`"$offRigRoot`"", "-c", "`"$offFixtureConf`"") `
+            -WorkingDirectory $offRigRoot `
+            -WindowStyle Hidden
+        Start-Sleep -Milliseconds 600
+
+        try {
+            $r14 = Invoke-WebRequest -Uri "http://127.0.0.1:18103/" -UseBasicParsing -TimeoutSec 10
+            if ($r14.StatusCode -eq 200) { Pass "feature-off fixture served a request normally (HTTP 200)" }
+            else { Fail "feature-off fixture returned HTTP $($r14.StatusCode), expected 200" }
+        }
+        catch { Fail "feature-off fixture request threw: $_" }
+
+        $offEventLog = Join-Path $offRigRoot "logs\event.log"
+        if (Test-Path $offEventLog) {
+            Fail "a logs/event.log file was created even though the fixture has no cache-event access_log directive: $offEventLog"
+        }
+        else {
+            Pass "no logs/event.log file exists under the feature-off fixture root (no directive -> no file, ADR-0008 optional-at-runtime)"
+        }
+    }
+    finally {
+        Stop-NginxInstance $offRigRoot "`"$offFixtureConf`"" (Join-Path $offRigRoot "logs\nginx.pid")
     }
 }
 finally {

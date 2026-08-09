@@ -26,6 +26,15 @@ These are not style preferences; each entry cost a review round to learn.
   not blank it — leaving `nginx -t` green and the cache quietly wrong (WP 1.9).
 - Temp paths must live OUTSIDE the document root but on the SAME filesystem
   as the cache (atomic rename) (WP 1.1/1.9).
+- `access_log` inheritance is REPLACE, not merge: declaring a second log in
+  a location silently kills the inherited one — restate every log per
+  location (WP 3.10).
+- `$upstream_cache_status` is literally `-` under proxy_store on both HIT
+  and MISS (measured) — cache-status truth must come from structural
+  location markers (`set` in the serving location), never from
+  proxy_cache-only or `$upstream_status` variables (WP 3.10).
+- PCRE `.` stops at newlines — regexes bounding DECODED URIs need `(?s)`
+  or an embedded %0A silently truncates the match (WP 3.10).
 
 ## SQLite / FastAPI / vault-api
 - Connections must be created, used, and closed in ONE thread. A generator
@@ -63,7 +72,12 @@ These are not style preferences; each entry cost a review round to learn.
 
 ## PowerShell 5.1 (dev/test harnesses)
 - `2>&1` on native commands wraps stderr lines in NativeCommandError and
-  kills the script under `$ErrorActionPreference=Stop` (WP 1.8/0.6).
+  kills the script under `$ErrorActionPreference=Stop` (WP 1.8/0.6) — and
+  so does `2>$null` (measured, WP 3.10): ANY stderr redirection triggers
+  it; the only fix around stderr-writing natives like `nginx -t` is a
+  locally restored `$ErrorActionPreference = "Continue"`.
+- `return $arrayVar` re-flattens a single-element array even when the
+  helper wrapped it — the CALL SITE needs `@(...)` too (WP 3.10).
 - `"\n"` in double quotes is a literal backslash-n; locale decimal commas
   corrupt reports — force InvariantCulture (WP 0.3).
 - `$null` numeric comparisons pass silently (`$x -ge $null` is true) — gate
