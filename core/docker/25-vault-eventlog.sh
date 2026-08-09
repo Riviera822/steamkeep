@@ -69,18 +69,29 @@ if [ -z "$VALUE" ]; then
     # check above with remaining=0 while leaving a real, live event-log
     # access_log behind -- exactly the "half-disabled" state this script
     # exists to prevent. Check for the DIRECTIVE itself too, independent of
-    # the marker: nothing naming "vault_event" (the log_format name used
-    # only by this feature's access_log lines) may remain once the feature
-    # is off. Keep the Dockerfile's marker-count build-time assertion as
+    # the marker. Keep the Dockerfile's marker-count build-time assertion as
     # the FIRST line of defense (it catches a template edit before the
     # image even ships); this is the second, runtime one.
-    survivors=$(grep -c "vault_event" "$CONF" 2>/dev/null || true)
+    #
+    # BLOCKER FIX (WP 5.1 CI review): a bare `grep -c "vault_event"` also
+    # matches the `log_format vault_event escape=default ...` declaration
+    # itself and the three `$vault_event_*` map names above it -- none of
+    # which are access_log directives and all of which are ALWAYS present
+    # in the rendered config regardless of VAULT_EVENT_LOG. That made this
+    # branch unconditionally die with survivors>0 on every OFF render,
+    # i.e. vault-core could never start with its own documented default
+    # (empty VAULT_EVENT_LOG, deploy/compose.yaml sets only VAULT_RESOLVER)
+    # -- reproduced and confirmed by WP 5.1's CI job, which runs this exact
+    # OFF render. Anchored to the DIRECTIVE line itself (`access_log ...
+    # vault_event ...`) instead, matching what the marker-based deletion
+    # above actually targets.
+    survivors=$(grep -cE '^[[:space:]]*access_log[[:space:]].*vault_event' "$CONF" 2>/dev/null || true)
     if [ "${survivors:-0}" != "0" ]; then
-        die "VAULT_EVENT_LOG is unset/empty but $survivors line(s) referencing
-  'vault_event' still remain in $CONF after marker-based removal -- a live
-  event-log access_log directive may have survived without its marker
-  comment. Refusing to start half-disabled rather than guessing which line
-  is safe to ignore."
+        die "VAULT_EVENT_LOG is unset/empty but $survivors access_log
+  directive(s) referencing 'vault_event' still remain in $CONF after
+  marker-based removal -- a live event-log access_log directive may have
+  survived without its marker comment. Refusing to start half-disabled
+  rather than guessing which line is safe to ignore."
     fi
 
     log "VAULT_EVENT_LOG unset/empty -- cache-event log disabled (ADR-0008 optional-at-runtime), no access_log directive rendered"
