@@ -235,6 +235,9 @@ Steam-only, prefill-first design can solve better:
 | DELETE | /v1/cache/{appid} | Delete a game from the cache |
 | POST | /v1/cache/{appid}/gc | Garbage-collect orphaned chunks (manifest diff) |
 | GET | /v1/cache/summary | Total usage, top consumers, unmapped depots, free space |
+| GET | /v1/oracle/{appid} | Oracle snapshot: depots, branch manifest gids, staleness hints (WP 3.9; 404-equivalent `enabled:false` when oracle off) |
+| POST | /v1/oracle/{appid}/refresh | Explicitly re-query the manifest oracle for one app (never automatic; `ok:false` on oracle failure, never 5xx) |
+| DELETE | /v1/oracle/{appid} | Drop stored oracle data for one app |
 | GET | /v1/clients | Per-client hit stats incl. bypass warnings |
 | GET | /v1/stats | Cache-event sweep state: cursor, lines read/skipped, miss-trigger activity, unmapped depot misses (WP 3.11, ADR-0008) |
 | POST | /v1/agent/installed | PC agent reports installed app IDs |
@@ -430,10 +433,25 @@ parallel/serial decisions, merge discipline, open user decisions):
       depots' owners, partial-failure honesty; schema v7; 687 tests green;
       Opus PASS + Fable PASS. Optional auto-GC after update prefills still
       open)*
-- [ ] Beta-branch protection for GC (user decision 2026-08-09, ADR-0007
+- [x] Beta-branch protection for GC (user decision 2026-08-09, ADR-0007
       addendum): (A) recently-stored grace window via st_ctime as a
       ChunkExclusion predicate; (B) open-beta branch manifests join the
       keep set when the oracle (WP 3.9) is enabled
+      *(A: WP 3.8b merged. B: WP 3.9 done — opt-in manifest oracle
+      (`VAULT_MANIFEST_ORACLE=steamcmd_api`, default OFF, mutation-pinned),
+      own tables `oracle_app_state`/`oracle_branch_manifests` (schema v10,
+      `depot_manifests` never written — test-pinned), passworded/unknown
+      branches never stored, `public` excluded from the keep set, additive
+      post-gate union in `gc.py` via generic `extra_manifest_ids` (no oracle
+      import; orphans(on) ⊆ orphans(off)), fail-soft everywhere incl. broad
+      catch so an oracle error can never fail a GC job; stdlib urllib with
+      redirects refused + bounded read; three authed `/v1/oracle/*` routes.
+      Renumbered twice by rebases: WP 3.12 took v8, WP 3.11 took v9, so the
+      oracle tables are v10 — harmless, they add no column to either. 1193
+      tests green, 17 mutations killed by named tests, reviewer re-verified
+      with its own mutation set; Opus PASS ×3. Note: response shape modeled on
+      api.steamcmd.net, not yet verified against the live service — mismatch
+      degrades to oracle-off, documented in api/README)*
 - [x] Per-client hit statistics + bypass detection (`/v1/clients`)
       *(WP 3.11, ADR-0008: event sweep with a persisted byte-offset cursor,
       strict 9-field v1 parsing, miss-triggered prefill (cooldown + per-sweep

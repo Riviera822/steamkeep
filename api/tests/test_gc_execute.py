@@ -27,6 +27,7 @@ The three things these tests are built around:
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import posixpath
 import sqlite3
@@ -48,7 +49,7 @@ from tests.test_gc import (
     write_chunks,
 )
 from vault_api import deletion, gc, gc_execute, jobs
-from vault_api.config import Settings
+from vault_api.config import MANIFEST_ORACLE_STEAMCMD_API, Settings
 from vault_api.db import get_connection, init_db
 from vault_api.main import create_app
 from vault_api.sizes import SizeCache
@@ -643,6 +644,10 @@ def test_run_gc_has_no_way_to_be_handed_a_plan() -> None:
     assert parameters == {
         "conn", "appid", "cache_root", "archive_dir", "execute", "exclusions",
         "should_cancel",
+        # WP 3.9: manifest IDS, not a plan — ``run_gc`` still resolves and
+        # parses them itself against a fresh filesystem scan, so this stays a
+        # list of inputs to a plan rather than a pre-built plan.
+        "oracle_manifests",
     }
 
 
@@ -1990,3 +1995,92 @@ def test_parse_bin_payload_cross_check_fires_on_a_mismatch(tmp_path: Path) -> No
         parse_bin_payload(
             str(path), filename_depot_id=442, filename_manifest_id=900
         )
+
+
+# ==========================================================================
+# The manifest oracle's keep-set contribution, end to end (WP 3.9)
+#
+# tests/test_gc.py proves the planner unions extra manifest ids; these two
+# prove the WIRING that gets them there — settings -> oracle.gc_keepset_gids
+# -> load_gc_inputs -> plan_gc -> execute — actually spares real files on
+# disk, and that it does nothing at all with the oracle off.
+# ==========================================================================
+
+
+BETA_MANIFEST = "902"
+
+
+def _world_with_a_beta_build(tmp_path: Path, *, oracle_on: bool) -> Settings:
+    """The standard world, plus: the two "orphans" are really an opt-in beta
+    branch's chunks, and the beta manifest is in the cache the way a client's
+    store-on-miss download would have left it."""
+    settings = build_world(tmp_path)
+    if oracle_on:
+        settings = dataclasses.replace(
+            settings, manifest_oracle=MANIFEST_ORACLE_STEAMCMD_API
+        )
+
+    write_cache_manifest(
+        cache_root(settings),
+        depotid=441,
+        manifestid=BETA_MANIFEST,
+        chunks={**KEEP_SIZES, **ORPHAN_SIZES},
+    )
+
+    conn = open_db(settings)
+    try:
+        conn.execute(
+            "INSERT INTO oracle_branch_manifests "
+            "(appid, depotid, branch, manifestid, recorded_at, source) "
+            "VALUES (440, 441, 'beta', ?, '2026-08-09T10:00:00Z', 'steamcmd_api')",
+            (BETA_MANIFEST,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return settings
+
+
+def _run_execute_gc(settings: Settings) -> dict:
+    conn = open_db(settings)
+    try:
+        jobs.enqueue_gc(conn, 440, execute=True)
+        job = jobs.claim_next_job(conn)
+        assert job is not None
+        gc_execute.run_gc_job(conn, job, settings=settings)
+        return dict(jobs.get_job(conn, int(job["id"])))
+    finally:
+        conn.close()
+
+
+def test_an_open_beta_branch_survives_gc_when_the_oracle_is_on(
+    tmp_path: Path,
+) -> None:
+    """ADR-0007 decision B, end to end and on real files."""
+    settings = _world_with_a_beta_build(tmp_path, oracle_on=True)
+
+    finished = _run_execute_gc(settings)
+
+    assert finished["status"] == "done", finished["log_excerpt"]
+    for chunk_id in (*KEEP_SIZES, *ORPHAN_SIZES):
+        assert chunk_path(settings, 441, chunk_id).exists(), chunk_id
+    assert "oracle_protected=2" in finished["log_excerpt"]
+
+
+def test_the_same_beta_build_is_collected_with_the_oracle_off(
+    tmp_path: Path,
+) -> None:
+    """The default direction, pinned on the same fixture: identical database
+    rows, identical cache tree, oracle off ⇒ the beta chunks go. Enabling the
+    oracle is the ONLY difference between this test and the one above."""
+    settings = _world_with_a_beta_build(tmp_path, oracle_on=False)
+    assert settings.manifest_oracle_enabled is False
+
+    finished = _run_execute_gc(settings)
+
+    assert finished["status"] == "done", finished["log_excerpt"]
+    for chunk_id in KEEP_SIZES:
+        assert chunk_path(settings, 441, chunk_id).exists()
+    for chunk_id in ORPHAN_SIZES:
+        assert not chunk_path(settings, 441, chunk_id).exists()
+    assert "oracle_protected" not in finished["log_excerpt"]

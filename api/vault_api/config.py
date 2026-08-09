@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from vault_api.schedule_window import (
     ScheduleWindow,
@@ -87,6 +88,38 @@ MIN_MANIFEST_KEEP = 1
 #: constructed) — the pre-WP-3.8b behaviour, i.e. every orphan the plan names
 #: is deleted.
 DEFAULT_GC_GRACE_DAYS = 14
+
+#: ``VAULT_MANIFEST_ORACLE`` value meaning "no oracle" — **the default**
+#: (WP 3.9, ADR-0006 decision 4: "Default off; unaffiliated with Valve").
+#: With this value vault-api makes no outbound third-party request at all,
+#: which is the only posture a fresh install may have: enabling the oracle
+#: sends this vault's app ids to a service outside the LAN (see
+#: ``vault_api/oracle.py``'s privacy section and api/README.md).
+MANIFEST_ORACLE_OFF = ""
+
+#: The one implemented oracle: ``api.steamcmd.net``'s public mirror of Steam's
+#: PICS app info. Also used verbatim as the ``source`` provenance tag on every
+#: row it produces (``oracle.SOURCE_STEAMCMD_API``).
+MANIFEST_ORACLE_STEAMCMD_API = "steamcmd_api"
+
+#: Everything ``VAULT_MANIFEST_ORACLE`` may be set to. An unrecognised value
+#: is refused at STARTUP rather than silently treated as "off": "off" is what
+#: the operator gets by leaving the variable alone, so a non-empty value is an
+#: explicit request for a feature — and a typo in it must not look like it
+#: worked (the misconfiguration is loud, the oracle's own failures stay soft).
+SUPPORTED_MANIFEST_ORACLES = (MANIFEST_ORACLE_OFF, MANIFEST_ORACLE_STEAMCMD_API)
+
+#: Where ``steamcmd_api`` asks. Overridable so an operator can point at their
+#: own mirror of the same API (or at a LAN proxy, which is the only way to use
+#: this feature without traffic leaving the network). The value is
+#: operator-supplied and therefore trusted by definition — vault-api only
+#: insists on http/https and refuses to follow redirects away from it.
+DEFAULT_MANIFEST_ORACLE_URL = "https://api.steamcmd.net/v1/info"
+
+#: Socket timeout for one oracle request. Short on purpose: the oracle is
+#: optional information, and a slow third party must never turn into a slow
+#: vault-api. A timeout is an ordinary "no data" outcome (fail-soft).
+DEFAULT_MANIFEST_ORACLE_TIMEOUT = 10.0
 
 #: How long the scheduler waits between sweeps of the installed list (WP 3.5).
 #: Plan §7 Phase 3 spells the cron window out as "e.g. 09:00-17:00, every 3 h"
@@ -338,6 +371,49 @@ def _env_auto_gc(name: str = "VAULT_AUTO_GC") -> str:
     return raw
 
 
+def _env_manifest_oracle(name: str = "VAULT_MANIFEST_ORACLE") -> str:
+    """Read the oracle selector, refusing anything not implemented (WP 3.9).
+
+    Case- and whitespace-insensitive so ``STEAMCMD_API`` and a stray trailing
+    space still select the oracle the operator meant; anything else raises at
+    startup. See ``SUPPORTED_MANIFEST_ORACLES`` for why an unknown value is a
+    hard error rather than a silent "off".
+    """
+    raw = os.environ.get(name, "").strip().lower()
+    if raw not in SUPPORTED_MANIFEST_ORACLES:
+        known = ", ".join(repr(v) for v in SUPPORTED_MANIFEST_ORACLES if v)
+        raise RuntimeError(
+            f"{name}={raw!r} is not a supported manifest oracle "
+            f"(known: {known}; leave it unset or empty to disable the oracle)"
+        )
+    return raw
+
+
+def _env_manifest_oracle_url(name: str = "VAULT_MANIFEST_ORACLE_URL") -> str:
+    """Read the oracle base URL, validated at startup even when the oracle is
+    off (same reasoning as the ``VAULT_SCHEDULE_*`` numbers: a typo surfaces
+    the day it is made, not the day the feature is switched on).
+
+    Only the scheme is checked. The host is the operator's decision — this is
+    a self-hosted service and pointing it at a private mirror is a supported,
+    documented use — but a non-http(s) scheme (``file:``, ``ftp:``, a pasted
+    ``api.steamcmd.net/v1/info`` with no scheme at all) is a mistake with a
+    surprising failure mode, so it is refused here rather than once per
+    request inside ``oracle.http_fetch``'s fail-soft path, where it would only
+    ever show up as "the oracle never works".
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return DEFAULT_MANIFEST_ORACLE_URL
+    scheme = urlsplit(raw).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise RuntimeError(
+            f"{name}={raw!r} must be an http:// or https:// URL "
+            f"(got scheme {scheme!r})"
+        )
+    return raw
+
+
 def _is_plain_decimal(raw: str) -> bool:
     """Is ``raw`` a plain ASCII decimal literal — ``digits`` or ``digits.digits``?
 
@@ -479,6 +555,13 @@ class Settings:
     # WP 3.11. Truncate the event log at/above this size once fully consumed.
     # 0 = never truncate.
     event_log_max_bytes: int = DEFAULT_EVENT_LOG_MAX_BYTES
+    # WP 3.9 / ADR-0006 decision 4. Which third-party manifest oracle to use.
+    # "" (the default) = none, and that default is load-bearing: it is the
+    # difference between a vault-api that talks only to the LAN and one that
+    # queries an external service. See vault_api/oracle.py.
+    manifest_oracle: str = MANIFEST_ORACLE_OFF
+    manifest_oracle_url: str = DEFAULT_MANIFEST_ORACLE_URL
+    manifest_oracle_timeout: float = DEFAULT_MANIFEST_ORACLE_TIMEOUT
 
     @property
     def scheduler_enabled(self) -> bool:
@@ -531,6 +614,16 @@ class Settings:
         than a string comparison inlined in the worker.
         """
         return self.auto_gc == AUTO_GC_EXECUTE
+
+    @property
+    def manifest_oracle_enabled(self) -> bool:
+        """True iff an oracle is configured (WP 3.9) — the one enable switch.
+
+        Every read path in ``vault_api/oracle.py`` consults this rather than
+        assuming its caller did, so "the oracle is off" cannot be bypassed by
+        forgetting a check at one call site.
+        """
+        return self.manifest_oracle != MANIFEST_ORACLE_OFF
 
     @staticmethod
     def from_env() -> "Settings":
@@ -642,5 +735,13 @@ class Settings:
             # to something else), which is a legitimate operational choice.
             event_log_max_bytes=_env_int(
                 "VAULT_EVENT_LOG_MAX_BYTES", DEFAULT_EVENT_LOG_MAX_BYTES, minimum=0
+            ),
+            # WP 3.9. Unset/blank = no oracle, no outbound third-party request
+            # — the default, and the reason the URL and timeout below are
+            # harmless to have a default for.
+            manifest_oracle=_env_manifest_oracle(),
+            manifest_oracle_url=_env_manifest_oracle_url(),
+            manifest_oracle_timeout=_env_float(
+                "VAULT_MANIFEST_ORACLE_TIMEOUT", DEFAULT_MANIFEST_ORACLE_TIMEOUT
             ),
         )

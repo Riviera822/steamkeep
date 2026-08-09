@@ -205,7 +205,7 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Mapping, Sequence
 
-from vault_api import deletion, gc, jobs
+from vault_api import deletion, gc, jobs, oracle
 from vault_api.config import Settings
 from vault_api.sizes import SizeCache
 
@@ -712,6 +712,13 @@ class DepotGcResult:
     held_back_bytes: int = 0
     problems: list[FileRemoval] = field(default_factory=list)
 
+    #: WP 3.9 / ADR-0007 decision B: on-disk chunks that would have been
+    #: orphans if the manifest oracle had not contributed an open beta
+    #: branch's manifest to this depot's keep set. Copied from the plan, zero
+    #: whenever the oracle is off — which is the default.
+    oracle_protected_count: int = 0
+    oracle_protected_bytes: int = 0
+
     dedupe_removed_count: int = 0
     dedupe_removed_bytes: int = 0
     #: Reclaims GC deliberately passed on (``DECLINED_OUTCOMES``): a duplicate
@@ -774,6 +781,8 @@ def execute_depot(
         kept_bytes=depot_plan.kept_bytes,
         planned_dedupe_count=sum(len(c.duplicates) for c in depot_plan.dedupe),
         planned_dedupe_bytes=depot_plan.dedupe_bytes,
+        oracle_protected_count=depot_plan.oracle_protected_count,
+        oracle_protected_bytes=depot_plan.oracle_protected_bytes,
         note=depot_plan.note,
     )
 
@@ -1243,13 +1252,24 @@ def _depot_line(depot: DepotGcResult) -> str:
         note = depot.note[:MAX_LOGGED_NOTE_CHARS]
         suffix = "..." if len(depot.note) > MAX_LOGGED_NOTE_CHARS else ""
         return f"  depot {depot.depotid} {depot.status}: {note}{suffix}"
+    # WP 3.9: appended only when the oracle actually protected something, so a
+    # default install's log lines are byte-identical to their pre-WP-3.9 form
+    # and an operator who sees this suffix knows it means something.
+    oracle_suffix = (
+        ""
+        if not depot.oracle_protected_count
+        else (
+            f" oracle_protected={depot.oracle_protected_count} "
+            f"({depot.oracle_protected_bytes} bytes)"
+        )
+    )
     if not depot.executed:
         return (
             f"  depot {depot.depotid} planned: orphans={depot.planned_orphan_count} "
             f"({depot.planned_orphan_bytes} bytes) held_back={len(depot.held_back)} "
             f"({depot.held_back_bytes} bytes) kept={depot.kept_count} "
             f"({depot.kept_bytes} bytes) dedupe_candidates={depot.planned_dedupe_count} "
-            f"({depot.planned_dedupe_bytes} bytes)"
+            f"({depot.planned_dedupe_bytes} bytes)" + oracle_suffix
         )
     return (
         f"  depot {depot.depotid} planned: orphans={depot.planned_orphan_count} "
@@ -1260,7 +1280,7 @@ def _depot_line(depot: DepotGcResult) -> str:
         f"kept={depot.kept_count} ({depot.kept_bytes} bytes) "
         f"dedupe_removed={depot.dedupe_removed_count} "
         f"({depot.dedupe_removed_bytes} bytes) "
-        f"dedupe_declined={len(depot.dedupe_declined)}"
+        f"dedupe_declined={len(depot.dedupe_declined)}" + oracle_suffix
     )
 
 
@@ -1273,6 +1293,7 @@ def run_gc(
     execute: bool,
     exclusions: Sequence[ChunkExclusion] = NO_EXCLUSIONS,
     should_cancel: Callable[[], bool] | None = None,
+    oracle_manifests: Mapping[int, Sequence[str]] | None = None,
 ) -> GcRunReport:
     """Plan garbage collection for one app **now**, and — only if ``execute``
     — carry it out. Never raises for an expected failure.
@@ -1280,6 +1301,12 @@ def run_gc(
     ``execute`` is a required keyword argument with no default: see
     ``jobs.enqueue_gc`` for why the one flag that decides whether files are
     deleted is never allowed to be implicit.
+
+    ``oracle_manifests`` (WP 3.9, ADR-0007 decision B) can only *grow* the
+    keep set — the exact mirror image of ``exclusions``, and the same net
+    direction: both can only shrink what is deleted. ``None`` means "no
+    oracle", which is what ``run_gc_job`` passes whenever the feature is off
+    and therefore the behaviour every pre-WP-3.9 caller keeps.
 
     ``exclusions`` can only shrink what gets deleted (see ``ChunkExclusion``).
     They are applied to a **dry run as well**, where they delete nothing and
@@ -1324,7 +1351,7 @@ def run_gc(
             plan_error=str(exc),
         )
 
-    inputs = gc.load_gc_inputs(conn, appid)
+    inputs = gc.load_gc_inputs(conn, appid, oracle_manifests=oracle_manifests)
     plan = gc.plan_gc(appid, inputs, depot_root=depot_root, archive_dir=archive_dir)
 
     if not execute:
@@ -1361,6 +1388,8 @@ def run_gc(
                     kept_bytes=depot.kept_bytes,
                     planned_dedupe_count=sum(len(c.duplicates) for c in depot.dedupe),
                     planned_dedupe_bytes=depot.dedupe_bytes,
+                    oracle_protected_count=depot.oracle_protected_count,
+                    oracle_protected_bytes=depot.oracle_protected_bytes,
                     held_back=held_back,
                     held_back_bytes=_held_back_bytes(depot, held_back),
                     note=depot.note,
@@ -1519,6 +1548,18 @@ def run_gc_job(
             should_cancel=lambda: (
                 jobs.read_stop_request(conn, job_id) == jobs.STOP_REQUEST_CANCEL
             ),
+            # WP 3.9 / ADR-0007 decision B: open beta branches' manifests join
+            # the keep set when the oracle is enabled. `gc_keepset_gids`
+            # returns {} when it is not (and when anything at all goes wrong
+            # reading it), so this line is a no-op on a default install.
+            #
+            # This is the SINGLE place the oracle enters the deletion path, and
+            # it sits below every entry point: the manual
+            # `POST /v1/cache/{appid}/gc` and WP 3.12's auto-GC hook both queue
+            # an ordinary `gc` job that the worker runs through `run_gc_job`,
+            # so an auto-queued collection inherits the beta-branch keep set
+            # without auto-GC needing to know the oracle exists.
+            oracle_manifests=oracle.gc_keepset_gids(conn, appid, settings=settings),
         )
     except Exception:
         # Last-resort net, same shape as the prefill path's. A crash here has

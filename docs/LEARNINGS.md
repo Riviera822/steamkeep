@@ -178,6 +178,13 @@ These are not style preferences; each entry cost a review round to learn.
   discards the parent entirely — strict-child path guards must compare
   `dirname`/`basename` equality on the joined result, never prefixes
   (WP 3.8, measured).
+- CPython's `json` scanner recurses per nesting level — a bounded response
+  body is NOT a bounded parse; catch `RecursionError` by name around
+  `json.loads` on untrusted input and convert it to the module's own error
+  type (WP 3.9, same failure class as the WP 2.1 blocker).
+- `urllib` follows redirects by default — an operator-configured outbound
+  URL needs an explicit no-redirect opener, or the host actually contacted
+  is not the one configured (WP 3.9).
 
 ## Containers
 - A non-root container user needs a real, writable HOME — tools that

@@ -54,6 +54,31 @@ collector must never have. The same rule applies inside the fallback: the
 newest stored manifest id is either read or the app is unresolved; an older
 one is never silently substituted.
 
+## Extra keep-set manifests (WP 3.9, ADR-0007 beta addendum, decision B)
+
+``resolve_depot_chunkset`` accepts ``extra_manifest_ids``: manifest ids that
+are **not** any app's current manifest but whose chunks must survive anyway.
+Today the only producer is the opt-in manifest oracle
+(``vault_api.oracle.gc_keepset_gids``), supplying the gids of open
+(non-passworded) beta branches — content that reached the cache through a real
+client's store-on-miss download and appears in no ``public`` manifest.
+
+Three properties make this safe to bolt onto a deletion path:
+
+- **Additive only.** They are unioned into the keep set *after* the readiness
+  gate has already passed. A keep set can only grow, so the orphan set with
+  extras is always a subset of the orphan set without them — an oracle that
+  is wrong, poisoned or absent can never cause a deletion, only fail to
+  prevent one (which is the pre-WP-3.9 baseline).
+- **They never gate.** An extra id that cannot be resolved is reported in
+  ``ChunkSetResolution.extras`` and otherwise ignored. It does NOT skip the
+  depot: a beta branch whose manifest was never cached is the *normal* case,
+  and gating on it would freeze GC for every app that ever had a beta branch —
+  the permanent-block leak this ADR's own addendum refused elsewhere.
+- **Same validation as everything else here.** Each id goes through
+  ``valid_manifest_id`` before it becomes a path component, and the count is
+  bounded by ``MAX_EXTRA_MANIFESTS``.
+
 ## The uncached-app decision (item 1's explicit reconciliation)
 
 Two accepted documents point in opposite directions for one specific case: a
@@ -198,6 +223,13 @@ MAX_MANIFEST_ID_DIGITS = 20
 #: ``manifest_ingest.MAX_LOGGED_NAMES``: a depot full of junk must not turn a
 #: job's log excerpt into megabytes.
 MAX_REPORTED_NAMES = 10
+
+#: How many ``extra_manifest_ids`` one depot may contribute to the keep set
+#: (WP 3.9). Each one costs a parse of a multi-megabyte manifest, and the list
+#: comes from a database table an operator can edit — a poisoned table must
+#: turn into a bounded amount of work plus a report, not into a plan run that
+#: never finishes. A real app has a handful of open branches.
+MAX_EXTRA_MANIFESTS = 32
 
 _HEX_LOWERCASE = frozenset("0123456789abcdef")
 
@@ -587,6 +619,33 @@ class ManifestResolution:
 
 
 @dataclass(frozen=True)
+class ExtraManifestResolution:
+    """What happened to one ``extra_manifest_ids`` entry (WP 3.9, decision B).
+
+    Purely informational: whatever this says, the depot's status is unchanged
+    (see the module docstring — extras never gate). ``error`` is set when the
+    id was unusable or its manifest could not be read anywhere, in which case
+    that manifest's chunks simply keep the protection they had before, i.e.
+    none beyond WP 3.8b's grace window.
+    """
+
+    #: The raw value as it arrived, so a poisoned row is reportable verbatim.
+    raw: object
+    manifestid: str | None = None
+    source: str | None = None
+    path: str | None = None
+    chunk_count: int | None = None
+    #: Chunks this manifest contributed that NO app manifest already covered —
+    #: the honest measure of what decision B actually protected here.
+    added_count: int = 0
+    error: str | None = None
+
+    @property
+    def resolved(self) -> bool:
+        return self.chunk_count is not None
+
+
+@dataclass(frozen=True)
 class ChunkSetResolution:
     """The keep set for one depot, plus how each app got there."""
 
@@ -595,10 +654,16 @@ class ChunkSetResolution:
     #: ``plan_gc`` turns the passing case into ``STATUS_PLANNED``.
     status: str
     #: chunk id -> the manifest's declared ``cb_compressed``. Empty for every
-    #: non-passing status.
+    #: non-passing status. Includes the extra manifests' chunks (WP 3.9).
     keep: dict[str, int]
     apps: list[ManifestResolution]
     note: str = ""
+    #: One entry per ``extra_manifest_ids`` value that was considered (WP 3.9).
+    extras: list[ExtraManifestResolution] = field(default_factory=list)
+    #: Keep-set ids contributed ONLY by an extra manifest — i.e. exactly the
+    #: chunks that would be orphans without the oracle. Empty unless the gate
+    #: passed, like ``keep`` itself.
+    extra_only_chunks: frozenset[str] = frozenset()
 
     @property
     def gate_passed(self) -> bool:
@@ -715,6 +780,7 @@ def resolve_depot_chunkset(
     archive_dir: str,
     stored_manifests: Mapping[str, Sequence[StoredManifestCopy]],
     reader: "_ManifestReader | None" = None,
+    extra_manifest_ids: Sequence[object] = (),
 ) -> ChunkSetResolution:
     """The keep set for ONE depot: the UNION of every counting app's current
     manifest (ADR-0007 item 2), or a skip reason.
@@ -736,7 +802,10 @@ def resolve_depot_chunkset(
     5. resolve every counting app's manifest; any failure ->
        ``STATUS_NO_MANIFEST``, with the per-source errors kept in that app's
        ``ManifestResolution.errors``;
-    6. otherwise ``STATUS_PLANNED`` with the union.
+    6. otherwise ``STATUS_PLANNED`` with the union — plus, last,
+       ``extra_manifest_ids``'s chunks (WP 3.9 / ADR-0007 decision B). Step 7
+       runs only on this path and can only *add* to ``keep``; it never changes
+       the status and never turns a passing depot into a skipped one.
 
     ``keep`` is empty for every outcome except 6 — a caller that ignores the
     status and just uses ``keep`` therefore still deletes nothing, which is
@@ -834,9 +903,163 @@ def resolve_depot_chunkset(
             ),
         )
 
-    return ChunkSetResolution(
-        depotid=depotid, status=STATUS_PLANNED, keep=keep, apps=resolutions
+    # Step 7 (WP 3.9): the extras. Deliberately AFTER the gate, so nothing
+    # here can influence whether the depot is planned at all — only what is
+    # kept once it is.
+    extras, extra_only = _union_extra_manifests(
+        depotid,
+        extra_manifest_ids,
+        keep=keep,
+        archive_dir=archive_dir,
+        stored_manifests=stored_manifests,
+        reader=reader,
     )
+
+    return ChunkSetResolution(
+        depotid=depotid,
+        status=STATUS_PLANNED,
+        keep=keep,
+        apps=resolutions,
+        extras=extras,
+        extra_only_chunks=extra_only,
+    )
+
+
+def _union_extra_manifests(
+    depotid: int,
+    extra_manifest_ids: Sequence[object],
+    *,
+    keep: dict[str, int],
+    archive_dir: str,
+    stored_manifests: Mapping[str, Sequence[StoredManifestCopy]],
+    reader: _ManifestReader,
+) -> tuple[list[ExtraManifestResolution], frozenset[str]]:
+    """Add each extra manifest's chunks to ``keep`` (mutated in place).
+
+    Returns the per-id report and the set of ids that were contributed
+    **only** by an extra manifest. Never raises, never removes anything from
+    ``keep``, never reports a status — see the module docstring's three
+    properties.
+
+    Duplicates are collapsed and the order is deterministic (sorted by the
+    validated id) so two runs over the same data produce identical reports.
+    """
+    if not extra_manifest_ids:
+        return [], frozenset()
+
+    app_chunks = frozenset(keep)
+    extras: list[ExtraManifestResolution] = []
+    extra_only: set[str] = set()
+
+    seen: set[str] = set()
+    ordered: list[tuple[str | None, object]] = []
+    for raw in extra_manifest_ids:
+        validated = valid_manifest_id(raw)
+        if validated is not None:
+            if validated in seen:
+                continue
+            seen.add(validated)
+        ordered.append((validated, raw))
+    ordered.sort(key=lambda item: (item[0] is None, item[0] or ""))
+
+    for validated, raw in ordered[:MAX_EXTRA_MANIFESTS]:
+        if validated is None:
+            extras.append(
+                ExtraManifestResolution(
+                    raw=raw,
+                    error=(
+                        f"unusable manifest id {raw!r} (expected a decimal Steam "
+                        "manifest id); it protects nothing"
+                    ),
+                )
+            )
+            continue
+
+        parsed, source, path, error = _read_manifest_by_id(
+            depotid,
+            validated,
+            archive_dir=archive_dir,
+            stored_manifests=stored_manifests,
+            reader=reader,
+        )
+        if parsed is None:
+            extras.append(
+                ExtraManifestResolution(raw=raw, manifestid=validated, error=error)
+            )
+            continue
+
+        added = 0
+        for chunk_id, size in parsed.chunks.items():
+            if chunk_id not in app_chunks:
+                if chunk_id not in extra_only:
+                    added += 1
+                extra_only.add(chunk_id)
+            keep.setdefault(chunk_id, size)
+        extras.append(
+            ExtraManifestResolution(
+                raw=raw,
+                manifestid=validated,
+                source=source,
+                path=path,
+                chunk_count=len(parsed.chunks),
+                added_count=added,
+            )
+        )
+
+    dropped = len(ordered) - MAX_EXTRA_MANIFESTS
+    if dropped > 0:
+        extras.append(
+            ExtraManifestResolution(
+                raw=None,
+                error=(
+                    f"{dropped} further extra manifest id(s) ignored: more than "
+                    f"{MAX_EXTRA_MANIFESTS} were supplied for this depot"
+                ),
+            )
+        )
+
+    return extras, frozenset(extra_only)
+
+
+def _read_manifest_by_id(
+    depotid: int,
+    manifestid: str,
+    *,
+    archive_dir: str,
+    stored_manifests: Mapping[str, Sequence[StoredManifestCopy]],
+    reader: _ManifestReader,
+) -> tuple[ParsedManifest | None, str | None, str | None, str | None]:
+    """Read ONE known manifest id from the archive, else from the cache.
+
+    Same source order and the same cross-checks as ``_resolve_app_manifest``'s
+    recorded-id branch, minus the per-app bookkeeping — and, as there, never a
+    fallback to a *different* manifest id. Returns
+    ``(parsed, source, path, error)``.
+    """
+    errors: list[str] = []
+    archive_path = os.path.join(
+        archive_dir, archive_filename(depotid=depotid, manifestid=manifestid)
+    )
+    parsed = reader.archived_bin(archive_path, depotid=depotid, manifestid=manifestid)
+    if not isinstance(parsed, ManifestParseError):
+        return parsed, SOURCE_ARCHIVE, archive_path, None
+    errors.append(f"archive {archive_path}: {parsed}")
+
+    copies = stored_manifests.get(manifestid, ())
+    if not copies:
+        errors.append(
+            f"cache-stored: no copy of manifest {manifestid} under "
+            f"{MANIFEST_DIRNAME}/{manifestid}/{MANIFEST_REQUEST_DIR}/"
+        )
+        return None, None, None, "; ".join(errors)
+
+    hit = _try_stored_copies(
+        reader, copies, depotid=depotid, manifestid=manifestid, errors=errors
+    )
+    if hit is None:
+        return None, None, None, "; ".join(errors)
+    parsed, copy = hit
+    return parsed, SOURCE_CACHE_MANIFEST, copy.path, None
 
 
 def _resolve_app_manifest(
@@ -1010,6 +1233,14 @@ class DepotGcPlan:
     dedupe: list[DedupeCandidate] = field(default_factory=list)
     #: Human-readable reason, for the API response and the job log.
     note: str = ""
+    #: WP 3.9: one entry per extra (oracle) manifest id considered here.
+    extras: list[ExtraManifestResolution] = field(default_factory=list)
+    #: On-disk chunks that would have been orphans WITHOUT the extra
+    #: manifests — i.e. exactly what ADR-0007 decision B saved on this run.
+    #: Reported (and logged) so an operator can see the oracle earning its
+    #: keep instead of having to infer it from a smaller number.
+    oracle_protected_count: int = 0
+    oracle_protected_bytes: int = 0
 
     @property
     def orphan_count(self) -> int:
@@ -1022,6 +1253,13 @@ class DepotGcPlan:
     @property
     def dedupe_bytes(self) -> int:
         return sum(candidate.reclaimable_bytes for candidate in self.dedupe)
+
+    @property
+    def extra_problems(self) -> list[ExtraManifestResolution]:
+        """Extra manifest ids that could not be used. Never a failure — see
+        ``ExtraManifestResolution`` — but worth surfacing: an oracle whose
+        gids never resolve is protecting nothing."""
+        return [extra for extra in self.extras if extra.error]
 
 
 @dataclass(frozen=True)
@@ -1085,6 +1323,12 @@ class GcInputs:
     content_states: dict[int, bool]
     #: ``{(appid, depotid): raw manifestid}`` from ``depot_manifests``.
     recorded_manifests: dict[tuple[int, int], object]
+    #: WP 3.9: ``{depotid: [extra manifest ids]}``. Empty (the default) means
+    #: "no extra keep-set protection", which is precisely the behaviour before
+    #: WP 3.9 — the oracle being off must be indistinguishable from it never
+    #: having been built. Filled by ``vault_api.oracle.gc_keepset_gids``; this
+    #: module deliberately does not know where the ids came from.
+    oracle_manifests: dict[int, list[str]] = field(default_factory=dict)
 
 
 def plan_gc(
@@ -1162,6 +1406,7 @@ def plan_gc(
                 depot_root=depot_root,
                 archive_dir=archive_dir,
                 reader=reader,
+                extra_manifest_ids=inputs.oracle_manifests.get(depotid, ()),
             )
         )
 
@@ -1182,6 +1427,7 @@ def _plan_one_depot(
     depot_root: str,
     archive_dir: str,
     reader: _ManifestReader,
+    extra_manifest_ids: Sequence[object] = (),
 ) -> DepotGcPlan:
     try:
         depot_dir = deletion.depot_dir_path(depot_root, depotid)
@@ -1209,6 +1455,7 @@ def _plan_one_depot(
         archive_dir=archive_dir,
         stored_manifests=stored,
         reader=reader,
+        extra_manifest_ids=extra_manifest_ids,
     )
 
     shown = scan.unrecognized[:MAX_REPORTED_NAMES]
@@ -1221,6 +1468,7 @@ def _plan_one_depot(
         chunk_dir_exists=scan.chunk_dir_exists,
         apps=resolution.apps,
         dedupe=duplicates,
+        extras=resolution.extras,
     )
 
     if not resolution.gate_passed:
@@ -1246,11 +1494,27 @@ def _plan_one_depot(
         if declared != size:
             size_mismatches += 1
 
+    # WP 3.9: what the extra (oracle) manifests actually saved here — on-disk
+    # chunks no app manifest covers. Computed from the plan's own two sets, so
+    # it cannot drift from what was really kept.
+    protected = {
+        chunk_id: size
+        for chunk_id, size in on_disk.items()
+        if chunk_id in resolution.extra_only_chunks
+    }
+
     logger.info(
-        "cache-gc depot=%s planned: keep_set=%d on_disk=%d orphans=%d bytes=%d",
+        "cache-gc depot=%s planned: keep_set=%d on_disk=%d orphans=%d bytes=%d "
+        "oracle_protected=%d (%d bytes)",
         depotid, len(keep), len(on_disk), len(orphan_chunks),
-        sum(orphan_chunks.values()),
+        sum(orphan_chunks.values()), len(protected), sum(protected.values()),
     )
+    for extra in resolution.extras:
+        if extra.error:
+            logger.info(
+                "cache-gc depot=%s extra manifest %s unusable: %s",
+                depotid, extra.manifestid, extra.error,
+            )
 
     return DepotGcPlan(
         status=STATUS_PLANNED,
@@ -1259,6 +1523,8 @@ def _plan_one_depot(
         kept_bytes=kept_bytes,
         keep_set_count=len(keep),
         size_mismatch_count=size_mismatches,
+        oracle_protected_count=len(protected),
+        oracle_protected_bytes=sum(protected.values()),
         note="",
         **common,
     )
@@ -1327,8 +1593,22 @@ def load_recorded_manifests(
     return recorded
 
 
-def load_gc_inputs(conn: sqlite3.Connection, appid: int) -> GcInputs:
-    """Read everything ``plan_gc`` needs for one app in three queries."""
+def load_gc_inputs(
+    conn: sqlite3.Connection,
+    appid: int,
+    *,
+    oracle_manifests: Mapping[int, Sequence[str]] | None = None,
+) -> GcInputs:
+    """Read everything ``plan_gc`` needs for one app in three queries.
+
+    ``oracle_manifests`` is **passed in, not read here** (WP 3.9). This module
+    knows nothing about the manifest oracle — its caller
+    (``gc_execute.run_gc``) asks ``vault_api.oracle.gc_keepset_gids``, which
+    is the one place that consults the enable flag. Keeping the direction that
+    way round means ``vault_api/gc.py`` has no import of, and no opinion
+    about, a network-backed feature; ``None`` (the default) is exactly the
+    pre-WP-3.9 behaviour.
+    """
     mapping_rows = deletion.load_mapping_rows(conn, appid)
     owner_ids = {appid}
     owner_ids.update(deletion.other_owner_ids(mapping_rows, appid))
@@ -1336,4 +1616,11 @@ def load_gc_inputs(conn: sqlite3.Connection, appid: int) -> GcInputs:
         mapping_rows=mapping_rows,
         content_states=load_content_states(conn, owner_ids),
         recorded_manifests=load_recorded_manifests(conn, appid),
+        oracle_manifests=(
+            {}
+            if oracle_manifests is None
+            else {
+                depotid: list(gids) for depotid, gids in oracle_manifests.items()
+            }
+        ),
     )

@@ -29,6 +29,7 @@ from vault_api.routers import (
     health,
     jobs,
     mapping,
+    oracle,
     schedule,
     stats,
 )
@@ -174,4 +175,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(clients.router)
     app.include_router(schedule.router)
     app.include_router(stats.router)
+    # WP 3.9. Always mounted, even with VAULT_MANIFEST_ORACLE unset: the routes
+    # answer "enabled: false" rather than 404 in that case, so a client can
+    # tell "this vault-api is too old to have an oracle" from "this operator
+    # chose not to enable it" — which are different things to show a user.
+    app.include_router(oracle.router)
     return app
