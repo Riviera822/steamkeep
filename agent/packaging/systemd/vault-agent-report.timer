@@ -1,0 +1,57 @@
+# vault-agent-report.timer — WP 2.5 (Linux/SteamOS, ADR-0002)
+#
+# Pairs with vault-agent-report.service (same directory). Install both to
+# ~/.config/systemd/user/ — see agent/README.md's "Linux/SteamOS install"
+# section for the full step-by-step.
+#
+# This is the Linux answer to "report every ~30 min" (plan §3/§7):
+# systemd's own timer replaces vault-agent's `report --loop` here, the
+# same way a Windows Scheduled Task replaces it on Windows (WP 2.6).
+# `--loop` still exists and still works on Linux (e.g. inside a container
+# or under a process supervisor with no systemd) — this timer is simply
+# the native, recommended way to get the same periodic behavior on a real
+# systemd user session, matching Windows's split between "the OS times
+# it" and "the binary just reports once".
+
+[Unit]
+Description=Periodic timer for vault-agent-report.service
+Documentation=https://github.com/Riviera822/steamvault/blob/main/agent/README.md
+
+[Timer]
+# Every 30 minutes on the clock (:00 and :30) — matches
+# agentconfig.DefaultReportInterval (go/agentconfig/config.go), so the
+# timer's default cadence agrees with `report --loop`'s default without
+# either one having to read the other's config.
+#
+# MUST be OnCalendar=, not OnBootSec=/OnUnitActiveSec= (an earlier version
+# of this file used those instead, on the mistaken assumption that
+# Persistent= below would give catch-up behavior regardless of trigger
+# type — it does not): systemd.timer(5) is explicit that "this setting
+# [Persistent=] only has an effect on timers configured with OnCalendar=".
+# OnBootSec=/OnUnitActiveSec= are monotonic timers with no on-disk
+# last-trigger stamp for Persistent= to compare against, so on those,
+# Persistent=true is silently a no-op — exactly the catch-up-after-
+# suspend behavior a frequently-suspended Steam Deck needs most, and the
+# one case an earlier version of this file and the README both
+# (incorrectly) promised it had.
+OnCalendar=*:0/30
+
+# +/- up to 5 minutes of random jitter added to every trigger, same
+# purpose as go/cmd/vault-agent's own +/-10% jitter on --loop: if many
+# agents on the same network are installed with the same timer, they
+# don't all hit vault-api in lockstep.
+RandomizedDelaySec=5min
+
+# With OnCalendar= above, this now does what the comment always claimed:
+# the last-trigger time is persisted to disk — for a system unit that's
+# /var/lib/systemd/timers/stamp-vault-agent-report.timer, but THIS is a
+# user unit, and the verified real location there (WSL2, systemd 259,
+# confirmed by `find` during WP 2.5's E2E re-run) is
+# ~/.local/share/systemd/timers/stamp-vault-agent-report.timer — and on
+# the next activation (e.g. the Deck waking from suspend, or a reboot)
+# the service runs immediately if a scheduled :00/:30 slot was missed,
+# instead of waiting for the next one to come around on the clock.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -340,7 +340,9 @@ for users who expose the API differently.
       symlink refusal, SIGKILL/ENOSPC fault-injection evidence. Note:
       Phase 0 proved CURRENT Linux clients also perform lancache
       discovery, so hosts mode works beyond Windows; Opus + Fable
-      double review. Real-Windows-hosts run = 2-min user checklist)*
+      double review. Real-Windows verification done 2026-08-06: hosts
+      status on the live machine correctly reported the user's manual
+      Phase-0 entry as a conflict without touching anything)*
 - [ ] Document Windows scheduled-task setup, optional installer script
 - [ ] Linux/SteamOS agent variant (Steam Deck / Steam Machine): library
       discovery under `~/.local/share/Steam`, systemd user service

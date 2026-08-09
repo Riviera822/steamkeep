@@ -49,12 +49,26 @@ const (
 
 // Config is vault-agent's fully validated, ready-to-use configuration.
 type Config struct {
-	ServerURL      string // e.g. "http://100.x.y.z:8080", no trailing slash
-	APIKey         string // NEVER logged - see Redacted() and cmd/vault-agent's logger
-	ClientID       string
-	LibraryRoot    string
-	ReportInterval time.Duration // only consulted in --loop mode
-	Loop           bool
+	ServerURL   string // e.g. "http://100.x.y.z:8080", no trailing slash
+	APIKey      string // NEVER logged - see Redacted() and cmd/vault-agent's logger
+	ClientID    string
+	LibraryRoot string
+	// LibraryRootProbeNote is non-empty exactly when LibraryRoot came from
+	// the Linux none-of-the-candidates-exist fallback guess (WP 2.5's
+	// probeLinuxLibraryRoot) rather than an explicit --library-root/env
+	// value or a confirmed-existing probe hit. Empty on Windows always,
+	// and empty on Linux whenever a real value was found or given.
+	//
+	// This exists so that guess is not a SILENT one: main.go logs it once
+	// at startup (see cmd/vault-agent's runReport) instead of the
+	// descriptive error probeLinuxLibraryRoot already builds
+	// (probeLinuxLibraryRootError, naming every path it checked) being
+	// constructed and then thrown away with no caller ever seeing it -
+	// which is exactly what happened before this field existed: the
+	// error was real, but unreachable by any operator.
+	LibraryRootProbeNote string
+	ReportInterval       time.Duration // only consulted in --loop mode
+	Loop                 bool
 }
 
 // Redacted returns a copy of cfg safe to log: APIKey is replaced with a
@@ -197,8 +211,9 @@ func build(spec flagSpec, getenv Getenv) (Config, error) {
 		libraryRoot = getenv(EnvLibraryRoot)
 	}
 	libraryRoot = strings.TrimSpace(libraryRoot)
+	var libraryRootProbeNote string
 	if libraryRoot == "" {
-		libraryRoot = defaultLibraryRoot(runtime.GOOS)
+		libraryRoot, libraryRootProbeNote = defaultLibraryRoot(runtime.GOOS)
 	}
 
 	rawInterval := spec.interval
@@ -228,12 +243,13 @@ func build(spec flagSpec, getenv Getenv) (Config, error) {
 	}
 
 	return Config{
-		ServerURL:      serverURL,
-		APIKey:         apiKey,
-		ClientID:       clientID,
-		LibraryRoot:    libraryRoot,
-		ReportInterval: interval,
-		Loop:           spec.loop,
+		ServerURL:            serverURL,
+		APIKey:               apiKey,
+		ClientID:             clientID,
+		LibraryRoot:          libraryRoot,
+		LibraryRootProbeNote: libraryRootProbeNote,
+		ReportInterval:       interval,
+		Loop:                 spec.loop,
 	}, nil
 }
 
@@ -298,27 +314,142 @@ func defaultClientID(hostname func() (string, error)) (string, error) {
 }
 
 // defaultLibraryRoot returns the Steam install directory to use when
-// neither --library-root nor VAULT_AGENT_LIBRARY_ROOT is given.
+// neither --library-root nor VAULT_AGENT_LIBRARY_ROOT is given, plus a
+// note (empty string when there's nothing to say). An explicit
+// --library-root/env value ALWAYS wins over this - build() only calls
+// this when both are empty, and only build() decides what to do with the
+// note (surface it as Config.LibraryRootProbeNote, which cmd/vault-agent
+// logs once at startup - see agent/README.md's "Linux/SteamOS variant"
+// section).
 //
-// No registry lookup (Windows) and no package-manager/well-known-path
-// probing (Linux) is done in v1 - see the WP 2.2 brief. These are
-// reasonable, documented starting points, not a guarantee the real
-// install lives there; acf.DiscoverInstalled degrades to warnings (never
-// a crash) if it doesn't.
-func defaultLibraryRoot(goos string) string {
+// No registry lookup is done on Windows (v1 scope, WP 2.2 brief); the
+// note is always empty there. Linux probes three real, documented
+// install locations in order (WP 2.5, see linuxLibraryRootCandidates)
+// rather than a single hardcoded guess; the note is empty when a
+// candidate was confirmed to exist, and non-empty (naming every path
+// checked) exactly when none did and candidate 0 is being returned as an
+// unconfirmed guess.
+func defaultLibraryRoot(goos string) (path string, note string) {
 	switch goos {
 	case "windows":
-		return `C:\Program Files (x86)\Steam`
+		return `C:\Program Files (x86)\Steam`, ""
 	default:
-		// Linux/SteamOS (ADR-0002): the standard XDG data-home location a
-		// real Steam client installs itself into. A full Linux/SteamOS
-		// agent variant (library discovery beyond this default, systemd
-		// packaging) is WP 2.5 - this default only keeps cross-builds for
-		// linux/amd64 and linux/arm64 usable today, it is not that variant.
-		home, err := os.UserHomeDir()
-		if err != nil || home == "" {
-			return ".local/share/Steam"
+		// Linux/SteamOS (ADR-0002, WP 2.5). probeLinuxLibraryRoot only
+		// fails when NONE of the candidates exist yet (fresh machine,
+		// Steam not installed at any known location) - that is not a
+		// config-parse error (mirrors the Windows default, which never
+		// checks the disk either): fall back to the modern default
+		// (candidate 0) and let the returned note (surfaced via
+		// Config.LibraryRootProbeNote) tell the operator it's an
+		// unconfirmed guess, on top of acf.DiscoverInstalled's own
+		// resilience contract surfacing the missing-library Warning once
+		// `report` actually runs against it.
+		home, _ := os.UserHomeDir() // error/empty handled by the candidates helper itself
+		candidates := linuxLibraryRootCandidates(home)
+		found, err := probeLinuxLibraryRoot(candidates, dirExists)
+		if err == nil {
+			return found, ""
 		}
-		return home + "/.local/share/Steam"
+		return candidates[0], fmt.Sprintf(
+			"defaulted library-root to %q without confirming it exists (%s)",
+			candidates[0], err,
+		)
 	}
+}
+
+// dirExists reports whether path exists and is a directory. A package var
+// (not a direct os.Stat call inlined into probeLinuxLibraryRoot) so tests
+// can substitute a fake filesystem view - real candidate paths live under
+// a real user's $HOME and unit tests must never depend on what happens to
+// exist there on whichever machine runs `go test` (WP 2.5).
+var dirExists = func(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// linuxLibraryRootCandidates returns, in probe order, the real Steam-on-
+// Linux install locations defaultLibraryRoot checks (WP 2.5, ADR-0002):
+//
+//  1. ~/.local/share/Steam
+//     The modern (2019+) default. Confirmed against a real installed
+//     client (WSL2 Ubuntu, current stable Steam-for-Linux, see
+//     agent/README.md's Linux discovery section) - this is where the
+//     official installer puts it, and it's the XDG data-home convention
+//     (Steam does not otherwise honor $XDG_DATA_HOME; the path is
+//     hardcoded by the client, but shares the same location XDG would
+//     pick).
+//  2. ~/.steam/steam
+//     The legacy path. On every modern install this directory is ITSELF
+//     a symlink into #1 (confirmed on the same real install:
+//     ~/.steam/steam -> ~/.local/share/Steam) - kept as a distinct probe
+//     entry for older or hand-installed setups where it is a real
+//     directory instead of a symlink to #1, not because it usually
+//     points somewhere different (os.Stat follows symlinks, so on a
+//     modern install this candidate resolves to the same directory as
+//     #1 and is simply redundant with it, never wrong).
+//  3. ~/.var/app/com.valvesoftware.Steam/.local/share/Steam
+//     The Flatpak sandbox location. Not exercised by the real WSL2 probe
+//     (that install is the native/deb package, not Flatpak), but this is
+//     Flatpak's standard per-app data directory convention
+//     (`~/.var/app/<app-id>/.local/share/...` mirrors the app's sandboxed
+//     $XDG_DATA_HOME) applied to Steam's Flatpak app ID
+//     (com.valvesoftware.Steam) - documented Flatpak behavior, checked
+//     last because it's the least common of the three on a Steam
+//     Deck/desktop-Linux gaming box, which normally has Steam natively
+//     installed or preinstalled by the OS image.
+//
+// home is os.UserHomeDir()'s result. An empty home (lookup failed) falls
+// back to bare relative paths - candidate 0 (".local/share/Steam") is
+// then BYTE-IDENTICAL to the exact string the pre-WP-2.5 default
+// returned in this case (that code returned the literal
+// ".local/share/Steam", no "./" prefix), so a broken $HOME lookup
+// degrades exactly as before, not merely to something equivalent. (An
+// earlier draft of this function built these with a "." + "/" base
+// instead, which produces "./.local/share/Steam" - a working but
+// DIFFERENT string from the pre-WP-2.5 one; the doc comment claimed
+// parity that code didn't actually have. Fixed here, not just reworded.)
+func linuxLibraryRootCandidates(home string) []string {
+	if home == "" {
+		return []string{
+			".local/share/Steam",
+			".steam/steam",
+			".var/app/com.valvesoftware.Steam/.local/share/Steam",
+		}
+	}
+	return []string{
+		home + "/.local/share/Steam",
+		home + "/.steam/steam",
+		home + "/.var/app/com.valvesoftware.Steam/.local/share/Steam",
+	}
+}
+
+// probeLinuxLibraryRootError is returned by probeLinuxLibraryRoot when
+// none of the candidates exist. It names every path that was checked (in
+// the order they were checked) so a log line built from it is actionable
+// on its own, without the reader needing to already know the probe order
+// documented above.
+type probeLinuxLibraryRootError struct {
+	candidates []string
+}
+
+func (e *probeLinuxLibraryRootError) Error() string {
+	return fmt.Sprintf(
+		"no Steam installation found at any of the known Linux locations (checked in order: %s); "+
+			"pass --library-root or set %s explicitly if Steam is installed elsewhere",
+		strings.Join(e.candidates, ", "), EnvLibraryRoot,
+	)
+}
+
+// probeLinuxLibraryRoot returns the first candidate for which exists
+// reports true, preserving candidate order (first-exists-wins). Returns a
+// *probeLinuxLibraryRootError - never a bare string message, so a caller
+// can errors.As if it ever needs to inspect which paths were tried -
+// when none exist.
+func probeLinuxLibraryRoot(candidates []string, exists func(string) bool) (string, error) {
+	for _, c := range candidates {
+		if exists(c) {
+			return c, nil
+		}
+	}
+	return "", &probeLinuxLibraryRootError{candidates: candidates}
 }

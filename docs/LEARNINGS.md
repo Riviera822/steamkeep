@@ -111,6 +111,15 @@ These are not style preferences; each entry cost a review round to learn.
   (\x1b[38;5;226m) and timestamps are digits too — require
   digits-and-separators-only (WP 3.3).
 
+## systemd / packaging
+- Persistent=true only works with OnCalendar= timers — on monotonic
+  triggers (OnBootSec/OnUnitActiveSec) it is a silent no-op, so
+  "catch up after suspend" claims need OnCalendar (WP 2.5).
+- network-online.target does not exist in the systemd USER scope —
+  Wants=/After= on it are no-ops there (WP 2.5).
+- Secret env files: umask 077 BEFORE creating, not chmod 600 after
+  (world-readable window) (WP 2.5).
+
 ## Go / CLI
 - Never register a secret env value as a flag DEFAULT — Go's
   flag.PrintDefaults() prints non-empty defaults verbatim on -h and every
@@ -126,6 +135,9 @@ These are not style preferences; each entry cost a review round to learn.
 ## Testing discipline
 - Flake-hunt concurrency tests: run the module isolated in a 20-40x loop —
   full-suite green means nothing for timing bugs (WP 1.6 Fable).
+- Enumerate the package's GUARANTEES and mutation-test each one by name —
+  six killed mutations mean nothing if the seventh (the primary
+  fail-closed promise) was never targeted (WP 2.3).
 - Mutation-test regression tests (revert the fix, watch the test fail)
   before trusting them (multiple WPs).
 - Fixtures: synthetic only, modeled on real structure — never personal data

@@ -121,6 +121,16 @@ func runReport(args []string, stdout, stderr io.Writer) int {
 	logger.Printf("vault-agent starting server_url=%q client_id=%q library_root=%q loop=%v report_interval=%s api_key=%s",
 		redacted.ServerURL, redacted.ClientID, redacted.LibraryRoot, redacted.Loop, redacted.ReportInterval, redacted.APIKey)
 
+	// WP 2.5 S2 (review): LibraryRootProbeNote is only ever non-empty when
+	// LibraryRoot is an UNCONFIRMED Linux fallback guess (none of the
+	// probed install locations exist) - logged once here, at startup,
+	// exactly once per run, so that guess is not a silent one. Never
+	// contains anything secret (see Config.LibraryRootProbeNote's doc
+	// comment), so no redaction is needed.
+	if cfg.LibraryRootProbeNote != "" {
+		logger.Printf("library root note=%q", cfg.LibraryRootProbeNote)
+	}
+
 	httpClient := client.New(cfg.ServerURL, cfg.APIKey)
 
 	if !cfg.Loop {

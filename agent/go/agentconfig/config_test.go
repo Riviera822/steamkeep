@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -381,11 +382,14 @@ func TestParse_UnusableHostnameFailsLoudlyWhenNoClientIDGiven(t *testing.T) {
 }
 
 func TestDefaultLibraryRoot_PerOS(t *testing.T) {
-	win := defaultLibraryRoot("windows")
+	win, winNote := defaultLibraryRoot("windows")
 	if !strings.Contains(win, "Steam") {
 		t.Errorf("windows default = %q, want it to mention Steam", win)
 	}
-	linux := defaultLibraryRoot("linux")
+	if winNote != "" {
+		t.Errorf("windows note = %q, want empty (Windows never probes)", winNote)
+	}
+	linux, _ := defaultLibraryRoot("linux") // note depends on real disk state here, not asserted
 	if !strings.Contains(linux, ".local/share/Steam") {
 		t.Errorf("linux default = %q, want the XDG Steam path", linux)
 	}
@@ -400,9 +404,274 @@ func TestDefaultLibraryRoot_MatchesRuntimeGOOSConvention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := defaultLibraryRoot(runtime.GOOS)
+	want, _ := defaultLibraryRoot(runtime.GOOS)
 	if cfg.LibraryRoot != want {
 		t.Errorf("LibraryRoot = %q, want %q", cfg.LibraryRoot, want)
+	}
+}
+
+// --- WP 2.5: Linux/SteamOS library-root probe order ---
+//
+// fakeExists below stubs the dirExists package var so these tests never
+// touch the real filesystem or depend on what happens to be installed on
+// whatever machine runs `go test` (real Steam install state on the WSL2
+// dev/test box would otherwise make TestProbeLinuxLibraryRoot_* pass or
+// fail depending on which candidate paths exist there right now).
+
+// fakeExists returns a dirExists-shaped func backed by a fixed set of
+// "existing" paths, plus the ordered list of paths it was actually asked
+// about (so a test can assert probing stopped at the first hit instead of
+// checking every candidate).
+func fakeExists(existing ...string) (func(string) bool, *[]string) {
+	set := map[string]bool{}
+	for _, p := range existing {
+		set[p] = true
+	}
+	var asked []string
+	fn := func(p string) bool {
+		asked = append(asked, p)
+		return set[p]
+	}
+	return fn, &asked
+}
+
+func TestLinuxLibraryRootCandidates_OrderAndPaths(t *testing.T) {
+	got := linuxLibraryRootCandidates("/home/deck")
+	want := []string{
+		"/home/deck/.local/share/Steam",
+		"/home/deck/.steam/steam",
+		"/home/deck/.var/app/com.valvesoftware.Steam/.local/share/Steam",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d candidates, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("candidate[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestLinuxLibraryRootCandidates_EmptyHomeFallsBackToRelative(t *testing.T) {
+	got := linuxLibraryRootCandidates("")
+	// Byte-identical to the exact string the pre-WP-2.5 default returned
+	// for this case (no "./" prefix) - not just an equivalent path. See
+	// linuxLibraryRootCandidates' doc comment for why this distinction
+	// matters (a review finding: an earlier draft produced
+	// "./.local/share/Steam" here and claimed parity it didn't have).
+	want := []string{
+		".local/share/Steam",
+		".steam/steam",
+		".var/app/com.valvesoftware.Steam/.local/share/Steam",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d candidates, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("candidate[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestProbeLinuxLibraryRoot_FirstExistsWins(t *testing.T) {
+	candidates := []string{"/home/deck/.local/share/Steam", "/home/deck/.steam/steam", "/home/deck/flatpak/Steam"}
+	// All three "exist" - the modern (first) candidate must still win, and
+	// probing must stop there (never even ask about the later two).
+	exists, asked := fakeExists(candidates...)
+
+	got, err := probeLinuxLibraryRoot(candidates, exists)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != candidates[0] {
+		t.Errorf("got %q, want the first candidate %q", got, candidates[0])
+	}
+	if len(*asked) != 1 || (*asked)[0] != candidates[0] {
+		t.Errorf("asked = %v, want probing to stop at the first hit", *asked)
+	}
+}
+
+func TestProbeLinuxLibraryRoot_SecondCandidateWinsWhenFirstMissing(t *testing.T) {
+	candidates := []string{"/home/deck/.local/share/Steam", "/home/deck/.steam/steam", "/home/deck/flatpak/Steam"}
+	// Only the legacy symlink location exists - modern location absent
+	// (e.g. a manual/legacy install). Second candidate must win.
+	exists, asked := fakeExists(candidates[1])
+
+	got, err := probeLinuxLibraryRoot(candidates, exists)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != candidates[1] {
+		t.Errorf("got %q, want the second candidate %q", got, candidates[1])
+	}
+	want := []string{candidates[0], candidates[1]}
+	if len(*asked) != len(want) || (*asked)[0] != want[0] || (*asked)[1] != want[1] {
+		t.Errorf("asked = %v, want %v (probing stops at the first hit)", *asked, want)
+	}
+}
+
+func TestProbeLinuxLibraryRoot_ThirdCandidateWinsWhenFirstTwoMissing(t *testing.T) {
+	candidates := []string{"/home/deck/.local/share/Steam", "/home/deck/.steam/steam", "/home/deck/flatpak/Steam"}
+	// Only the Flatpak sandbox location exists.
+	exists, _ := fakeExists(candidates[2])
+
+	got, err := probeLinuxLibraryRoot(candidates, exists)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != candidates[2] {
+		t.Errorf("got %q, want the third (Flatpak) candidate %q", got, candidates[2])
+	}
+}
+
+func TestProbeLinuxLibraryRoot_NoneExistIsAClearError(t *testing.T) {
+	candidates := []string{"/home/deck/.local/share/Steam", "/home/deck/.steam/steam", "/home/deck/flatpak/Steam"}
+	exists, asked := fakeExists() // nothing exists
+
+	_, err := probeLinuxLibraryRoot(candidates, exists)
+	if err == nil {
+		t.Fatal("expected an error when none of the candidates exist")
+	}
+	msg := err.Error()
+	for _, c := range candidates {
+		if !strings.Contains(msg, c) {
+			t.Errorf("error %q does not name checked candidate %q", msg, c)
+		}
+	}
+	if !strings.Contains(msg, "--library-root") || !strings.Contains(msg, EnvLibraryRoot) {
+		t.Errorf("error %q does not point the operator at the escape hatch", msg)
+	}
+	if len(*asked) != len(candidates) {
+		t.Errorf("asked = %v, want every candidate checked when none match", *asked)
+	}
+}
+
+func TestDefaultLibraryRoot_Linux_PicksFirstExistingCandidateViaRealProbe(t *testing.T) {
+	// Exercises defaultLibraryRoot's actual Linux branch (not just the
+	// probeLinuxLibraryRoot helper in isolation), with the package-level
+	// dirExists var stubbed so this stays deterministic regardless of
+	// what's really installed on the machine running `go test`.
+	orig := dirExists
+	defer func() { dirExists = orig }()
+
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("no $HOME on this test runner")
+	}
+	legacy := home + "/.steam/steam"
+	dirExists = func(p string) bool { return p == legacy }
+
+	got, note := defaultLibraryRoot("linux")
+	if got != legacy {
+		t.Errorf("defaultLibraryRoot(\"linux\") = %q, want the legacy candidate %q to win", got, legacy)
+	}
+	if note != "" {
+		t.Errorf("note = %q, want empty when a candidate was confirmed to exist", note)
+	}
+}
+
+func TestDefaultLibraryRoot_Linux_FallsBackToModernDefaultWhenNoneExist(t *testing.T) {
+	orig := dirExists
+	defer func() { dirExists = orig }()
+	dirExists = func(string) bool { return false }
+
+	home, _ := os.UserHomeDir()
+	want := linuxLibraryRootCandidates(home)[0]
+
+	got, note := defaultLibraryRoot("linux")
+	if got != want {
+		t.Errorf("defaultLibraryRoot(\"linux\") = %q, want the modern-default fallback %q", got, want)
+	}
+	// S2 (review): probeLinuxLibraryRoot's descriptive error used to be
+	// built and immediately discarded here - reachable by nothing and
+	// nobody. It must now come back out through defaultLibraryRoot's
+	// second return value.
+	if note == "" {
+		t.Fatal("note = \"\", want a non-empty note when none of the candidates exist")
+	}
+	if !strings.Contains(note, want) {
+		t.Errorf("note = %q, want it to mention the fallback path %q", note, want)
+	}
+}
+
+func TestDefaultLibraryRoot_Windows_NeverProbesTheFilesystem(t *testing.T) {
+	orig := dirExists
+	defer func() { dirExists = orig }()
+	dirExists = func(string) bool {
+		t.Fatal("dirExists must not be called for the windows branch")
+		return false
+	}
+
+	got, note := defaultLibraryRoot("windows")
+	if !strings.Contains(got, "Steam") {
+		t.Errorf("windows default = %q", got)
+	}
+	if note != "" {
+		t.Errorf("note = %q, want empty on windows", note)
+	}
+}
+
+// --- S2 (review): the fallback note must be reachable all the way through
+// Parse()/build() as Config.LibraryRootProbeNote - that's the path an
+// actual operator (via cmd/vault-agent's startup log line) observes it
+// through, not the internal probeLinuxLibraryRoot helper directly.
+
+func TestParse_LibraryRootProbeNote_SetWhenFallbackGuessUsed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fallback-guess note only exists on the non-Windows branch")
+	}
+	orig := dirExists
+	defer func() { dirExists = orig }()
+	dirExists = func(string) bool { return false } // nothing exists -> fallback guess
+
+	cfg, err := parseDiscard([]string{
+		"--server-url", "http://h:1", "--api-key", "k", "--client-id", "pc",
+	}, emptyEnv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LibraryRootProbeNote == "" {
+		t.Fatal("expected LibraryRootProbeNote to be set when the Linux probe fallback guess was used")
+	}
+	if !strings.Contains(cfg.LibraryRootProbeNote, cfg.LibraryRoot) {
+		t.Errorf("note = %q, want it to mention the resulting LibraryRoot %q", cfg.LibraryRootProbeNote, cfg.LibraryRoot)
+	}
+}
+
+func TestParse_LibraryRootProbeNote_EmptyWhenProbeFindsSomething(t *testing.T) {
+	orig := dirExists
+	defer func() { dirExists = orig }()
+	dirExists = func(string) bool { return true } // first candidate "exists"
+
+	cfg, err := parseDiscard([]string{
+		"--server-url", "http://h:1", "--api-key", "k", "--client-id", "pc",
+	}, emptyEnv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if runtime.GOOS != "windows" && cfg.LibraryRootProbeNote != "" {
+		t.Errorf("note = %q, want empty when a probe candidate is confirmed to exist", cfg.LibraryRootProbeNote)
+	}
+}
+
+func TestParse_LibraryRootProbeNote_EmptyWhenLibraryRootGivenExplicitly(t *testing.T) {
+	orig := dirExists
+	defer func() { dirExists = orig }()
+	dirExists = func(string) bool { return false } // would produce a note if consulted at all
+
+	cfg, err := parseDiscard([]string{
+		"--server-url", "http://h:1", "--api-key", "k", "--client-id", "pc",
+		"--library-root", "/custom/steam/path",
+	}, emptyEnv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LibraryRoot != "/custom/steam/path" {
+		t.Errorf("LibraryRoot = %q, want the explicit value", cfg.LibraryRoot)
+	}
+	if cfg.LibraryRootProbeNote != "" {
+		t.Errorf("note = %q, want empty when --library-root is explicit (the probe must not even run)", cfg.LibraryRootProbeNote)
 	}
 }
 

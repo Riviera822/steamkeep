@@ -1,0 +1,57 @@
+# vault-agent-report.service — WP 2.5 (Linux/SteamOS, ADR-0002)
+#
+# A systemd USER unit (not a system-wide unit — see agent/README.md's
+# "Linux/SteamOS install" section for why: SteamOS's rootfs is read-only
+# and this whole install deliberately touches only the home directory).
+# Install it to ~/.config/systemd/user/, never /etc/systemd/system/.
+#
+# This unit runs exactly one `vault-agent report` (Type=oneshot) and
+# exits — deliberately dumb (plan §3): no loop, no scheduling logic here.
+# All periodic timing lives in the paired vault-agent-report.timer, which
+# starts this unit on a schedule; running this unit directly
+# (`systemctl --user start vault-agent-report.service`) also works for a
+# manual one-off report or for the install verification below.
+#
+# %h expands to the invoking user's home directory (systemd user-unit
+# specifier) — NOT hardcoded, so the same two files work unmodified for
+# any user/home on any machine (a regular Linux desktop, a Steam Deck's
+# `deck` user, ...).
+#
+# The API key lives in %h/.config/vault-agent/env (mode 600), never in
+# this unit file — see agent/README.md for exactly why and how to create
+# it. This file is safe to read by anyone; it contains no secret.
+
+[Unit]
+Description=SteamVault vault-agent: report installed Steam apps to vault-api
+Documentation=https://github.com/Riviera822/steamvault/blob/main/agent/README.md
+# No After=/Wants=network-online.target: that target is a system-manager
+# concept and is not reliably present/orderable against from a systemd
+# USER unit (no system-level network-online service to depend on in this
+# scope, and pulling it in from a user unit does not actually delay
+# activation the way it would for a system unit). go/client's own retry +
+# backoff (up to ~105s worst case, see agent/README.md's "Retry behavior")
+# already covers "network not up yet" for the one-shot HTTP POST this
+# unit makes, so there is nothing this ordering would add.
+
+[Service]
+Type=oneshot
+# No leading "-": a missing/unreadable env file is a HARD failure (the
+# unit fails to start at all) rather than silently running vault-agent
+# with no VAULT_AGENT_SERVER_URL/VAULT_AGENT_API_KEY - fail-closed by
+# construction, not by agentconfig's own validation as a second line of
+# defense.
+EnvironmentFile=%h/.config/vault-agent/env
+ExecStart=%h/.local/bin/vault-agent report
+
+# Hardening notes (deliberately NOT more aggressive than this):
+#   - No ProtectSystem=/ProtectHome= sandboxing here: this is a USER unit
+#     that itself only ever writes to stdout/stderr (systemd captures
+#     both into the journal, see `journalctl --user -u
+#     vault-agent-report.service`) and reads the local Steam library
+#     read-only (go/acf.DiscoverInstalled never writes anything) plus one
+#     outbound HTTPS/HTTP POST — there is no local write path to lock
+#     down beyond what running as an unprivileged user already confines.
+#   - NoNewPrivileges=true costs nothing here (vault-agent never needs to
+#     gain privileges) and closes off a class of future-code-change risk
+#     for free.
+NoNewPrivileges=true

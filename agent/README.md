@@ -11,11 +11,11 @@ see "Go port (production)" below. The HTTP reporter and the `vault-agent`
 CLI now exist (WP 2.2, `go/report`, `go/client`, `go/agentconfig`,
 `go/cmd/vault-agent`) — see "vault-agent CLI (WP 2.2)" below. The optional
 hosts-file mode now exists too (WP 2.3, `go/hostsfile` +
-`go/cmd/vault-agent/hosts.go`) — see "Hosts-file mode (WP 2.3)" below. No
-Linux/SteamOS discovery variant yet (WP 2.5, see ADR-0002; the binary
-already cross-compiles for linux/amd64 and linux/arm64 and runs, but
-library-discovery paths beyond the OS-generic default are WP 2.5's job),
-and no Windows Scheduled Task installer (WP 2.6).
+`go/cmd/vault-agent/hosts.go`) — see "Hosts-file mode (WP 2.3)" below. The
+Linux/SteamOS variant now exists too (WP 2.5, see ADR-0002: real-install
+library discovery beyond the OS-generic default, plus systemd user-service
+packaging under `packaging/systemd/`) — see "Linux/SteamOS variant
+(WP 2.5)" below. No Windows Scheduled Task installer yet (WP 2.6).
 
 **Executable specification (ADR-0005):** vault-agent ships as a Go binary
 in production; this Python package and its test suite are the pinned
@@ -86,6 +86,18 @@ agent/go/
 
 Sandbox verification scripts for hosts mode live in `agent/tests/sandbox/`
 (see "Hosts-file mode" below) — they are not `go test` and are run by hand.
+
+Systemd packaging for the Linux/SteamOS variant (WP 2.5) lives outside
+`go/` entirely, next to it:
+
+```
+agent/packaging/systemd/
+├── vault-agent-report.service   # Type=oneshot: runs `vault-agent report` once
+└── vault-agent-report.timer     # OnCalendar=*:0/30 + jitter, Persistent=true (real catch-up)
+```
+
+See "Linux/SteamOS variant (WP 2.5)" below for the full install and
+verification story.
 
 **Building and testing (WSL2 — no Windows Go toolchain in this repo's dev
 environment; Go 1.26 in WSL):**
@@ -283,13 +295,11 @@ it with retry). Deliberately dumb (plan §3): no control logic runs here —
 scheduling, prefill decisions, and removal handling all live in vault-api.
 
 Out of scope for `report` (see the Status line above): a Windows Scheduled
-Task installer script (WP 2.6), a Linux/SteamOS-specific library discovery
-variant and systemd packaging (WP 2.5 — the binary runs on linux/amd64 and
-linux/arm64 today with the OS-generic `~/.local/share/Steam` default, but
-that's this package's default, not WP 2.5's dedicated variant). The
-hosts-file mode landed separately as the `hosts` subcommand — see
-"Hosts-file mode (WP 2.3)" below; `report` itself never touches the hosts
-file.
+Task installer script (WP 2.6). The hosts-file mode landed separately as
+the `hosts` subcommand — see "Hosts-file mode (WP 2.3)" below; `report`
+itself never touches the hosts file. The Linux/SteamOS-specific library
+discovery order and systemd packaging landed as WP 2.5 — see "Linux/
+SteamOS variant (WP 2.5)" below.
 
 ### Usage
 
@@ -620,9 +630,26 @@ the elevation wording differ.
 Windows remains the **documented primary target**, because that is where the
 "single gaming PC, no local DNS server" scenario mode 3 exists for is most
 common. On SteamOS specifically, note that the rootfs is read-only by
-default — hosts mode there needs `steamos-readonly disable`, which is
-outside what this package does or recommends; the systemd/SteamOS packaging
-story is WP 2.5.
+default (`steamos-readonly status`/`disable`/`enable`, SteamOS 3's
+dm-verity-protected A/B root partition) — **and this claim now has a
+verification note attached, per WP 2.5's review of it:** it is accurate
+for THIS package's hosts-file mode specifically, because `/etc/hosts`
+lives on that read-only root, not under the home directory — writing it
+on an unmodified SteamOS install needs `steamos-readonly disable` first,
+which this package does not do and does not recommend automating (the
+same "no self-elevation" reasoning as the section above extends naturally
+to "no self-disabling-of-OS-protections" — a background tool silently
+punching a hole in the read-only rootfs is a worse idea than a hosts-file
+UAC-style prompt ever was). **It is NOT accurate for WP 2.5's systemd
+install** (see "Linux/SteamOS variant (WP 2.5)" below): that install is
+deliberately entirely under `$HOME` (`~/.local/bin`,
+`~/.config/systemd/user/`, `~/.config/vault-agent/`), which lives on
+SteamOS's separate, writable home partition and needs no rootfs mutation
+at all — `steamos-readonly disable` is neither required nor mentioned
+anywhere in that section. The two Linux-targeting features in this
+package have opposite read-only-rootfs stories; naming which one a given
+piece of documentation is about is the fix, not picking one blanket
+answer for both.
 
 ### Verifying it
 
@@ -730,6 +757,426 @@ want to confirm the real thing end to end, this is the whole procedure:
 | `0` | the operation succeeded, or `status` produced a report (whatever state it found — the state is the output, not an error), or `-h` |
 | `1` | a runtime failure: permission denied, corrupt markers, a conflicting entry, an unreadable file |
 | `2` | a usage error: unknown subcommand, missing/invalid `--cache-ip`, an unknown flag, a stray positional argument |
+
+## Linux/SteamOS variant (WP 2.5)
+
+Everything in "vault-agent CLI (WP 2.2)" above already runs unchanged on
+Linux and SteamOS — `go/acf`, `go/report`, `go/client`, and the `report`
+subcommand have no Windows-specific code anywhere in them. This package
+is the other two things ADR-0002 asked for: a **library-discovery default
+that actually matches how Steam installs itself on Linux** (not just one
+guessed path), and **systemd user-service packaging** so `report` runs on
+a schedule the same way a Windows Scheduled Task will (WP 2.6) — without
+needing root, without touching anything outside `$HOME`, and without
+`--loop` staying resident.
+
+### Library discovery: probe order (`go/agentconfig`)
+
+`--library-root` / `VAULT_AGENT_LIBRARY_ROOT` always wins when given —
+nothing below ever runs if either is set. When neither is set, non-Windows
+`defaultLibraryRoot` (`go/agentconfig/config.go`) probes three real
+locations, **in this order**, and uses the first one that exists as a
+directory:
+
+1. **`~/.local/share/Steam`** — the modern (2019+) default. This is where
+   the official Debian/Ubuntu package AND the official installer script
+   put it.
+2. **`~/.steam/steam`** — the legacy path. On every modern install this is
+   itself a **symlink into #1** (confirmed on the real install below —
+   `~/.steam/steam -> ~/.local/share/Steam`); kept as a distinct candidate
+   for an older or hand-built install where it is a real directory
+   instead of a symlink. `os.Stat` follows symlinks, so on a modern
+   install this candidate simply resolves to the same place as #1 and is
+   redundant with it, never wrong or conflicting.
+3. **`~/.var/app/com.valvesoftware.Steam/.local/share/Steam`** — the
+   Flatpak sandbox location (`~/.var/app/<app-id>/...` is Flatpak's
+   standard per-app data directory convention, applied to Steam's
+   Flatpak app ID). Checked last: it's the least common of the three on
+   a gaming box, which normally has Steam preinstalled by the OS image or
+   installed natively.
+
+If **none** of the three exist yet (a fresh machine, Steam not installed
+anywhere known), the probe falls back to #1 rather than failing config
+parsing — the same "reasonable starting point, not a guarantee" stance
+the pre-existing Windows default already took (see that default's own
+doc comment). This is a deliberate choice, not an oversight: making the
+Linux default *harder-failing* than the Windows default for the exact
+same kind of guess would be an inconsistency with no real benefit,
+because `acf.DiscoverInstalled`'s own resilience contract already
+surfaces a missing library as a `Warning`, not silence, the moment
+`report` actually runs against it (see `main.go`'s
+`logger.Printf("discover warning=%q", ...)`). The probing primitive
+itself (`probeLinuxLibraryRoot`) is unit-tested in isolation for all four
+shapes: first-candidate-wins, second/third-wins-when-earlier-missing, and
+the none-exist case, which DOES return a descriptive error naming every
+path it checked (`go/agentconfig/config_test.go`'s
+`TestProbeLinuxLibraryRoot_*` — used for a clear log message, not
+propagated as a hard config-parse failure, for the reason just given).
+Every one of those tests stubs the package-level `dirExists` var instead
+of touching a real filesystem, so they're deterministic regardless of
+what happens to be installed on whatever machine runs `go test`.
+
+**Verified against a real Steam-on-Linux install** (WSL2 Ubuntu, the same
+box used for Phase 0's Linux-client PoC — native `.deb` install, not
+Flatpak):
+
+```
+$ ls -la ~/.steam/steam
+lrwxrwxrwx 1 jan jan 28 ... /home/jan/.steam/steam -> /home/jan/.local/share/Steam
+
+$ go run ./cmd/probe $HOME/.local/share/Steam
+discovered 3 installed app(s) under /home/jan/.local/share/Steam:
+  appid=1070560  installed=true  stateflags=4  size=222685392  name="Steam Linux Runtime 1.0 (scout)"
+  appid=1391110  installed=true  stateflags=4  size=676189670  name="Steam Linux Runtime 2.0 (soldier)"
+  appid=480      installed=true  stateflags=4  size=1906055    name="Spacewar"
+0 warning(s)
+```
+
+Candidate #1 exists (it's the real install location) and candidate #2 is
+confirmed to be exactly the symlink-into-#1 case documented above — so
+probing correctly stops at #1 without needing to fall through. Running
+the production binary's `report` with **no `--library-root` at all**
+resolves to the same path automatically:
+
+```
+$ vault-agent report --server-url http://127.0.0.1:9 --api-key x --client-id probe-host
+... library_root="/home/jan/.local/share/Steam" ...
+... report built installed_count=3 client_id="probe-host"
+```
+
+matching `cmd/probe`'s 3 apps exactly. No real app ownership/library data
+beyond what's already synthesized/reproduced above is stored anywhere in
+this repo (fixture policy, same as WP 2.1b/2.2).
+
+### systemd packaging (`agent/packaging/systemd/`)
+
+Two unit files, both **systemd USER units** (never `/etc/systemd/system/`
+— see the read-only-rootfs note below for exactly why that split matters
+on SteamOS specifically, and why it's the right call even on a regular
+desktop Linux box):
+
+- **`vault-agent-report.service`** — `Type=oneshot`,
+  `ExecStart=%h/.local/bin/vault-agent report`,
+  `EnvironmentFile=%h/.config/vault-agent/env` (no leading `-`: a
+  missing/unreadable env file is a **hard** failure — the unit refuses to
+  start at all rather than silently running vault-agent with no
+  `VAULT_AGENT_SERVER_URL`/`VAULT_AGENT_API_KEY` — fail-closed by
+  construction, on top of `agentconfig`'s own validation as a second
+  line of defense). No `After=`/`Wants=network-online.target`: that
+  target is a system-manager concept a user unit can't meaningfully
+  order against, and `go/client`'s own retry/backoff (up to ~105s worst
+  case — see "Retry behavior" above) already covers "network isn't up
+  yet" for the one HTTP POST this unit makes. Runs one report and exits;
+  no loop, no scheduling logic in the unit itself.
+- **`vault-agent-report.timer`** — `OnCalendar=*:0/30` (every 30 minutes
+  on the clock, matching `agentconfig.DefaultReportInterval`),
+  `RandomizedDelaySec=5min` (jitter, same purpose as `--loop`'s own
+  ±10% jitter: many agents on one network shouldn't all hit vault-api in
+  lockstep), `Persistent=true` (a missed run while suspended/off is
+  caught up on the next activation instead of silently skipped — **this
+  is why the timer uses `OnCalendar=` and not `OnBootSec=`/
+  `OnUnitActiveSec=`**: `systemd.timer(5)` (systemd 259) is explicit that
+  "this setting \[`Persistent=`\] only has an effect on timers configured
+  with `OnCalendar=`" — an earlier draft of this unit used the monotonic
+  `OnBootSec=`/`OnUnitActiveSec=` pair instead, which have no on-disk
+  last-trigger stamp for `Persistent=` to compare against, so it was
+  silently a no-op there. That earlier draft, and this README, both
+  incorrectly promised catch-up-after-suspend behavior the timer didn't
+  actually have — exactly the scenario that matters most on a Steam Deck,
+  which spends most of its life suspended, not running).
+
+`%h` is a systemd user-unit specifier for the invoking user's home
+directory — **not hardcoded**, so the same two files work unmodified for
+any user on any machine (a desktop Linux user, a Steam Deck's `deck`
+user, ...). Neither file contains a secret: the API key lives only in the
+`EnvironmentFile`, which is data, not part of the unit — see below.
+
+### Install (Steam Deck / any systemd-user Linux machine)
+
+Everything here lives under `$HOME`. Nothing needs root, and nothing
+needs `steamos-readonly disable` (see the corrected claim in "Hosts-file
+mode"'s "The Linux-client finding" above — that requirement is about
+`/etc/hosts`, a completely different file this section never touches).
+
+```bash
+# 1. Binary
+mkdir -p ~/.local/bin
+cp vault-agent ~/.local/bin/          # the linux/amd64 or linux/arm64 cross-build
+chmod +x ~/.local/bin/vault-agent
+
+# 2. Units
+mkdir -p ~/.config/systemd/user
+cp agent/packaging/systemd/vault-agent-report.service ~/.config/systemd/user/
+cp agent/packaging/systemd/vault-agent-report.timer   ~/.config/systemd/user/
+
+# 3. Secret: the env file EnvironmentFile= points at, mode 600 (this is
+#    where VAULT_AGENT_API_KEY actually lives - NEVER in the unit file,
+#    NEVER in this repo). `umask 077` FIRST so the file is created 0600
+#    from the moment it exists - without it, `cat >` creates the file at
+#    the shell's default mode (typically 644, world-readable) and ONLY
+#    THEN narrows it when chmod runs a moment later, leaving a real
+#    (if brief) window where the key is world-readable. The chmod below
+#    is kept anyway as a defensive backstop (e.g. if this snippet is
+#    copy-pasted without the umask line, or run in a shell with a
+#    stranger startup umask already set).
+mkdir -p ~/.config/vault-agent
+umask 077
+cat > ~/.config/vault-agent/env <<'EOF'
+VAULT_AGENT_SERVER_URL=http://100.x.y.z:8080
+VAULT_AGENT_API_KEY=your-real-api-key-here
+VAULT_AGENT_CLIENT_ID=steam-deck-01
+EOF
+chmod 600 ~/.config/vault-agent/env
+
+# 4. Enable + start the timer (the .service is never enabled directly -
+#    the timer activates it on schedule; `systemctl --user start
+#    vault-agent-report.service` still works standalone for a manual
+#    one-off report, e.g. to verify step 3 before waiting for the timer)
+systemctl --user daemon-reload
+systemctl --user enable --now vault-agent-report.timer
+```
+
+**Headless boxes (no active graphical/SSH login session): `loginctl
+enable-linger`.** A systemd **user** manager instance normally only runs
+while that user has an active login session — on a Steam Deck sitting at
+the Gaming Mode UI with no desktop session open, or any Linux box you SSH
+into once to set this up and then log out of, the user manager (and every
+timer/service under it) stops the moment the last session closes, so the
+30-minute timer would never fire again after that. Fix it once, as root
+(or the same account via `sudo`):
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+This is a one-time, per-user setting (`Linger=yes` in `loginctl
+show-user $USER`, backed by the actual presence of the file
+`/var/lib/systemd/linger/<username>` — `enable-linger` creates it,
+`disable-linger` removes it; verified directly, by checking for that
+exact file, during WP 2.5's own E2E run). It does **not** need
+`steamos-readonly disable`: `/var` is one of SteamOS's writable
+partitions (alongside `/home`) precisely so ordinary system state like
+this can be updated without touching the protected, dm-verity'd root
+partition `steamos-readonly` guards — unlike `/etc/hosts`, which lives
+*on* that protected partition (see the corrected claim in "Hosts-file
+mode" above for the contrast).
+
+**Verify it landed:**
+
+```bash
+systemctl --user list-timers vault-agent-report.timer   # shows NEXT/LAST run
+journalctl --user -u vault-agent-report.service --no-pager   # report log lines
+```
+
+### `timer` vs `--loop`: which one to use
+
+**`systemctl --user enable --now vault-agent-report.timer` is the Linux
+answer** — use it on every real Linux/SteamOS install, including the
+Steam Deck. It integrates with `journalctl` (no separate log file to
+manage), survives a reboot on its own once enabled, and needs no process
+of vault-agent's own to stay resident between reports (`Type=oneshot`
+exits after every run — nothing idles in memory for 30 minutes doing
+nothing).
+
+**`report --loop` still exists and still works on Linux** — it's for the
+cases that DON'T have a systemd user session to hook into: a container
+(`docker run vault-agent report --loop`, no systemd PID 1 at all), or
+under a process supervisor (s6, runit, supervisord) that expects a
+long-running foreground process rather than a unit it schedules itself.
+Neither mode is "more correct" in the abstract; the systemd timer is
+simply the native fit for a real systemd user session, which is what a
+Steam Deck, a SteamOS desktop, and most desktop Linux distros actually
+run.
+
+### Steam Deck walkthrough (concrete)
+
+1. Switch to Desktop Mode (Steam button → Power → Switch to Desktop).
+2. Open Konsole (or any terminal). The default user is `deck`, so every
+   `~` above is `/home/deck`.
+3. Copy the **`linux/amd64`** cross-build to the device (`scp`, a USB
+   stick, or built directly on-device if you have a Go toolchain there)
+   and follow "Install" above verbatim.
+4. **Note on architecture:** the Steam Deck (LCD and OLED models) is
+   **x86_64**, not ARM64 — `linux/amd64` is the correct cross-build. The
+   `linux/arm64` target in ADR-0005's build matrix is for a Linux ARM64
+   SteamOS/Steam-Machine-class device in general (the ADR's own wording:
+   "SteamOS devices ... ARM64"), not the Deck specifically; verify with
+   `uname -m` on the device (`x86_64` on every Deck shipped to date)
+   before picking a cross-build.
+5. `loginctl enable-linger deck` if you want reports to continue while
+   sitting in Gaming Mode with no desktop session open (the common case
+   for a Deck — most of its life is spent in Gaming Mode, not Desktop
+   Mode) — see the linger note above; this is the one step that needs
+   `sudo` (a session/login setting, not a rootfs write).
+6. Point `VAULT_AGENT_SERVER_URL` at your vault-api's Tailscale/VPN
+   address in the env file, same as any other client (plan §10).
+7. This install never touches `/etc/hosts`, `/etc/systemd/system/`, or
+   any other rootfs path, so **it survives a SteamOS update** the same
+   way any of your other `$HOME` files and settings do — no
+   `steamos-readonly disable`/`enable` dance needed before or after an OS
+   update, unlike the (unrelated) hosts-file mode.
+
+### Cross-builds and the DNS-free hosts-mode note
+
+The `linux/amd64`/`linux/arm64` cross-build commands are unchanged from
+the "Go port (production)" section above — this package adds no new
+build target, only a new default and new packaging for the targets that
+already existed. Recall from that section (and from Phase 0, WP 0.6):
+**the current stable Linux/SteamOS Steam client DOES perform lancache
+discovery** (the old "Linux clients ignore `lancache.steamcontent.com`"
+assumption plan §3 originally shipped with was disproved), so a Linux/
+SteamOS box benefits from vault-dns (the DNS-rewrite path) exactly like a
+Windows one, and can *also* use hosts mode (`vault-agent hosts apply`) if
+you'd rather skip running a DNS server at all — see "Hosts-file mode
+(WP 2.3)" above for that mode's own (different) read-only-rootfs story.
+The agent (`report`) and hosts mode are independent features; installing
+one implies nothing about the other.
+
+### Validation (WP 2.5)
+
+**`systemd-analyze verify`**, both units, real WSL2 systemd (259.5):
+clean, zero errors or warnings, once the two files are readable as normal
+(non-executable, non-world-writable) regular files at their real install
+path with the real `vault-agent` binary present at `%h/.local/bin/` —
+`systemd-analyze` itself flags an executable/world-writable unit file as
+a warning, which is a `/mnt/c` DrvFs mount artifact (Windows has no Unix
+permission bits), not a real issue on an actual Linux filesystem;
+confirmed by re-running the same command against copies placed on the
+WSL2 instance's own native filesystem, which have ordinary `644`
+permissions with no warning.
+
+**End-to-end**, entirely in WSL2 against a throwaway user, throwaway
+vault-api (loopback `127.0.0.1`, throwaway SQLite DB, `api/.venv`-pattern
+install — a separate WSL-native venv, since the Windows `api/.venv` isn't
+runnable from Linux), throwaway API key, cleaned up afterward:
+
+1. Built the `linux/amd64` binary, installed it + both units + a
+   `~/.config/vault-agent/env` (mode 600) pointing at the throwaway
+   vault-api, exactly per "Install" above.
+2. `systemctl --user daemon-reload` — clean.
+3. `systemctl --user start vault-agent-report.service` — the unit ran to
+   completion: `Result=success`, `ExecMainStatus=0`. Journal:
+   `report built installed_count=3` → `reported 3 installed app(s) ...
+   added=[480 1070560 1391110] removed=[] first_report=true` → `report
+   accepted received=3 added=3 removed=0 first_report=true`.
+4. Confirmed server-side landing directly in the throwaway SQLite file:
+   `SELECT * FROM agent_reports` returned exactly one row —
+   `client_id='wp25-e2e-steamdeck'`, `appids='[480,1070560,1391110]'` —
+   matching the discovery output byte for byte.
+5. `systemctl --user enable --now vault-agent-report.timer` →
+   `systemctl --user list-timers` showed a scheduled next run aligned to
+   the next `:00`/`:30` clock boundary plus jitter (per `OnCalendar=*:0/30`
+   + `RandomizedDelaySec=5min` — see "Review round 2" below for the
+   corrected timer design and the re-verification that replaced this
+   step's original, since-fixed `OnBootSec=5min` evidence) with
+   `enabled`/`active` status confirmed via `systemctl --user
+   is-enabled`/`is-active`.
+6. **Found and fixed while validating, not a code bug but an install-doc
+   gap:** the very first `systemctl --user start` attempt failed with
+   `Failed to connect to user scope bus via local transport` — the WSL2
+   user manager instance is not kept alive between separate non-login
+   shell invocations without `loginctl enable-linger` (exactly the
+   headless-box scenario the brief called out). `sudo loginctl
+   enable-linger jan` fixed it immediately; this is why the linger step
+   above is written as load-bearing ("Fix it once"), not an optional
+   nice-to-have, for any box that doesn't keep a session open 24/7 —
+   which describes a Steam Deck in Gaming Mode as much as it describes a
+   WSL2 test box.
+7. **Cleanup:** timer stopped + disabled, both unit files removed from
+   `~/.config/systemd/user/`, the env file and binary removed, the
+   throwaway vault-api process killed, its SQLite DB and venv deleted,
+   and `loginctl disable-linger` reverted the one durable WSL-wide
+   setting step 6 needed — the WSL2 instance was left exactly as found
+   (verified: `~/.local/share/Steam`, the real Steam install used for the
+   discovery probe above, was read-only accessed and never modified by
+   any of this).
+
+### Review round 2: timer semantics fix + `LibraryRootProbeNote` (WP 2.5)
+
+Two findings from review, fixed and re-verified in the same real WSL2
+environment as the first pass above:
+
+**S1 — `Persistent=true` was a no-op.** The original timer used
+`OnBootSec=5min` + `OnUnitActiveSec=30min` (monotonic triggers) with
+`Persistent=true`, on the mistaken assumption that `Persistent=` alone
+guarantees catch-up-after-suspend regardless of trigger type. It doesn't:
+`systemd.timer(5)` (systemd 259, `man systemd.timer`) states plainly
+that `Persistent=` "only has an effect on timers configured with
+`OnCalendar=`" — monotonic timers have no on-disk last-trigger stamp for
+it to compare against. That's the exact scenario the unit's own comment
+and this README both promised worked, and the one that matters most for
+a Steam Deck, which spends most of its life suspended. Fixed by
+switching to `OnCalendar=*:0/30` (every 30 minutes on the clock) —
+`Persistent=true` is now real:
+
+```
+$ systemctl --user enable --now vault-agent-report.timer
+$ systemctl --user list-timers vault-agent-report.timer
+NEXT                          LEFT LAST PASSED UNIT                     ACTIVATES
+Sun 2026-08-09 09:01:05 CEST 22min -    -      vault-agent-report.timer vault-agent-report.service
+```
+
+(`09:01:05` is the `09:00` calendar boundary plus `RandomizedDelaySec`
+jitter — confirms `OnCalendar=*:0/30` is being evaluated correctly, not
+just accepted by `systemd-analyze verify`.) And, unlike the monotonic
+version, this one actually writes the persistence stamp `Persistent=`
+depends on:
+
+```
+$ find ~/.local -iname '*stamp*vault-agent*'
+/home/jan/.local/share/systemd/timers/stamp-vault-agent-report.timer
+```
+
+`systemd-analyze verify` was re-run against both corrected unit files
+(same real WSL2 systemd 259.5) — clean, zero errors or warnings. The
+full one-shot `start` → journal → `agent_reports` row chain (steps 2-4
+above) was also re-run end to end against the corrected units, with
+identical results to the first pass.
+
+**S2 — the fallback-guess error was built and discarded.**
+`probeLinuxLibraryRoot`'s descriptive "none of the candidates exist"
+error (naming every path it checked) was constructed and then thrown
+away — no caller ever surfaced it, so an operator whose Steam install
+wasn't at any of the three probed locations got a silent wrong guess
+with no way to find out why `report` kept sending zero apps. Fixed:
+`defaultLibraryRoot` now returns `(path, note)`, `Config` carries it as
+`LibraryRootProbeNote` (empty unless the fallback guess was actually
+used), and `cmd/vault-agent`'s `runReport` logs it once at startup right
+after the existing "vault-agent starting ..." line. Verified live with a
+throwaway empty `$HOME`:
+
+```
+$ HOME=/tmp/fake-empty-home vault-agent report --server-url http://127.0.0.1:9 --api-key x --client-id probe-host
+vault-agent starting ... library_root="/tmp/fake-empty-home/.local/share/Steam" ...
+library root note="defaulted library-root to \"/tmp/fake-empty-home/.local/share/Steam\" without confirming it exists (no Steam installation found at any of the known Linux locations (checked in order: /tmp/fake-empty-home/.local/share/Steam, /tmp/fake-empty-home/.steam/steam, /tmp/fake-empty-home/.var/app/com.valvesoftware.Steam/.local/share/Steam); pass --library-root or set VAULT_AGENT_LIBRARY_ROOT explicitly if Steam is installed elsewhere)"
+discover warning="could not read/parse .../libraryfolders.vdf (...); falling back to treating .../.local/share/Steam as the only library"
+```
+
+— the note now fires exactly once, before discovery even runs, instead
+of being unreachable. Regression-tested in
+`go/agentconfig/config_test.go` (`TestParse_LibraryRootProbeNote_*`):
+set when the fallback guess is used, empty when a probe candidate is
+confirmed to exist, empty when `--library-root` is given explicitly (the
+probe must not even run in that case).
+
+**Cheap items fixed in the same pass:**
+`After=`/`Wants=network-online.target` removed from the `.service` (not
+meaningful from a systemd user unit, and `go/client`'s own retry covers
+the same gap); the env-file install snippet now runs `umask 077` before
+the `cat > ... <<'EOF'` heredoc so the file is `0600` from the moment it
+exists, with the `chmod 600` kept as a defensive backstop rather than
+the only line of defense; `EnvironmentFile=` (no leading `-`) is now
+documented as a deliberate fail-closed choice; the
+`linuxLibraryRootCandidates` empty-`$HOME` fallback was fixed to return
+the byte-identical pre-WP-2.5 string (`".local/share/Steam"`, no `./`
+prefix) instead of a merely-equivalent one, and its doc comment
+corrected to match; the `loginctl enable-linger` explanation now names
+and empirically confirms the real backing file
+(`/var/lib/systemd/linger/<user>`, checked for presence/absence directly
+around `enable`/`disable-linger` in WSL2); and the `stamp-vault-agent-
+report.timer` file this round's own timer-enable check left under
+`~/.local/share/systemd/timers/` in the WSL2 home was deleted during
+cleanup, alongside everything the first E2E pass already cleaned up.
 
 ## What's here
 
