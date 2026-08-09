@@ -392,7 +392,11 @@ for users who expose the API differently.
 - [ ] Document APK build (no Play Store requirement; F-Droid as a long-term goal)
 
 ### Phase 5 — Community Release
-- [ ] README with architecture diagram, quickstart (compose up in 5 minutes)
+- [ ] README with architecture diagram, quickstart (compose up in 5 minutes),
+      and an explicit "works for guests" FAQ note: any Steam client behind
+      the LAN DNS is served with zero setup — no account, agent, or app;
+      store-on-miss means the first guest download fills the cache for
+      everyone (ADR-0001)
 - [ ] License: Apache-2.0 (permissive for maximum adoption, includes patent
       grant; AGPL deliberately rejected as it deters contributors and
       companies in the early phase)
