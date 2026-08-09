@@ -151,6 +151,13 @@ These are not style preferences; each entry cost a review round to learn.
 - "Verified by inspection" is not verified: every binary that ships in an
   image needs at least a credential-free smoke RUN in the verify suite
   (WP 1.9).
+- A `.env` beside `compose.yaml` only feeds `${...}` interpolation inside
+  that file — it is NOT a pass-through into container environments. Any
+  setting config.py reads is dead unless the service's `environment:`
+  block forwards it by name; WP 5.4 found four such dead vars
+  (VAULT_SCHEDULE_WINDOW, VAULT_SCHEDULE_INTERVAL_MINUTES,
+  VAULT_SCHEDULE_CLIENT_STALE_DAYS, VAULT_GC_GRACE_DAYS) and documented a
+  compose.override.yaml recipe instead of a silently-broken .env example.
 
 ## Subprocess output handling
 - SteamPrefill writes its summary table in the OS OEM codepage (cp850
@@ -182,6 +189,12 @@ These are not style preferences; each entry cost a review round to learn.
 - time.Sleep in retry loops is not ctx-cancellable — select on
   ctx.Done() vs time.After (WP 2.2). CGO_ENABLED=0 explicitly or
   "static binary" claims are false on the native target (WP 2.2).
+- With core.autocrlf=true and no `*.go eol=lf` in .gitattributes,
+  `gofmt -l .` lists EVERY Go file — a checkout property, not a style
+  violation. Judge gofmt only from an LF checkout (measured, WP 5.4).
+- On this dev host the Go toolchain lives only in WSL (no go.exe) —
+  Go verification claims must state where they ran, and reviewers should
+  check WSL before treating a Go claim as unverifiable (WP 5.4).
 
 - Removal reviews audit CONTENT, not just references: a deleted reference
   implementation can be the only home of documentation living code still

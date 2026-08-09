@@ -252,7 +252,8 @@ continuously updated checklist.
 
 ## License
 
-**Planned license: Apache-2.0** — permissive, includes a patent grant,
-chosen deliberately over AGPL to keep the barrier low for contributors and
-companies alike (see `docs/PROJECT_PLAN.md` §7, Phase 5). No `LICENSE` file
-exists in this repository yet; it lands with the Phase 5 community release.
+**Apache-2.0** — permissive, includes a patent grant, chosen deliberately
+over AGPL to keep the barrier low for contributors and companies alike
+(see `docs/PROJECT_PLAN.md` §7, Phase 5 and [`LICENSE`](LICENSE)).
+Contributions are accepted under the same license — see
+[`CONTRIBUTING.md`](CONTRIBUTING.md).

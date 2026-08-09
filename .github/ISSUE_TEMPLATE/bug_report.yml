@@ -1,0 +1,95 @@
+name: Bug report
+description: Something in SteamVault isn't working as documented.
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please do **not** use this
+        form for security vulnerabilities — see the security link on the
+        template chooser instead.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of SteamVault is affected?
+      options:
+        - core (vault-core / nginx cache)
+        - api (vault-api / FastAPI backend)
+        - agent (vault-agent / PC listener)
+        - dns (vault-dns / bundled dnsmasq)
+        - deploy (Docker Compose, .env, examples)
+        - web (browser UI)
+        - app (Android app)
+        - docs (README, PROJECT_PLAN, ADRs, guides)
+        - not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: >
+        The release tag, image tag (`VAULT_IMAGE_TAG`), or git commit hash
+        you're running. `docker compose images` or `git rev-parse HEAD` will
+        tell you.
+      placeholder: e.g. v0.3.0, or commit 25a0661
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment method
+      options:
+        - Docker Compose (deploy/compose.yaml, plain docker compose)
+        - Dockge (see deploy/examples/truenas-scale-dockge.md)
+        - Other / custom orchestration
+        - Not deploying the server (agent/app/CLI only)
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact steps someone else could follow to see the same thing.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened. Include exact error text if there is any.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: >
+        **Before pasting: redact your `VAULT_API_KEY` / any other API key,
+        and any LAN details you'd rather not share (internal IPs, hostnames,
+        Tailscale/Twingate node names).** `docker compose logs` output, an
+        agent's console output, or a browser console/network trace are all
+        useful. Paste as text (in a code block) rather than a screenshot
+        where possible, so it can be searched.
+      render: shell
+    validations:
+      required: false

@@ -469,12 +469,25 @@ parallel/serial decisions, merge discipline, open user decisions):
       more ADR-backed entries; feature status stated against shipped code,
       not ADR designs — license section says "planned Apache-2.0" until
       the LICENSE file lands with the release)*
-- [ ] License: Apache-2.0 (permissive for maximum adoption, includes patent
+- [x] License: Apache-2.0 (permissive for maximum adoption, includes patent
       grant; AGPL deliberately rejected as it deters contributors and
       companies in the early phase)
+      *(WP 5.4: root `LICENSE`, canonical text, copyright line "Copyright
+      2026 SteamVault contributors")*
 - [ ] CI: GitHub Actions — lint, tests, multi-arch image build (amd64/arm64),
       publish to ghcr.io with pinned version tags
-- [ ] CONTRIBUTING.md, issue templates, example configs
+- [x] CONTRIBUTING.md, issue templates, example configs
+      *(WP 5.4: root `CONTRIBUTING.md` with verified per-component test
+      commands (api pytest: 704 passed/1 skipped; agent go build/vet/test:
+      all packages green, incl. a documented CRLF/`gofmt -l` checkout
+      caveat) and an honest local-only-vs-CI test matrix; GitHub issue-forms
+      `.github/ISSUE_TEMPLATE/{bug_report,feature_request,config}.yml`
+      (YAML-validated) + `.github/PULL_REQUEST_TEMPLATE.md`;
+      `deploy/examples/{minimal-lan,tuned-setup}.md` plus an examples
+      `README.md` index — `tuned-setup.md` documents a real gap (scheduler/
+      GC env vars are read by `vault_api/config.py` but not yet forwarded
+      by `deploy/compose.yaml`) with a working Compose-override recipe
+      rather than a silently-broken `.env` example)*
 - [ ] Announcement: r/selfhosted, r/homelab, LanCache Discord (stay fair:
       frame as a complement/alternative, not a "LanCache killer")
 
