@@ -44,6 +44,7 @@ from typing import Callable, ContextManager
 
 from fastapi import Request
 
+from vault_api.config import Settings
 from vault_api.db import get_connection
 from vault_api.sizes import SizeCache
 
@@ -71,6 +72,20 @@ def get_size_cache(request: Request) -> SizeCache:
     reuse one disk scan instead of each doing their own.
     """
     return request.app.state.size_cache
+
+
+def get_settings(request: Request) -> Settings:
+    """FastAPI dependency returning the whole ``Settings`` snapshot (WP 3.9).
+
+    The existing dependencies here hand a router exactly the one value it
+    needs (``get_cache_root``, ``get_agent_report_keep``) — the right shape
+    when a router uses one setting. The oracle router passes ``settings``
+    straight through to ``vault_api.oracle``, whose functions each consult the
+    enable flag themselves (that is how "off" cannot be bypassed by a
+    forgotten check), so handing it the object is the honest signature rather
+    than three separate scalars re-assembled on the other side.
+    """
+    return request.app.state.settings
 
 
 def get_agent_report_keep(request: Request) -> int:

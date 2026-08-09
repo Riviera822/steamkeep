@@ -75,6 +75,14 @@ These are not style preferences; each entry cost a review round to learn.
   `lstat` with `FileNotFoundError [WinError 2]` but `unlink` with
   `PermissionError [WinError 5]` — WP 1.6's finding is about unlink only;
   measured with a FILE_SHARE_DELETE handle rig (WP 3.8b).
+- A path-shape guard measured only on the dev OS is not a guard:
+  `ntpath.basename` splits on `\` (and strips `X:` drives), `posixpath`
+  does neither — the Windows measurement hid a POSIX hole (`a\b`, `C:x`
+  accepted as direct children) for two work packages until CI ran pytest
+  on the production OS for the first time. Reject separator-ish
+  characters (`\`, `:`) by LITERAL check, never via the host's `os.path`;
+  pin each rejection arm with its own mutation-tested case (WP 3.8 →
+  caught by WP 5.1 CI run #1).
 
 ## PowerShell 5.1 (dev/test harnesses)
 - `2>&1` on native commands wraps stderr lines in NativeCommandError and
@@ -178,6 +186,13 @@ These are not style preferences; each entry cost a review round to learn.
   discards the parent entirely — strict-child path guards must compare
   `dirname`/`basename` equality on the joined result, never prefixes
   (WP 3.8, measured).
+- CPython's `json` scanner recurses per nesting level — a bounded response
+  body is NOT a bounded parse; catch `RecursionError` by name around
+  `json.loads` on untrusted input and convert it to the module's own error
+  type (WP 3.9, same failure class as the WP 2.1 blocker).
+- `urllib` follows redirects by default — an operator-configured outbound
+  URL needs an explicit no-redirect opener, or the host actually contacted
+  is not the one configured (WP 3.9).
 
 ## Containers
 - A non-root container user needs a real, writable HOME — tools that

@@ -79,7 +79,23 @@ import sqlite3
 #: version — and that NULL is load-bearing, not cosmetic: a client whose
 #: address is unknown can never be ``bypass_suspected`` (see
 #: ``routers/clients.py``).
-#: v10 (WP 3.13): added ``client_bypass_state`` -- the generic-webhook
+#: v10 (WP 3.9): added ``oracle_app_state`` and ``oracle_branch_manifests`` —
+#: the opt-in third-party manifest oracle's own storage (ADR-0006 decision 4).
+#: **Two new tables, deliberately separate from ``depot_manifests``**: that
+#: table is vault-api's first-hand record of manifests it parsed itself, and a
+#: third-party claim must never be indistinguishable from it (see
+#: ``vault_api/oracle.py``). Like v6, these are brand-new TABLEs and therefore
+#: fully expressible as ``CREATE TABLE IF NOT EXISTS`` — no ALTER step; an
+#: older database simply gains two empty tables, which read as "the oracle has
+#: never said anything", the same as a fresh install with the oracle off.
+#: (This work package was written against v8 and has been renumbered twice by
+#: rebases — onto WP 3.12, which claimed v8, and onto WP 3.11, which claimed
+#: v9. That is harmless precisely because it adds no column to anything those
+#: versions touched: the three ALTER steps below are each guarded per column
+#: via ``PRAGMA table_info``, so which file gets which column is decided by
+#: what the file actually has, not by where this table bump landed in the
+#: sequence. ``init_db``'s ``< 8`` / ``< 9`` conditions are unchanged by it.)
+#: v11 (WP 3.13): added ``client_bypass_state`` -- the generic-webhook
 #: feature's own bookkeeping, one row per ``client_id``, recording the LAST
 #: computed ``bypass_suspected`` verdict for that client. It exists so the
 #: cache-event sweep (``event_sweep.py``) can tell a NEW accusation (the
@@ -87,9 +103,11 @@ import sqlite3
 #: been flagged for days and would otherwise fire on every sweep tick) --
 #: without it there would be nowhere to remember "was this client already
 #: flagged the last time we checked" across restarts. A brand-new table, so
-#: like v6/v9's new tables this is fully expressible as ``CREATE TABLE IF NOT
-#: EXISTS`` and needs no ``ALTER`` step.
-SCHEMA_VERSION = 10
+#: like v6/v9/v10's new tables this is fully expressible as ``CREATE TABLE IF
+#: NOT EXISTS`` and needs no ``ALTER`` step. (Renumbered from v10 in the merge
+#: with WP 3.9, which claimed v10 first on the public branch — harmless for
+#: the same reason as v10's own renumbering note above.)
+SCHEMA_VERSION = 11
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -390,6 +408,50 @@ CREATE TABLE IF NOT EXISTS client_bypass_state (
     bypass_suspected INTEGER NOT NULL DEFAULT 0,
     updated_at       TEXT NOT NULL
 );
+
+-- WP 3.9 / ADR-0006 decision 4: the opt-in third-party manifest oracle's own
+-- storage. THIRD-PARTY CLAIMS LIVE HERE AND NOWHERE ELSE -- nothing in
+-- vault_api/oracle.py writes to depot_manifests, which stays vault-api's
+-- first-hand record of manifests it parsed itself. Every row additionally
+-- carries a `source` provenance tag naming the oracle that produced it, so a
+-- future second oracle cannot be confused with this one.
+--
+-- One row per app: when it was last asked, and the public branch's build id
+-- (operator information -- nothing branches on the build id).
+CREATE TABLE IF NOT EXISTS oracle_app_state (
+    appid        INTEGER PRIMARY KEY,
+    buildid      TEXT,
+    checked_at   TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    depot_count  INTEGER NOT NULL,
+    branch_count INTEGER NOT NULL
+);
+
+-- One row per (app, depot, OPEN branch). Password-protected branches are
+-- never inserted at all (vault_api/oracle.py drops them at validation time):
+-- their manifests are encrypted and uncoverable, so a gid that is absent from
+-- this table cannot leak into a GC keep set through a forgotten WHERE clause.
+-- `manifestid` is TEXT for the same reason depot_manifests.manifestid is:
+-- Steam gids are u64 and SQLite's INTEGER storage is signed 64-bit.
+--
+-- Snapshot semantics: a refresh DELETEs the app's rows and re-inserts them in
+-- one transaction, so a branch that disappeared upstream stops protecting
+-- chunks instead of lingering forever.
+CREATE TABLE IF NOT EXISTS oracle_branch_manifests (
+    appid       INTEGER NOT NULL,
+    depotid     INTEGER NOT NULL,
+    branch      TEXT NOT NULL,
+    manifestid  TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    PRIMARY KEY (appid, depotid, branch)
+);
+
+-- GC asks "every open-branch manifest for THIS DEPOT, whichever app recorded
+-- it" (a shared depot's beta chunks belong to the depot, not to one app) --
+-- the appid-first primary key above does not serve that direction.
+CREATE INDEX IF NOT EXISTS idx_oracle_branch_manifests_depotid
+    ON oracle_branch_manifests (depotid);
 """
 
 

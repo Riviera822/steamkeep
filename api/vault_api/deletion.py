@@ -262,18 +262,60 @@ def safe_child_path(parent: str, name: str) -> str:
     ``"a/b"``, ``"a\\b"`` and an absolute path are refused by name rather than
     only by where they happen to land.
 
-    **The two checks are redundant, and that is stated rather than implied**
-    (measured on Windows 11 / CPython 3.12.10 for ``".."``, ``"."``, ``""``,
-    ``"a/b"``, ``"a\\b"``, ``"441\\"``, ``"/etc/passwd"``, ``"C:x"`` and
-    ``"a:b"``: every one of them fails *both*). Two of those are worth naming,
-    because they are the cases where ``os.path.join`` does something
-    surprising rather than something obviously wrong: ``join(parent, "C:x")``
-    silently drops the drive and yields ``parent\\x``, and
-    ``join(parent, "a:b")`` returns ``"a:b"`` — the parent is discarded
-    entirely, because ``ntpath`` reads ``"a:"`` as a drive. Both are then
-    caught by the ``basename(candidate) != name`` arm below. The up-front
-    check is kept anyway: it costs nothing, it says what a caller is expected
-    to pass, and it produces the error message that names the actual problem
+    **Backslash and colon are rejected explicitly, on every platform,
+    regardless of what the host OS's own path module thinks a separator or
+    drive marker is (production finding, CI running on Linux for the first
+    time, WP 5.1 aftermath — colon added in the same review round once the
+    identical gap was found for it).** This docstring previously claimed
+    the up-front check and the resolve-then-recheck below were
+    "redundant... measured on Windows 11 / CPython 3.12.10" for a list of
+    inputs including ``"a\\b"``, ``"C:x"`` and ``"a:b"`` — true only on
+    Windows: ``ntpath.basename("a\\b") == "b"`` (backslash IS a separator
+    there) and ``ntpath`` reads a leading ``"C:"``/``"a:"`` as a drive
+    letter, so the up-front ``basename(name) != name`` check already fired
+    on its own for all three there. It was never true on POSIX:
+    ``posixpath`` treats backslash and colon as ordinary, legal filename
+    characters — ``posixpath.basename`` returns each of ``"a\\b"``,
+    ``"C:x"`` and ``"a:b"`` **unchanged** (nothing to split on), so the
+    up-front check passed, ``os.path.join``/``normpath`` then built a real
+    one-level-below child with that literal name, and *both* checks let it
+    through.
+
+    Every name a caller has a *reason* to pass here is a depot id's decimal
+    digits, a 40-character hex chunk id, a manifest id, or a
+    ``<manifestid>_<code>.bin`` archive filename — none of which ever
+    contains a backslash or colon, so rejecting both unconditionally costs
+    nothing for any legitimate caller. That said, this is **not** merely a
+    defensive check against input that can never actually arrive here:
+    ``gc_execute``'s manifest dedupe path (``_verified_copy_path``) derives
+    ``name`` from ``os.path.basename`` of a path ``gc.scan_stored_manifests``
+    recorded from a real ``os.scandir`` walk of ``manifest/<id>/`` on disk,
+    which applies **no filename-pattern validation of its own** — a file
+    that ended up on disk literally named e.g. ``a\b`` or ``C:x`` (a manual
+    copy, a corrupted write, anything) is genuinely reachable input, not a
+    hypothetical one. This guard's refusal is the actual fail-closed
+    backstop for that case: such a file is left permanently un-deleted by GC
+    (surfaced as ``REFUSED_UNSAFE_NAME``/``REFUSED_NO_KEEPER`` in the GC
+    report, never silently mishandled) rather than assumed away. That is the
+    intended, reported trade this guard makes, not dead code guarding an
+    unreachable branch.
+
+    Rejecting backslash and colon unconditionally, rather than only where
+    the host happens to treat them as special, is what makes this guard's
+    fail-closed behaviour consistent between the container's Linux
+    production target and a Windows dev machine, instead of depending on
+    which one happens to be running it.
+
+    The remaining checks stay genuinely platform-redundant (measured on
+    Windows 11 / CPython 3.12.10 for ``".."``, ``"."``, ``""``, ``"a/b"``
+    and ``"/etc/passwd"``: every one of those still fails *both* the
+    up-front check and the resolve-then-recheck below, on both platforms —
+    the two slash forms because both ``ntpath`` and ``posixpath`` treat
+    ``/`` as a separator, the relative markers and the empty name because
+    they are matched literally up front and ``normpath`` collapses them
+    onto the parent (or above it) in the recheck). The up-front check
+    is kept anyway: it costs nothing, it says what a caller is expected to
+    pass, and it produces the error message that names the actual problem
     instead of one about a path that no longer resembles the input.
 
     Links are deliberately NOT resolved here — same reason as
@@ -286,7 +328,13 @@ def safe_child_path(parent: str, name: str) -> str:
             f"{parent!r} is not an absolute path; refusing to build a deletion "
             "target from it."
         )
-    if not name or name in (".", "..") or os.path.basename(name) != name:
+    if (
+        not name
+        or name in (".", "..")
+        or "\\" in name
+        or ":" in name
+        or os.path.basename(name) != name
+    ):
         raise UnsafeDepotTargetError(
             f"{name!r} is not a plain filename (it contains a path separator, or is "
             "a relative marker), so it cannot be a direct child of "

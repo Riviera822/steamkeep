@@ -12,6 +12,20 @@ EXPECTED_TABLES = {
     "agent_reports",
     "depot_manifests",
     "schedule_state",
+    # v9 (WP 3.11, ADR-0008): the cache-event sweep's own storage. Added here
+    # during the WP 3.9 rebase — WP 3.11 shipped them in db.py without listing
+    # them, and this set is only meaningful if it is exhaustive (see
+    # test_expected_tables_lists_every_table_the_ddl_creates below).
+    "event_sweep_state",
+    "client_cache_stats",
+    "depot_miss_stats",
+    "miss_trigger_state",
+    # v10 (WP 3.9): the opt-in manifest oracle's own storage. Present on every
+    # install, empty unless the oracle is enabled AND has been asked something.
+    "oracle_app_state",
+    "oracle_branch_manifests",
+    # v11 (WP 3.13): the webhook feature's bypass-transition bookkeeping.
+    "client_bypass_state",
 }
 
 
@@ -29,6 +43,24 @@ def test_init_db_creates_expected_tables(tmp_path) -> None:
         conn.close()
 
     assert EXPECTED_TABLES.issubset(table_names)
+
+
+def test_expected_tables_lists_every_table_the_ddl_creates() -> None:
+    """``EXPECTED_TABLES`` must be EXHAUSTIVE, not merely a subset.
+
+    The assertion above is ``issubset``, so a table added to ``_DDL`` without
+    being listed here passes silently — which is exactly what happened: WP
+    3.11 shipped four new tables and this set did not learn about them until a
+    rebase noticed by hand. Derived from ``_DDL`` itself rather than from
+    ``sqlite_master``, because the latter also holds ``sqlite_sequence`` (an
+    ``AUTOINCREMENT`` artifact, not something this project declares).
+    """
+    import re
+
+    from vault_api.db import _DDL
+
+    declared = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", _DDL))
+    assert declared == EXPECTED_TABLES
 
 
 def test_init_db_is_idempotent(tmp_path) -> None:
@@ -445,6 +477,92 @@ def test_init_db_upgrades_a_pre_v6_database_by_adding_schedule_state(tmp_path) -
     assert appid == 440
 
 
+def test_init_db_upgrades_a_v9_database_to_v10_in_place(tmp_path) -> None:
+    """v9 -> v10 (WP 3.9) adds two brand-new TABLEs plus one index, so —
+    like v5 -> v6 above, and unlike v4/v5/v7/v8/v9's added columns — plain
+    ``CREATE ... IF NOT EXISTS`` is the whole migration: no ALTER step.
+
+    An upgraded database must come out reading as "the oracle has never said
+    anything" (two empty tables), which is exactly the state a fresh install
+    with the oracle off is in — and existing rows must be untouched.
+    """
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("INSERT INTO apps (appid, status) VALUES (440, 'done')")
+        conn.execute("DROP TABLE oracle_branch_manifests")  # drops its index too
+        conn.execute("DROP TABLE oracle_app_state")
+        conn.execute("UPDATE schema_version SET version = 9")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        (version,) = conn.execute("SELECT version FROM schema_version").fetchone()
+        tables = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        indexes = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+        (states,) = conn.execute("SELECT COUNT(*) FROM oracle_app_state").fetchone()
+        (branches,) = conn.execute(
+            "SELECT COUNT(*) FROM oracle_branch_manifests"
+        ).fetchone()
+        (appid,) = conn.execute("SELECT appid FROM apps").fetchone()
+    finally:
+        conn.close()
+
+    assert version == SCHEMA_VERSION
+    assert {"oracle_app_state", "oracle_branch_manifests"} <= tables
+    assert "idx_oracle_branch_manifests_depotid" in indexes
+    assert (states, branches) == (0, 0)
+    assert appid == 440
+
+
+def test_init_db_upgrade_to_v10_is_idempotent_if_called_twice(tmp_path) -> None:
+    """Same guarantee the other bumps carry: running the upgrade again against
+    an already-upgraded file must not raise and must not duplicate anything."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("DROP TABLE oracle_branch_manifests")
+        conn.execute("DROP TABLE oracle_app_state")
+        conn.execute("UPDATE schema_version SET version = 9")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+    init_db(db_path)  # must not raise
+
+    conn = get_connection(db_path)
+    try:
+        versions = conn.execute("SELECT version FROM schema_version").fetchall()
+        oracle_indexes = [
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+                ("idx_oracle_branch_manifests_depotid",),
+            )
+        ]
+    finally:
+        conn.close()
+
+    assert len(versions) == 1
+    assert versions[0]["version"] == SCHEMA_VERSION
+    assert oracle_indexes == ["idx_oracle_branch_manifests_depotid"]
+
+
 def test_init_db_upgrades_a_pre_v7_database_by_adding_gc_execute(tmp_path) -> None:
     """v6 -> v7 (WP 3.8) adds ``jobs.gc_execute`` — ADR-0007's dry-run/execute
     bit. Same ALTER-guarded shape as v4, reusing the same per-column step, and
@@ -571,7 +689,7 @@ def test_init_db_upgrades_a_pre_v8_database_by_adding_the_job_control_columns(
     # The pre-v8 file is brought all the way to the CURRENT version, whatever
     # that is — this test is about the two job-control columns arriving with
     # the right type, not about pinning the version number (v9 added the event
-    # sweep on top, WP 3.11).
+    # sweep on top, WP 3.11; v10 the oracle tables, WP 3.9).
     assert version == SCHEMA_VERSION
     assert types["paused_at"] == "TEXT"
     assert types["stop_request"] == "TEXT"

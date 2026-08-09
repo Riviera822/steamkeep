@@ -27,10 +27,13 @@ The three things these tests are built around:
 
 from __future__ import annotations
 
+import dataclasses
 import os
+import posixpath
 import sqlite3
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Sequence
 
 import pytest
@@ -46,7 +49,7 @@ from tests.test_gc import (
     write_chunks,
 )
 from vault_api import deletion, gc, gc_execute, jobs
-from vault_api.config import Settings
+from vault_api.config import MANIFEST_ORACLE_STEAMCMD_API, Settings
 from vault_api.db import get_connection, init_db
 from vault_api.main import create_app
 from vault_api.sizes import SizeCache
@@ -641,6 +644,10 @@ def test_run_gc_has_no_way_to_be_handed_a_plan() -> None:
     assert parameters == {
         "conn", "appid", "cache_root", "archive_dir", "execute", "exclusions",
         "should_cancel",
+        # WP 3.9: manifest IDS, not a plan — ``run_gc`` still resolves and
+        # parses them itself against a fresh filesystem scan, so this stays a
+        # list of inputs to a plan rather than a pre-built plan.
+        "oracle_manifests",
     }
 
 
@@ -1879,6 +1886,52 @@ def test_safe_child_path_builds_a_direct_child(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("name", ["a\\b", "C:x", "a:b"])
+def test_safe_child_path_refuses_backslash_and_colon_even_under_simulated_posix(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Pins the WP 5.1-aftermath fixes as MUTATION-PROOF, host-independent
+    tests -- not just rows in the parametrized case above.
+
+    None of these three is a reliable regression pin on its own on Windows:
+    ``ntpath.basename("a\\b") == "b"`` (backslash IS a separator there), and
+    ``ntpath`` reads a leading ``"C:"``/``"a:"`` as a drive letter -- so the
+    PRE-fix up-front check (``os.path.basename(name) != name``) already
+    raised on its own for all three there. Reverting the explicit ``"\\" in
+    name`` or ``":" in name`` arms these fixes add would NOT make the
+    parametrized cases above fail on a Windows dev machine -- exactly how
+    the backslash gap shipped past review in the first place (WP 3.8) and
+    was only caught once CI ran ``api`` pytest on ``ubuntu-latest`` for the
+    first time (WP 5.1 aftermath); the colon gap was found the same way in
+    review, without needing a second production incident.
+    ``posixpath`` treats backslash and colon as ordinary filename
+    characters: ``posixpath.basename`` returns ``"a\\b"``, ``"C:x"`` and
+    ``"a:b"`` all UNCHANGED (nothing to split on), so none of the old checks
+    fired there.
+
+    Swaps ``deletion``'s ``os`` name for a stand-in whose ``.path`` is the
+    real ``posixpath`` module, for the duration of one call, to reproduce
+    that platform deterministically on ANY host running this suite,
+    including a Windows one -- ``safe_child_path`` never touches the
+    filesystem (pure string manipulation over ``os.path``, per its own
+    docstring), so this is a faithful simulation, not a mock of the function
+    under test. Patching ``deletion.os`` itself (rather than mutating
+    ``os.path`` on the real, singleton ``os`` module) confines the swap to
+    this module's own name binding -- nothing else importing the real ``os``
+    module is affected, even transiently. A POSIX-shaped absolute parent is
+    used (not ``tmp_path``, which is host-native) so the earlier
+    ``os.path.isabs`` check does not itself misfire under the swap.
+    ``monkeypatch`` undoes the swap automatically when this test returns.
+
+    Revert either the ``"\\" in name`` or the ``":" in name`` arm in
+    ``safe_child_path`` and the corresponding case here fails on every
+    platform, not only on Linux CI.
+    """
+    monkeypatch.setattr(deletion, "os", SimpleNamespace(path=posixpath))
+    with pytest.raises(deletion.UnsafeDepotTargetError):
+        deletion.safe_child_path("/vault/cache/depot/441", name)
+
+
 def test_remove_file_settling_reports_an_already_absent_file_as_not_ours(
     tmp_path: Path,
 ) -> None:
@@ -1942,3 +1995,92 @@ def test_parse_bin_payload_cross_check_fires_on_a_mismatch(tmp_path: Path) -> No
         parse_bin_payload(
             str(path), filename_depot_id=442, filename_manifest_id=900
         )
+
+
+# ==========================================================================
+# The manifest oracle's keep-set contribution, end to end (WP 3.9)
+#
+# tests/test_gc.py proves the planner unions extra manifest ids; these two
+# prove the WIRING that gets them there — settings -> oracle.gc_keepset_gids
+# -> load_gc_inputs -> plan_gc -> execute — actually spares real files on
+# disk, and that it does nothing at all with the oracle off.
+# ==========================================================================
+
+
+BETA_MANIFEST = "902"
+
+
+def _world_with_a_beta_build(tmp_path: Path, *, oracle_on: bool) -> Settings:
+    """The standard world, plus: the two "orphans" are really an opt-in beta
+    branch's chunks, and the beta manifest is in the cache the way a client's
+    store-on-miss download would have left it."""
+    settings = build_world(tmp_path)
+    if oracle_on:
+        settings = dataclasses.replace(
+            settings, manifest_oracle=MANIFEST_ORACLE_STEAMCMD_API
+        )
+
+    write_cache_manifest(
+        cache_root(settings),
+        depotid=441,
+        manifestid=BETA_MANIFEST,
+        chunks={**KEEP_SIZES, **ORPHAN_SIZES},
+    )
+
+    conn = open_db(settings)
+    try:
+        conn.execute(
+            "INSERT INTO oracle_branch_manifests "
+            "(appid, depotid, branch, manifestid, recorded_at, source) "
+            "VALUES (440, 441, 'beta', ?, '2026-08-09T10:00:00Z', 'steamcmd_api')",
+            (BETA_MANIFEST,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return settings
+
+
+def _run_execute_gc(settings: Settings) -> dict:
+    conn = open_db(settings)
+    try:
+        jobs.enqueue_gc(conn, 440, execute=True)
+        job = jobs.claim_next_job(conn)
+        assert job is not None
+        gc_execute.run_gc_job(conn, job, settings=settings)
+        return dict(jobs.get_job(conn, int(job["id"])))
+    finally:
+        conn.close()
+
+
+def test_an_open_beta_branch_survives_gc_when_the_oracle_is_on(
+    tmp_path: Path,
+) -> None:
+    """ADR-0007 decision B, end to end and on real files."""
+    settings = _world_with_a_beta_build(tmp_path, oracle_on=True)
+
+    finished = _run_execute_gc(settings)
+
+    assert finished["status"] == "done", finished["log_excerpt"]
+    for chunk_id in (*KEEP_SIZES, *ORPHAN_SIZES):
+        assert chunk_path(settings, 441, chunk_id).exists(), chunk_id
+    assert "oracle_protected=2" in finished["log_excerpt"]
+
+
+def test_the_same_beta_build_is_collected_with_the_oracle_off(
+    tmp_path: Path,
+) -> None:
+    """The default direction, pinned on the same fixture: identical database
+    rows, identical cache tree, oracle off ⇒ the beta chunks go. Enabling the
+    oracle is the ONLY difference between this test and the one above."""
+    settings = _world_with_a_beta_build(tmp_path, oracle_on=False)
+    assert settings.manifest_oracle_enabled is False
+
+    finished = _run_execute_gc(settings)
+
+    assert finished["status"] == "done", finished["log_excerpt"]
+    for chunk_id in KEEP_SIZES:
+        assert chunk_path(settings, 441, chunk_id).exists()
+    for chunk_id in ORPHAN_SIZES:
+        assert not chunk_path(settings, 441, chunk_id).exists()
+    assert "oracle_protected" not in finished["log_excerpt"]

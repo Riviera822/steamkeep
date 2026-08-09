@@ -145,11 +145,13 @@ def inputs(
     mapping_rows: list[tuple[object, object]],
     content_states: dict[int, bool] | None = None,
     recorded: dict[tuple[int, int], object] | None = None,
+    oracle_manifests: dict[int, list[str]] | None = None,
 ) -> gc.GcInputs:
     return gc.GcInputs(
         mapping_rows=mapping_rows,
         content_states=content_states or {},
         recorded_manifests=recorded or {},
+        oracle_manifests=oracle_manifests or {},
     )
 
 
@@ -1317,3 +1319,287 @@ def test_parse_bin_payload_reads_the_archives_own_two_segment_filename(
     )
     assert manifest.depot_id == 441
     assert manifest.chunks == {_cid(1): 10}
+
+
+# ==========================================================================
+# Extra keep-set manifests (WP 3.9, ADR-0007 beta addendum decision B)
+#
+# The scenario every test in this section builds is the real one the ADR
+# describes: a depot whose PUBLIC manifest vault-api recorded, plus chunks
+# that exist on disk only because a LAN client downloaded an opt-in BETA
+# branch through vault-core (store-on-miss). Those chunks appear in no public
+# manifest, so plain manifest-diff GC calls them orphans. The beta build's own
+# manifest IS in the cache (the client fetched it too), and the oracle is what
+# tells GC which manifest id that is.
+# ==========================================================================
+
+
+BETA_PUBLIC_MANIFEST = "900"
+BETA_BRANCH_MANIFEST = "901"
+
+
+def _beta_scenario(
+    cache: Path, archive_dir: Path
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Depot 441: two public chunks, two beta-only chunks, both manifests on
+    disk. Returns ``(public_chunks, beta_only_chunks)``."""
+    public_chunks = {_cid(1): 100, _cid(2): 200}
+    beta_only = {_cid(3): 300, _cid(4): 400}
+
+    write_chunks(cache, 441, {**public_chunks, **beta_only})
+    write_archive_bin(
+        archive_dir, depotid=441, manifestid=BETA_PUBLIC_MANIFEST, chunks=public_chunks
+    )
+    # The beta manifest reached the cache the same way its chunks did.
+    write_cache_manifest(
+        cache,
+        depotid=441,
+        manifestid=BETA_BRANCH_MANIFEST,
+        chunks={**public_chunks, **beta_only},
+    )
+    return public_chunks, beta_only
+
+
+def test_beta_chunks_are_orphans_without_the_oracle(
+    cache: Path, depot_root: str, archive_dir: Path
+) -> None:
+    """The baseline this feature exists to change — and the pin on the DEFAULT
+    direction (docs/LEARNINGS.md: default-direction branches need a test that
+    dies if the default flips). With no extra manifest ids, the beta-only
+    chunks ARE planned for deletion."""
+    _, beta_only = _beta_scenario(cache, archive_dir)
+
+    depot = only_depot(
+        gc.plan_gc(
+            440,
+            inputs(
+                mapping_rows=[(441, 440)],
+                recorded={(440, 441): BETA_PUBLIC_MANIFEST},
+            ),
+            depot_root=depot_root,
+            archive_dir=str(archive_dir),
+        )
+    )
+
+    assert depot.status == gc.STATUS_PLANNED
+    assert depot.orphan_chunks == beta_only
+    assert depot.oracle_protected_count == 0
+    assert depot.oracle_protected_bytes == 0
+
+
+def test_open_beta_branch_manifest_joins_the_keep_set(
+    cache: Path, depot_root: str, archive_dir: Path
+) -> None:
+    """**The decision-B test.** Deleting the ``extra_manifest_ids`` union in
+    ``gc.resolve_depot_chunkset`` — or dropping ``inputs.oracle_manifests`` in
+    ``plan_gc`` — makes the beta chunks orphans again and kills this test,
+    which is exactly the mutation the work package asks for."""
+    _, beta_only = _beta_scenario(cache, archive_dir)
+
+    depot = only_depot(
+        gc.plan_gc(
+            440,
+            inputs(
+                mapping_rows=[(441, 440)],
+                recorded={(440, 441): BETA_PUBLIC_MANIFEST},
+                oracle_manifests={441: [BETA_BRANCH_MANIFEST]},
+            ),
+            depot_root=depot_root,
+            archive_dir=str(archive_dir),
+        )
+    )
+
+    assert depot.status == gc.STATUS_PLANNED
+    assert depot.orphan_chunks == {}
+    assert depot.oracle_protected_count == len(beta_only)
+    assert depot.oracle_protected_bytes == sum(beta_only.values())
+
+    extra = depot.extras[0]
+    assert extra.manifestid == BETA_BRANCH_MANIFEST
+    assert extra.source == gc.SOURCE_CACHE_MANIFEST
+    assert extra.added_count == len(beta_only)
+    assert extra.error is None
+
+
+def test_the_oracle_can_only_shrink_the_orphan_set(
+    cache: Path, depot_root: str, archive_dir: Path
+) -> None:
+    """The headline invariant, asserted as a set relation rather than trusted:
+    whatever the extras say, the orphan set with them is a SUBSET of the
+    orphan set without them — and a chunk in no manifest at all still goes."""
+    _beta_scenario(cache, archive_dir)
+    write_chunks(cache, 441, {_cid(9): 90})
+
+    def orphans(oracle_manifests: dict[int, list[str]] | None) -> set[str]:
+        return set(
+            only_depot(
+                gc.plan_gc(
+                    440,
+                    inputs(
+                        mapping_rows=[(441, 440)],
+                        recorded={(440, 441): BETA_PUBLIC_MANIFEST},
+                        oracle_manifests=oracle_manifests,
+                    ),
+                    depot_root=depot_root,
+                    archive_dir=str(archive_dir),
+                )
+            ).orphan_chunks
+        )
+
+    without = orphans(None)
+    with_oracle = orphans({441: [BETA_BRANCH_MANIFEST]})
+
+    assert with_oracle < without
+    assert with_oracle == {_cid(9)}
+
+
+def test_an_unresolvable_extra_manifest_never_skips_the_depot(
+    cache: Path, depot_root: str, archive_dir: Path
+) -> None:
+    """Fail-soft, the direction that matters: a beta gid whose manifest is not
+    on disk (the normal case for a branch nobody on this LAN ever installed)
+    must NOT fire the readiness gate. Gating on it would freeze GC forever for
+    every app that ever had a beta branch."""
+    _, beta_only = _beta_scenario(cache, archive_dir)
+
+    depot = only_depot(
+        gc.plan_gc(
+            440,
+            inputs(
+                mapping_rows=[(441, 440)],
+                recorded={(440, 441): BETA_PUBLIC_MANIFEST},
+                oracle_manifests={441: ["7777777777"]},
+            ),
+            depot_root=depot_root,
+            archive_dir=str(archive_dir),
+        )
+    )
+
+    assert depot.status == gc.STATUS_PLANNED
+    assert depot.orphan_chunks == beta_only  # unchanged from the baseline
+    assert [e.manifestid for e in depot.extra_problems] == ["7777777777"]
+
+
+def test_a_poisoned_extra_manifest_id_never_becomes_a_path(
+    cache: Path, depot_root: str, archive_dir: Path
+) -> None:
+    """``valid_manifest_id`` runs on the extras too — the ids come from a
+    database table an operator can edit, and they are joined onto the archive
+    directory."""
+    _, beta_only = _beta_scenario(cache, archive_dir)
+
+    depot = only_depot(
+        gc.plan_gc(
+            440,
+            inputs(
+                mapping_rows=[(441, 440)],
+                recorded={(440, 441): BETA_PUBLIC_MANIFEST},
+                oracle_manifests={441: ["../../etc", " 901 ", "0", ""]},
+            ),
+            depot_root=depot_root,
+            archive_dir=str(archive_dir),
+        )
+    )
+
+    assert depot.status == gc.STATUS_PLANNED
+    assert depot.orphan_chunks == beta_only
+    assert depot.oracle_protected_count == 0
+    assert len(depot.extra_problems) == 4
+    assert all("unusable manifest id" in (e.error or "") for e in depot.extra_problems)
+
+
+def test_extra_manifests_are_bounded(
+    cache: Path, depot_root: str, archive_dir: Path
+) -> None:
+    """A poisoned table must cost a bounded number of parses, not one per row."""
+    _beta_scenario(cache, archive_dir)
+    many = [str(1000 + i) for i in range(gc.MAX_EXTRA_MANIFESTS + 5)]
+
+    depot = only_depot(
+        gc.plan_gc(
+            440,
+            inputs(
+                mapping_rows=[(441, 440)],
+                recorded={(440, 441): BETA_PUBLIC_MANIFEST},
+                oracle_manifests={441: many},
+            ),
+            depot_root=depot_root,
+            archive_dir=str(archive_dir),
+        )
+    )
+
+    considered = [e for e in depot.extras if e.raw is not None]
+    assert len(considered) == gc.MAX_EXTRA_MANIFESTS
+    assert any(
+        "further extra manifest id(s) ignored" in (e.error or "") for e in depot.extras
+    )
+
+
+def test_extra_manifests_are_ignored_for_a_skipped_depot(
+    cache: Path, depot_root: str, archive_dir: Path
+) -> None:
+    """Extras are applied AFTER the gate. A depot that fails the gate keeps an
+    empty keep set and an empty orphan set — the oracle cannot argue it into a
+    planned one."""
+    write_chunks(cache, 441, {_cid(1): 100})
+    write_cache_manifest(
+        cache, depotid=441, manifestid=BETA_BRANCH_MANIFEST, chunks={_cid(1): 100}
+    )
+
+    depot = only_depot(
+        gc.plan_gc(
+            440,
+            inputs(
+                mapping_rows=[(441, 440)],
+                # A recorded manifest that exists nowhere: the readiness gate
+                # fires (never GC on partial knowledge).
+                recorded={(440, 441): "555"},
+                oracle_manifests={441: [BETA_BRANCH_MANIFEST]},
+            ),
+            depot_root=depot_root,
+            archive_dir=str(archive_dir),
+        )
+    )
+
+    assert depot.status == gc.STATUS_NO_MANIFEST
+    assert depot.orphan_chunks == {}
+    assert depot.extras == []
+    assert depot.oracle_protected_count == 0
+
+
+def test_extra_manifest_ids_are_scoped_per_depot(
+    cache: Path, depot_root: str, archive_dir: Path
+) -> None:
+    """A gid recorded for depot 441 must not protect chunks in depot 442 — the
+    union is built per depot, keyed by depot id."""
+    _beta_scenario(cache, archive_dir)
+    write_chunks(cache, 442, {_cid(5): 500, _cid(6): 600})
+    write_archive_bin(archive_dir, depotid=442, manifestid="800", chunks={_cid(5): 500})
+
+    plan = gc.plan_gc(
+        440,
+        inputs(
+            mapping_rows=[(441, 440), (442, 440)],
+            recorded={(440, 441): BETA_PUBLIC_MANIFEST, (440, 442): "800"},
+            oracle_manifests={441: [BETA_BRANCH_MANIFEST]},
+        ),
+        depot_root=depot_root,
+        archive_dir=str(archive_dir),
+    )
+
+    by_depot = {depot.depotid: depot for depot in plan.depots}
+    assert by_depot[441].orphan_chunks == {}
+    assert by_depot[442].orphan_chunks == {_cid(6): 600}
+
+
+def test_load_gc_inputs_defaults_to_no_extra_manifests(conn) -> None:
+    """The pre-WP-3.9 behaviour is the default of the LOADER too, not just of
+    the planner — nothing reads the oracle unless a caller passes it in."""
+    from vault_api.mapping import upsert_mapping
+
+    upsert_mapping(conn, depotid=441, appid=440, name="TF2")
+
+    assert gc.load_gc_inputs(conn, 440).oracle_manifests == {}
+    assert gc.load_gc_inputs(conn, 440, oracle_manifests={441: ["901"]}).oracle_manifests == {
+        441: ["901"]
+    }
