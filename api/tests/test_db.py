@@ -501,6 +501,127 @@ def test_init_db_upgrades_a_pre_v7_database_by_adding_gc_execute(tmp_path) -> No
     assert row["gc_execute"] is None
 
 
+def test_init_db_upgrades_a_pre_v8_database_by_adding_the_job_control_columns(
+    tmp_path,
+) -> None:
+    """v7 -> v8 (WP 3.12) adds ``jobs.paused_at`` and ``jobs.stop_request``.
+
+    Two things this pins beyond "the columns exist":
+
+    - an existing job row comes out with both NULL — a job from before job
+      control was never paused and has no pending request, and neither may be
+      guessed at;
+    - the columns are created as **TEXT**, not INTEGER. The per-column ALTER
+      step used to hardcode ``INTEGER`` for everything, which would have given
+      an upgraded database a different column type from a fresh one built by
+      ``_DDL`` while both reported ``schema_version = 8``.
+    """
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        # Recreated in its exact pre-v8 shape (same reason as the pre-v7 test
+        # above: DROP COLUMN rewrites the stored CREATE TABLE text).
+        conn.execute("DROP TABLE jobs")
+        conn.execute(
+            """
+            CREATE TABLE jobs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                appid       INTEGER NOT NULL,
+                type        TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'idle',
+                created_at  TEXT NOT NULL,
+                started_at  TEXT,
+                finished_at TEXT,
+                log_excerpt TEXT,
+                updated           INTEGER,
+                up_to_date        INTEGER,
+                summary_parse_ok  INTEGER,
+                gc_execute        INTEGER
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO jobs (id, appid, type, status, created_at) "
+            "VALUES (1, 440, 'prefill', 'done', '2026-08-09T00:00:00Z')"
+        )
+        conn.execute("UPDATE schema_version SET version = 7")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+    init_db(db_path)  # idempotent: must not raise 'duplicate column name'
+
+    conn = get_connection(db_path)
+    try:
+        (version,) = conn.execute("SELECT version FROM schema_version").fetchone()
+        types = {
+            row["name"]: row["type"]
+            for row in conn.execute("PRAGMA table_info(jobs)")
+        }
+        row = conn.execute("SELECT * FROM jobs WHERE id = 1").fetchone()
+    finally:
+        conn.close()
+
+    assert version == SCHEMA_VERSION == 8
+    assert types["paused_at"] == "TEXT"
+    assert types["stop_request"] == "TEXT"
+    assert row["paused_at"] is None
+    assert row["stop_request"] is None
+
+
+def test_a_fresh_database_and_an_upgraded_one_agree_on_the_jobs_columns(
+    tmp_path,
+) -> None:
+    """The migration and ``_DDL`` must never drift apart (WP 3.12).
+
+    A v1 database taken all the way up must end with byte-identical column
+    names AND types to a database created from scratch — otherwise
+    ``schema_version`` stops meaning "this is the shape of the tables".
+    """
+    fresh_path = str(tmp_path / "fresh.db")
+    init_db(fresh_path)
+
+    old_path = str(tmp_path / "old.db")
+    init_db(old_path)
+    conn = get_connection(old_path)
+    try:
+        conn.execute("DROP TABLE jobs")
+        conn.execute(
+            """
+            CREATE TABLE jobs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                appid       INTEGER NOT NULL,
+                type        TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'idle',
+                created_at  TEXT NOT NULL,
+                started_at  TEXT,
+                finished_at TEXT,
+                log_excerpt TEXT
+            )
+            """
+        )
+        conn.execute("UPDATE schema_version SET version = 1")
+        conn.commit()
+    finally:
+        conn.close()
+    init_db(old_path)
+
+    def job_columns(path: str) -> list[tuple[str, str]]:
+        conn = get_connection(path)
+        try:
+            return [
+                (row["name"], row["type"])
+                for row in conn.execute("PRAGMA table_info(jobs)")
+            ]
+        finally:
+            conn.close()
+
+    assert job_columns(old_path) == job_columns(fresh_path)
+
+
 def test_schedule_state_rejects_a_second_row(tmp_path) -> None:
     """CHECK (id = 1): "the single row" is enforced by the schema, not by
     convention — a second row would make "when did the last sweep run"

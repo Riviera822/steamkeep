@@ -263,14 +263,29 @@ def delete_cached_app(
         job_label = (
             "GC" if str(active_job["type"]) == jobs.JOB_TYPE_GC else "Prefill"
         )
+        # WP 3.12: a PAUSED job is in ACTIVE_STATUSES too, and the reason it
+        # blocks a deletion is a different one worth spelling out — there is no
+        # write in flight, but the depots hold the partial download the pause
+        # exists to preserve, and resume would have to fetch it all again.
+        if str(active_job["status"]) == jobs.STATUS_PAUSED:
+            why = (
+                "A paused prefill has partially downloaded content in these "
+                "depots and resuming it continues from what is on disk, so "
+                "deleting them now would throw that progress away. Resume the "
+                "job and let it finish, or cancel it with "
+                f"DELETE /v1/jobs/{active_job['id']}, then delete."
+            )
+        else:
+            why = (
+                "Deleting depots while they are being downloaded (or "
+                "garbage-collected) would delete under an active write — retry "
+                "once that job has finished (poll GET /v1/jobs/{id})."
+            )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
                 f"{job_label} job {active_job['id']} for app {appid} is "
-                f"{active_job['status']}. Deleting depots while they are being "
-                "downloaded (or garbage-collected) would delete under an active "
-                "write — retry once that job has finished (poll "
-                "GET /v1/jobs/{id})."
+                f"{active_job['status']}. {why}"
             ),
         )
 

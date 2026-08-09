@@ -19,6 +19,27 @@ shutdown ->  stop event set; the loop exits before claiming another job, and a
              prefill subprocess currently in flight is terminated (otherwise
              ``docker stop`` would block for as long as the download takes).
              The aborted job is recorded as 'error' with a clear reason.
+
+Job control (WP 3.12)
+---------------------
+``DELETE /v1/jobs/{id}`` and ``POST /v1/jobs/{id}/pause`` do not talk to this
+thread directly. They write ``jobs.stop_request`` (schema v8) and this worker
+polls it — on the subprocess wait tick for a prefill, between depots for a GC
+run. What each request turns into once honored:
+
+- **cancel**, prefill: SteamPrefill is terminated, the job ends ``cancelled``
+  (a real terminal status, not ``error``), ``apps.status`` goes back to
+  ``idle``, and neither the depot mapping nor manifest ingestion is touched.
+- **cancel**, GC: cooperative between depots; the depot currently being
+  executed finishes (that is documented, not accidental — a mid-depot abort
+  would be a *worse* state than a completed one, and one depot is bounded work).
+- **pause**, prefill only: identical termination, but the job is parked at
+  ``paused`` instead of finalized, and ``resume`` puts it back in the queue.
+  There is no pause signal in SteamPrefill; pause IS terminate and resume IS
+  re-run, which is affordable only because already-cached chunks replay as
+  local HITs (ADR-0001) — the cache is the progress store.
+- **either, too late**: a run that finished on its own before the request was
+  noticed keeps its real outcome; the log says the request arrived too late.
 """
 
 from __future__ import annotations
@@ -170,9 +191,34 @@ class PrefillWorker:
                 timeout_seconds=self._settings.prefill_timeout_seconds,
                 should_abort=self._stop.is_set,
                 use_force=use_force,
+                # WP 3.12: read on the runner's own 0.2 s poll tick, from THIS
+                # thread's connection (the thread-confinement rule in
+                # deps.py/db.py holds — `conn` belongs to the worker thread and
+                # never leaves it).
+                stop_request=lambda: jobs.read_stop_request(conn, job_id),
             )
 
             log_parts = [result.output]
+
+            # WP 3.12: an operator-requested stop that was actually honored.
+            # Handled before anything else because it is neither a success nor
+            # a failure, and both of the branches below would misreport it.
+            if result.failure_reason in prefill.STOP_FAILURE_REASONS:
+                self._finish_stopped_prefill(conn, job_id, appid, result, log_parts)
+                return
+
+            # A request that lost the race with the process finishing (see
+            # prefill._wait_for_process): the run has a real outcome, so that
+            # outcome stands and the log says why the request had no effect.
+            # jobs.finish_job clears the pending request either way.
+            late_stop = jobs.read_stop_request(conn, job_id)
+            if late_stop is not None:
+                log_parts.append(
+                    f"[vault-api] A '{late_stop}' request for this job arrived "
+                    "after SteamPrefill had already exited on its own, so it "
+                    "was not applied — the outcome recorded below is what "
+                    "really happened."
+                )
 
             if result.success:
                 # WP 3.3 / ADR-0006 decision 1, reordered ahead of the
@@ -337,6 +383,12 @@ class PrefillWorker:
                         job_id, appid,
                     )
 
+                # WP 3.12's auto-GC hook. Deliberately the LAST thing before
+                # the job is finalized: it must see the run's real summary, it
+                # must not run for any other branch, and its log line belongs
+                # in this job's excerpt.
+                self._maybe_queue_auto_gc(conn, job_id, appid, summary, log_parts)
+
                 jobs.finish_job(
                     conn, job_id, jobs.STATUS_DONE, "\n".join(log_parts),
                     updated=summary.updated,
@@ -385,3 +437,161 @@ class PrefillWorker:
                 jobs.finish_job(conn, job_id, jobs.STATUS_ERROR, message)
             except Exception:  # pragma: no cover - DB itself is broken
                 logger.exception("Could not even record the failure of job %s", job_id)
+
+    # -- WP 3.12 -----------------------------------------------------------
+
+    def _finish_stopped_prefill(
+        self,
+        conn: sqlite3.Connection,
+        job_id: int,
+        appid: int,
+        result: prefill.PrefillResult,
+        log_parts: list[str],
+    ) -> None:
+        """Record a prefill that an operator cancelled or paused.
+
+        **What is deliberately NOT done here, and why (the needs_force /
+        ingestion audit this package owed):**
+
+        - **No summary parse.** ``prefill_summary.parse_summary`` is only ever
+          called on the success branch above, and a terminated run must keep it
+          that way: SteamPrefill prints its ``Updated``/``Up To Date`` table at
+          the *end* of a run, so a run killed part-way either has no table or
+          has one describing a different, earlier state. The job's ``updated``/
+          ``up_to_date``/``summary_parse_ok`` columns therefore stay ``NULL``
+          ("not applicable"), never a guessed zero — and ``0/0`` in particular
+          has the specific "app not owned" meaning (ADR-0006 decision 1) that a
+          stopped run has not earned.
+        - **No depot mapping.** Same rule every other non-success branch
+          follows: a partial run is no evidence about which depots belong to
+          the app, and ``apply_observed_mapping``'s replace-semantics
+          (ADR-0003 decision 3) would delete good rows on the strength of it.
+        - **No manifest ingestion.** ``manifest_ingest.ingest_after_prefill``
+          lives inside the success branch, so a run killed mid-depot can never
+          ingest a half-written ``.bin`` file. This function existing does not
+          change that; the test suite pins it.
+        - **No ``needs_force`` clear.** ``clear_needs_force_if_unchanged`` is
+          likewise reached only from the success branch, so the flag stays
+          exactly as the deletion path (or the schema default) left it. That is
+          the correct answer rather than merely a convenient one: the run did
+          not complete, so whatever made it forced still holds, and a resumed
+          forced run is not wasteful — ``--force`` makes SteamPrefill re-request
+          the chunks, and the ones already on disk come back as local HITs.
+
+        What DOES survive is the only thing that should: the bytes SteamPrefill
+        already wrote into the cache. Nothing here deletes or rolls back
+        anything, and the next run — resumed or not — replays them at disk
+        speed. SteamPrefill's own ``successfullyDownloadedDepots.json`` keeps
+        claiming the depots it actually finished, which is TRUE, so a
+        non-forced resume skips exactly those: cache-as-progress-store, using
+        the tool's own bookkeeping rather than fighting it.
+        """
+        stopped = result.failure_reason
+        log_parts.append(
+            "[vault-api] This run was stopped on request "
+            f"({stopped}). The depot mapping, the manifest state and the "
+            "needs_force flag for this app were all left untouched — a run "
+            "that did not complete is not evidence about any of them. "
+            "Everything already written to the cache stays on disk."
+        )
+
+        # apps.status must not stay 'running' (nothing is), and must not become
+        # 'error' (nothing failed) — see jobs.reset_app_status_if_running.
+        jobs.reset_app_status_if_running(conn, appid)
+
+        if stopped == prefill.FAILURE_PAUSED:
+            jobs.park_paused(conn, job_id, "\n".join(log_parts))
+            logger.info(
+                "Prefill job %s for appid %s paused on request; SteamPrefill "
+                "was terminated (exit code %s) and the job is parked until "
+                "POST /v1/jobs/%s/resume.",
+                job_id, appid, result.exit_code, job_id,
+            )
+        else:
+            jobs.finish_job(
+                conn, job_id, jobs.STATUS_CANCELLED, "\n".join(log_parts)
+            )
+            logger.info(
+                "Prefill job %s for appid %s cancelled on request; "
+                "SteamPrefill was terminated (exit code %s).",
+                job_id, appid, result.exit_code,
+            )
+
+        # A stopped run is the one non-success case that reliably DID change
+        # disk content (it downloaded until the moment it was stopped), and an
+        # operator who just pressed stop is looking at the UI right now — so
+        # the size cache is invalidated here as well as on success, rather than
+        # letting GET /v1/games show a pre-run number for up to
+        # VAULT_SIZE_CACHE_TTL seconds.
+        if self._size_cache is not None:
+            self._size_cache.invalidate()
+
+    def _maybe_queue_auto_gc(
+        self,
+        conn: sqlite3.Connection,
+        job_id: int,
+        appid: int,
+        summary: "prefill_summary.PrefillSummary",
+        log_parts: list[str],
+    ) -> None:
+        """``VAULT_AUTO_GC``: queue a GC job after a prefill that changed something.
+
+        Three conditions, all required, and each one is a decision:
+
+        1. ``VAULT_AUTO_GC`` is ``dry-run`` or ``execute`` (default ``off`` —
+           a feature that can delete files does not switch itself on).
+        2. This job reached the **successful** branch. A failed, aborted,
+           unowned, cancelled or paused run tells us nothing about what is now
+           orphaned, and collecting off the back of one would be acting on a
+           cache state nobody vouched for.
+        3. The summary parsed **and** ``updated > 0``. Orphans are produced by
+           *game updates*: superseded chunks are exactly what an update leaves
+           behind. A run that only confirmed "up to date" (``updated == 0``)
+           changed nothing, so there is nothing new to collect, and queueing GC
+           after every routine staleness check would turn ADR-0006's ~3 s no-op
+           into a full depot scan on every sweep tick. A summary that could not
+           be parsed is not evidence of an update either.
+
+        No new mechanism: this calls the same ``jobs.enqueue_gc`` the endpoint
+        does, so per-(app, mode) dedupe applies unchanged — an operator's
+        pending GC job for this app in the same mode absorbs the automatic one
+        instead of stacking a second scan.
+
+        Wrapped in its own ``try``: a prefill that genuinely succeeded must not
+        be flipped to ``error`` because a follow-up job could not be queued
+        (the same reasoning the manifest-ingestion call above is wrapped for).
+        """
+        settings = self._settings
+        if not settings.auto_gc_enabled:
+            return
+        if not summary.parse_ok or summary.updated is None or summary.updated <= 0:
+            return
+
+        try:
+            gc_job, created = jobs.enqueue_gc(
+                conn, appid, execute=settings.auto_gc_executes
+            )
+        except Exception:
+            logger.exception(
+                "Auto-GC could not be queued for appid %s after job %s; the "
+                "prefill job itself still succeeded.",
+                appid, job_id,
+            )
+            log_parts.append(
+                "[vault-api] Auto-GC (VAULT_AUTO_GC="
+                f"{settings.auto_gc}) could not be queued; see the server log "
+                "(the prefill job itself still succeeded)."
+            )
+            return
+
+        log_parts.append(
+            f"[vault-api] Auto-GC (VAULT_AUTO_GC={settings.auto_gc}): this run "
+            f"updated {summary.updated} app(s), so GC job {gc_job['id']} was "
+            + ("queued" if created else "already queued")
+            + f" for app {appid} in {settings.auto_gc} mode."
+        )
+        logger.info(
+            "Auto-GC queued GC job %s for appid %s in %s mode after prefill "
+            "job %s (deduplicated=%s)",
+            gc_job["id"], appid, settings.auto_gc, job_id, not created,
+        )

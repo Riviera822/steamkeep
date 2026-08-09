@@ -12,16 +12,74 @@ Concurrency model
 -----------------
 - N HTTP request threads may enqueue and read.
 - Exactly ONE worker thread claims and executes.
-- Every read-modify-write here (dedupe check + insert, claim) runs inside an
-  ``BEGIN IMMEDIATE`` transaction, which takes SQLite's write lock up front,
-  so two racing enqueues of the same appid cannot both insert and two claim
-  attempts cannot both take the same job. Readers are unaffected (WAL).
+- Every read-modify-write here (dedupe check + insert, claim, and every WP 3.12
+  job-control transition) runs inside an ``BEGIN IMMEDIATE`` transaction, which
+  takes SQLite's write lock up front, so two racing enqueues of the same appid
+  cannot both insert, two claim attempts cannot both take the same job, and a
+  cancel cannot slip past a claim. Readers are unaffected (WAL).
+
+The job status model (WP 3.12) — and the audit that fixed its shape
+-------------------------------------------------------------------
+Before WP 3.12 a job was ``queued`` -> ``running`` -> ``done`` | ``error``.
+Job control adds two states, and the shape below is the result of auditing
+**every existing consumer of ``jobs.status``** rather than of picking names:
+
+* ``cancelled`` — TERMINAL, deliberately distinct from ``error``. An operator
+  stopping a job is not a failure, and squeezing it into ``error`` would make
+  the one status that means "something went wrong" unreadable (the scheduler,
+  the app's badges and any future alerting all key on it). It behaves exactly
+  like ``done``/``error`` for every consumer: not claimable, not active, does
+  not block dedupe or ``DELETE /v1/cache/{appid}``.
+* ``paused`` — NON-terminal. The job has no subprocess (pause *terminates*
+  SteamPrefill — see ``vault_api/worker.py``), holds no worker slot, and is
+  waiting for ``POST /v1/jobs/{id}/resume``, which puts it back to ``queued``.
+
+**The audit, consumer by consumer** (each line is pinned by a test in
+``tests/test_job_control.py``):
+
+1. ``ACTIVE_STATUSES`` — the shared "in flight" definition. ``paused`` is IN
+   it; ``cancelled`` is NOT. The decisive consumer is ``deletion``'s
+   ``_has_cache_content`` (ADR-0003 addendum): a paused prefill has, by
+   construction, written chunks to disk (that is the entire premise of
+   pause — the cache IS the progress store), so the app must count as
+   "has content" or a co-owner's deletion could take a last-remnant shared
+   depot out from under it. Fail-closed, so ``paused`` is active.
+2. ``enqueue_prefill`` / ``enqueue_gc`` dedupe — follows (1). A second
+   ``POST /v1/prefill`` for an app with a paused job returns THAT job with
+   ``deduplicated: true`` rather than stacking a rival job that would download
+   the same content the paused one is holding progress for. Honest consequence,
+   documented in api/README.md: a paused job an operator forgets about keeps
+   deduping. The escape hatch is ``DELETE /v1/jobs/{id}``, which cancels a
+   paused job immediately.
+3. ``active_job_for_app`` -> ``DELETE /v1/cache/{appid}`` 409 — follows (1)
+   too, and the reason is stronger than "consistency": deleting the depots of a
+   paused prefill destroys exactly the partially-downloaded content the pause
+   exists to preserve. Cancel the job first, then delete.
+4. ``claim_next_job`` — claims ``queued`` only, unchanged. ``paused`` is not
+   claimable (that is what makes resume an explicit act) and ``cancelled`` is
+   terminal.
+5. ``recover_stale_jobs`` — recovers ``running`` only, unchanged, and that is
+   load-bearing: a ``paused`` row MUST survive a restart and stay resumable.
+   Widening it to include ``paused`` would silently eat every paused job on
+   every container restart (mutation-tested).
+6. ``clear_needs_force_if_unchanged`` (ADR-0006 decision 2) — keyed on
+   OUTCOMES, not statuses: only ``worker.py``'s one successful branch calls it.
+   Cancel and pause never reach it, so a cancelled/paused run leaves
+   ``needs_force`` exactly as the deletion path (or the schema default) set it,
+   which is correct — the run never completed, so the reason it was forced
+   still holds.
+
+``apps.status`` gains NO new values (it stays idle/running/done/error, plan
+§3). Cancel and pause reset it from ``running`` to ``idle`` via a conditional
+UPDATE, because nothing is running any more; the JOB row is the authority on
+"there is unfinished work here". See ``reset_app_status_if_running``.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterator, Mapping
 
@@ -51,8 +109,45 @@ STATUS_RUNNING = "running"
 STATUS_DONE = "done"
 STATUS_ERROR = "error"
 
-#: A job in one of these states is "in flight" for dedupe purposes.
-ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_RUNNING)
+#: WP 3.12. Non-terminal: the job's subprocess was terminated on operator
+#: request and the job is parked until ``POST /v1/jobs/{id}/resume``. Job
+#: statuses only — never an ``apps.status`` value.
+STATUS_PAUSED = "paused"
+
+#: WP 3.12. Terminal, and deliberately NOT ``error`` — see the module
+#: docstring's status-model section.
+STATUS_CANCELLED = "cancelled"
+
+#: A job in one of these states is "in flight": for dedupe, for
+#: ``DELETE /v1/cache/{appid}``'s 409 and for ADR-0003's has-content rule.
+#: ``paused`` is included on purpose (module docstring, audit item 1).
+ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_RUNNING, STATUS_PAUSED)
+
+#: A job in one of these states has an outcome and will never run again.
+#: Cancelling one is a 409 — an outcome is history, not something to rewrite.
+TERMINAL_STATUSES = (STATUS_DONE, STATUS_ERROR, STATUS_CANCELLED)
+
+#: Placeholders for ``status IN (...)`` over ``ACTIVE_STATUSES`` — keeps the
+#: count and the bound values trivially in sync (same device as
+#: ``deletion._ACTIVE_JOB_PLACEHOLDERS``). Before WP 3.12 three queries in this
+#: module spelled ``IN (?, ?)`` with two inlined constants; adding a third
+#: active status is exactly the kind of change that silently misses one of
+#: them, so there is now one definition.
+_ACTIVE_PLACEHOLDERS = ",".join("?" for _ in ACTIVE_STATUSES)
+
+#: WP 3.12. Values of ``jobs.stop_request`` (schema v8): what the operator
+#: asked for while the job was RUNNING. ``NULL`` = nothing pending.
+#:
+#: This is a database column rather than an in-process event on purpose. The
+#: request arrives on an HTTP thread and has to reach the worker thread, which
+#: is inside ``subprocess`` polling; a DB flag needs no wiring between the two
+#: (the worker already holds a connection), is visible to an operator with
+#: ``sqlite3``, and — unlike an in-memory event — cannot be lost by the request
+#: and worker disagreeing about which job id is current. The worker re-reads it
+#: on its existing 0.2 s subprocess poll (one primary-key SELECT, no lock, WAL
+#: readers never block) and GC re-reads it between depots.
+STOP_REQUEST_CANCEL = "cancel"
+STOP_REQUEST_PAUSE = "pause"
 
 #: Columns returned by the job read helpers. ``log_excerpt`` is intentionally
 #: excluded from the *list* query (see ``list_jobs``). ``updated``/
@@ -62,9 +157,13 @@ ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_RUNNING)
 #: ``gc_execute`` (schema v7, WP 3.8) is included everywhere — list included —
 #: for the same reason as those three: it is a single small scalar, and it is
 #: the one field that says whether a GC job deletes or only reports.
+#: ``paused_at``/``stop_request`` (schema v8, WP 3.12) are included everywhere
+#: for the same reason as ``gc_execute``: two small scalars that answer
+#: "since when has this been paused?" and "is a cancel already on its way?" —
+#: the two questions a polling UI otherwise has to guess at.
 _JOB_COLUMNS = (
     "id, appid, type, status, created_at, started_at, finished_at, log_excerpt, "
-    "updated, up_to_date, summary_parse_ok, gc_execute"
+    "updated, up_to_date, summary_parse_ok, gc_execute, paused_at, stop_request"
 )
 
 #: Cap on stored log excerpts. 4 KiB is enough to show the tail of a
@@ -280,11 +379,11 @@ def enqueue_prefill(conn: sqlite3.Connection, appid: int) -> tuple[dict[str, obj
         existing = conn.execute(
             f"""
             SELECT {_JOB_COLUMNS} FROM jobs
-            WHERE appid = ? AND type = ? AND status IN (?, ?)
+            WHERE appid = ? AND type = ? AND status IN ({_ACTIVE_PLACEHOLDERS})
             ORDER BY id
             LIMIT 1
             """,
-            (appid, JOB_TYPE_PREFILL, STATUS_QUEUED, STATUS_RUNNING),
+            (appid, JOB_TYPE_PREFILL, *ACTIVE_STATUSES),
         ).fetchone()
         if existing is not None:
             return _row_to_dict(existing), False
@@ -338,11 +437,12 @@ def enqueue_gc(
         existing = conn.execute(
             f"""
             SELECT {_JOB_COLUMNS} FROM jobs
-            WHERE appid = ? AND type = ? AND status IN (?, ?) AND gc_execute = ?
+            WHERE appid = ? AND type = ? AND status IN ({_ACTIVE_PLACEHOLDERS})
+              AND gc_execute = ?
             ORDER BY id
             LIMIT 1
             """,
-            (appid, JOB_TYPE_GC, STATUS_QUEUED, STATUS_RUNNING, int(execute)),
+            (appid, JOB_TYPE_GC, *ACTIVE_STATUSES, int(execute)),
         ).fetchone()
         if existing is not None:
             return _row_to_dict(existing), False
@@ -389,22 +489,27 @@ def get_job(conn: sqlite3.Connection, job_id: int) -> dict[str, object] | None:
 def active_job_for_app(
     conn: sqlite3.Connection, appid: int
 ) -> dict[str, object] | None:
-    """The app's oldest ``queued``/``running`` job, or None if it has none.
+    """The app's oldest in-flight (``ACTIVE_STATUSES``) job, or None.
 
-    Same "in flight" definition ``enqueue_prefill`` dedupes on
-    (``ACTIVE_STATUSES``), exposed as a read for ``DELETE /v1/cache/{appid}``
-    (WP 1.6): deleting depot directories while a prefill is writing into them
-    would delete under an active download, so that endpoint refuses with 409.
-    Served by ``idx_jobs_appid_status``.
+    Same "in flight" definition ``enqueue_prefill`` dedupes on, exposed as a
+    read for ``DELETE /v1/cache/{appid}`` (WP 1.6): deleting depot directories
+    while a prefill is writing into them would delete under an active download,
+    so that endpoint refuses with 409. Served by ``idx_jobs_appid_status``.
+
+    WP 3.12: a ``paused`` job counts here too. There is no subprocess writing
+    at that moment, but the depots hold a partial download that resume is
+    going to continue from (the cache is the progress store) — deleting them
+    would throw exactly that away, so the 409 is the right answer and its
+    message says so.
     """
     row = conn.execute(
         f"""
         SELECT {_JOB_COLUMNS} FROM jobs
-        WHERE appid = ? AND status IN (?, ?)
+        WHERE appid = ? AND status IN ({_ACTIVE_PLACEHOLDERS})
         ORDER BY id
         LIMIT 1
         """,
-        (appid, STATUS_QUEUED, STATUS_RUNNING),
+        (appid, *ACTIVE_STATUSES),
     ).fetchone()
     return None if row is None else _row_to_dict(row)
 
@@ -421,7 +526,8 @@ def list_jobs(conn: sqlite3.Connection, limit: int) -> list[dict[str, object]]:
     rows = conn.execute(
         """
         SELECT id, appid, type, status, created_at, started_at, finished_at,
-               updated, up_to_date, summary_parse_ok, gc_execute
+               updated, up_to_date, summary_parse_ok, gc_execute,
+               paused_at, stop_request
         FROM jobs
         ORDER BY id DESC
         LIMIT ?
@@ -436,7 +542,14 @@ def claim_next_job(conn: sqlite3.Connection) -> dict[str, object] | None:
 
     The claim is a conditional UPDATE (``WHERE id = ? AND status = 'queued'``)
     inside an immediate transaction, so it is safe even if a second worker ever
-    existed: the loser's UPDATE matches zero rows and it sees ``None``.
+    existed: the loser's UPDATE matches zero rows and it sees ``None``. The
+    same lock is what makes ``cancel_job`` on a queued job safe: it either wins
+    (the job is cancelled and never claimed) or loses (the job is running and
+    the cancel becomes a ``stop_request`` the worker honors).
+
+    ``paused`` rows are invisible here (WP 3.12) — a paused job re-enters the
+    queue only through ``resume_job``, and because it keeps its original id it
+    is then claimed before anything queued during the pause.
     """
     with immediate_transaction(conn):
         row = conn.execute(
@@ -478,7 +591,15 @@ def finish_job(
     up_to_date: int | None = None,
     summary_parse_ok: bool | None = None,
 ) -> None:
-    """Mark a job ``done`` or ``error`` and store its (tail-truncated) log.
+    """Mark a job terminal (``done``/``error``/``cancelled``) and store its
+    (tail-truncated) log.
+
+    **``stop_request`` is always cleared here (WP 3.12).** A terminal job has
+    an outcome; a pending "please cancel this" against it is not just inert but
+    actively misleading — a UI that shows a spinner for "cancelling…" would
+    show it forever on a job that finished on its own microseconds before the
+    request landed. Clearing it in the one function every terminal transition
+    already goes through means no caller can forget.
 
     ``updated``/``up_to_date``/``summary_parse_ok`` (schema v4, WP 3.3) are
     SteamPrefill's own summary-table counters (``vault_api.prefill_summary``,
@@ -492,7 +613,8 @@ def finish_job(
         """
         UPDATE jobs
         SET status = ?, finished_at = ?, log_excerpt = ?,
-            updated = ?, up_to_date = ?, summary_parse_ok = ?
+            updated = ?, up_to_date = ?, summary_parse_ok = ?,
+            stop_request = NULL
         WHERE id = ?
         """,
         (
@@ -506,6 +628,369 @@ def finish_job(
         ),
     )
     conn.commit()
+
+
+# --------------------------------------------------------------------------
+# Job control: cancel / pause / resume (WP 3.12)
+# --------------------------------------------------------------------------
+
+#: Outcomes of the three control transitions below. Deliberately data, not
+#: exceptions: ``routers/jobs.py`` maps them to 200/404/409, and a future
+#: caller that is not an HTTP endpoint gets to make its own choice.
+CONTROL_UNKNOWN = "unknown"
+#: The transition completed synchronously (a queued/paused job needs no worker).
+CONTROL_IMMEDIATE = "immediate"
+#: The job is running: the request was recorded and the worker will act on it.
+CONTROL_REQUESTED = "requested"
+#: A paused job was put back in the queue.
+CONTROL_RESUMED = "resumed"
+#: The job is in a state this transition does not apply to (-> 409).
+CONTROL_CONFLICT = "conflict"
+
+CANCELLED_QUEUED_MESSAGE = (
+    "[vault-api] Cancelled while queued: this job was never started, so "
+    "nothing ran and nothing on disk was touched."
+)
+
+CANCELLED_PAUSED_MESSAGE = (
+    "[vault-api] Cancelled while paused. The SteamPrefill subprocess had "
+    "already been terminated by the pause, so nothing was running at this "
+    "point. Whatever the run had cached before it was paused stays on disk "
+    "and is served as local HITs by the next prefill for this app."
+)
+
+
+@dataclass(frozen=True)
+class ControlResult:
+    """What one cancel/pause/resume attempt did."""
+
+    outcome: str
+    #: The job row AFTER the attempt — ``None`` only for ``CONTROL_UNKNOWN``.
+    job: dict[str, object] | None = None
+    #: Human-readable reason, filled for ``CONTROL_CONFLICT`` (becomes the 409
+    #: detail) and for the informational outcomes.
+    detail: str = ""
+
+
+def read_stop_request(conn: sqlite3.Connection, job_id: int) -> str | None:
+    """The pending stop request for a job (``'cancel'``/``'pause'``/``None``).
+
+    Called from the WORKER thread on the worker's own connection, on the
+    subprocess poll tick and between GC depots — a single primary-key SELECT.
+    Returns ``None`` for an unknown id, which is the safe direction: a job row
+    that vanished is not a reason to abort work that is already underway.
+    """
+    row = conn.execute(
+        "SELECT stop_request FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    value = row["stop_request"]
+    return None if value is None else str(value)
+
+
+def reset_app_status_if_running(conn: sqlite3.Connection, appid: int) -> None:
+    """Put ``apps.status`` back to ``idle`` — but only if it is ``running``.
+
+    Used by the cancel and pause paths. ``apps.status`` has exactly the four
+    plan-§3 values and gains none from job control (module docstring), so the
+    question is only which of them a stopped run leaves behind:
+
+    - **not ``error``**: an operator pressing stop is not a failure, and the
+      red badge is the one signal that has to keep meaning "something went
+      wrong".
+    - **not left at ``running``**: nothing is running, and a yellow badge with
+      no worker behind it is the permanent-stale-badge bug ``recover_stale_jobs``
+      exists to prevent.
+    - **``idle``** says exactly what is true: no run is in flight and vault-api
+      makes no claim about this app's fill state. ``last_prefill_at`` is left
+      untouched, so an app that WAS filled earlier still reports when.
+
+    The ``WHERE ... AND status = 'running'`` guard (same shape as
+    ``recover_stale_jobs``') keeps this from clobbering a status a concurrent
+    ``DELETE /v1/cache/{appid}`` just wrote.
+    """
+    conn.execute(
+        "UPDATE apps SET status = ? WHERE appid = ? AND status = ?",
+        (STATUS_IDLE, appid, STATUS_RUNNING),
+    )
+    conn.commit()
+
+
+def park_paused(
+    conn: sqlite3.Connection, job_id: int, log_excerpt: str
+) -> dict[str, object] | None:
+    """Park a running job at ``paused`` (worker-side half of pause).
+
+    ``finished_at`` stays ``NULL`` — the job is not finished — while
+    ``paused_at`` records when it was suspended, and ``stop_request`` is
+    cleared because the request has now been honored. The summary counters are
+    likewise left ``NULL``: a terminated run produced no trustworthy
+    ``Updated``/``Up To Date`` numbers (see ``worker.py``).
+
+    Conditional on ``status = 'running'`` so a job that finished on its own in
+    the same instant is never dragged back out of a terminal state; returns the
+    row afterwards (``None`` if the id is unknown).
+    """
+    with immediate_transaction(conn):
+        conn.execute(
+            """
+            UPDATE jobs
+            SET status = ?, paused_at = ?, stop_request = NULL, log_excerpt = ?
+            WHERE id = ? AND status = ?
+            """,
+            (
+                STATUS_PAUSED,
+                utcnow_iso(),
+                tail_excerpt(log_excerpt),
+                job_id,
+                STATUS_RUNNING,
+            ),
+        )
+        row = conn.execute(
+            f"SELECT {_JOB_COLUMNS} FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    return None if row is None else _row_to_dict(row)
+
+
+def cancel_job(conn: sqlite3.Connection, job_id: int) -> ControlResult:
+    """``DELETE /v1/jobs/{id}``: cancel one job. Never raises for a bad state.
+
+    Three shapes, decided inside ONE ``BEGIN IMMEDIATE`` transaction so the
+    decision cannot be invalidated between the read and the write (the worker's
+    claim takes the same write lock, so "cancel a queued job the worker is
+    claiming right now" resolves one way or the other, never both):
+
+    * **queued** — finalized here and now, and it never runs: the worker only
+      ever claims ``queued`` rows, and this transaction moves it out of that
+      state under the write lock.
+    * **paused** — same, and equally immediate: pause already terminated the
+      subprocess, so there is nothing left to stop.
+    * **running** — ``stop_request`` is recorded and the WORKER finalizes the
+      job (it owns the subprocess, and it is the only place that can honestly
+      say what the run had achieved). Asynchronous by nature; the caller polls.
+
+    A job that already has an outcome (``TERMINAL_STATUSES``) is a conflict,
+    not a no-op: it already happened, and rewriting a ``done`` job to
+    ``cancelled`` would falsify history.
+    """
+    with immediate_transaction(conn):
+        row = conn.execute(
+            f"SELECT {_JOB_COLUMNS} FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        if row is None:
+            return ControlResult(CONTROL_UNKNOWN)
+
+        job_status = str(row["status"])
+        appid = int(row["appid"])
+
+        if job_status in TERMINAL_STATUSES:
+            return ControlResult(
+                CONTROL_CONFLICT,
+                _row_to_dict(row),
+                detail=(
+                    f"Job {job_id} already finished with status "
+                    f"'{job_status}'. A job that has an outcome cannot be "
+                    "cancelled — that outcome is what actually happened."
+                ),
+            )
+
+        if job_status in (STATUS_QUEUED, STATUS_PAUSED):
+            message = (
+                CANCELLED_QUEUED_MESSAGE
+                if job_status == STATUS_QUEUED
+                else CANCELLED_PAUSED_MESSAGE
+            )
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, finished_at = ?, log_excerpt = ?,
+                    stop_request = NULL
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    STATUS_CANCELLED,
+                    utcnow_iso(),
+                    message,
+                    job_id,
+                    job_status,
+                ),
+            )
+            # Only ever fires for a paused prefill whose apps row was somehow
+            # left at 'running' (pause itself already resets it); a queued job
+            # never set the status in the first place, and the guard makes this
+            # a no-op there rather than a silent downgrade of a 'done' app.
+            conn.execute(
+                "UPDATE apps SET status = ? WHERE appid = ? AND status = ?",
+                (STATUS_IDLE, appid, STATUS_RUNNING),
+            )
+            after = conn.execute(
+                f"SELECT {_JOB_COLUMNS} FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            return ControlResult(
+                CONTROL_IMMEDIATE, _row_to_dict(after), detail=message
+            )
+
+        # running
+        conn.execute(
+            "UPDATE jobs SET stop_request = ? WHERE id = ? AND status = ?",
+            (STOP_REQUEST_CANCEL, job_id, STATUS_RUNNING),
+        )
+        after = conn.execute(
+            f"SELECT {_JOB_COLUMNS} FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        return ControlResult(
+            CONTROL_REQUESTED,
+            _row_to_dict(after),
+            detail=(
+                f"Job {job_id} is running; cancellation was requested. The "
+                "worker stops it at its next check — a prefill by terminating "
+                "SteamPrefill, a GC run after the depot it is currently "
+                "working on. Poll GET /v1/jobs/{id} until the status is "
+                "'cancelled'."
+            ),
+        )
+
+
+def request_pause(conn: sqlite3.Connection, job_id: int) -> ControlResult:
+    """``POST /v1/jobs/{id}/pause``: suspend a RUNNING PREFILL job.
+
+    Restricted to running prefills, and both halves of that are deliberate:
+
+    * **Prefill only.** A GC job is refused (409). GC runs are short — the plan
+      is rebuilt from scratch on every run anyway, so "pause" would mean
+      "throw away the current plan and rebuild it later", which is what
+      cancelling and re-queueing already does, spelled honestly.
+    * **Running only.** A queued job has nothing to suspend (cancel it, or let
+      it run); a paused job is already paused; a finished one has an outcome.
+
+    Like ``cancel_job``, the actual suspension is the worker's: it terminates
+    SteamPrefill and calls ``park_paused``. **There is no wire protocol to
+    SteamPrefill** — it has no pause signal, so pause IS terminate, and resume
+    IS a fresh run. What makes that cheap rather than wasteful is that the
+    chunks already on disk replay as local HITs (ADR-0001: ~120x faster than a
+    miss), i.e. the cache itself is the progress store.
+    """
+    with immediate_transaction(conn):
+        row = conn.execute(
+            f"SELECT {_JOB_COLUMNS} FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        if row is None:
+            return ControlResult(CONTROL_UNKNOWN)
+
+        job_status = str(row["status"])
+        job_type = str(row["type"])
+
+        if job_type != JOB_TYPE_PREFILL:
+            return ControlResult(
+                CONTROL_CONFLICT,
+                _row_to_dict(row),
+                detail=(
+                    f"Job {job_id} is a '{job_type}' job and cannot be paused. "
+                    "Only prefill jobs can — a GC run is short and rebuilds its "
+                    "plan from scratch every time, so there is no partial "
+                    "progress a pause could preserve. Cancel it with "
+                    "DELETE /v1/jobs/{id} and queue a new one when you want it."
+                ),
+            )
+
+        if job_status != STATUS_RUNNING:
+            return ControlResult(
+                CONTROL_CONFLICT,
+                _row_to_dict(row),
+                detail=(
+                    f"Job {job_id} is '{job_status}', not 'running', so there "
+                    "is nothing to pause. "
+                    + (
+                        "It is already paused — resume it with "
+                        "POST /v1/jobs/{id}/resume."
+                        if job_status == STATUS_PAUSED
+                        else (
+                            "A queued job has not started: cancel it with "
+                            "DELETE /v1/jobs/{id}, or let it start and pause "
+                            "it then."
+                            if job_status == STATUS_QUEUED
+                            else "It already finished."
+                        )
+                    )
+                ),
+            )
+
+        conn.execute(
+            "UPDATE jobs SET stop_request = ? WHERE id = ? AND status = ?",
+            (STOP_REQUEST_PAUSE, job_id, STATUS_RUNNING),
+        )
+        after = conn.execute(
+            f"SELECT {_JOB_COLUMNS} FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        return ControlResult(
+            CONTROL_REQUESTED,
+            _row_to_dict(after),
+            detail=(
+                f"Pause requested for job {job_id}. The worker terminates "
+                "SteamPrefill at its next check and parks the job at 'paused'; "
+                "poll GET /v1/jobs/{id} until it gets there, then resume with "
+                "POST /v1/jobs/{id}/resume."
+            ),
+        )
+
+
+def resume_job(conn: sqlite3.Connection, job_id: int) -> ControlResult:
+    """``POST /v1/jobs/{id}/resume``: put a paused job back in the queue.
+
+    **Priority comes for free, and that is why there is no priority column.**
+    The queue is FIFO by ``jobs.id`` (``claim_next_job``) and a resumed job
+    keeps the id it was created with — which is, by construction, older than
+    everything enqueued while it was paused. Flipping the status back to
+    ``queued`` therefore puts it at the FRONT of the queue, which is what a
+    resume should mean: the operator suspended this job to let something else
+    through, not to send it to the back of the line. Creating a NEW job row
+    instead (the obvious alternative) would silently do the opposite.
+
+    ``stop_request`` is cleared so the stale pause request cannot make the
+    resumed run stop again immediately, and ``paused_at`` is deliberately KEPT:
+    it is the timestamp of the most recent pause, which stays true after a
+    resume and gives a UI something honest to show ("resumed, was paused at
+    …"). ``status`` is the authority on whether the job is paused right now.
+    """
+    with immediate_transaction(conn):
+        row = conn.execute(
+            f"SELECT {_JOB_COLUMNS} FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        if row is None:
+            return ControlResult(CONTROL_UNKNOWN)
+
+        job_status = str(row["status"])
+        if job_status != STATUS_PAUSED:
+            return ControlResult(
+                CONTROL_CONFLICT,
+                _row_to_dict(row),
+                detail=(
+                    f"Job {job_id} is '{job_status}', not 'paused', so there is "
+                    "nothing to resume."
+                ),
+            )
+
+        conn.execute(
+            """
+            UPDATE jobs SET status = ?, stop_request = NULL
+            WHERE id = ? AND status = ?
+            """,
+            (STATUS_QUEUED, job_id, STATUS_PAUSED),
+        )
+        after = conn.execute(
+            f"SELECT {_JOB_COLUMNS} FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        return ControlResult(
+            CONTROL_RESUMED,
+            _row_to_dict(after),
+            detail=(
+                f"Job {job_id} is queued again and, keeping its original job "
+                "id, runs before anything enqueued while it was paused. "
+                "SteamPrefill re-runs from the start; every chunk the earlier "
+                "attempt already cached is served from disk as a local HIT."
+            ),
+        )
 
 
 #: Message stored on jobs recovered by ``recover_stale_jobs``.
@@ -538,6 +1023,15 @@ def recover_stale_jobs(conn: sqlite3.Connection) -> int:
 
     ``apps.status`` is repaired for the same reason: an app left at 'running'
     would show a permanent yellow badge in the app.
+
+    **``paused`` jobs are deliberately NOT touched (WP 3.12), and this is the
+    single most important line of the function.** A paused job has no
+    subprocess — pause terminates SteamPrefill and waits for the child before
+    the row ever reaches ``paused`` — so it is not an orphan and there is
+    nothing to recover. Surviving a restart is the whole point: an operator who
+    pauses a 60 GB download on Friday must still be able to resume it after
+    Monday's container restart. Widening this query to include ``paused``
+    would eat every paused job on every restart; a test mutation-pins it.
     """
     with immediate_transaction(conn):
         rows = conn.execute(

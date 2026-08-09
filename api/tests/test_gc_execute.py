@@ -636,8 +636,11 @@ def test_run_gc_has_no_way_to_be_handed_a_plan() -> None:
 
     parameters = set(inspect.signature(gc_execute.run_gc).parameters)
     assert "plan" not in parameters
+    # `should_cancel` (WP 3.12) is a callback the run polls, not state it is
+    # handed — it can only make the run do LESS, never act on stale input.
     assert parameters == {
         "conn", "appid", "cache_root", "archive_dir", "execute", "exclusions",
+        "should_cancel",
     }
 
 

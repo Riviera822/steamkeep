@@ -138,12 +138,19 @@ def test_manifest_keep_default_and_override(monkeypatch: pytest.MonkeyPatch) -> 
 def test_manifest_keep_below_one_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VAULT_API_KEY", "some-key")
 
-    for bad in ("0", "-1"):
-        monkeypatch.setenv("VAULT_MANIFEST_KEEP", bad)
-        # minimum=1 phrases as "> 0" (_env_int's existing wording rule, same
-        # as VAULT_PREFILL_TIMEOUT_SECONDS/VAULT_WORKER_POLL_SECONDS above).
-        with pytest.raises(RuntimeError, match=r"must be > 0"):
-            Settings.from_env()
+    # minimum=1 phrases as "> 0" (_env_int's existing wording rule, same as
+    # VAULT_PREFILL_TIMEOUT_SECONDS/VAULT_WORKER_POLL_SECONDS above).
+    monkeypatch.setenv("VAULT_MANIFEST_KEEP", "0")
+    with pytest.raises(RuntimeError, match=r"must be > 0"):
+        Settings.from_env()
+
+    # WP 3.12: a NEGATIVE value is now refused one step earlier, by the
+    # digits-only syntax rule, and its message names the smallest accepted
+    # value instead of the ">" phrasing. Still a loud startup RuntimeError —
+    # only the wording moved.
+    monkeypatch.setenv("VAULT_MANIFEST_KEEP", "-1")
+    with pytest.raises(RuntimeError, match=r"ASCII digits only"):
+        Settings.from_env()
 
 
 def test_steamprefill_cache_dir_has_a_platform_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -248,7 +255,7 @@ def test_bad_schedule_numbers_fail_loudly(monkeypatch: pytest.MonkeyPatch) -> No
         Settings.from_env()
 
     monkeypatch.setenv("VAULT_SCHEDULE_INTERVAL_MINUTES", "three hours")
-    with pytest.raises(RuntimeError, match="must be an integer"):
+    with pytest.raises(RuntimeError, match="ASCII digits only"):
         Settings.from_env()
 
     monkeypatch.setenv("VAULT_SCHEDULE_INTERVAL_MINUTES", "180")
@@ -291,9 +298,15 @@ def test_a_bad_gc_grace_days_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -
     nothing". Rejected at startup, where somebody is looking."""
     monkeypatch.setenv("VAULT_API_KEY", "some-key")
 
+    # WP 3.12: a negative value is refused by the digits-only syntax rule
+    # before the floor check ever runs, and its message names the smallest
+    # accepted value (0) rather than using the ">=" phrasing. Still a startup
+    # RuntimeError — the protection this test exists for is unchanged.
     for bad in ("-1", "-14"):
         monkeypatch.setenv("VAULT_GC_GRACE_DAYS", bad)
-        with pytest.raises(RuntimeError, match=r"must be >= 0"):
+        with pytest.raises(
+            RuntimeError, match=r"smallest accepted value is 0"
+        ):
             Settings.from_env()
 
     for garbage in ("fourteen", "14 days", "", " ", "1.5"):
@@ -302,7 +315,7 @@ def test_a_bad_gc_grace_days_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -
             # Blank is "unset" everywhere in this module, not an error.
             assert Settings.from_env().gc_grace_days == 14
             continue
-        with pytest.raises(RuntimeError, match="must be an integer"):
+        with pytest.raises(RuntimeError, match="ASCII digits only"):
             Settings.from_env()
 
 
@@ -314,14 +327,308 @@ def test_agent_report_keep_below_two_fails_loudly(monkeypatch: pytest.MonkeyPatc
     """
     monkeypatch.setenv("VAULT_API_KEY", "some-key")
 
-    for bad in ("1", "0", "-3"):
+    for bad in ("1", "0"):
         monkeypatch.setenv("VAULT_AGENT_REPORT_KEEP", bad)
         with pytest.raises(RuntimeError, match="must be >= 2"):
             Settings.from_env()
 
+    # WP 3.12: negatives now fail the digits-only syntax rule first (the
+    # message names the floor, so it is still actionable).
+    monkeypatch.setenv("VAULT_AGENT_REPORT_KEEP", "-3")
+    with pytest.raises(RuntimeError, match=r"smallest accepted value is 2"):
+        Settings.from_env()
+
     monkeypatch.setenv("VAULT_AGENT_REPORT_KEEP", "many")
-    with pytest.raises(RuntimeError, match="must be an integer"):
+    with pytest.raises(RuntimeError, match="ASCII digits only"):
         Settings.from_env()
 
     monkeypatch.setenv("VAULT_AGENT_REPORT_KEEP", "2")
     assert Settings.from_env().agent_report_keep == 2
+
+
+# ==========================================================================
+# WP 3.12: strict integer parsing for EVERY integer setting
+# ==========================================================================
+
+#: Every ``_env_int``-backed setting, with the attribute it lands on and a
+#: valid value. Parameterizing over the whole list is the point: the hardening
+#: is a property of ``_env_int``, so a future setting that bypassed it (or a
+#: caller that stopped using it) shows up as a failing row here rather than as
+#: one un-hardened variable nobody checked.
+INTEGER_SETTINGS = [
+    ("VAULT_PREFILL_TIMEOUT_SECONDS", "prefill_timeout_seconds", "7"),
+    ("VAULT_AGENT_REPORT_KEEP", "agent_report_keep", "7"),
+    ("VAULT_MANIFEST_KEEP", "manifest_keep", "7"),
+    ("VAULT_GC_GRACE_DAYS", "gc_grace_days", "7"),
+    ("VAULT_SCHEDULE_INTERVAL_MINUTES", "schedule_interval_minutes", "7"),
+    ("VAULT_SCHEDULE_CLIENT_STALE_DAYS", "schedule_client_stale_days", "7"),
+]
+
+#: The four shapes Python's own ``int()`` accepts and an operator never means.
+#: ``"1_0"`` is the nastiest: ``int("1_0")`` is **ten**, so it fails silently
+#: rather than loudly. ``"٧"`` is ARABIC-INDIC DIGIT SEVEN — ``str.isdigit()``
+#: is True for it, which is why the ASCII check has to come first.
+SLOPPY_INTEGERS = [" 7 ", "+7", "-7", "1_0", "٧", "7\n", "7 ", " 7", "0x7"]
+
+
+@pytest.mark.parametrize(("name", "attribute", "good"), INTEGER_SETTINGS)
+def test_a_plain_integer_is_still_accepted(
+    monkeypatch: pytest.MonkeyPatch, name: str, attribute: str, good: str
+) -> None:
+    """The hardening must not have broken any legitimate value."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv(name, good)
+
+    assert getattr(Settings.from_env(), attribute) == int(good)
+
+
+@pytest.mark.parametrize(("name", "attribute", "good"), INTEGER_SETTINGS)
+@pytest.mark.parametrize("sloppy", SLOPPY_INTEGERS)
+def test_sloppy_integers_are_refused_at_startup(
+    monkeypatch: pytest.MonkeyPatch, name: str, attribute: str, good: str, sloppy: str
+) -> None:
+    """docs/LEARNINGS.md's ``int()`` rule, applied to every integer setting.
+
+    Each of these would otherwise start the service with a number nobody wrote
+    down — ``"1_0"`` most of all, which ``int()`` reads as ten.
+    """
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv(name, sloppy)
+
+    with pytest.raises(RuntimeError, match=name):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize(("name", "attribute", "good"), INTEGER_SETTINGS)
+def test_a_blank_integer_setting_still_means_unset(
+    monkeypatch: pytest.MonkeyPatch, name: str, attribute: str, good: str
+) -> None:
+    """A stray space after ``=`` in a .env file must not fail startup — blank
+    is "not configured" for every setting in this module, and always has been.
+    """
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    # The dataclass field default IS the documented default for every one of
+    # these settings, so compare against it rather than restating numbers here.
+    default = getattr(
+        Settings(vault_api_key="k", db_path="x", cache_root="y", log_level="INFO"),
+        attribute,
+    )
+
+    for blank in ("", "   ", "\t"):
+        monkeypatch.setenv(name, blank)
+        assert getattr(Settings.from_env(), attribute) == default
+
+
+def test_every_env_example_value_still_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shipped .env.example is the file operators copy — after tightening
+    the parser, every value in it must still be accepted (WP 3.12).
+
+    Read from the real file rather than a copy of its contents, so a future
+    edit that introduces a value this parser rejects fails here.
+    """
+    import os
+
+    env_example = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env.example"
+    )
+    with open(env_example, encoding="utf-8") as handle:
+        lines = [
+            line.strip()
+            for line in handle
+            if line.strip() and not line.strip().startswith("#") and "=" in line
+        ]
+
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    seen: dict[str, str] = {}
+    for line in lines:
+        name, _, value = line.partition("=")
+        if name == "VAULT_API_KEY":
+            continue
+        monkeypatch.setenv(name, value)
+        seen[name] = value
+
+    # Nothing raises: every documented value is accepted as written.
+    settings = Settings.from_env()
+
+    # Both hardened families really were exercised — otherwise a future
+    # .env.example that stopped shipping the numeric settings would make this
+    # test pass without testing anything.
+    assert seen.keys() & {name for name, _attr, _good in INTEGER_SETTINGS}
+    assert seen.keys() & {name for name, _attr in FLOAT_SETTINGS}
+    assert settings.worker_poll_seconds == float(seen["VAULT_WORKER_POLL_SECONDS"])
+    assert settings.size_cache_ttl_seconds == float(seen["VAULT_SIZE_CACHE_TTL"])
+    assert settings.gc_grace_days == int(seen["VAULT_GC_GRACE_DAYS"])
+    assert len(seen) >= 8, "the .env.example parsing above found suspiciously little"
+
+
+# ==========================================================================
+# WP 3.12: VAULT_AUTO_GC
+# ==========================================================================
+
+
+def test_auto_gc_defaults_to_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A feature that can delete files does not switch itself on."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.delenv("VAULT_AUTO_GC", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.auto_gc == "off"
+    assert settings.auto_gc_enabled is False
+    assert settings.auto_gc_executes is False
+
+
+@pytest.mark.parametrize(
+    ("value", "enabled", "executes"),
+    [
+        ("off", False, False),
+        ("dry-run", True, False),
+        ("execute", True, True),
+        ("EXECUTE", True, True),
+        ("  Dry-Run  ", True, False),
+    ],
+)
+def test_auto_gc_accepts_the_three_modes(
+    monkeypatch: pytest.MonkeyPatch, value: str, enabled: bool, executes: bool
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_AUTO_GC", value)
+
+    settings = Settings.from_env()
+
+    assert settings.auto_gc_enabled is enabled
+    assert settings.auto_gc_executes is executes
+
+
+@pytest.mark.parametrize("bad", ["exectue", "on", "true", "1", "dry run", "delete"])
+def test_a_bad_auto_gc_value_fails_at_startup(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    """A typo must not silently mean "off": an operator who set this believes
+    automatic collection is running."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_AUTO_GC", bad)
+
+    with pytest.raises(RuntimeError, match="VAULT_AUTO_GC must be one of"):
+        Settings.from_env()
+
+
+# ==========================================================================
+# WP 3.12 review carry-over: the SAME strictness for the float settings
+# ==========================================================================
+
+#: Every ``_env_float``-backed setting. Same parameterize-over-the-list device
+#: as INTEGER_SETTINGS above, and for the same reason.
+FLOAT_SETTINGS = [
+    ("VAULT_WORKER_POLL_SECONDS", "worker_poll_seconds"),
+    ("VAULT_SIZE_CACHE_TTL", "size_cache_ttl_seconds"),
+]
+
+#: The accepted grammar: ASCII digits, optionally one '.' with digits on both
+#: sides. Nothing else.
+GOOD_FLOATS = ["60", "1.0", "0.25", "3.5", "0.5", "120"]
+
+#: Everything ``float()`` would have swallowed. ``"nan"`` is the reason this
+#: exists: ``nan <= 0`` is False, so the old range check passed it through.
+SLOPPY_FLOATS = [
+    " 1.5 ", "+1.5", "-1.5", "1_0", "٧", "nan", "NaN", "inf", "-inf",
+    "Infinity", "abc", "1e3", "1E3", ".5", "5.", "1.2.3", "1,5", "0x1",
+]
+
+
+@pytest.mark.parametrize(("name", "attribute"), FLOAT_SETTINGS)
+@pytest.mark.parametrize("good", GOOD_FLOATS)
+def test_a_plain_decimal_is_still_accepted(
+    monkeypatch: pytest.MonkeyPatch, name: str, attribute: str, good: str
+) -> None:
+    """Fractions are the whole point of a float setting — '3.5' must work."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv(name, good)
+
+    assert getattr(Settings.from_env(), attribute) == float(good)
+
+
+@pytest.mark.parametrize(("name", "attribute"), FLOAT_SETTINGS)
+@pytest.mark.parametrize("sloppy", SLOPPY_FLOATS)
+def test_sloppy_floats_are_refused_at_startup(
+    monkeypatch: pytest.MonkeyPatch, name: str, attribute: str, sloppy: str
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv(name, sloppy)
+
+    with pytest.raises(RuntimeError, match=name):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize(("name", "attribute"), FLOAT_SETTINGS)
+def test_nan_can_no_longer_slip_past_the_positive_check(
+    monkeypatch: pytest.MonkeyPatch, name: str, attribute: str
+) -> None:
+    """The specific hole this carry-over closes, named on its own.
+
+    ``float("nan") <= 0`` is ``False``, so the pre-hardening guard accepted it.
+    Downstream that is not harmless: a nan ``VAULT_SIZE_CACHE_TTL`` makes
+    ``SizeCache``'s ``(now - computed_at) < ttl`` always false, so every request
+    re-walks the whole depot tree; a nan ``VAULT_WORKER_POLL_SECONDS`` is fed
+    straight to ``threading.Event.wait``.
+    """
+    import math
+
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv(name, "nan")
+
+    with pytest.raises(RuntimeError, match="not 'nan' or 'inf'"):
+        Settings.from_env()
+
+    # ...and the property that made it dangerous, stated so the test explains
+    # itself: the old `value <= 0` guard genuinely does not catch this.
+    assert (float("nan") <= 0) is False
+    assert not math.isfinite(float("nan"))
+
+
+@pytest.mark.parametrize(("name", "attribute"), FLOAT_SETTINGS)
+def test_a_digit_string_that_overflows_to_inf_is_refused(
+    monkeypatch: pytest.MonkeyPatch, name: str, attribute: str
+) -> None:
+    """The one way ``inf`` can still get past the literal grammar: 400 digits
+    is a valid decimal literal that ``float()`` rounds to infinity."""
+    import math
+
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    huge = "9" * 400
+    assert math.isinf(float(huge))  # the premise, not an assumption
+    monkeypatch.setenv(name, huge)
+
+    with pytest.raises(RuntimeError, match="too large"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize(("name", "attribute"), FLOAT_SETTINGS)
+def test_a_blank_float_setting_still_means_unset(
+    monkeypatch: pytest.MonkeyPatch, name: str, attribute: str
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    default = getattr(
+        Settings(vault_api_key="k", db_path="x", cache_root="y", log_level="INFO"),
+        attribute,
+    )
+
+    for blank in ("", "   ", "\t"):
+        monkeypatch.setenv(name, blank)
+        assert getattr(Settings.from_env(), attribute) == default
+
+
+@pytest.mark.parametrize(("name", "attribute"), FLOAT_SETTINGS)
+def test_zero_is_still_rejected_by_the_range_check(
+    monkeypatch: pytest.MonkeyPatch, name: str, attribute: str
+) -> None:
+    """The pre-existing rule survives the new grammar: '0' and '0.0' are
+    syntactically fine and still refused, because VAULT_SIZE_CACHE_TTL=0 would
+    mean a full depot-tree walk on every request (there is deliberately no
+    "disable the cache" setting)."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+
+    for zero in ("0", "0.0", "0.000"):
+        monkeypatch.setenv(name, zero)
+        with pytest.raises(RuntimeError, match="must be > 0"):
+            Settings.from_env()

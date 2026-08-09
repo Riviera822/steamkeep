@@ -54,7 +54,17 @@ import sqlite3
 #: so it reuses v4's explicit ``ALTER TABLE ... ADD COLUMN`` step (see
 #: ``_add_missing_job_columns``, which is per-column guarded and therefore
 #: correct for a database at any version from v1 to v6).
-SCHEMA_VERSION = 7
+#: v8 (WP 3.12): added ``jobs.paused_at`` and ``jobs.stop_request`` — job
+#: control (cancel/pause/resume). ``stop_request`` is the operator's pending
+#: request against a RUNNING job (``NULL`` | ``'cancel'`` | ``'pause'``); it
+#: lives in the database rather than in process memory because the HTTP thread
+#: that accepts the request and the worker thread that must honor it are
+#: different threads polling a subprocess, and because an operator has to be
+#: able to see it. ``paused_at`` records when a job was last suspended
+#: (``finished_at`` stays NULL — a paused job is not finished). Both are TEXT,
+#: which is why ``_add_missing_job_columns`` had to learn per-column types
+#: instead of adding everything as INTEGER.
+SCHEMA_VERSION = 8
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -110,7 +120,16 @@ CREATE TABLE IF NOT EXISTS jobs (
     -- worker reads THIS column, not a request-scoped variable, so a queued
     -- job that outlives a restart still carries the mode it was created with
     -- and an old job row still says which mode it ran in.
-    gc_execute        INTEGER
+    gc_execute        INTEGER,
+    -- v8 (WP 3.12): job control. paused_at is when this job was most recently
+    -- suspended (NULL = never); it is NOT cleared on resume, because "when was
+    -- this last paused" stays true afterwards and `status` is the authority on
+    -- whether it is paused right now. stop_request is the pending operator
+    -- request against a RUNNING job: NULL (nothing), 'cancel' or 'pause'. It is
+    -- cleared by every terminal transition (jobs.finish_job), by park_paused
+    -- once the pause has been honored, and by resume_job.
+    paused_at         TEXT,
+    stop_request      TEXT
 );
 
 -- The job worker polls "give me the oldest queued job" on every tick and the
@@ -273,11 +292,12 @@ def init_db(db_path: str) -> None:
         # executescript so the two migration mechanisms (ALTER here, CREATE
         # ... IF NOT EXISTS below) never depend on ordering relative to each
         # other.
-        # v7 (WP 3.8) reuses the same step: `_add_missing_job_columns` is
-        # guarded per column, so one call brings a `jobs` table at ANY version
-        # from v1 to v6 up to the current column set (a v6 database is missing
-        # only `gc_execute`; a v1 database is missing all four).
-        if row is not None and row["version"] < 7:
+        # v7 (WP 3.8) and v8 (WP 3.12) reuse the same step:
+        # `_add_missing_job_columns` is guarded per column, so one call brings a
+        # `jobs` table at ANY version from v1 to v7 up to the current column set
+        # (a v7 database is missing only the two v8 columns; a v1 database is
+        # missing all six).
+        if row is not None and row["version"] < 8:
             _add_missing_job_columns(conn)
 
         # v5 (WP 3.4): same situation as the v4 step above -- an existing
@@ -300,12 +320,29 @@ def init_db(db_path: str) -> None:
         conn.close()
 
 
+#: The ``jobs`` columns added after v1, with the type each must be created
+#: with. Types are spelled out per column rather than assumed (WP 3.12): v4/v7
+#: added only nullable INTEGERs and the old loop hardcoded ``INTEGER``, which
+#: would have silently given v8's two TEXT columns the wrong affinity on an
+#: upgraded database while a fresh one got TEXT from ``_DDL`` — two databases
+#: with the same ``schema_version`` and different column types.
+_POST_V1_JOB_COLUMNS = (
+    ("updated", "INTEGER"),
+    ("up_to_date", "INTEGER"),
+    ("summary_parse_ok", "INTEGER"),
+    ("gc_execute", "INTEGER"),
+    ("paused_at", "TEXT"),
+    ("stop_request", "TEXT"),
+)
+
+
 def _add_missing_job_columns(conn: sqlite3.Connection) -> None:
-    """v1->v7 migration step: add every ``jobs`` column added after v1.
+    """v1->v8 migration step: add every ``jobs`` column added after v1.
 
     ``updated``/``up_to_date``/``summary_parse_ok`` came with v4 (WP 3.3),
-    ``gc_execute`` with v7 (WP 3.8). All four are plain nullable ``INTEGER``
-    columns with no default, so one guarded loop covers them.
+    ``gc_execute`` with v7 (WP 3.8), ``paused_at``/``stop_request`` with v8
+    (WP 3.12). All six are nullable with no default, so one guarded loop covers
+    them — see ``_POST_V1_JOB_COLUMNS`` for why the loop carries types.
 
     Guarded per-column via ``PRAGMA table_info`` (not just per-version) so
     calling ``init_db`` twice against the same older file — or against a file
@@ -313,12 +350,12 @@ def _add_missing_job_columns(conn: sqlite3.Connection) -> None:
     ``duplicate column name`` instead of silently doing nothing on the second
     call, matching the idempotency the rest of ``init_db`` already promises.
     That per-column guard is also what lets ONE step serve every version from
-    v1 to v6: a v6 database simply gains ``gc_execute`` and nothing else.
+    v1 to v7: a v7 database simply gains the two v8 columns and nothing else.
     """
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
-    for column in ("updated", "up_to_date", "summary_parse_ok", "gc_execute"):
+    for column, column_type in _POST_V1_JOB_COLUMNS:
         if column not in existing:
-            conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} INTEGER")
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {column_type}")
 
 
 def _add_missing_app_columns(conn: sqlite3.Connection) -> None:

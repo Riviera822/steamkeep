@@ -1062,6 +1062,11 @@ class GcRunReport:
     #: App ids whose ``needs_force`` this run set to 1 (see the module
     #: docstring). Always empty for a dry run.
     flagged_appids: list[int] = field(default_factory=list)
+    #: WP 3.12: an operator cancelled this run part-way. The depots in
+    #: ``depots`` were fully processed; ``skipped_depots`` were never started.
+    cancelled: bool = False
+    #: Depot ids the cancellation left untouched, in plan order.
+    skipped_depots: list[int] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -1191,6 +1196,17 @@ class GcRunReport:
             if extra > 0:
                 lines.append(f"    - ... and {extra} more")
 
+        if self.cancelled:
+            # Ahead of the totals on purpose, so the numbers are read with the
+            # partial-pass caveat already in view rather than after it.
+            lines.append(
+                "[vault-api] GC was CANCELLED on request after "
+                f"{len(self.depots)} depot(s). {len(self.skipped_depots)} "
+                f"depot(s) were never started: {self.skipped_depots}. The "
+                "totals below cover only the depots that did run — they are "
+                "exact for those and say nothing about the rest."
+            )
+
         if self.requested_execute:
             lines.append(
                 f"[vault-api] GC totals (EXECUTED): chunks_removed={self.removed_count} "
@@ -1256,6 +1272,7 @@ def run_gc(
     archive_dir: str,
     execute: bool,
     exclusions: Sequence[ChunkExclusion] = NO_EXCLUSIONS,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> GcRunReport:
     """Plan garbage collection for one app **now**, and — only if ``execute``
     — carry it out. Never raises for an expected failure.
@@ -1275,6 +1292,25 @@ def run_gc(
     that is what makes "GC never executes an enqueue-time plan" a property of
     the interface rather than a habit of its callers (module docstring,
     "TOCTOU").
+
+    ``should_cancel`` (WP 3.12) is polled **between depots** and stops the run
+    where it stands. Cooperative on purpose, at exactly that granularity:
+
+    - *Not mid-depot*, because one depot is bounded work and stopping half way
+      through it would leave the least useful state of all — some of that
+      depot's orphans gone, some not, with the operator unable to tell which
+      without reading the log line by line. A depot either was processed
+      completely or was never started, and the report says which.
+    - *Not "abandon everything"*, because what was already removed IS removed;
+      a cancelled GC run reports exactly what it did, the same honesty rule the
+      module docstring sets out for partial work.
+    - Cancellation is checked before the FIRST depot too, so a cancel that
+      lands while the job is still starting up can stop it before it touches
+      anything.
+
+    It is polled in the dry-run branch as well. A dry run reads the filesystem
+    for every depot, which on a large cache is not instant, and "cancel" must
+    not mean "cancel, unless you happened to ask for a preview".
     """
     try:
         depot_root = deletion.resolve_depot_root(cache_root)
@@ -1297,7 +1333,22 @@ def run_gc(
         # which an execute run then refused to free would be a preview of
         # something else. Predicates only read; running them changes nothing.
         dry: list[DepotGcResult] = []
-        for depot in plan.depots:
+        for index, depot in enumerate(plan.depots):
+            if should_cancel is not None and should_cancel():
+                skipped = [d.depotid for d in plan.depots[index:]]
+                logger.info(
+                    "cache-gc appid=%s dry run CANCELLED after %d depot(s); "
+                    "%d depot(s) not inspected: %s",
+                    appid, index, len(skipped), skipped,
+                )
+                return GcRunReport(
+                    appid=appid,
+                    requested_execute=False,
+                    executed=False,
+                    depots=dry,
+                    cancelled=True,
+                    skipped_depots=skipped,
+                )
             _, held_back = orphans_to_delete(depot, exclusions=exclusions)
             dry.append(
                 DepotGcResult(
@@ -1322,11 +1373,30 @@ def run_gc(
             depots=dry,
         )
 
-    results = [
-        execute_depot(depot, depot_root=depot_root, exclusions=exclusions)
-        for depot in plan.depots
-    ]
+    # A plain loop rather than the comprehension this used to be: the
+    # cancellation check has to happen BETWEEN depots, which a comprehension
+    # cannot express (WP 3.12).
+    results: list[DepotGcResult] = []
+    cancelled = False
+    skipped: list[int] = []
+    for index, depot in enumerate(plan.depots):
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            skipped = [d.depotid for d in plan.depots[index:]]
+            logger.info(
+                "cache-gc appid=%s CANCELLED after %d depot(s); %d depot(s) "
+                "not started: %s",
+                appid, index, len(skipped), skipped,
+            )
+            break
+        results.append(
+            execute_depot(depot, depot_root=depot_root, exclusions=exclusions)
+        )
 
+    # Runs for the depots that DID execute even on a cancelled run: their
+    # chunks are really gone, so every app mapped to them really does have
+    # stale SteamPrefill bookkeeping. Skipping this because the run was
+    # cancelled would leave the exact wedge ADR-0003's addendum closes.
     touched = [d.depotid for d in results if d.executed and d.chunks_gone]
     flagged = flag_needs_force_for_depots(conn, touched)
 
@@ -1336,6 +1406,8 @@ def run_gc(
         executed=True,
         depots=results,
         flagged_appids=flagged,
+        cancelled=cancelled,
+        skipped_depots=skipped,
     )
     logger.info(
         "cache-gc appid=%s finished: removed=%d chunk(s) / %d byte(s), dedupe "
@@ -1410,7 +1482,15 @@ def run_gc_job(
 
     ``apps.status`` is deliberately not touched in any branch (module
     docstring): GC does not change whether a game is filled, only how much
-    dead weight its depots carry.
+    dead weight its depots carry — and that stays true for a cancelled run.
+
+    **Cancellation (WP 3.12) beats both other outcomes when it happened.** A
+    run stopped between depots is reported ``cancelled``, not ``done`` (it did
+    not finish what it planned) and not ``error`` (nothing went wrong — an
+    operator asked it to stop). If the depots it DID process also produced
+    problems, the log still lists every one of them; the status just names the
+    reason the run ended, and "an operator stopped it" is the more informative
+    of the two.
     """
     job_id = int(job["id"])  # type: ignore[arg-type]
     appid = int(job["appid"])  # type: ignore[arg-type]
@@ -1431,6 +1511,14 @@ def run_gc_job(
             # WP 3.8b: the configured grace window, applied to dry runs and
             # execute runs alike so the preview matches what would happen.
             exclusions=grace_window_exclusions(settings),
+            # WP 3.12: cooperative cancellation. Read from the job row on the
+            # worker's own connection (thread-confined, same as every other
+            # use of `conn` in here) between depots. Only 'cancel' counts —
+            # a GC job can never carry a 'pause' request (the endpoint refuses
+            # to pause GC), and an unrecognized value must not stop a run.
+            should_cancel=lambda: (
+                jobs.read_stop_request(conn, job_id) == jobs.STOP_REQUEST_CANCEL
+            ),
         )
     except Exception:
         # Last-resort net, same shape as the prefill path's. A crash here has
@@ -1452,7 +1540,10 @@ def run_gc_job(
     if size_cache is not None and report.bytes_freed:
         size_cache.invalidate()
 
-    status = jobs.STATUS_DONE if report.ok else jobs.STATUS_ERROR
+    if report.cancelled:
+        status = jobs.STATUS_CANCELLED
+    else:
+        status = jobs.STATUS_DONE if report.ok else jobs.STATUS_ERROR
     jobs.finish_job(conn, job_id, status, report.log_text())
     logger.info(
         "GC job %s for appid %s finished '%s' (%s; %d byte(s) freed)",

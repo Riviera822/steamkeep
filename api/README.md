@@ -100,6 +100,44 @@ Copy `.env.example` to `.env` and adjust:
 | `VAULT_SCHEDULE_WINDOW`         | no       | *(empty — scheduler OFF)* | Daytime window the scheduler sweeps in, `HH:MM-HH:MM` **server-local** time (e.g. `09:00-17:00`, `22:00-06:00`). Unset/blank = disabled. See "Scheduler" |
 | `VAULT_SCHEDULE_INTERVAL_MINUTES` | no     | `180`        | Minimum spacing between two sweeps (plan §7's "every 3 h"); **must be > 0** |
 | `VAULT_SCHEDULE_CLIENT_STALE_DAYS` | no    | `7`          | A client whose newest agent report is older than this drops out of the sweep's target set; **must be > 0** |
+| `VAULT_AUTO_GC`                 | no       | `off`        | `off` \| `dry-run` \| `execute` — queue a GC job after a prefill that actually **updated** something (WP 3.12). See "Job control → Auto-GC" |
+
+**All eight numeric settings are parsed strictly (WP 3.12).** Six take a whole
+number (`VAULT_PREFILL_TIMEOUT_SECONDS`, `VAULT_AGENT_REPORT_KEEP`,
+`VAULT_MANIFEST_KEEP`, `VAULT_GC_GRACE_DAYS`,
+`VAULT_SCHEDULE_INTERVAL_MINUTES`, `VAULT_SCHEDULE_CLIENT_STALE_DAYS`) and two
+take a decimal (`VAULT_WORKER_POLL_SECONDS`, `VAULT_SIZE_CACHE_TTL`). Each
+family goes through exactly one validator, with the same house rule:
+
+| | Accepted grammar | Examples that pass | Examples that are now refused |
+|---|---|---|---|
+| integers (`_env_int`) | ASCII digits only | `7`, `14400` | `" 7 "`, `"+7"`, `"-7"`, `"1_0"`, `"٧"`, `"0x7"`, `"1.5"` |
+| decimals (`_env_float`) | ASCII digits, optionally **one** `.` with digits on **both** sides | `60`, `1.0`, `0.25`, `3.5` | `" 1.5 "`, `"+1.5"`, `"1_0"`, `"٧"`, `"1e3"`, `".5"`, `"5."`, `"1,5"`, **`"nan"`**, **`"inf"`** |
+
+No signs, no whitespace, no underscores, no exponents, no thousands
+separators, no non-ASCII digits. Write `0.5`, not `.5`.
+
+**Why this is not pedantry.** Python's `int()`/`float()` are far more
+permissive than anyone configuring a service expects — most dangerously
+`"1_0"`, which both read as **ten**. `float()` additionally accepts `"nan"` and
+`"inf"`, and `nan` is the one value that slips past a range check silently
+(`nan <= 0` is `False`). Downstream that is not harmless: a `nan`
+`VAULT_SIZE_CACHE_TTL` makes the size cache's `(now - computed_at) < ttl`
+freshness test *always false*, so every request re-walks the whole `depot/`
+tree — exactly the footgun the "`0` is rejected, there is no disable switch"
+rule below exists to prevent, reintroduced through the back door; a `nan`
+`VAULT_WORKER_POLL_SECONDS` is handed straight to `threading.Event.wait()`.
+A grammatically valid but absurdly long digit string (400 digits) also
+overflows to `inf` in `float()` and is refused explicitly.
+
+A **blank** value still means "not configured" and falls back to the default (a
+stray space after `=` in a `.env` file must not stop the service). Consequence
+worth knowing: a negative value is now reported as a *syntax* error rather than
+a range error — still loud, still at startup, and the message names the
+smallest accepted value. Range rules are unchanged and still apply after the
+grammar check (`VAULT_SIZE_CACHE_TTL=0` is still refused).
+`tests/test_config.py` parses the shipped `.env.example` and asserts every
+documented value still passes.
 
 `VAULT_API_KEY` has no default. Starting the app without it raises
 `RuntimeError` immediately (`Settings.from_env`) — this is the "fail loudly"
@@ -110,9 +148,8 @@ behavior required by the work package, verified in `tests/test_config.py`.
 `/v1/health` on a host where SteamPrefill hasn't been set up yet. A missing or
 wrong path fails the individual *job* with an actionable message
 (`tests/test_worker.py::test_missing_steamprefill_path_fails_the_job_but_not_the_app`).
-The three numeric settings (`VAULT_PREFILL_TIMEOUT_SECONDS`,
-`VAULT_WORKER_POLL_SECONDS`, `VAULT_SIZE_CACHE_TTL`) reject non-numeric and
-non-positive values loudly at startup. In particular **`VAULT_SIZE_CACHE_TTL`
+The numeric settings reject malformed and non-positive values loudly at startup
+(see the grammar table above). In particular **`VAULT_SIZE_CACHE_TTL`
 must be greater than 0**: `0` is rejected rather than accepted as "no caching",
 because a zero TTL would mean a full `depot/` tree walk on *every* request —
 a footgun on a large cache, not a feature. Set a small value (e.g. `1`) if you
@@ -138,7 +175,7 @@ where nobody is watching. The two numbers are validated even when no window is
 set, so a typo surfaces the day it is made rather than the day the scheduler
 is switched on.
 
-## Database schema (v7)
+## Database schema (v8)
 
 Created idempotently at startup by `vault_api/db.py::init_db` (safe to call
 on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
@@ -149,7 +186,7 @@ on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
 | `schema_version` | `version`                                                                                   | Single-row marker for future migrations |
 | `apps`           | `appid` (PK), `name`, `status`, `last_prefill_at`, `last_manifest_check`, `needs_force`     | One row per tracked Steam app. `needs_force` (**v5**, WP 3.4) is ADR-0006 decision 2's per-app flag — see "needs_force" below |
 | `depot_app_map`  | `depotid`, `appid`, PK `(depotid, appid)`                                                   | Depot→app mapping; a depot can map to multiple apps (shared depots, plan §4) |
-| `jobs`           | `id` (PK autoincrement), `appid`, `type`, `status`, `created_at`, `started_at`, `finished_at`, `log_excerpt`, `updated`, `up_to_date`, `summary_parse_ok`, `gc_execute` | Prefill/GC job queue (plan §3, §6). `updated`/`up_to_date`/`summary_parse_ok` (**v4**, WP 3.3) are SteamPrefill's own summary-table counters — see "Job outcome honesty" above. `gc_execute` (**v7**, WP 3.8) is the GC dry-run/execute bit: `NULL` for every non-GC job, `0` = report only, `1` = delete — see "Garbage collection" below |
+| `jobs`           | `id` (PK autoincrement), `appid`, `type`, `status`, `created_at`, `started_at`, `finished_at`, `log_excerpt`, `updated`, `up_to_date`, `summary_parse_ok`, `gc_execute`, `paused_at`, `stop_request` | Prefill/GC job queue (plan §3, §6). `updated`/`up_to_date`/`summary_parse_ok` (**v4**, WP 3.3) are SteamPrefill's own summary-table counters — see "Job outcome honesty" above. `gc_execute` (**v7**, WP 3.8) is the GC dry-run/execute bit: `NULL` for every non-GC job, `0` = report only, `1` = delete — see "Garbage collection" below. `paused_at`/`stop_request` (**v8**, WP 3.12) are job control: when the job was last suspended, and the operator's pending `cancel`/`pause` request against a *running* job — see "Job control" below |
 | `agent_reports`  | `client_id`, `reported_at`, `appids` (JSON array of ints)                                    | One row per agent report — a full installed-app-ID snapshot at that timestamp (ADR-0002: the agent is stateless/dumb, always reports the complete list). vault-api derives additions/removals by diffing the two most recent rows per `client_id` |
 | `depot_manifests` | `appid`, `containing_appid`, `depotid`, `manifestid` (TEXT), `chunk_count`, `total_bytes`, `recorded_at`, `source`, PK `(appid, depotid)` | **Latest**-known manifest state per (app, depot) — WP 3.2, ADR-0006 decision 3. See "Manifest ingestion" below |
 | `schedule_state` | `id` (PK, `CHECK (id = 1)`), `last_sweep_at`, `last_sweep_targets`, `last_sweep_enqueued` | **v6**, WP 3.5. Single-row scheduler bookkeeping: when the last sweep started (UTC) and what it did. Persisted rather than in-memory so a restart mid-window does not re-sweep — see "Scheduler" below. The two counters are `NULL` while a sweep is in flight (or if the process died during one) |
@@ -203,6 +240,18 @@ redundant `--force` run per app after the upgrade and is the safe side to
 err on for an app this code has no force-history for. Covered by
 `tests/test_db.py::test_init_db_upgrades_a_v4_database_to_v5_in_place` and
 `..._idempotent_if_called_twice`.
+
+**v7 → v8 (WP 3.12) reuses the same per-column step, with one fix.** The
+`jobs` migration loop used to hardcode `ALTER TABLE jobs ADD COLUMN <name>
+INTEGER`, which was fine while every added column was an integer. `paused_at`
+and `stop_request` are `TEXT`, so the loop now carries a type per column
+(`db._POST_V1_JOB_COLUMNS`) — otherwise an upgraded database and a freshly
+created one would report the same `schema_version` with different column
+types. Pinned by
+`tests/test_db.py::test_init_db_upgrades_a_pre_v8_database_by_adding_the_job_control_columns`
+and by `..._a_fresh_database_and_an_upgraded_one_agree_on_the_jobs_columns`,
+which takes a v1 file all the way up and compares the full column list against
+a fresh one.
 
 **Ordering fix (WP 1.5 carry-over from the WP 1.4 review):** `init_db` now
 creates only the `schema_version` table, reads the stored version, and checks
@@ -289,7 +338,7 @@ appid both saw "no row" and both inserted; the loser got
 is now `INSERT OR IGNORE` plus a conditional name `UPDATE`, pinned by
 `tests/test_mapping.py::test_concurrent_upsert_of_the_same_new_appid_does_not_500`.
 
-## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4 + 3.5 + 3.8)
+## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4 + 3.5 + 3.8 + 3.12)
 
 All routes below require `X-Api-Key` (see "Auth"). Full API table:
 `docs/PROJECT_PLAN.md` §6; the games, mapping, prefill, jobs, cache, agent and
@@ -303,9 +352,12 @@ clients rows are implemented so far.
 | GET    | `/v1/mapping`                      | Full depot→app mapping table: list of `{depotid, appid}` |
 | DELETE | `/v1/mapping/{depotid}/{appid}`    | Remove one mapping pair (correction path for the additive `PUT`, see below); `204` on success, `404` if the pair doesn't exist, `422` for non-positive ids |
 | POST   | `/v1/prefill`                      | Body `{"appids": [int, ...]}` — queue one prefill job per app id. `202` with a list of `{appid, job_id, status, deduplicated}`. `422` for an empty list, an appid `< 1`, a non-list, or an unrecognized body field |
-| GET    | `/v1/jobs`                         | Recent jobs, newest first. `?limit=` 1–200, default 20 (`422` outside that range). Omits `log_excerpt` on purpose — this is the polling list. Includes `updated`, `up_to_date`, `summary_parse_ok` (schema v4, WP 3.3 — see "Job outcome honesty" below; `null` until the job finishes or if the summary couldn't be parsed), plus `gc_execute` (schema v7, WP 3.8 — `null` for a prefill job, `false`/`true` for a GC job's mode) |
+| GET    | `/v1/jobs`                         | Recent jobs, newest first. `?limit=` 1–200, default 20 (`422` outside that range). Omits `log_excerpt` on purpose — this is the polling list. Includes `updated`, `up_to_date`, `summary_parse_ok` (schema v4, WP 3.3 — see "Job outcome honesty" below; `null` until the job finishes or if the summary couldn't be parsed), `gc_execute` (schema v7, WP 3.8 — `null` for a prefill job, `false`/`true` for a GC job's mode), plus `paused_at` and `stop_request` (schema v8, WP 3.12 — see "Job control" below) |
 | GET    | `/v1/jobs/{id}`                    | One job incl. `log_excerpt` plus the same `updated`/`up_to_date`/`summary_parse_ok`/`gc_execute` fields; `404` for an unknown id |
-| DELETE | `/v1/cache/{appid}`                | Delete this game's depot directories. `200` with `{appid, deleted_depots[], skipped_shared[], failed[], total_bytes_freed}`; `404` unknown appid or no mappings; `409` while a prefill **or GC** job for the app is queued/running; `422` for `appid < 1`; `500` if the cache-root guards refuse. See "Per-game deletion" below |
+| DELETE | `/v1/jobs/{id}`                    | **Cancel** a job (WP 3.12). `200` with `{job_id, status, outcome, detail}` — `outcome` is `"immediate"` (a queued/paused job, finalized here) or `"requested"` (a running job; the worker stops it, keep polling). `404` unknown id; `409` if the job already finished. See "Job control" below |
+| POST   | `/v1/jobs/{id}/pause`              | **Pause** a running **prefill** job. Same response shape; `outcome` is always `"requested"`. `404` unknown id; `409` for a GC job or any job that is not `running` |
+| POST   | `/v1/jobs/{id}/resume`             | **Resume** a paused job — back to `queued`, keeping its original job id, so it runs *before* anything enqueued while it was paused. `outcome: "resumed"`. `404` unknown id; `409` if the job is not `paused` |
+| DELETE | `/v1/cache/{appid}`                | Delete this game's depot directories. `200` with `{appid, deleted_depots[], skipped_shared[], failed[], total_bytes_freed}`; `404` unknown appid or no mappings; `409` while a prefill **or GC** job for the app is queued/running/**paused** (WP 3.12); `422` for `appid < 1`; `500` if the cache-root guards refuse. See "Per-game deletion" below |
 | POST   | `/v1/cache/{appid}/gc`             | Queue a garbage-collection job. Body optional; `{"execute": true}` (a literal JSON boolean) is the only way to delete — **dry run by default**. `202` with `{appid, job_id, status, type, mode, execute, deduplicated}`; `404` unknown appid or no mappings; `422` for `appid < 1`, a non-boolean `execute`, or an unrecognized body field. See "Garbage collection" below |
 | GET    | `/v1/cache/summary`                | `total_bytes` (disk usage of `depot/`, each depot counted once), `top_consumers` (top 10 `{appid, name, size_bytes}`, largest first), `unmapped_depots` (`{count, size_bytes}` for depot dirs on disk with no mapping row for any app), `free_disk_bytes` (free space on the cache filesystem, `null` if undeterminable) |
 | POST   | `/v1/agent/installed`              | Body `{"client_id": str, "appids": [int, ...]}` — store one **full-list** snapshot of a client's installed games. `200` with `{client_id, received, added, removed, first_report}`; `422` for a bad `client_id` (empty, > 64 chars, control characters, surrounding whitespace, `.`/`..`), an appid `< 1` or a boolean, a missing/non-list `appids`, more than 10 000 ids, or an unrecognized body field. See "Agent reports" below |
@@ -319,7 +371,8 @@ clients rows are implemented so far.
 - `POST /v1/prefill` only *enqueues* and returns `202` immediately — the app
   polls `GET /v1/jobs/{id}` for the outcome.
 - **Exactly one job runs at a time** (plan §3), FIFO by job id.
-- **Dedupe:** if an app already has a `queued` or `running` job, that job is
+- **Dedupe:** if an app already has an in-flight job (`queued`, `running` or —
+  since WP 3.12 — `paused`), that job is
   returned with `"deduplicated": true` instead of a second one being stacked.
   Duplicate app ids *within one body* fall out of the same rule — the response
   keeps one entry per requested id, in request order, so the repeat points at
@@ -328,8 +381,10 @@ clients rows are implemented so far.
   normal case. A *finished* job never blocks a new one.
 - Enqueueing an app that has never been seen creates its `apps` row (status
   `idle`) so `GET /v1/games/{appid}` answers 200 while the job is still queued.
-- Statuses: jobs are `queued` → `running` → `done` | `error`; `apps.status`
-  follows `idle` → `running` → `done` | `error` (plan §3). `last_prefill_at` is
+- Statuses: jobs are `queued` → `running` → `done` | `error` | `cancelled`,
+  with a non-terminal `paused` detour (WP 3.12 — see "Job control" below);
+  `apps.status` follows `idle` → `running` → `done` | `error` (plan §3) and
+  gains **no** new values. `last_prefill_at` is
   written **only** on success. **A successful (exit `0`) SteamPrefill run is
   not automatically `'done'`** — see "Job outcome honesty" below for the
   summary-table-driven rule (WP 3.3, ADR-0006 decision 1) that can still end
@@ -712,6 +767,243 @@ fallback endpoint (typos are the expected failure mode, not malice):
 - `MappingUpsertRequest` uses `model_config = ConfigDict(extra="forbid")` —
   an unrecognized body field (e.g. a typo'd `appId`) `422`s instead of
   silently upserting with `app_name` defaulting to `None`.
+
+## Job control — cancel / pause / resume (WP 3.12)
+
+Three endpoints, one mechanism, and one decision that the UI has to know
+about (see "The worker slot" below).
+
+| Endpoint | On a `queued` job | On a `running` job | On a `paused` job | On a finished job |
+|---|---|---|---|---|
+| `DELETE /v1/jobs/{id}` | cancelled immediately, never runs | `stop_request='cancel'`; the worker stops it | cancelled immediately | `409` |
+| `POST /v1/jobs/{id}/pause` | `409` | prefill: `stop_request='pause'`; GC: `409` | `409` (already paused) | `409` |
+| `POST /v1/jobs/{id}/resume` | `409` | `409` | back to `queued`, same job id | `409` |
+
+`404` for an unknown job id everywhere. All three answer `200` with
+`{job_id, status, outcome, detail}`; a client that reads only `outcome` always
+knows whether it still has to poll (`"requested"`) or not (`"immediate"` /
+`"resumed"`).
+
+### The status model, and the audit behind it
+
+Two new job statuses. `apps.status` gains **none** — it keeps exactly the four
+plan-§3 values.
+
+| Status | Terminal? | In `ACTIVE_STATUSES`? | Means |
+|---|---|---|---|
+| `cancelled` | yes | no | An operator stopped this job. Deliberately **not** `error`: stopping something on purpose is not a failure, and `error` has to keep meaning "something went wrong" |
+| `paused` | no | **yes** | The subprocess was terminated and the job is parked until `resume` |
+
+The shape above is the result of auditing every existing consumer of
+`jobs.status`, not of picking names. Each row is pinned by a named test in
+`tests/test_job_control.py`:
+
+1. **`ACTIVE_STATUSES`** — `paused` is in, `cancelled` is out. The decisive
+   consumer is `deletion._has_cache_content` (ADR-0003 addendum): a paused
+   prefill has, by construction, written chunks to disk, so its app **must**
+   count as "has cache content" — otherwise a co-owner's deletion could take a
+   last-remnant shared depot out from under the very download the pause exists
+   to preserve. Fail-closed, so `paused` counts.
+2. **Dedupe** (`enqueue_prefill`, `enqueue_gc`) follows from (1): a second
+   `POST /v1/prefill` for an app with a paused job returns *that* job with
+   `deduplicated: true` rather than stacking a rival that would re-download
+   what the paused one is holding progress for. Honest consequence: a paused
+   job an operator forgets about keeps deduplicating. The escape hatch is
+   `DELETE /v1/jobs/{id}`, which cancels a paused job immediately.
+3. **`DELETE /v1/cache/{appid}` → `409`** also follows, with its own reason
+   in the message: there is no write in flight, but deleting the depots would
+   throw away the partial download resume continues from. Cancel the job, then
+   delete.
+4. **`claim_next_job`** still claims `queued` only — a paused job re-enters the
+   queue exclusively through `resume`.
+5. **`recover_stale_jobs`** still recovers `running` only, and that is
+   load-bearing: **a paused job must survive an API restart and stay
+   resumable.** Widening this query would eat every paused job on every
+   container restart (mutation-tested).
+6. **`needs_force`** (ADR-0006 decision 2) is keyed on *outcomes*, not
+   statuses: `clear_needs_force_if_unchanged` is reached only from the one
+   successful branch in `worker.py`, so cancel and pause leave the flag exactly
+   as the deletion path or the schema default set it. Correct rather than
+   merely convenient — the run did not complete, so whatever made it forced
+   still holds.
+
+`apps.status` after a cancel or pause goes back to **`idle`** (conditionally,
+only if it is currently `running`). Not `error`, because nothing failed and the
+red badge must keep its meaning; not left at `running`, because nothing is
+running and that is the permanent-stale-badge bug `recover_stale_jobs` exists
+to prevent. `last_prefill_at` is untouched, so an app filled earlier still
+reports when. A **queued** job that is cancelled never touches `apps.status` at
+all — it never set it, so cancelling a queued re-check cannot grey out a filled
+game.
+
+### Pause = terminate. Resume = re-run. The cache is the progress store.
+
+**There is no wire protocol to SteamPrefill, because SteamPrefill has no pause
+signal.** Pausing terminates the subprocess; resuming runs it again from the
+start. That sounds wasteful and is not, for one measured reason: every chunk
+the first attempt already stored is served back by vault-core as a **local
+HIT** (Phase 0 / ADR-0001: ~120× faster than a miss), so a re-run replays at
+disk speed rather than re-downloading. **The cache itself is the progress
+store** — vault-api stores no byte offsets, no resume tokens and no partial
+state of its own, and therefore has none to get wrong.
+
+SteamPrefill's own `Config/successfullyDownloadedDepots.json` additionally
+still lists the depots the interrupted run *completed*, which is true — those
+depots really are done. A **non-forced** resume therefore skips them outright,
+which is exactly the behaviour wanted. A **forced** resume (the app had
+`needs_force = 1`, e.g. a first fill or a post-deletion refill) re-requests
+everything instead, and is still cheap for the same HIT reason.
+
+`_stop_process` terminates **and waits** (then kills and waits again), so by
+the time a job row says `paused` the child has been reaped: a paused job never
+has an orphan SteamPrefill behind it. Measured directly in
+`test_terminating_the_child_really_reaps_it` against a real long-lived child
+(not the `.cmd` stub shim, whose known Windows artifact is that terminating it
+leaves the Python grandchild alive).
+
+### The worker slot — a paused job does NOT hold it
+
+**Decision: pause RELEASES the single worker slot, and resume goes to the front
+of the queue.** This diverges from the UI mockup, which describes a paused job
+as holding the slot with the queue waiting behind it — see the work-package
+report; the UI should follow this behaviour.
+
+Reasoning:
+
+- Pause already terminated the subprocess, so there is nothing left to hold.
+  "Holding the slot" would mean parking the *worker thread* on a job that owns
+  no process, no file handle and no lock.
+- vault-api runs exactly one worker (plan §3). A paused 60 GB download that
+  kept the slot would starve everything else indefinitely — every other
+  prefill, and GC. That is a worse failure mode than anything it buys.
+- It would also break shutdown: `worker.stop()` joins the thread, and a thread
+  blocked waiting for a human to press resume does not come back.
+- It cannot survive a restart anyway. The paused state has to live in the
+  database to be resumable at all, and once it does, an in-memory "slot held"
+  is state that exists only until the next `docker restart`.
+
+Resume needs no priority column to be a priority: the queue is FIFO by
+`jobs.id` and a resumed job keeps the id it was created with, which is by
+construction older than everything enqueued while it was paused. Flipping the
+status back to `queued` therefore puts it at the **front**. (Creating a new job
+row on resume — the obvious alternative — would silently do the opposite; a
+test mutation-pins it.)
+
+### What a cancelled or paused prefill does NOT do
+
+A run stopped part-way is not evidence, and every consumer of "evidence"
+already lives inside the success branch of `worker.py`. This package pinned
+that rather than changing it:
+
+- **No summary parse.** `updated`, `up_to_date` and `summary_parse_ok` stay
+  `NULL` ("not applicable"). SteamPrefill prints its counter table at the *end*
+  of a run, so a terminated run has either no table or one describing an
+  earlier state — and `0 / 0` in particular has the specific "app not owned"
+  meaning (ADR-0006 decision 1) that a stopped run has not earned.
+- **No depot mapping.** `apply_observed_mapping`'s replace-semantics
+  (ADR-0003 decision 3) would delete good rows on the strength of a partial
+  observation.
+- **No manifest ingestion.** `ingest_after_prefill` is inside the success
+  branch, so a run killed mid-depot can never ingest a half-written `.bin`.
+  The test plants a *valid* `.bin` in the temp-cache directory before the run
+  and asserts `depot_manifests` is still empty afterwards, so this is a
+  statement about a file that really was there to ingest.
+- **No `needs_force` clear** (item 6 above).
+
+What *does* survive is the only thing that should: the bytes already written to
+the cache. Nothing is deleted or rolled back. Honest limit, unchanged from
+every other failed-run path: a **first-ever** prefill that is cancelled leaves
+depot directories with no mapping rows, so those bytes show up under
+`unmapped_depots` in `GET /v1/cache/summary` until a later successful run for
+that app attributes them.
+
+**A stop request that arrives too late loses.** `_wait_for_process` checks
+`process.poll()` first on every tick, so a run that finished on its own keeps
+its real outcome and the log notes that the request was not applied — rewriting
+a completed download as `cancelled` would discard the mapping and manifest work
+it earned. Cancelling an already-finished job is a `409` for the same reason.
+
+**Shutdown beats a pending pause.** If the container is going down and a pause
+is pending, the run ends `aborted` (job `error`, which `recover_stale_jobs`
+handles) rather than being parked at `paused` with no process left to honour
+the resume.
+
+### Cancelling a GC job — cooperative, between depots
+
+GC cancellation is checked **between depots**, including before the first one,
+and in dry runs as well as execute runs. Consequences, stated rather than
+hidden:
+
+- The depot being processed when the cancel lands **is finished**. One depot is
+  bounded work, and stopping half way through it would leave the least useful
+  state of all: some of that depot's orphans gone, some not.
+- Depots not yet started lose nothing at all, and the report names them
+  (`skipped_depots`).
+- What was already removed stays removed and is reported exactly, following the
+  module's existing honesty rule for partial work.
+- The job ends **`cancelled`**, not `done` (it did not finish what it planned)
+  and not `error` (nothing went wrong). If the depots that *did* run also had
+  problems, the log still lists every one of them.
+- `needs_force` is still set for the apps mapped to depots the cancelled run
+  actually took chunks from — those bytes really are gone, so their owners
+  really do have stale SteamPrefill bookkeeping.
+
+Pausing a GC job is a `409`: a GC run is short and rebuilds its plan from
+scratch on every execution, so "pause" would mean "throw the plan away and
+build a new one later", which is what cancel-and-requeue already says honestly.
+
+### How the request reaches the worker
+
+`jobs.stop_request` (schema v8) — a database column, not an in-process event.
+The request arrives on an HTTP thread and has to reach the worker thread, which
+is inside a `subprocess` poll loop. A column needs no wiring between the two
+(the worker already holds a connection), is visible to an operator with
+`sqlite3`, and cannot be lost by the two sides disagreeing about which job id
+is current. The worker re-reads it on its existing 0.2 s subprocess poll tick
+(one primary-key `SELECT`; WAL readers never block) and between GC depots.
+Every transition to a terminal status clears it (`jobs.finish_job`), so a job
+never sits at "cancelling…" forever.
+
+Every state transition — cancel, pause, resume — is decided inside a single
+`BEGIN IMMEDIATE` transaction, the same write lock `claim_next_job` takes. So
+"cancelled a queued job the worker was claiming at that exact moment" resolves
+one way or the other and never both: either the job is cancelled and never
+claimed, or it is running and the cancel becomes a `stop_request` the worker
+honours.
+
+### Auto-GC (`VAULT_AUTO_GC`)
+
+`off` (default) | `dry-run` | `execute`. After a **successful** prefill whose
+parsed summary reports `updated > 0`, vault-api queues a GC job for that app in
+the configured mode.
+
+Three conditions, all required, each a decision:
+
+1. The setting is not `off`. A feature that can delete files does not switch
+   itself on, and the `dry-run` rung exists so an operator can watch what
+   automatic collection *would* reclaim before trusting it.
+2. The prefill reached the **successful** branch. A failed, aborted, unowned,
+   cancelled or paused run tells you nothing about what is now orphaned.
+3. The summary **parsed** and `updated > 0`. Orphans are what a game *update*
+   leaves behind. A run that only confirmed "up to date" changed nothing, and
+   queueing a full depot scan after every routine staleness check would turn
+   ADR-0006's ~3 s no-op into real work on every sweep tick. An unparseable
+   table is not evidence of an update either.
+
+No new mechanism: it calls the same `jobs.enqueue_gc` the endpoint does, so the
+per-(app, mode) dedupe rule applies unchanged — an operator's pending GC job
+for that app in the same mode absorbs the automatic one instead of stacking a
+second scan. The call is wrapped in its own `try`, because a follow-up job that
+cannot be queued must not flip a genuinely successful prefill to `error` (same
+reasoning as the manifest-ingestion call next to it). What happened is written
+into the prefill job's own `log_excerpt`.
+
+**`execute` combines with the grace window.** `VAULT_GC_GRACE_DAYS` still
+applies, so the chunks the prefill just stored are protected by their own store
+time and are not collected out from under the run that fetched them. (They are
+also in the current manifest, so GC would keep them anyway — the window is the
+belt to that suspenders. It matters for the *other* content in those depots:
+beta-branch and store-on-miss chunks keep their fortnight.)
 
 ## Per-game size calculation and cache summary (WP 1.5)
 

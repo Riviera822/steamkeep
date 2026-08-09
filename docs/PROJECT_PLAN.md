@@ -393,10 +393,19 @@ parallel/serial decisions, merge discipline, open user decisions):
       exits 0 for unowned apps → green badge for a never-cached game)
       *(WP 3.3: summary parsing with digits-and-separators row detection,
       cp850-safe decode chain, 0/0 ⇒ error)*
-- [ ] Job control: pause/resume/cancel (`DELETE /v1/jobs/{id}`,
+- [x] Job control: pause/resume/cancel (`DELETE /v1/jobs/{id}`,
       pause = terminate the SteamPrefill subprocess, resume = re-run —
       already-cached chunks replay as disk-speed HITs, so the cache
       itself is the progress store; user feature decision 2026-08-06)
+      *(WP 3.12: distinct 'cancelled' terminal + 'paused' in
+      ACTIVE_STATUSES (a paused prefill keeps protecting its shared
+      depots), stop_request as a DB column cleared at every
+      terminal/parking transition, pause RELEASES the worker slot with
+      resume priority via the original job id (documented mockup
+      divergence — UI follows backend), cooperative GC cancellation,
+      VAULT_AUTO_GC hook, strict numeric env grammar (6 int + 2 float
+      settings, nan/inf rejected); schema v8; suite 895 green; Opus
+      PASS + Fable PASS)*
 - [x] Manifest comparison (stale detection)
       *(ADR-0006: staleness via non-forced prefill (Tier 1), depot_manifests
       latest-per-(app,depot) from WP 3.2 ingestion, needs_force lifecycle

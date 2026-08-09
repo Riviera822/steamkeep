@@ -119,6 +119,14 @@ These are not style preferences; each entry cost a review round to learn.
   strip + isascii + isdigit validation (WP 1.6/2.1).
 - Pydantic lax mode coerces `true`→1 on int fields — reject bools
   explicitly on any id field (WP 2.4).
+- `re`'s `\d` matches Unicode digits unless `re.ASCII` is passed — strict
+  numeric env/config grammars are safer as `isascii()+isdigit()` on the
+  partitioned string; and a long digit string is a VALID decimal literal
+  that `float()` rounds to `inf`, so check `math.isfinite` after
+  conversion (WP 3.12).
+- One-shot request flags (stop/cancel columns) must be cleared at EVERY
+  terminal or parking transition (finish, park, resume) — a stale flag
+  re-fires on the next run of the same row (WP 3.12).
 - envsubst on config templates: a colliding env var REPLACES runtime
   variables with its value (not blanks) and `nginx -t` still passes —
   always restrict with an allowlist filter (WP 1.9).
