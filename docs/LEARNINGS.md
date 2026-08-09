@@ -149,6 +149,13 @@ These are not style preferences; each entry cost a review round to learn.
 - One-shot request flags (stop/cancel columns) must be cleared at EVERY
   terminal or parking transition (finish, park, resume) — a stale flag
   re-fires on the next run of the same row (WP 3.12).
+- Cursor-based tailers: "no newline in the batch" conflates a partial
+  tail (wait) with an oversized line (skip past the next newline, loudly)
+  — a full-sized batch can never become a valid line, and treating it as
+  a tail stalls the sweep silently forever. Never advance a cursor past
+  unterminated bytes (half-written lines would parse as fresh records),
+  and never let a progress log line fire when nothing was consumed
+  (WP 3.11).
 - envsubst on config templates: a colliding env var REPLACES runtime
   variables with its value (not blanks) and `nginx -t` still passes —
   always restrict with an allowlist filter (WP 1.9).

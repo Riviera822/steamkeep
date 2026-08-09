@@ -30,6 +30,7 @@ from vault_api.routers import (
     jobs,
     mapping,
     schedule,
+    stats,
 )
 from vault_api.scheduler import PrefillScheduler
 from vault_api.sizes import SizeCache
@@ -82,10 +83,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # started when a window is configured — an unset VAULT_SCHEDULE_WINDOW
     # means "off", the safe default, and then no thread exists at all.
     scheduler: PrefillScheduler = app.state.scheduler
+    if scheduler.thread_needed:
+        scheduler.start()
     if scheduler.enabled:
         window = settings.schedule_window
         assert window is not None  # implied by scheduler_enabled
-        scheduler.start()
         logger.info(
             "Scheduler enabled: window %s (server-local time%s), sweeping "
             "every %d minute(s); clients silent for more than %d day(s) are "
@@ -101,6 +103,31 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             "only run when something asks for them (POST /v1/prefill). Set a "
             "window like '09:00-17:00' to have vault-api keep the gaming "
             "machines' installed apps current on its own."
+        )
+
+    # WP 3.11 (ADR-0008). Independent of the window above: the cache-event
+    # sweep rides the same thread but on its own interval and with no window
+    # gate at all (it owns the event log's rotation and feeds bypass
+    # detection, both of which break if the log goes unread for hours).
+    if settings.event_sweep_enabled:
+        logger.info(
+            "Cache-event sweep enabled: reading %s every %d minute(s). "
+            "Miss-triggered prefill is %s (cooldown %d min, at most %d "
+            "enqueue(s) per sweep). Bypass detection stays silent until the "
+            "feed is %d day(s) old.",
+            settings.event_log_path,
+            settings.event_sweep_interval_minutes,
+            "ON" if settings.miss_trigger_enabled else "OFF",
+            settings.miss_trigger_cooldown_minutes,
+            settings.miss_trigger_max_per_sweep,
+            settings.bypass_window_days,
+        )
+    else:
+        logger.info(
+            "Cache-event sweep disabled (VAULT_EVENT_LOG_PATH is unset). No "
+            "per-client hit statistics, no bypass detection and no "
+            "miss-triggered prefill. Point it at vault-core's structured "
+            "event log (VAULT_EVENT_LOG on that side) to switch it on."
         )
 
     try:
@@ -146,4 +173,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agent.router)
     app.include_router(clients.router)
     app.include_router(schedule.router)
+    app.include_router(stats.router)
     return app

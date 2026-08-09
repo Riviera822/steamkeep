@@ -101,13 +101,24 @@ Copy `.env.example` to `.env` and adjust:
 | `VAULT_SCHEDULE_INTERVAL_MINUTES` | no     | `180`        | Minimum spacing between two sweeps (plan §7's "every 3 h"); **must be > 0** |
 | `VAULT_SCHEDULE_CLIENT_STALE_DAYS` | no    | `7`          | A client whose newest agent report is older than this drops out of the sweep's target set; **must be > 0** |
 | `VAULT_AUTO_GC`                 | no       | `off`        | `off` \| `dry-run` \| `execute` — queue a GC job after a prefill that actually **updated** something (WP 3.12). See "Job control → Auto-GC" |
+| `VAULT_EVENT_LOG_PATH`          | no       | *(empty — sweep OFF)* | Path to vault-core's structured cache-event log (WP 3.10). Unset/blank = the whole cache-event feature is off. See "Cache-event sweep" |
+| `VAULT_EVENT_SWEEP_INTERVAL_MINUTES` | no  | `5`          | Minutes between sweeps of that log; **must be > 0**. Deliberately independent of `VAULT_SCHEDULE_WINDOW` |
+| `VAULT_MISS_TRIGGER_COOLDOWN_MINUTES` | no | `60`         | Per-app cooldown for miss-triggered prefill; **`0` turns the trigger OFF** (statistics keep running); **must be >= 0** |
+| `VAULT_MISS_TRIGGER_MAX_PER_SWEEP` | no    | `5`          | Hard cap on miss-triggered enqueues per sweep (storm backstop); **must be > 0** |
+| `VAULT_BYPASS_WINDOW_DAYS`      | no       | `3`          | Cache-log silence beyond this many days makes a still-reporting client `bypass_suspected`; **must be > 0** |
+| `VAULT_CLIENT_STATS_KEEP`       | no       | `48`         | Per-sweep statistics rows kept per client address; **must be > 0** |
+| `VAULT_EVENT_LOG_MAX_BYTES`     | no       | `67108864`   | Truncate the event log at/above this size once fully swept; `0` = never truncate; **must be >= 0** |
 
-**All eight numeric settings are parsed strictly (WP 3.12).** Six take a whole
-number (`VAULT_PREFILL_TIMEOUT_SECONDS`, `VAULT_AGENT_REPORT_KEEP`,
+**All fourteen numeric settings are parsed strictly (WP 3.12).** Twelve take a
+whole number (`VAULT_PREFILL_TIMEOUT_SECONDS`, `VAULT_AGENT_REPORT_KEEP`,
 `VAULT_MANIFEST_KEEP`, `VAULT_GC_GRACE_DAYS`,
-`VAULT_SCHEDULE_INTERVAL_MINUTES`, `VAULT_SCHEDULE_CLIENT_STALE_DAYS`) and two
-take a decimal (`VAULT_WORKER_POLL_SECONDS`, `VAULT_SIZE_CACHE_TTL`). Each
-family goes through exactly one validator, with the same house rule:
+`VAULT_SCHEDULE_INTERVAL_MINUTES`, `VAULT_SCHEDULE_CLIENT_STALE_DAYS`,
+and WP 3.11's `VAULT_EVENT_SWEEP_INTERVAL_MINUTES`,
+`VAULT_MISS_TRIGGER_COOLDOWN_MINUTES`, `VAULT_MISS_TRIGGER_MAX_PER_SWEEP`,
+`VAULT_BYPASS_WINDOW_DAYS`, `VAULT_CLIENT_STATS_KEEP`,
+`VAULT_EVENT_LOG_MAX_BYTES`) and two take a decimal
+(`VAULT_WORKER_POLL_SECONDS`, `VAULT_SIZE_CACHE_TTL`). Each family goes through
+exactly one validator, with the same house rule:
 
 | | Accepted grammar | Examples that pass | Examples that are now refused |
 |---|---|---|---|
@@ -175,7 +186,7 @@ where nobody is watching. The two numbers are validated even when no window is
 set, so a typo surfaces the day it is made rather than the day the scheduler
 is switched on.
 
-## Database schema (v8)
+## Database schema (v9)
 
 Created idempotently at startup by `vault_api/db.py::init_db` (safe to call
 on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
@@ -187,9 +198,13 @@ on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
 | `apps`           | `appid` (PK), `name`, `status`, `last_prefill_at`, `last_manifest_check`, `needs_force`     | One row per tracked Steam app. `needs_force` (**v5**, WP 3.4) is ADR-0006 decision 2's per-app flag — see "needs_force" below |
 | `depot_app_map`  | `depotid`, `appid`, PK `(depotid, appid)`                                                   | Depot→app mapping; a depot can map to multiple apps (shared depots, plan §4) |
 | `jobs`           | `id` (PK autoincrement), `appid`, `type`, `status`, `created_at`, `started_at`, `finished_at`, `log_excerpt`, `updated`, `up_to_date`, `summary_parse_ok`, `gc_execute`, `paused_at`, `stop_request` | Prefill/GC job queue (plan §3, §6). `updated`/`up_to_date`/`summary_parse_ok` (**v4**, WP 3.3) are SteamPrefill's own summary-table counters — see "Job outcome honesty" above. `gc_execute` (**v7**, WP 3.8) is the GC dry-run/execute bit: `NULL` for every non-GC job, `0` = report only, `1` = delete — see "Garbage collection" below. `paused_at`/`stop_request` (**v8**, WP 3.12) are job control: when the job was last suspended, and the operator's pending `cancel`/`pause` request against a *running* job — see "Job control" below |
-| `agent_reports`  | `client_id`, `reported_at`, `appids` (JSON array of ints)                                    | One row per agent report — a full installed-app-ID snapshot at that timestamp (ADR-0002: the agent is stateless/dumb, always reports the complete list). vault-api derives additions/removals by diffing the two most recent rows per `client_id` |
+| `agent_reports`  | `client_id`, `reported_at`, `appids` (JSON array of ints), `source_addr`                     | One row per agent report — a full installed-app-ID snapshot at that timestamp (ADR-0002: the agent is stateless/dumb, always reports the complete list). vault-api derives additions/removals by diffing the two most recent rows per `client_id`. `source_addr` (**v9**, WP 3.11) is the address the report arrived FROM — the only key correlating a `client_id` with the event log's addresses; `NULL` for pre-v9 rows, which is why such a client is never `bypass_suspected` |
 | `depot_manifests` | `appid`, `containing_appid`, `depotid`, `manifestid` (TEXT), `chunk_count`, `total_bytes`, `recorded_at`, `source`, PK `(appid, depotid)` | **Latest**-known manifest state per (app, depot) — WP 3.2, ADR-0006 decision 3. See "Manifest ingestion" below |
 | `schedule_state` | `id` (PK, `CHECK (id = 1)`), `last_sweep_at`, `last_sweep_targets`, `last_sweep_enqueued` | **v6**, WP 3.5. Single-row scheduler bookkeeping: when the last sweep started (UTC) and what it did. Persisted rather than in-memory so a restart mid-window does not re-sweep — see "Scheduler" below. The two counters are `NULL` while a sweep is in flight (or if the process died during one) |
+| `event_sweep_state` | `id` (PK, `CHECK (id = 1)`), `cursor_offset`, `first_sweep_at`, `last_sweep_at`, `last_rotated_at`, `lines_read_total`, `lines_skipped_total`, `last_lines`, `last_skipped`, `last_enqueued`, `last_dropped_by_cap`, `truncate_denied_count`, `last_truncate_denied_at`, `oversized_skips_total`, `last_oversized_at` | **v9**, WP 3.11. Single-row cache-event sweep bookkeeping. `cursor_offset` is the durable contract (each line read once); `first_sweep_at` is how bypass detection knows how long the feed has been watched; `truncate_denied_count` records that the sweeper may read the log but not rotate it; `oversized_skips_total` records a newline-free region longer than a read batch having to be discarded. See "Cache-event sweep" below |
+| `client_cache_stats` | `client_addr`, `window_at`, `requests`, `hits`, `misses`, `bypasses`, `errors`, `bytes_served`, `last_seen`, PK `(client_addr, window_at)` | **v9**, WP 3.11. One row per client address per sweep window (plan §5/§6 "per-client hit stats"). `requests = hits + misses + bypasses + errors` by construction; the three cache counters and `bytes_served` include **2xx responses only** (event-log field 9). Retention: `VAULT_CLIENT_STATS_KEEP` windows per address |
+| `depot_miss_stats` | `depotid` (PK), `miss_count`, `mapped`, `first_seen`, `last_seen`   | **v9**, WP 3.11. Which depots are being MISSed, and whether a mapping existed at the last sighting. ADR-0008's "misses on unmapped depots are counted but trigger nothing" is what this table counts. Bounded to `event_sweep.MAX_DEPOT_MISS_ROWS` (500) least-recently-seen-first |
+| `miss_trigger_state` | `appid` (PK), `last_triggered_at`, `trigger_count`                | **v9**, WP 3.11. The miss trigger's per-app cooldown, persisted so a restart cannot become "re-trigger everything that misses next" |
 
 Indexes beyond the primary keys: `idx_depot_app_map_appid` on
 `depot_app_map(appid)` (plan §4's main lookup direction is appid → depots,
@@ -252,6 +267,21 @@ types. Pinned by
 and by `..._a_fresh_database_and_an_upgraded_one_agree_on_the_jobs_columns`,
 which takes a v1 file all the way up and compares the full column list against
 a fresh one.
+
+**v8 → v9 (WP 3.11) is a mix of both mechanisms, which is worth naming.** The
+four new tables (`event_sweep_state`, `client_cache_stats`, `depot_miss_stats`,
+`miss_trigger_state`) are the *v6 situation* — plain `CREATE TABLE IF NOT
+EXISTS`, so an older database simply gains four empty tables and needs no step.
+`agent_reports.source_addr` is the *v4/v5/v8 situation* — an existing
+`agent_reports` table lacks the column and `CREATE TABLE IF NOT EXISTS` is a
+no-op against it — so it gets a third per-column `ALTER` step,
+`db._add_missing_agent_report_columns`, carrying an explicit `TEXT` type for
+the reason WP 3.12 discovered (a hardcoded type gives an upgraded database a
+different column affinity from a fresh one at the same `schema_version`). The
+column is nullable with **no default**: a report stored before v9 has no
+recorded address and there is no honest value to invent, so `NULL` means
+"unknown" and every consumer treats unknown as "cannot correlate, therefore
+cannot accuse".
 
 **Ordering fix (WP 1.5 carry-over from the WP 1.4 review):** `init_db` now
 creates only the `schema_version` table, reads the stored version, and checks
@@ -338,11 +368,11 @@ appid both saw "no row" and both inserted; the loser got
 is now `INSERT OR IGNORE` plus a conditional name `UPDATE`, pinned by
 `tests/test_mapping.py::test_concurrent_upsert_of_the_same_new_appid_does_not_500`.
 
-## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4 + 3.5 + 3.8 + 3.12)
+## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4 + 3.5 + 3.8 + 3.11 + 3.12)
 
 All routes below require `X-Api-Key` (see "Auth"). Full API table:
-`docs/PROJECT_PLAN.md` §6; the games, mapping, prefill, jobs, cache, agent and
-clients rows are implemented so far.
+`docs/PROJECT_PLAN.md` §6; the games, mapping, prefill, jobs, cache, agent,
+clients, schedule and stats rows are implemented so far.
 
 | Method | Endpoint                          | Purpose |
 |--------|-------------------------------------|---------|
@@ -361,8 +391,9 @@ clients rows are implemented so far.
 | POST   | `/v1/cache/{appid}/gc`             | Queue a garbage-collection job. Body optional; `{"execute": true}` (a literal JSON boolean) is the only way to delete — **dry run by default**. `202` with `{appid, job_id, status, type, mode, execute, deduplicated}`; `404` unknown appid or no mappings; `422` for `appid < 1`, a non-boolean `execute`, or an unrecognized body field. See "Garbage collection" below |
 | GET    | `/v1/cache/summary`                | `total_bytes` (disk usage of `depot/`, each depot counted once), `top_consumers` (top 10 `{appid, name, size_bytes}`, largest first), `unmapped_depots` (`{count, size_bytes}` for depot dirs on disk with no mapping row for any app), `free_disk_bytes` (free space on the cache filesystem, `null` if undeterminable) |
 | POST   | `/v1/agent/installed`              | Body `{"client_id": str, "appids": [int, ...]}` — store one **full-list** snapshot of a client's installed games. `200` with `{client_id, received, added, removed, first_report}`; `422` for a bad `client_id` (empty, > 64 chars, control characters, surrounding whitespace, `.`/`..`), an appid `< 1` or a boolean, a missing/non-list `appids`, more than 10 000 ids, or an unrecognized body field. See "Agent reports" below |
-| GET    | `/v1/clients`                      | One row per reporting client: `{client_id, first_seen, last_reported_at, app_count}`, sorted by `client_id`. **Minimal v1** — hit statistics and bypass warnings (plan §5/§6) arrive in Phase 3 as *additional* fields |
+| GET    | `/v1/clients`                      | One row per reporting client, sorted by `client_id`: `{client_id, first_seen, last_reported_at, app_count}` (WP 2.4) plus `{source_addrs, cache_hits, cache_misses, bytes_served, last_seen_in_cache_log, bypass_suspected}` (WP 3.11, ADR-0008 — the hit statistics and bypass warnings plan §5/§6 promised). The cache fields are `0`/`null`/`false` when the event feed is off. See "Cache-event sweep → Bypass detection" |
 | GET    | `/v1/schedule`                     | Scheduler config + last-sweep bookkeeping: `{enabled, window, overnight, interval_minutes, client_stale_days, server_timezone, last_sweep_at, last_sweep_targets, last_sweep_enqueued, next_eligible_at}`. **Read-only** — there is deliberately no write endpoint, see "Scheduler" below |
+| GET    | `/v1/stats`                        | Cache-event sweep config + bookkeeping (WP 3.11): `{event_feed_enabled, sweep_interval_minutes, miss_trigger_enabled, miss_trigger_cooldown_minutes, miss_trigger_max_per_sweep, bypass_window_days, cursor_offset, first_sweep_at, last_sweep_at, last_rotated_at, lines_read_total, lines_skipped_total, last_lines, last_skipped, last_enqueued, last_dropped_by_cap, truncate_denied_count, last_truncate_denied_at, oversized_skips_total, last_oversized_at, top_unmapped_depots[]}`. **Read-only.** Three counters are alerts: `lines_skipped_total` climbing means a format disagreement, `truncate_denied_count` climbing means the log is growing unbounded, and any non-zero `oversized_skips_total` means bytes were discarded because something wrote a newline-free region longer than a read batch. See "Cache-event sweep" below |
 
 ## Prefill orchestration (WP 1.4, job outcome honesty WP 3.3)
 
@@ -2197,6 +2228,299 @@ interval and staleness bound, so an operator can see what enabling the window
 - No `deploy/` changes — the new `VAULT_SCHEDULE_*` variables are documented
   in `api/.env.example`; wiring them (and a `TZ`) into the Compose file is a
   follow-up on top of WP 1.9.
+
+## Cache-event sweep (WP 3.11, ADR-0008)
+
+The consumer of vault-core's structured cache-event log (WP 3.10). It answers
+the two questions the plan left hanging: **miss-triggered prefill completion**
+(ADR-0001's hybrid decision, staged to "lands in Phase 3 together with the
+scheduler/job infrastructure") and **per-client hit statistics + bypass
+detection** (plan §5/§6). `vault_api/event_sweep.py`.
+
+Off unless `VAULT_EVENT_LOG_PATH` is set. With no path there is no sweeping, no
+table growth, no miss trigger, and `bypass_suspected` is `false` for everyone —
+ADR-0008's "optional at runtime" boundary, matching the empty `VAULT_EVENT_LOG`
+default vault-core itself ships.
+
+### The line format, and what "strict" means here
+
+Tab-separated, `escape=default`, exactly **9** fields, version-prefixed
+(`core/README.md` "Cache-event log" is the normative definition):
+
+| # | Field | Notes |
+|---|-------|-------|
+| 1 | `v1` | format version — must match **exactly** |
+| 2 | `$time_iso8601` | normalized to the project's stored UTC format |
+| 3 | `$remote_addr` | the correlation key |
+| 4 | `HIT` / `MISS` / `BYPASS` | |
+| 5 | depot id, or `-` | |
+| 6 | `$uri` | decoded, query-free, bounded to 300 chars by nginx |
+| 7 | `$bytes_sent` | |
+| 8 | `$host` | validated, not stored |
+| 9 | `$status` | **the served/not-served filter** |
+
+Every field is validated before any of them is used, and a line that fails is
+counted by category and skipped — never partially trusted, never crashed on:
+
+- **not exactly 9 fields** → `field-count`. `escape=default` renders a
+  percent-encoded tab or newline in a hostile request path as the literal text
+  `\x09`/`\x0A`, so the only real tabs on a line are nginx's own separators —
+  the guarantee is pinned empirically on the producing side
+  (`core/tests/test-core.ps1`) and defended here anyway.
+- **field 1 is not `v1`** → `unknown-version`, its own category on purpose. A
+  future v2 with nine fields in a *different order* is exactly the line that
+  must not be read as v1; it would otherwise produce wrong depot ids and wrong
+  byte counts silently. Logged, counted in `lines_skipped_total`, never guessed.
+- **depot id / bytes / status that are not plain ASCII digits** → refused.
+  `docs/LEARNINGS.md`'s house rule: `int()` accepts `" 4 "`, `"+4"`, `"1_0"`
+  (= **ten**) and non-ASCII digits, and these values feed SQL and an app-id
+  lookup. `isascii() and isdigit()` closes all four. The depot id is
+  additionally bounded to 10 digits — Steam depot ids are uint32, so a longer
+  run is somebody probing `/depot/999…/`, and the bound also keeps the value
+  inside SQLite's signed-64-bit INTEGER.
+- **a malformed address, an unknown cache status, an over-long line** →
+  refused. Lines are bounded at 8 KiB and one sweep reads at most 4 MiB, so a
+  backlog is consumed across sweeps rather than loaded into memory at once.
+
+An unparseable *timestamp* is the one field that does **not** discard the line:
+it falls back to the sweep's own clock. Losing a client's whole request because
+nginx's clock stamp was odd would be the worse trade.
+
+**Field 9 is the reason hit statistics are honest.** `hits`/`misses`/`bypasses`
+and `bytes_served` count **2xx responses only**. Without that filter a 403 from
+the Host allowlist, a 404, or a 502 from a dead CDN edge would all count as
+served traffic — and a MISS that 502'd would "prove" an app is not cached and
+trigger a prefill when nothing was ever fetched. Non-2xx lines are counted in
+their own `errors` column, so `requests = hits + misses + bypasses + errors`
+still closes.
+
+### The cursor contract
+
+`event_sweep_state.cursor_offset` is a byte offset. Three rules make "each line
+is read once, and a sweep failure re-reads instead of losing data" real:
+
+1. **A line is never consumed without its trailing newline.** nginx buffers
+   (`buffer=64k flush=5s`), so a read at EOF routinely lands mid-line. The
+   cursor advances only to just past the last `\n` in what was read; the
+   partial tail is re-read whole next time.
+
+   **One case must be distinguished from that** (review finding S1): a *full*
+   4 MiB read containing no newline at all is **not** a partial tail — no
+   amount of waiting turns 4 MiB of newline-free bytes into a line this parser
+   accepts, since `MAX_LINE_LENGTH` is 8 KiB. Treated as a tail it was a
+   silent, **permanent** stall: every sweep re-read the same bytes, consumed
+   nothing, statistics stopped, bypass detection went blind, rotation could
+   never fire (the file was never fully swept), and the only signal was an
+   INFO line that read like progress. The sweeper now steps over the region to
+   the next newline, discards it, counts it in `oversized_skips_total`
+   (`GET /v1/stats`) and logs a WARNING naming the offset. The residual case —
+   an oversized region running to EOF with **no** newline anywhere — cannot be
+   skipped without consuming an unterminated line, so the cursor holds and
+   every tick logs a *stalled* WARNING instead of pretending to progress; it
+   resolves by itself the moment a newline appears. Non-zero
+   `oversized_skips_total` means something other than vault-core's event log is
+   writing to that file, since nginx bounds the URI field to 300 characters.
+2. **The cursor advances in the same transaction as the batch's effects** —
+   one `BEGIN IMMEDIATE` covering the statistics upserts, the retention prunes
+   and the new offset. There is no state where one is committed and the other
+   is not.
+3. **A file smaller than the cursor is treated as rotated** and the cursor
+   resets to 0. This covers an operator, a `logrotate` with `copytruncate`, or
+   a vault-core redeployed onto a fresh volume — without it, everything the new
+   file accumulated below the old offset would be skipped forever.
+
+### Idempotence, stated honestly
+
+A crash anywhere before the commit means the whole batch is re-read. Per effect:
+
+- **Statistics: exactly-once.** Rule 2 is the whole mechanism — a batch whose
+  commit did not happen left no counters behind either. Pinned twice: once by
+  killing the sweep *before* the commit, and once (the stronger pin) by failing
+  *inside* the transaction after the counters are written, which a row-by-row
+  commit design would fail.
+- **Miss triggers: at-most-twice, and harmless.** Enqueues happen **before** the
+  cursor commit, because a job that exists beats a job that was lost. A re-read
+  is absorbed by two guards: the per-app cooldown row is committed immediately
+  after the enqueue, and failing that, `jobs.enqueue_prefill`'s per-app dedupe
+  returns the still-queued job. The one gap left: a crash where the enqueued job
+  also *finished* before the next sweep makes the app eligible again and it gets
+  a second non-forced prefill — ~3 s if it really is current (ADR-0006). That is
+  the trade this ordering deliberately makes, not an oversight.
+
+### Rotation — best-effort, and usually impossible in the shipped containers
+
+ADR-0008 gives rotation to this sweeper and to nothing else. `maybe_truncate`
+truncates to zero and resets the cursor only when the sweep succeeded, the file
+is at least `VAULT_EVENT_LOG_MAX_BYTES`, **and** its size right now still equals
+the committed cursor (i.e. every byte has been read).
+
+Truncate-in-place is safe against nginx's own writer: nginx opens `access_log`
+files with `O_APPEND`, so every write targets the file's *current* end-of-file
+as tracked by the kernel. Truncating moves that end-of-file too, and the next
+line lands at offset 0 — no gap, no sparse hole, no `USR1` reopen. That is why
+ADR-0008 could choose "sweep, then truncate" over a rename dance.
+
+**The one residual race, stated plainly.** Between the size check and the
+`truncate` syscall nginx can flush a buffer, and those lines are destroyed. The
+window is two adjacent syscalls, nginx flushes at most every 5 s or 64 KiB, and
+truncation only happens past 64 MiB (hundreds of thousands of lines). It is
+rare and bounded, it is not zero, and no portable "truncate-if-size-is-still-N"
+primitive exists to make it zero. Set `VAULT_EVENT_LOG_MAX_BYTES=0` and rotate
+externally if that is unacceptable — the shrink detection then picks the new
+file up.
+
+**In the shipped containers the sweeper cannot rotate at all, and that is
+handled rather than assumed away.** vault-api runs as uid/gid `101:101`
+(`api/Dockerfile`) while `/vault/logs` is vault-core's `nginx` user's `0755`
+directory and the event log it creates there is `0644`. The sweeper can open it
+for reading and **`os.truncate` raises `PermissionError`**. The design is
+fail-soft:
+
+- **Sweeping is unaffected.** Correctness is cursor-based and the cursor is
+  already committed before truncation is attempted. Nothing is re-read, nothing
+  is lost, statistics and the miss trigger keep working exactly as before.
+- **The cost is unbounded file growth**, which must be *visible* rather than
+  silently swallowed: every denial logs a WARNING naming the one-line fix and
+  increments `event_sweep_state.truncate_denied_count`, which `GET /v1/stats`
+  reports. An operator who never reads container logs still sees it climb.
+- **The fix is a permission change on the vault-core side** — make
+  `/vault/logs/event.log` writable by vault-api's uid (`chown 101:101`, or a
+  shared group with `0664`). Wiring that into `deploy/` is a follow-up work
+  package, not this one.
+
+A native install (the WP 1.7 MVP setup, or a dev machine where both processes
+run as the same user) hits none of this and truncates normally. Both directions
+are pinned by tests: truncation happens when permitted, and `EPERM` keeps
+sweeping correctly, records the denial and warns.
+
+### Why the sweep ignores the schedule window (decision)
+
+The sweep runs on WP 3.5's scheduler thread but on **its own interval**
+(`VAULT_EVENT_SWEEP_INTERVAL_MINUTES`, default 5) and **unconditionally** — it
+is not gated on `VAULT_SCHEDULE_WINDOW`. Three reasons, heaviest first:
+
+1. **This sweeper owns the event log's rotation.** A window-gated sweeper would
+   leave the file unread for the 16 hours a day the window is shut, so the
+   feature would create the unbounded-growth problem it exists to own.
+2. **Bypass detection must not have blind hours.** "This machine never appears
+   in the cache log" is only trustworthy if the log is read around the clock;
+   windowed, every evening gamer would look like a suspect at 22:00 and
+   innocent again at 09:00.
+3. **A sweep is cheap and bounded** — one bounded read plus a handful of small
+   SQLite writes — unlike the prefill sweep the window exists for, which starts
+   Steam logins and downloads.
+
+Consequence worth naming: a miss-triggered prefill can therefore be enqueued
+outside the window, and the worker will run it. That is consistent with
+`POST /v1/prefill`, which has never been window-gated either — the window is
+"when vault-api starts downloads *on its own initiative*", and a miss trigger is
+a reaction to a human who is already downloading. The cap and cooldown, not the
+window, are the storm control. The thread now starts when *either* feature is
+configured (`PrefillScheduler.thread_needed`), and each rides the tick inside
+its own `try`, so neither can silence the other.
+
+### The miss trigger — four guards and one narrowing rule
+
+A MISS line may enqueue a **non-forced** prefill (a miss says "something is not
+on disk", which argues for filling, never for re-downloading what is). Guards,
+cheapest and most decisive first:
+
+1. **The per-sweep cap** (`VAULT_MISS_TRIGGER_MAX_PER_SWEEP`, default 5) — the
+   storm backstop for many *different* apps at once (a LAN party where six
+   machines each start a different game). Everything past it is reported by app
+   id at WARNING; `docs/LEARNINGS.md` forbids silent caps. Dropped candidates
+   are reconsidered on the next sweep — the cap delays, it does not discard.
+2. **The queue's own per-app dedupe** (`jobs.active_job_for_app`,
+   `ACTIVE_STATUSES` — which includes `paused` since WP 3.12, so a job an
+   operator deliberately suspended is not quietly replaced). Its *unique*
+   effect, beyond what `enqueue_prefill` already dedupes, is that such an app
+   does not burn a scarce cap slot or start a cooldown.
+3. **The per-app cooldown** (`VAULT_MISS_TRIGGER_COOLDOWN_MINUTES`, default 60).
+4. **cached-and-current**: `apps.status = 'done'` **and** `needs_force = 0`
+   **and** `last_manifest_check` no older than the cooldown window. The
+   freshness bound is deliberately the cooldown rather than a fourth setting —
+   "how recently must we have confirmed this app" and "how often may one app be
+   re-triggered" are the same operator question asked twice. Anything unknown
+   reads as **not** current: the cost of being wrong is one ~3 s non-forced run,
+   while the opposite error leaves a half-cached game nobody completes.
+
+Two narrowing rules on top, both counted-but-never-triggered:
+
+- **Unmapped depots** — ADR-0008 verbatim: "no mapping = no honest target".
+- **Depots mapped to more than one app** — the same rule from the other side. A
+  shared depot (redistributables, plan §4) maps to every app that pulled it, so
+  one chunk miss cannot say *which* game is downloading. Enqueueing for all of
+  them would fan a single miss into N jobs; picking one would be a guess.
+- **Manifest and patch misses** — ADR-0001 production finding 5: manifest URLs
+  carry a per-request code, so they never URL-deduplicate and *every* manifest
+  request is a structural MISS, forever, for every app however completely it is
+  cached. Only `/depot/<id>/chunk/...` paths trigger; chunk URLs are content
+  addressed, so a chunk miss really does mean "this byte range is not on disk".
+  Manifest misses are still counted in the statistics and in `depot_miss_stats`.
+
+**On by default when the sweep runs, and why.** The operator already made the
+opt-in decision by pointing `VAULT_EVENT_LOG_PATH` at the log. Miss→prefill
+completion is not a bonus bolted onto that — it is the *reason* ADR-0001 chose
+hybrid miss handling. Behind a second switch defaulted to off, a decided
+architecture would quietly never run anywhere. `VAULT_MISS_TRIGGER_COOLDOWN_MINUTES=0`
+is the explicit off switch for operators who want statistics without enqueues;
+`0` means **OFF**, not "no cooldown", because "no cooldown" is precisely the
+storm shape the setting exists to prevent and is therefore not selectable.
+
+### Bypass detection — fail toward NOT accusing
+
+`GET /v1/clients` gains `cache_hits`, `cache_misses`, `bytes_served`,
+`last_seen_in_cache_log`, `source_addrs` and `bypass_suspected`. The event log
+knows **addresses**; agent reports know **client_ids**; schema v9's
+`agent_reports.source_addr` is the only bridge, and a client's statistics are
+summed over **every** address its retained reports arrived from (a laptop that
+moved from wifi to cable still has traffic under the old address). The peer
+address is taken from the TCP peer, **never** from `X-Forwarded-For` — trusting
+a client-settable header for an identity key would let any agent claim another
+machine's traffic, or disclaim its own to dodge detection.
+
+A false positive sends an operator hunting a network fault that does not exist,
+so every unknown reads as "not suspected". A client is flagged only after
+surviving all six disqualifications:
+
+1. the event feed is off — there is no cache log to be absent from;
+2. no sweep has ever completed, or the feed is younger than
+   `VAULT_BYPASS_WINDOW_DAYS` — "we have not been watching long enough" is not
+   evidence about the client;
+3. the client's own newest report is older than the window — a machine that has
+   been off cannot be bypassing, and would otherwise be accused forever;
+4. it reports no installed games, or its snapshot was unreadable;
+5. no retained report recorded a source address — **including every pre-v9
+   row**, so an upgraded installation does not light up with accusations
+   against every machine at once;
+6. it *has* appeared in the cache log within the window.
+
+Each of the six is separately mutation-tested: flip it and a named test in
+`tests/test_bypass_detection.py` dies. `docs/LEARNINGS.md` is explicit that
+fail-safe defaults need tests pinning the DEFAULT direction, not just the happy
+path.
+
+The default window is 3 days rather than 1 because of ADR-0001's production
+requirement 7: Steam LAN peer-to-peer transfers can legitimately replace cache
+traffic, so one quiet day proves nothing.
+
+**Retention caveat, stated in the response's own field docs:** `cache_hits` and
+`bytes_served` are sums over the *retained* windows
+(`VAULT_CLIENT_STATS_KEEP`), so they are not lifetime counters and can go down.
+
+### What this work package deliberately did NOT do
+
+- **No `deploy/` changes.** The new variables are documented in
+  `api/.env.example`; mounting the event log into the vault-api container (and
+  granting the write access rotation needs) is a parallel/follow-up package.
+- **No `core/` changes.** The producing side shipped in WP 3.10 and its format
+  is consumed exactly as documented.
+- No webhooks (WP 3.13) and no third-party manifest oracle (WP 3.9).
+- No config-write API and no "sweep now" endpoint — same reasoning as
+  `GET /v1/schedule`'s read-only stance.
+- No content attribution from the event log. ADR-0008's boundary holds: the
+  depot id is used to *look up* the mapping vault-api already owns, never to
+  build it. Chunk→game attribution stays with manifests (ADR-0006/0007).
 
 ## Garbage-collection core (WP 3.7, ADR-0007)
 

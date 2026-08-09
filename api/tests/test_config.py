@@ -632,3 +632,131 @@ def test_zero_is_still_rejected_by_the_range_check(
         monkeypatch.setenv(name, zero)
         with pytest.raises(RuntimeError, match="must be > 0"):
             Settings.from_env()
+
+
+# ---------------------------------------------------------------------------
+# WP 3.11 (ADR-0008): the cache-event sweep settings
+# ---------------------------------------------------------------------------
+
+
+def _sweep_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Base environment: API key set, every sweep variable unset."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    for name in (
+        "VAULT_EVENT_LOG_PATH",
+        "VAULT_EVENT_SWEEP_INTERVAL_MINUTES",
+        "VAULT_MISS_TRIGGER_COOLDOWN_MINUTES",
+        "VAULT_MISS_TRIGGER_MAX_PER_SWEEP",
+        "VAULT_BYPASS_WINDOW_DAYS",
+        "VAULT_CLIENT_STATS_KEEP",
+        "VAULT_EVENT_LOG_MAX_BYTES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_the_event_sweep_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole feature hangs off one path, and it is empty by default."""
+    _sweep_env(monkeypatch)
+
+    settings = Settings.from_env()
+
+    assert settings.event_log_path == ""
+    assert settings.event_sweep_enabled is False
+    assert settings.miss_trigger_enabled is False
+    # The other values are still populated so an operator can see what WOULD
+    # happen before switching it on.
+    assert settings.event_sweep_interval_minutes == 5
+    assert settings.miss_trigger_cooldown_minutes == 60
+    assert settings.miss_trigger_max_per_sweep == 5
+    assert settings.bypass_window_days == 3
+    assert settings.client_stats_keep == 48
+    assert settings.event_log_max_bytes == 64 * 1024 * 1024
+
+
+def test_a_blank_event_log_path_disables_rather_than_failing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _sweep_env(monkeypatch)
+    monkeypatch.setenv("VAULT_EVENT_LOG_PATH", "   ")
+
+    assert Settings.from_env().event_sweep_enabled is False
+
+
+def test_the_miss_trigger_is_on_by_default_once_the_sweep_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PINNED DECISION: pointing at the log IS the opt-in (ADR-0001 hybrid)."""
+    _sweep_env(monkeypatch)
+    monkeypatch.setenv("VAULT_EVENT_LOG_PATH", "/vault/logs/event.log")
+
+    settings = Settings.from_env()
+
+    assert settings.event_sweep_enabled is True
+    assert settings.miss_trigger_enabled is True
+
+
+def test_a_zero_cooldown_is_the_triggers_off_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0 means OFF, deliberately -- never "no cooldown"."""
+    _sweep_env(monkeypatch)
+    monkeypatch.setenv("VAULT_EVENT_LOG_PATH", "/vault/logs/event.log")
+    monkeypatch.setenv("VAULT_MISS_TRIGGER_COOLDOWN_MINUTES", "0")
+
+    settings = Settings.from_env()
+
+    assert settings.miss_trigger_cooldown_minutes == 0
+    assert settings.event_sweep_enabled is True, "statistics keep running"
+    assert settings.miss_trigger_enabled is False
+
+
+def test_event_log_max_bytes_zero_disables_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _sweep_env(monkeypatch)
+    monkeypatch.setenv("VAULT_EVENT_LOG_MAX_BYTES", "0")
+
+    assert Settings.from_env().event_log_max_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "VAULT_EVENT_SWEEP_INTERVAL_MINUTES",
+        "VAULT_MISS_TRIGGER_MAX_PER_SWEEP",
+        "VAULT_BYPASS_WINDOW_DAYS",
+        "VAULT_CLIENT_STATS_KEEP",
+    ],
+)
+def test_the_sweep_settings_that_must_be_positive_reject_zero(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Two of the seven accept 0 (as an off switch); these four must not."""
+    _sweep_env(monkeypatch)
+    monkeypatch.setenv(name, "0")
+
+    with pytest.raises(RuntimeError, match=name):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "VAULT_EVENT_SWEEP_INTERVAL_MINUTES",
+        "VAULT_MISS_TRIGGER_COOLDOWN_MINUTES",
+        "VAULT_MISS_TRIGGER_MAX_PER_SWEEP",
+        "VAULT_BYPASS_WINDOW_DAYS",
+        "VAULT_CLIENT_STATS_KEEP",
+        "VAULT_EVENT_LOG_MAX_BYTES",
+    ],
+)
+@pytest.mark.parametrize("value", [" 5 ", "+5", "-5", "1_0", "٥", "1.5"])
+def test_sloppy_sweep_numbers_are_refused_at_startup(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    """The same house rule as every other numeric setting (WP 3.12)."""
+    _sweep_env(monkeypatch)
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(RuntimeError, match=name):
+        Settings.from_env()

@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
 from vault_api.jobs import immediate_transaction, utcnow_iso
@@ -55,6 +55,11 @@ MAX_APPIDS_PER_REPORT = 10_000
 #: *plus* the one being written, so fewer than 2 rows per client would make
 #: every report look like a first report.
 MIN_REPORTS_KEPT = 2
+
+#: Longest accepted source address (schema v9, WP 3.11). An IPv6 address with a
+#: zone id fits in 45 characters; 64 leaves room for other peer spellings an
+#: ASGI server might report.
+MAX_SOURCE_ADDR_LENGTH = 64
 
 #: How many removed/added ids a single log line prints before it summarizes.
 _LOG_ID_SAMPLE = 50
@@ -100,6 +105,40 @@ class ClientSummary:
     last_reported_at: str
     #: Size of the latest snapshot; ``None`` if that row's JSON was unreadable.
     app_count: int | None
+    #: Every distinct address this client's RETAINED reports arrived from
+    #: (schema v9, WP 3.11). Usually one; more than one when the machine
+    #: changed address (DHCP lease, wifi vs. cable) within the retained window.
+    #: Empty when no retained report recorded an address — which includes every
+    #: report written before schema v9, and is the case that must never be read
+    #: as "this client is bypassing the cache" (see ``routers/clients.py``).
+    source_addrs: list[str] = field(default_factory=list)
+
+
+def normalize_source_addr(raw: str | None) -> str | None:
+    """Validate the peer address of an agent report; ``None`` if unusable.
+
+    This value is the join key between agent reports and event-log lines
+    (ADR-0008's client identity story), it is written into log lines, and it is
+    returned in an API response. It comes from the ASGI server rather than from
+    the request body, so it is not attacker-chosen in any normal deployment —
+    but "not normally attacker-chosen" is not a reason to store it unchecked,
+    and a ``None`` here is perfectly serviceable (it means "cannot correlate",
+    which every consumer already has to handle for pre-v9 rows).
+
+    Bounded, ASCII, printable, whitespace-free — the same shape the event-log
+    parser demands of field 3, because a value that cannot appear on that side
+    can never correlate with anything on this one.
+    """
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value or len(value) > MAX_SOURCE_ADDR_LENGTH:
+        return None
+    if not value.isascii() or not value.isprintable():
+        return None
+    if any(character.isspace() for character in value):
+        return None
+    return value
 
 
 def normalize_appids(appids: Iterable[int]) -> list[int]:
@@ -219,6 +258,7 @@ def store_report(
     client_id: str,
     appids: Sequence[int],
     keep: int,
+    source_addr: str | None = None,
 ) -> ReportResult:
     """Store one full-list snapshot and diff it against the previous one.
 
@@ -237,12 +277,18 @@ def store_report(
     stored = normalize_appids(appids)
     payload = json.dumps(stored, separators=(",", ":"))
     reported_at = utcnow_iso()
+    # Schema v9 (WP 3.11): recorded, never required. An unusable or absent peer
+    # address stores NULL and the report itself is completely unaffected —
+    # correlation is a nice-to-have on top of the report, not a precondition
+    # for accepting one.
+    stored_addr = normalize_source_addr(source_addr)
 
     with immediate_transaction(conn):
         previous = latest_snapshot(conn, client_id)
         conn.execute(
-            "INSERT INTO agent_reports (client_id, reported_at, appids) VALUES (?, ?, ?)",
-            (client_id, reported_at, payload),
+            "INSERT INTO agent_reports (client_id, reported_at, appids, source_addr) "
+            "VALUES (?, ?, ?, ?)",
+            (client_id, reported_at, payload, stored_addr),
         )
         pruned = prune_reports(conn, client_id, keep)
 
@@ -320,6 +366,27 @@ def list_clients(conn: sqlite3.Connection) -> list[ClientSummary]:
                 first_seen=str(row["first_seen"]),
                 last_reported_at=latest.reported_at,
                 app_count=None if latest.appids is None else len(latest.appids),
+                source_addrs=source_addrs_for(conn, client_id),
             )
         )
     return summaries
+
+
+def source_addrs_for(conn: sqlite3.Connection, client_id: str) -> list[str]:
+    """Distinct source addresses across this client's RETAINED reports (v9).
+
+    Every retained report, not only the newest: a laptop that moved from wifi
+    to cable an hour ago still has cache-log traffic under the old address, and
+    dropping it would make the machine look half-silent. Retention bounds the
+    set naturally — it can never hold more addresses than
+    ``VAULT_AGENT_REPORT_KEEP`` rows.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT source_addr FROM agent_reports
+        WHERE client_id = ? AND source_addr IS NOT NULL
+        ORDER BY source_addr
+        """,
+        (client_id,),
+    ).fetchall()
+    return [str(row["source_addr"]) for row in rows]

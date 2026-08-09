@@ -172,13 +172,45 @@ _JOB_COLUMNS = (
 LOG_EXCERPT_MAX_CHARS = 4096
 
 
+#: The one timestamp format in this database. Lives here, next to
+#: ``utcnow_iso``, because three modules now render and parse it (the job
+#: queue, the prefill scheduler, and WP 3.11's event sweep) and a second copy
+#: of the format string is a second place for it to drift.
+TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
 def utcnow_iso() -> str:
     """Current UTC time as a second-precision ISO-8601 string ('...Z').
 
     All timestamps in this database are stored in this one format so plain
     string comparison sorts chronologically.
     """
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
+
+
+def to_utc_iso(moment: datetime) -> str:
+    """Render an aware datetime in the project's UTC timestamp format.
+
+    Moved here from ``scheduler`` in WP 3.11 so ``event_sweep`` can use it
+    without importing ``scheduler`` — which imports ``event_sweep`` to run the
+    sweep on its tick, and would therefore be a cycle. ``scheduler`` re-exports
+    both this and ``parse_utc_iso`` under their original names.
+    """
+    return moment.astimezone(timezone.utc).strftime(TIMESTAMP_FORMAT)
+
+
+def parse_utc_iso(text: str) -> datetime | None:
+    """Parse a stored ``...Z`` timestamp; ``None`` if it is not one.
+
+    Returning ``None`` rather than raising keeps a corrupt/hand-edited row from
+    wedging a background thread forever — see how the callers degrade (they
+    treat it as "no usable value" and say so in the log), the same pattern
+    ``agent_reports._decode_appids`` uses for an unreadable snapshot.
+    """
+    try:
+        return datetime.strptime(text, TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
 
 
 def tail_excerpt(text: str, limit: int = LOG_EXCERPT_MAX_CHARS) -> str:

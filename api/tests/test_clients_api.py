@@ -40,12 +40,27 @@ def test_lists_one_row_per_client_with_the_latest_snapshot_size(
     for row in body:
         assert row["first_seen"].endswith("Z")
         assert row["last_reported_at"] >= row["first_seen"]
+    # WP 3.11 (ADR-0008) added the cache-side fields plan §6 always promised.
+    # The WP 2.4 fields are all still here, unchanged and in place — that is
+    # the forward-compatibility claim that row shape was chosen for.
     assert set(gaming_pc) == {
         "client_id",
         "first_seen",
         "last_reported_at",
         "app_count",
+        "source_addrs",
+        "cache_hits",
+        "cache_misses",
+        "bytes_served",
+        "last_seen_in_cache_log",
+        "bypass_suspected",
     }
+    # With no event feed configured there is nothing to correlate, and nobody
+    # is accused of anything.
+    for row in body:
+        assert row["cache_hits"] == 0
+        assert row["last_seen_in_cache_log"] is None
+        assert row["bypass_suspected"] is False
 
 
 def test_an_empty_library_reports_app_count_zero(client: TestClient) -> None:

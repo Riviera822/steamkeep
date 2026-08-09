@@ -64,7 +64,22 @@ import sqlite3
 #: (``finished_at`` stays NULL — a paused job is not finished). Both are TEXT,
 #: which is why ``_add_missing_job_columns`` had to learn per-column types
 #: instead of adding everything as INTEGER.
-SCHEMA_VERSION = 8
+#: v9 (WP 3.11, ADR-0008): the cache-event sweep. Four brand-new tables
+#: (``event_sweep_state``, ``client_cache_stats``, ``depot_miss_stats``,
+#: ``miss_trigger_state``) — fully expressible as ``CREATE TABLE IF NOT
+#: EXISTS``, like v6 — plus ONE new column, ``agent_reports.source_addr``,
+#: which is not: an existing ``agent_reports`` table from v1-v8 lacks it and
+#: ``CREATE TABLE IF NOT EXISTS`` is a no-op against it. So this version reuses
+#: the v4/v5/v8 pattern with a third per-column ALTER step
+#: (``_add_missing_agent_report_columns``). ``source_addr`` is the address the
+#: report arrived FROM: ADR-0008's client-identity correlation ("vault-agent
+#: reports already arrive FROM those addresses, so vault-api records the report
+#: source address and correlates") is what turns event-log lines, which carry
+#: only addresses, into named clients. NULL for every row written before this
+#: version — and that NULL is load-bearing, not cosmetic: a client whose
+#: address is unknown can never be ``bypass_suspected`` (see
+#: ``routers/clients.py``).
+SCHEMA_VERSION = 9
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -146,7 +161,19 @@ CREATE INDEX IF NOT EXISTS idx_jobs_appid_status ON jobs (appid, status);
 CREATE TABLE IF NOT EXISTS agent_reports (
     client_id   TEXT NOT NULL,
     reported_at TEXT NOT NULL,
-    appids      TEXT NOT NULL
+    appids      TEXT NOT NULL,
+    -- v9 (WP 3.11, ADR-0008): the network address this report arrived FROM,
+    -- as seen at the TCP level. The join key between "which machine says it
+    -- has these games installed" (this table) and "which address actually
+    -- pulled bytes through the cache" (client_cache_stats) -- the event log
+    -- knows only addresses, agent reports know only client_ids, and this
+    -- column is the only thing connecting them.
+    -- NULL when unknown: rows written before v9, and any request whose peer
+    -- address the ASGI server did not report. Never guessed, and never
+    -- derived from X-Forwarded-For (vault-api is not behind a proxy in this
+    -- design, and a trusted-header story is a security decision nobody has
+    -- made here).
+    source_addr TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_reports_client_time
@@ -211,6 +238,132 @@ CREATE TABLE IF NOT EXISTS schedule_state (
     last_sweep_targets  INTEGER,
     last_sweep_enqueued INTEGER
 );
+
+-- WP 3.11 / ADR-0008: the cache-event sweep's bookkeeping. Single-row, same
+-- CHECK(id = 1) device and the same reasoning as schedule_state above.
+--
+-- cursor_offset is THE durable contract of this feature: the byte offset in
+-- vault-core's event log up to which every line has been read AND its effects
+-- committed. It advances in the same transaction that writes those effects, so
+-- a process that dies mid-sweep re-reads the batch from the last committed
+-- offset instead of losing it (ADR-0008: "each line is read once, a sweep
+-- failure re-reads instead of losing data"). It lives in the database for the
+-- same reason schedule_state does: in memory it would reset to 0 on every
+-- restart and re-ingest the whole file.
+--
+-- first_sweep_at is not decoration. Bypass detection has to distinguish "this
+-- client never appears in the cache log" from "the log has not been running
+-- long enough to know", and the age of the feed is the only honest source for
+-- that (see routers/clients.py's fail-toward-not-suspecting rule).
+--
+-- The counters are diagnostics: the *_total ones accumulate across sweeps,
+-- the last_* ones describe the most recent sweep only (NULL before the first
+-- one). GET /v1/stats reads exactly this row.
+--
+-- truncate_denied_count / last_truncate_denied_at record the deployment
+-- reality that the sweeper often CANNOT rotate the file it is contractually
+-- responsible for: in the shipped containers vault-api runs as uid 101 while
+-- /vault/logs and the nginx-created event.log belong to nginx, so the log is
+-- readable but not writable and os.truncate raises EPERM. That is a
+-- fail-soft condition, not an error -- sweeping stays correct because
+-- correctness is cursor-based -- but it means the file grows without bound,
+-- which an operator has to be able to SEE rather than infer from a full disk.
+-- Hence a persisted counter next to the log warnings.
+CREATE TABLE IF NOT EXISTS event_sweep_state (
+    id                      INTEGER PRIMARY KEY CHECK (id = 1),
+    cursor_offset           INTEGER NOT NULL DEFAULT 0,
+    first_sweep_at          TEXT,
+    last_sweep_at           TEXT,
+    last_rotated_at         TEXT,
+    lines_read_total        INTEGER NOT NULL DEFAULT 0,
+    lines_skipped_total     INTEGER NOT NULL DEFAULT 0,
+    last_lines              INTEGER,
+    last_skipped            INTEGER,
+    last_enqueued           INTEGER,
+    last_dropped_by_cap     INTEGER,
+    truncate_denied_count   INTEGER NOT NULL DEFAULT 0,
+    last_truncate_denied_at TEXT,
+    -- How often the sweeper had to step over a region whose "line" was longer
+    -- than a whole read batch (4 MiB). Unreachable in normal operation --
+    -- nginx bounds the URI field to 300 characters -- so a non-zero value here
+    -- means something other than the event log is writing to that file, or it
+    -- is corrupt. It is persisted rather than only logged because the
+    -- alternative (the pre-review behaviour) was a SILENT PERMANENT STALL:
+    -- the sweep re-read the same bytes forever, consumed nothing, and the only
+    -- signal was an INFO line that read like progress.
+    oversized_skips_total   INTEGER NOT NULL DEFAULT 0,
+    last_oversized_at       TEXT
+);
+
+-- WP 3.11: per-client-address request statistics, one row per address per
+-- sweep window (plan §5/§6 "per-client hit stats"). window_at is the sweep's
+-- own UTC timestamp, so the row means "what this address did in the lines this
+-- sweep consumed" -- NOT a fixed wall-clock bucket.
+--
+-- Writers use INSERT ... ON CONFLICT DO UPDATE with `col = col + excluded.col`.
+-- That is what makes two sweeps landing in the same second merge instead of
+-- raising, and it keeps the counters additive, which is the property the
+-- crash-recovery story needs: the whole aggregate is applied in the same
+-- transaction as cursor_offset, so a re-read batch is never double-counted.
+--
+-- requests = hits + misses + bypasses + errors, by construction. hits/misses/
+-- bypasses count only lines whose HTTP status was 2xx (field 9 of the event
+-- log exists precisely so a 403/404/502 is not counted as served traffic);
+-- everything else lands in `errors`. bytes_served likewise sums bytes_sent on
+-- 2xx lines only, so an error body's bytes never inflate a client's total.
+CREATE TABLE IF NOT EXISTS client_cache_stats (
+    client_addr  TEXT NOT NULL,
+    window_at    TEXT NOT NULL,
+    requests     INTEGER NOT NULL DEFAULT 0,
+    hits         INTEGER NOT NULL DEFAULT 0,
+    misses       INTEGER NOT NULL DEFAULT 0,
+    bypasses     INTEGER NOT NULL DEFAULT 0,
+    errors       INTEGER NOT NULL DEFAULT 0,
+    bytes_served INTEGER NOT NULL DEFAULT 0,
+    last_seen    TEXT NOT NULL,
+    PRIMARY KEY (client_addr, window_at)
+);
+
+-- WP 3.11: which depots are being MISSed, and whether vault-api had a mapping
+-- for them at the time. ADR-0008: "misses on unmapped depots are counted but
+-- trigger nothing" -- this table is where that counting lands, and it is the
+-- operator's answer to "what is my LAN downloading that I have no mapping
+-- for". One row per depot (not per sighting), bounded by
+-- event_sweep.MAX_DEPOT_MISS_ROWS on a least-recently-seen basis.
+CREATE TABLE IF NOT EXISTS depot_miss_stats (
+    depotid    INTEGER PRIMARY KEY,
+    miss_count INTEGER NOT NULL DEFAULT 0,
+    mapped     INTEGER NOT NULL DEFAULT 0,
+    first_seen TEXT NOT NULL,
+    last_seen  TEXT NOT NULL
+);
+
+-- WP 3.11 / ADR-0008: the miss trigger's per-app cooldown, persisted for the
+-- same reason every other piece of sweep state is -- an in-memory cooldown
+-- resets on restart, and "restart the container" would become "enqueue a
+-- prefill for every app that misses in the next batch".
+--
+-- Written in its own committed transaction immediately AFTER the enqueue it
+-- describes (see event_sweep.record_trigger): that ordering is deliberate, so
+-- a crash between the two leaves a queued job with no cooldown -- which the
+-- queue's own per-app dedupe then absorbs -- rather than a cooldown with no
+-- job, which would suppress the trigger for an app nothing is filling.
+CREATE TABLE IF NOT EXISTS miss_trigger_state (
+    appid             INTEGER PRIMARY KEY,
+    last_triggered_at TEXT NOT NULL,
+    trigger_count     INTEGER NOT NULL DEFAULT 0
+);
+
+-- GET /v1/clients aggregates a client's statistics across every address it has
+-- reported from; retention prunes per address. Both are address-keyed scans of
+-- a table that grows one row per active address per sweep.
+CREATE INDEX IF NOT EXISTS idx_client_cache_stats_addr
+    ON client_cache_stats (client_addr, window_at DESC);
+
+-- Retention drops the least-recently-seen depots; GET /v1/stats lists the most
+-- recently seen ones. Both sort by last_seen.
+CREATE INDEX IF NOT EXISTS idx_depot_miss_stats_last_seen
+    ON depot_miss_stats (last_seen);
 """
 
 
@@ -306,6 +459,14 @@ def init_db(db_path: str) -> None:
         if row is not None and row["version"] < 5:
             _add_missing_app_columns(conn)
 
+        # v9 (WP 3.11): same situation once more, for `agent_reports`. An
+        # existing table from v1-v8 has no `source_addr` column and
+        # `CREATE TABLE IF NOT EXISTS agent_reports` below is a no-op against
+        # it. The four NEW tables v9 also adds need no step at all -- they are
+        # plain `CREATE TABLE IF NOT EXISTS` (the v6 situation).
+        if row is not None and row["version"] < 9:
+            _add_missing_agent_report_columns(conn)
+
         conn.executescript(_DDL)
 
         if row is None:
@@ -356,6 +517,33 @@ def _add_missing_job_columns(conn: sqlite3.Connection) -> None:
     for column, column_type in _POST_V1_JOB_COLUMNS:
         if column not in existing:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {column_type}")
+
+
+#: The ``agent_reports`` columns added after v1, same shape as
+#: ``_POST_V1_JOB_COLUMNS``.
+_POST_V1_AGENT_REPORT_COLUMNS = (("source_addr", "TEXT"),)
+
+
+def _add_missing_agent_report_columns(conn: sqlite3.Connection) -> None:
+    """v1->v9 migration step: add ``agent_reports.source_addr`` (WP 3.11).
+
+    Guarded per column via ``PRAGMA table_info`` for exactly the reasons
+    ``_add_missing_job_columns`` spells out, and carrying an explicit type for
+    the reason WP 3.12 discovered the hard way (a hardcoded type gives an
+    upgraded database a different column affinity from a fresh one at the same
+    ``schema_version``).
+
+    Nullable with no default, deliberately: a report stored before v9 has no
+    recorded source address and there is no honest value to invent for it.
+    ``NULL`` means "unknown", and every consumer treats unknown as "cannot
+    correlate, therefore cannot accuse" — see ``routers/clients.py``.
+    """
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(agent_reports)")}
+    for column, column_type in _POST_V1_AGENT_REPORT_COLUMNS:
+        if column not in existing:
+            conn.execute(
+                f"ALTER TABLE agent_reports ADD COLUMN {column} {column_type}"
+            )
 
 
 def _add_missing_app_columns(conn: sqlite3.Connection) -> None:

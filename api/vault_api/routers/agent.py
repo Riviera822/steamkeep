@@ -15,7 +15,7 @@ mechanics live in ``vault_api/agent_reports.py``.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from vault_api import agent_reports
@@ -93,6 +93,7 @@ class InstalledReportResponse(BaseModel):
 
 @router.post("/v1/agent/installed", response_model=InstalledReportResponse)
 def report_installed_apps(
+    request: Request,
     body: InstalledReportRequest,
     open_db: DbOpener = Depends(db_opener),
     keep: int = Depends(get_agent_report_keep),
@@ -112,10 +113,25 @@ def report_installed_apps(
     Removals are logged (INFO, audit-style) and returned. Acting on them stays
     a human/API decision (``DELETE /v1/cache/{appid}``); Phase 3's scheduler is
     what will consume these snapshots as the prefill set.
+
+    **The peer address is recorded alongside the snapshot** (schema v9,
+    WP 3.11, ADR-0008): "vault-agent reports already arrive FROM those
+    addresses, so vault-api records the report source address and correlates".
+    It is taken from the TCP peer (``request.client``) and **never** from
+    ``X-Forwarded-For`` — vault-api is not behind a proxy in this design, and
+    trusting a client-settable header for an identity key would let any agent
+    claim any machine's cache traffic (or disclaim its own to dodge bypass
+    detection). ``request.client`` is ``None`` on some transports; the report
+    is stored anyway, with a NULL address.
     """
+    peer = request.client.host if request.client is not None else None
     with open_db() as conn:
         result = agent_reports.store_report(
-            conn, client_id=body.client_id, appids=body.appids, keep=keep
+            conn,
+            client_id=body.client_id,
+            appids=body.appids,
+            keep=keep,
+            source_addr=peer,
         )
 
     return InstalledReportResponse(

@@ -124,6 +124,94 @@ AUTO_GC_MODES = (AUTO_GC_OFF, AUTO_GC_DRY_RUN, AUTO_GC_EXECUTE)
 DEFAULT_AUTO_GC = AUTO_GC_OFF
 
 
+# --------------------------------------------------------------------------
+# WP 3.11 — the cache-event sweep (ADR-0008). OFF by default: the whole
+# feature hangs off ``VAULT_EVENT_LOG_PATH`` being set to vault-core's
+# structured event log. Empty (the default) means no sweeper thread work, no
+# tables growing, no miss trigger — exactly the "optional at runtime"
+# boundary ADR-0008 draws, and the same default vault-core itself ships
+# (``VAULT_EVENT_LOG`` is empty in core/Dockerfile).
+# --------------------------------------------------------------------------
+
+#: How often the sweeper reads new lines out of the event log.
+#:
+#: **Deliberately its own interval, and deliberately NOT gated on
+#: ``VAULT_SCHEDULE_WINDOW``** (decision, WP 3.11 — see api/README.md "Why the
+#: sweep ignores the schedule window"). Three reasons, in order of weight:
+#:
+#: 1. The sweeper is the *only* thing that rotates the event log (ADR-0008:
+#:    cursor + truncate, nothing in core/ rotates it). A window-gated sweeper
+#:    would let the file grow unattended for the 16 hours a day the window is
+#:    closed — the feature would create the unbounded-file problem it is
+#:    supposed to own.
+#: 2. Bypass detection must not have blind hours. "This machine never appears
+#:    in the cache log" is only trustworthy if the log is read around the
+#:    clock; a windowed sweep would make every evening gamer look like a
+#:    bypass suspect at 22:00 and innocent again at 09:00.
+#: 3. A sweep is cheap and bounded (one bounded read + a handful of small
+#:    SQLite writes), unlike the prefill sweep the window exists for, which
+#:    starts Steam logins and downloads.
+#:
+#: 5 minutes is comfortably coarser than vault-core's ``flush=5s`` log buffer
+#: (core/README.md), so a line is never missed for being unflushed, and fine
+#: enough that a miss-triggered prefill starts while the player is still
+#: downloading.
+DEFAULT_EVENT_SWEEP_INTERVAL_MINUTES = 5
+
+#: Per-app cooldown for the miss trigger (ADR-0008: "a per-app cooldown so a
+#: busy download night cannot enqueue storms").
+#:
+#: **``0`` means the trigger is OFF, not "no cooldown".** That reads backwards
+#: at first glance and is chosen on purpose: "no cooldown" is precisely the
+#: storm shape this setting exists to prevent, so it is not a value an
+#: operator can select at all. Statistics and bypass detection keep working
+#: with the trigger disabled — they are the other half of the sweep.
+#:
+#: 60 minutes against a default cap of 5 enqueues per sweep bounds the worst
+#: case at 5 new jobs per 5-minute sweep and one job per app per hour, which
+#: on a homelab is "the game somebody started downloading gets completed",
+#: not a queue flood.
+DEFAULT_MISS_TRIGGER_COOLDOWN_MINUTES = 60
+
+#: Hard cap on how many prefill jobs ONE sweep may enqueue from misses. The
+#: storm backstop of last resort: the cooldown bounds repeats per app, this
+#: bounds the *first* enqueue for many different apps at once (a LAN party
+#: where six machines each start a different game). Dropped candidates are
+#: logged by app id — never silently capped (docs/LEARNINGS.md).
+#:
+#: Minimum 1, not 0: ``VAULT_MISS_TRIGGER_COOLDOWN_MINUTES=0`` is the single
+#: off switch for the trigger, and two ways to spell "off" is one too many.
+DEFAULT_MISS_TRIGGER_MAX_PER_SWEEP = 5
+
+#: How far back ``GET /v1/clients`` looks for a client's cache-log presence
+#: before calling it ``bypass_suspected`` (plan §5's DNS-bypass pain point).
+#:
+#: 3 days rather than 1: ADR-0001's production requirement 7 warns that Steam
+#: LAN peer-to-peer transfers can legitimately replace cache traffic, and a
+#: machine that simply did not launch Steam yesterday is not evidence of
+#: anything. Three days of a reporting agent with zero cache lines is a real
+#: signal.
+DEFAULT_BYPASS_WINDOW_DAYS = 3
+
+#: How many per-sweep statistics rows are kept per client address. Same
+#: bounded-retention shape as ``VAULT_AGENT_REPORT_KEEP``: the sweep writes one
+#: row per active address per sweep, so without a cap the table grows forever.
+#: 48 rows at the default 5-minute interval is roughly the last 4 hours of
+#: fine-grained history; the totals ``GET /v1/clients`` reports are sums over
+#: the RETAINED rows, which is stated in the response's own documentation.
+DEFAULT_CLIENT_STATS_KEEP = 48
+
+#: Truncate the event log once it is at least this large — and only when the
+#: cursor has consumed all of it (see ``event_sweep.maybe_truncate`` for the
+#: exact conditions and the one residual race). ``0`` disables truncation
+#: entirely, leaving the file to an external rotation strategy.
+#:
+#: 64 MiB is a few hundred thousand event lines: large enough that truncation
+#: is a rare event (which is what keeps the residual race rare), small enough
+#: that a forgotten deployment does not fill a homelab volume.
+DEFAULT_EVENT_LOG_MAX_BYTES = 64 * 1024 * 1024
+
+
 def _default_steamprefill_cache_dir() -> str:
     """Platform default for SteamPrefill's manifest temp-cache directory
     (docs/research/phase3-manifests.md §1a): ``%LOCALAPPDATA%\\SteamPrefill\\v1``
@@ -372,11 +460,62 @@ class Settings:
     schedule_client_stale_days: int = DEFAULT_SCHEDULE_CLIENT_STALE_DAYS
     # WP 3.12. 'off' | 'dry-run' | 'execute' — see AUTO_GC_MODES above.
     auto_gc: str = DEFAULT_AUTO_GC
+    # WP 3.11 (ADR-0008). Path to vault-core's structured cache-event log.
+    # EMPTY = the whole feature is off: no sweeping, no statistics tables
+    # growing, no miss trigger. This is the one enable switch.
+    event_log_path: str = ""
+    # WP 3.11. Minutes between sweeps of that log. NOT gated on
+    # schedule_window — see DEFAULT_EVENT_SWEEP_INTERVAL_MINUTES.
+    event_sweep_interval_minutes: int = DEFAULT_EVENT_SWEEP_INTERVAL_MINUTES
+    # WP 3.11. Per-app cooldown for the miss trigger. 0 = trigger OFF.
+    miss_trigger_cooldown_minutes: int = DEFAULT_MISS_TRIGGER_COOLDOWN_MINUTES
+    # WP 3.11. Hard cap on miss-triggered enqueues per sweep.
+    miss_trigger_max_per_sweep: int = DEFAULT_MISS_TRIGGER_MAX_PER_SWEEP
+    # WP 3.11. Cache-log silence beyond this many days makes a still-reporting
+    # client `bypass_suspected` in GET /v1/clients.
+    bypass_window_days: int = DEFAULT_BYPASS_WINDOW_DAYS
+    # WP 3.11. Per-sweep statistics rows retained per client address.
+    client_stats_keep: int = DEFAULT_CLIENT_STATS_KEEP
+    # WP 3.11. Truncate the event log at/above this size once fully consumed.
+    # 0 = never truncate.
+    event_log_max_bytes: int = DEFAULT_EVENT_LOG_MAX_BYTES
 
     @property
     def scheduler_enabled(self) -> bool:
         """True iff a window is configured (WP 3.5) — the one enable switch."""
         return self.schedule_window is not None
+
+    @property
+    def event_sweep_enabled(self) -> bool:
+        """True iff an event-log path is configured (WP 3.11, ADR-0008).
+
+        The single enable switch for the whole cache-event feature. With no
+        path there is nothing to read, so the sweeper does no work, none of the
+        statistics tables grow, the miss trigger cannot fire, and
+        ``bypass_suspected`` is ``False`` for everyone (no data is not
+        evidence — see ``routers/clients.py``).
+        """
+        return bool(self.event_log_path)
+
+    @property
+    def miss_trigger_enabled(self) -> bool:
+        """True iff a sweep may enqueue miss-triggered prefills (ADR-0001).
+
+        Two conditions, and the first one is the interesting one: the trigger
+        is **on by default whenever the sweep runs**. The operator already made
+        the opt-in decision by pointing ``VAULT_EVENT_LOG_PATH`` at the log —
+        miss→prefill completion is not a bonus feature bolted onto that, it is
+        the *reason* ADR-0001 chose the hybrid miss handling, staged to "lands
+        in Phase 3 together with the scheduler/job infrastructure". Shipping it
+        behind a second switch defaulted to off would mean the hybrid decision
+        never actually runs anywhere unless an operator reads far enough into
+        the docs, which is how a decided architecture quietly becomes
+        store-on-miss only.
+
+        ``VAULT_MISS_TRIGGER_COOLDOWN_MINUTES=0`` is the explicit off switch
+        for operators who want the statistics without the enqueues.
+        """
+        return self.event_sweep_enabled and self.miss_trigger_cooldown_minutes > 0
 
     @property
     def auto_gc_enabled(self) -> bool:
@@ -468,4 +607,40 @@ class Settings:
                 "VAULT_SCHEDULE_CLIENT_STALE_DAYS", DEFAULT_SCHEDULE_CLIENT_STALE_DAYS
             ),
             auto_gc=_env_auto_gc(),
+            # WP 3.11 (ADR-0008). Blank/unset = the whole cache-event feature
+            # stays off. The path itself is NOT validated here beyond
+            # stripping: vault-api may legitimately start before vault-core has
+            # created the file (fresh volume, core not up yet), so "does it
+            # exist / can I read it" is a per-sweep, warn-and-skip question,
+            # never a reason to refuse to boot — the same degradation
+            # ADR-0008 promises ("vault-api without read access to it degrades
+            # to today's behavior").
+            event_log_path=os.environ.get("VAULT_EVENT_LOG_PATH", "").strip(),
+            event_sweep_interval_minutes=_env_int(
+                "VAULT_EVENT_SWEEP_INTERVAL_MINUTES",
+                DEFAULT_EVENT_SWEEP_INTERVAL_MINUTES,
+            ),
+            # minimum=0 because 0 is a meaningful value here: it is the ONE
+            # documented way to run the sweep (statistics, bypass detection,
+            # rotation) with the miss trigger disabled.
+            miss_trigger_cooldown_minutes=_env_int(
+                "VAULT_MISS_TRIGGER_COOLDOWN_MINUTES",
+                DEFAULT_MISS_TRIGGER_COOLDOWN_MINUTES,
+                minimum=0,
+            ),
+            miss_trigger_max_per_sweep=_env_int(
+                "VAULT_MISS_TRIGGER_MAX_PER_SWEEP",
+                DEFAULT_MISS_TRIGGER_MAX_PER_SWEEP,
+            ),
+            bypass_window_days=_env_int(
+                "VAULT_BYPASS_WINDOW_DAYS", DEFAULT_BYPASS_WINDOW_DAYS
+            ),
+            client_stats_keep=_env_int(
+                "VAULT_CLIENT_STATS_KEEP", DEFAULT_CLIENT_STATS_KEEP
+            ),
+            # minimum=0 because 0 disables truncation entirely (leave rotation
+            # to something else), which is a legitimate operational choice.
+            event_log_max_bytes=_env_int(
+                "VAULT_EVENT_LOG_MAX_BYTES", DEFAULT_EVENT_LOG_MAX_BYTES, minimum=0
+            ),
         )

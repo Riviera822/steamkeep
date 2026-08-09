@@ -84,7 +84,10 @@ def test_agent_reports_is_one_row_per_report_snapshot(tmp_path) -> None:
     conn = get_connection(db_path)
     try:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(agent_reports)")}
-        assert columns == {"client_id", "reported_at", "appids"}
+        # source_addr joined in schema v9 (WP 3.11, ADR-0008): the address the
+        # report arrived FROM, which is the only key correlating a client_id
+        # with the event log's addresses.
+        assert columns == {"client_id", "reported_at", "appids", "source_addr"}
 
         conn.execute(
             "INSERT INTO agent_reports (client_id, reported_at, appids) VALUES (?, ?, ?)",
@@ -565,7 +568,11 @@ def test_init_db_upgrades_a_pre_v8_database_by_adding_the_job_control_columns(
     finally:
         conn.close()
 
-    assert version == SCHEMA_VERSION == 8
+    # The pre-v8 file is brought all the way to the CURRENT version, whatever
+    # that is — this test is about the two job-control columns arriving with
+    # the right type, not about pinning the version number (v9 added the event
+    # sweep on top, WP 3.11).
+    assert version == SCHEMA_VERSION
     assert types["paused_at"] == "TEXT"
     assert types["stop_request"] == "TEXT"
     assert row["paused_at"] is None

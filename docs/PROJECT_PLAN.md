@@ -236,6 +236,7 @@ Steam-only, prefill-first design can solve better:
 | POST | /v1/cache/{appid}/gc | Garbage-collect orphaned chunks (manifest diff) |
 | GET | /v1/cache/summary | Total usage, top consumers, unmapped depots, free space |
 | GET | /v1/clients | Per-client hit stats incl. bypass warnings |
+| GET | /v1/stats | Cache-event sweep state: cursor, lines read/skipped, miss-trigger activity, unmapped depot misses (WP 3.11, ADR-0008) |
 | POST | /v1/agent/installed | PC agent reports installed app IDs |
 | PUT | /v1/mapping/{depotid} | Manual depot→app mapping fallback (additive, see ADR-0003) |
 | GET | /v1/mapping | List all depot→app mappings |
@@ -433,7 +434,14 @@ parallel/serial decisions, merge discipline, open user decisions):
       addendum): (A) recently-stored grace window via st_ctime as a
       ChunkExclusion predicate; (B) open-beta branch manifests join the
       keep set when the oracle (WP 3.9) is enabled
-- [ ] Per-client hit statistics + bypass detection (`/v1/clients`)
+- [x] Per-client hit statistics + bypass detection (`/v1/clients`)
+      *(WP 3.11, ADR-0008: event sweep with a persisted byte-offset cursor,
+      strict 9-field v1 parsing, miss-triggered prefill (cooldown + per-sweep
+      cap + unmapped/shared/manifest never trigger), per-address hit stats,
+      bypass detection failing toward NOT accusing; schema v9; new
+      `GET /v1/stats`. Rotation is best-effort — in the shipped containers
+      vault-api may read the log but not truncate it, which is handled,
+      counted and surfaced rather than fatal)*
 - [ ] Optional generic webhook notifications (Discord/Slack/ntfy-compatible;
       built as a generic webhook feature, not vendor-specific)
 

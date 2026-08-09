@@ -96,10 +96,21 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from vault_api import agent_reports, jobs
+from vault_api import agent_reports, event_sweep, jobs
 from vault_api.config import Settings
 from vault_api.db import get_connection
-from vault_api.jobs import immediate_transaction
+
+# Re-exported under their historical names (WP 3.11 moved the bodies into
+# ``jobs`` so ``event_sweep`` can share them without an import cycle — this
+# module imports ``event_sweep``, so ``event_sweep`` must not import this one).
+# ``scheduler.to_utc_iso`` / ``scheduler.parse_utc_iso`` keep working for every
+# existing caller and test.
+from vault_api.jobs import (  # noqa: F401  (re-export)
+    TIMESTAMP_FORMAT as _TIMESTAMP_FORMAT,
+    immediate_transaction,
+    parse_utc_iso,
+    to_utc_iso,
+)
 from vault_api.schedule_window import next_open
 
 logger = logging.getLogger(__name__)
@@ -116,9 +127,6 @@ DEFAULT_TICK_SECONDS = 60.0
 #: queries, so this only has to cover an in-flight sweep's enqueue loop (which
 #: also checks the stop flag between apps).
 SHUTDOWN_JOIN_TIMEOUT_SECONDS = 30.0
-
-#: The one timestamp format in this database (``jobs.utcnow_iso``).
-_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 #: Returns the current time as an AWARE datetime in the server's local zone.
 Clock = Callable[[], datetime]
@@ -138,25 +146,6 @@ def local_now() -> datetime:
     window decision reproducible on any machine's timezone.
     """
     return datetime.now().astimezone()
-
-
-def to_utc_iso(moment: datetime) -> str:
-    """Render an aware datetime in the project's UTC timestamp format."""
-    return moment.astimezone(timezone.utc).strftime(_TIMESTAMP_FORMAT)
-
-
-def parse_utc_iso(text: str) -> datetime | None:
-    """Parse a stored ``...Z`` timestamp; ``None`` if it is not one.
-
-    Returning ``None`` rather than raising keeps a corrupt/hand-edited row
-    from wedging the scheduler forever — see how the callers degrade (they
-    treat it as "no usable value" and say so in the log), the same pattern
-    ``agent_reports._decode_appids`` uses for an unreadable snapshot.
-    """
-    try:
-        return datetime.strptime(text, _TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
-        return None
 
 
 # --------------------------------------------------------------------------
@@ -558,7 +547,27 @@ class PrefillScheduler:
 
     @property
     def enabled(self) -> bool:
+        """Is the PREFILL scheduler on (i.e. is a window configured)?
+
+        Unchanged meaning since WP 3.5 — ``GET /v1/schedule`` reports it. Note
+        that this is no longer the same question as "does the thread need to
+        run": WP 3.11's event sweep rides the same tick and is enabled
+        separately. See ``thread_needed``.
+        """
         return self._settings.scheduler_enabled
+
+    @property
+    def thread_needed(self) -> bool:
+        """Should the lifespan actually start this thread?
+
+        True when EITHER background job wants ticks: the prefill sweep
+        (``VAULT_SCHEDULE_WINDOW``) or the cache-event sweep
+        (``VAULT_EVENT_LOG_PATH``, WP 3.11). They are independently
+        configurable — running the event sweep with no prefill window is a
+        perfectly ordinary setup ("collect statistics, never download on a
+        schedule"), and so is the reverse.
+        """
+        return self._settings.scheduler_enabled or self._settings.event_sweep_enabled
 
     @property
     def settings(self) -> Settings:
@@ -624,10 +633,30 @@ class PrefillScheduler:
         Same last-resort net as the worker's job body: if this thread dies,
         nothing restarts it and the scheduler silently stops scheduling, which
         is far worse than a logged traceback and a retry in a minute.
+
+        Two independent jobs ride this tick, each with its OWN ``try`` (WP
+        3.11): a failing cache-event sweep must not stop prefill scheduling,
+        and a failing prefill sweep must not stop the event sweep — which owns
+        the event log's rotation, so silencing it would eventually fill a disk.
+        The event sweep goes first because it is the cheap one and because a
+        miss it discovers can enqueue work the prefill sweep would then see.
         """
+        now = self._clock()
+        try:
+            event_sweep.maybe_sweep(conn, self._settings, now)
+        except Exception:
+            logger.exception(
+                "Cache-event sweep failed (WP 3.11). The thread survives and "
+                "retries in %.0fs. The event-log cursor only advances inside "
+                "the transaction that commits a batch's effects, so nothing "
+                "was half-applied and no line was consumed -- the next sweep "
+                "re-reads from the last committed offset.",
+                self._tick_seconds,
+            )
+
         try:
             maybe_sweep(
-                conn, self._settings, self._clock(), should_abort=self._stop.is_set
+                conn, self._settings, now, should_abort=self._stop.is_set
             )
         except Exception:
             logger.exception(
