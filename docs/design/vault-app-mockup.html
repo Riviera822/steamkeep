@@ -1,0 +1,2831 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SteamVault — App Mockup</title>
+
+<style>
+/* ============================================================
+   SteamVault vault-app — interactive design mockup
+   Dark, committed single-theme app surface (user decision).
+   Only the desk backdrop around the phone follows the viewer theme.
+   ============================================================ */
+
+:root{
+  /* desk backdrop (theme-aware) */
+  --desk-a:#dfe6ea; --desk-b:#c3ced5; --desk-ink:#3c4a52;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --desk-a:#0d1216; --desk-b:#05080a; --desk-ink:#5d707c; }
+}
+:root[data-theme="dark"]{ --desk-a:#0d1216; --desk-b:#05080a; --desk-ink:#5d707c; }
+:root[data-theme="light"]{ --desk-a:#dfe6ea; --desk-b:#c3ced5; --desk-ink:#3c4a52; }
+
+:root{
+  /* app palette — fixed dark */
+  --bg:#0A1016;
+  --surface:#111C24;
+  --raised:#17252F;
+  --raised-2:#1D303C;
+  --line:#24363F;
+  --line-soft:#1B2A33;
+  --text:#E4EFF3;
+  --dim:#8AA1AD;
+  --dim-2:#63798A;
+
+  --accent:#2ED9CE;
+  --accent-deep:#12A79F;
+  --accent-ink:#04211F;
+  --accent-glow:rgba(46,217,206,.16);
+
+  /* status set — hues chosen for deuteranopia/protanopia separation (round 5):
+     the three "colored" states differ in LIGHTNESS as well as hue, because red-green
+     CVD collapses them onto a light-dark axis. cached is a light spring-green, stale a
+     darker saturated orange, run the lightest warm yellow; none is fully desaturated so
+     CVD reads it as neutral. Colour is only the 3rd cue — shape (status icons) is 1st. */
+  --ok:#57DD8A;
+  --run:#F2CE5B;
+  --stale:#F07B2E;
+  --none:#8296A6;
+  --danger:#FF6F6F;
+
+  --ui: "Roboto","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",sans-serif;
+  --cond: "Roboto Condensed","Archivo Narrow","Arial Narrow","Roboto",system-ui,sans-serif;
+  --mono: "Roboto Mono","Cascadia Mono",ui-monospace,SFMono-Regular,Consolas,monospace;
+
+  --r-s:8px; --r-m:12px; --r-l:18px; --r-xl:26px;
+}
+
+*{ box-sizing:border-box; }
+body{
+  margin:0;
+  min-height:100vh;
+  background:
+    radial-gradient(120% 90% at 50% -10%, var(--desk-a), var(--desk-b) 70%);
+  font-family:var(--ui);
+  color:var(--text);
+  display:flex; flex-direction:column; align-items:center;
+  padding:28px 16px 18px;
+  gap:14px;
+}
+button{ font:inherit; color:inherit; background:none; border:0; cursor:pointer; }
+:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
+
+/* ---------- phone chrome ---------- */
+.phone{
+  position:relative;
+  width:390px; height:844px;
+  border-radius:46px;
+  padding:10px;
+  background:linear-gradient(160deg,#2b3840,#0c1114 40%,#222d34);
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,.06),
+    0 34px 70px -20px rgba(0,0,0,.65),
+    0 4px 14px rgba(0,0,0,.35);
+  flex:none;
+}
+.phone::before,.phone::after{
+  content:""; position:absolute; right:-2px; width:3px; border-radius:2px;
+  background:linear-gradient(180deg,#3c4a52,#1b2429);
+}
+.phone::before{ top:150px; height:46px; }
+.phone::after{ top:210px; height:78px; }
+
+.screen{
+  position:relative; overflow:hidden;
+  width:100%; height:100%;
+  border-radius:37px;
+  background:var(--bg);
+  display:flex; flex-direction:column;
+  isolation:isolate;
+}
+
+/* android status bar */
+.sysbar{
+  flex:none; height:30px; padding:0 18px 0 22px;
+  display:flex; align-items:center; justify-content:space-between;
+  font-size:12px; font-weight:500; color:var(--text);
+  letter-spacing:.2px;
+  position:relative; z-index:6;
+  background:var(--bg);
+}
+.sysbar .icons{ display:flex; align-items:center; gap:6px; opacity:.9; }
+.camera{
+  position:absolute; top:9px; left:50%; transform:translateX(-50%);
+  width:11px; height:11px; border-radius:50%;
+  background:#05090b; box-shadow:inset 0 0 0 1px #1d262c; z-index:7;
+}
+
+/* ---------- app shell ---------- */
+/* overflow:hidden keeps sheets/dialogs inside the app area instead of
+   painting over the bottom nav when they are translated off-screen */
+.app{ flex:1; min-height:0; display:flex; flex-direction:column; position:relative; overflow:hidden; }
+.view{ display:none; flex:1; min-height:0; flex-direction:column; }
+.view.active{ display:flex; }
+
+.topbar{
+  flex:none; padding:6px 16px 10px;
+  display:flex; align-items:flex-end; justify-content:space-between; gap:10px;
+  background:var(--bg);
+}
+.topbar h1{
+  margin:0; font-size:23px; font-weight:700; letter-spacing:-.4px;
+}
+.topbar .sub{ display:block; font-size:11px; font-weight:500; color:var(--dim-2); letter-spacing:.3px; margin-top:2px; }
+.iconbtn{
+  width:34px; height:34px; border-radius:10px;
+  display:grid; place-items:center; color:var(--dim);
+  border:1px solid transparent;
+}
+.iconbtn:hover{ background:var(--raised); color:var(--text); }
+.iconbtn.on{ background:var(--accent-glow); color:var(--accent); border-color:rgba(46,217,206,.3); }
+
+.scroll{
+  flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain;
+  padding:0 16px 96px;
+  scrollbar-width:none;                 /* phones don't show a persistent bar */
+}
+.scroll::-webkit-scrollbar{ display:none; }
+
+/* ---------- server context strip ---------- */
+.ctx{
+  display:flex; align-items:center; gap:7px; flex-wrap:wrap;
+  padding:9px 11px; margin-bottom:10px;
+  background:var(--surface); border:1px solid var(--line-soft);
+  border-radius:var(--r-m);
+  font-size:11.5px; color:var(--dim); white-space:nowrap;
+}
+.ctx .host{ color:var(--text); font-weight:600; letter-spacing:.1px; }
+.ctx .sep{ color:var(--line); }
+.ctx .free{
+  margin-left:auto; font-family:var(--mono); font-size:10.5px;
+  color:var(--dim); font-variant-numeric:tabular-nums;
+}
+.pulse{
+  width:7px; height:7px; border-radius:50%; background:var(--ok); flex:none;
+  box-shadow:0 0 0 0 rgba(99,199,122,.6); animation:beat 2.6s infinite;
+}
+@keyframes beat{ 0%{box-shadow:0 0 0 0 rgba(99,199,122,.5)} 70%{box-shadow:0 0 0 7px rgba(99,199,122,0)} 100%{box-shadow:0 0 0 0 rgba(99,199,122,0)} }
+
+/* pull-to-refresh */
+.ptr{
+  height:0; overflow:hidden; display:grid; place-items:center;
+  color:var(--accent); font-size:11px; letter-spacing:.4px; text-transform:uppercase;
+  transition:height .18s ease;
+}
+.ptr.on{ height:30px; }
+.spinner{
+  width:13px; height:13px; border-radius:50%;
+  border:2px solid rgba(46,217,206,.25); border-top-color:var(--accent);
+  animation:spin .7s linear infinite; display:inline-block; vertical-align:-2px; margin-right:7px;
+}
+@keyframes spin{ to{ transform:rotate(360deg) } }
+
+/* ---------- bypass banner ---------- */
+.banner{
+  display:flex; gap:10px; align-items:flex-start;
+  padding:11px 12px; margin-bottom:12px;
+  border-radius:var(--r-m);
+  background:linear-gradient(180deg,rgba(239,143,60,.16),rgba(239,143,60,.07));
+  border:1px solid rgba(239,143,60,.34);
+}
+.banner .glyph{ color:var(--stale); flex:none; margin-top:1px; }
+.banner .body{ flex:1; font-size:12.3px; line-height:1.42; color:#F6DCC4; }
+.banner .body b{ color:#fff; font-weight:600; }
+.banner .acts{ display:flex; gap:14px; margin-top:7px; }
+.banner .acts button{ font-size:11.5px; font-weight:600; letter-spacing:.3px; text-transform:uppercase; color:var(--stale); }
+.banner .acts button.mute{ color:rgba(246,220,196,.55); }
+
+/* ---------- search ---------- */
+.search{
+  display:flex; align-items:center; gap:9px; margin-bottom:9px;
+  padding:9px 11px; border-radius:var(--r-m);
+  background:var(--surface); border:1px solid var(--line);
+  transition:border-color .15s;
+}
+.search:focus-within{ border-color:var(--accent); }
+.search .mag{ color:var(--dim-2); display:grid; place-items:center; flex:none; }
+.search:focus-within .mag{ color:var(--accent); }
+.search input{
+  flex:1; min-width:0; background:none; border:0; outline:none;
+  font-family:var(--ui); font-size:13px; color:var(--text);
+}
+.search input::placeholder{ color:var(--dim-2); }
+.qx{ display:none; color:var(--dim-2); flex:none; }
+.qx:hover{ color:var(--text); }
+.search.filled .qx{ display:grid; place-items:center; }
+.noresult{ grid-column:1/-1; text-align:center; padding:30px 16px; }
+.noresult p{ margin:0 0 14px; font-size:12.5px; line-height:1.6; color:var(--dim-2); }
+.noresult b{ color:var(--text); }
+
+/* ---------- filter chips ---------- */
+.chips{
+  display:flex; gap:7px; margin-bottom:12px;
+  overflow-x:auto; scrollbar-width:none; padding-bottom:2px;
+}
+.chips::-webkit-scrollbar{ display:none; }
+.chip{
+  flex:none; padding:6px 10px; border-radius:999px;
+  border:1px solid var(--line); background:var(--surface);
+  font-size:11.5px; font-weight:500; color:var(--dim);
+  display:flex; align-items:center; gap:6px; white-space:nowrap;
+  transition:background .14s, color .14s, border-color .14s;
+}
+.chip .n{ font-family:var(--mono); font-size:10.5px; opacity:.65; font-variant-numeric:tabular-nums; }
+.chip:hover{ color:var(--text); border-color:var(--raised-2); }
+.chip[aria-pressed="true"]{
+  background:var(--accent-glow); border-color:rgba(46,217,206,.45); color:var(--accent);
+}
+.chip[aria-pressed="true"] .n{ opacity:.85; }
+
+/* ---------- capsule grid ---------- */
+.grid{ display:grid; grid-template-columns:repeat(2,1fr); gap:13px 12px; }
+.card{ position:relative; text-align:left; display:flex; flex-direction:column; gap:7px; }
+.cap{
+  position:relative; width:100%; aspect-ratio:2/3;
+  border-radius:var(--r-m); overflow:hidden;
+  background:
+    radial-gradient(120% 70% at 22% -6%, hsl(var(--h1) 62% 42%), transparent 62%),
+    linear-gradient(158deg, hsl(var(--h1) 46% 26%), hsl(var(--h2) 66% 8%));
+  box-shadow:0 3px 12px rgba(0,0,0,.4), inset 0 0 0 1px rgba(255,255,255,.06);
+  transition:transform .16s ease, box-shadow .16s ease;
+}
+.card:active .cap{ transform:scale(.972); }
+.cap .art{ position:absolute; inset:0; }
+.cap.p0 .art{ background:linear-gradient(112deg,transparent 38%, hsl(var(--h1) 90% 62% / .34) 39%, hsl(var(--h1) 90% 62% / .34) 46%, transparent 47%); }
+.cap.p1 .art{ background:radial-gradient(120% 62% at 50% 112%, hsl(var(--h2) 92% 58% / .5), transparent 62%); }
+.cap.p2 .art{ background:linear-gradient(180deg, transparent 52%, hsl(var(--h1) 85% 55% / .3) 52.6%, transparent 54%), radial-gradient(80% 40% at 50% 55%, hsl(var(--h2) 95% 62% / .35), transparent 70%); }
+.cap.p3 .art{ background:radial-gradient(90% 70% at 8% 6%, hsl(var(--h1) 95% 60% / .48), transparent 58%); }
+.cap.p4 .art{ background:repeating-linear-gradient(96deg, hsl(var(--h2) 80% 55% / .16) 0 3px, transparent 3px 13px); }
+.cap.p5 .art{ background:radial-gradient(circle at 50% 38%, transparent 24%, hsl(var(--h1) 88% 58% / .30) 25%, transparent 27%), radial-gradient(circle at 50% 38%, transparent 40%, hsl(var(--h2) 88% 60% / .26) 41%, transparent 43%); }
+.cap .scrim{ position:absolute; inset:0; background:linear-gradient(180deg,rgba(4,8,11,.05) 40%, rgba(4,8,11,.72) 84%, rgba(4,8,11,.92)); }
+.cap .name{
+  position:absolute; left:9px; right:9px; bottom:8px;
+  font-family:var(--cond); font-weight:700; font-size:14.5px; line-height:1.06;
+  letter-spacing:.4px; text-transform:uppercase; color:#fff;
+  text-shadow:0 1px 5px rgba(0,0,0,.75); text-wrap:balance;
+}
+/* ---------- capsule status pill (round 6) ----------
+   One object on the cover carries BOTH facts the grid needs: the status icon and the size.
+   It replaces the old bare colour tick (which was colour-only) and the duplicate size line
+   under the card. The dark scrim + hairline keeps it readable over any artwork. */
+.cappill{
+  position:absolute; left:7px; top:7px; z-index:2;
+  display:inline-flex; align-items:center; gap:5px;
+  min-height:23px; padding:3px 8px 3px 3px; border-radius:999px;
+  background:rgba(6,11,14,.74);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.15), 0 1px 5px rgba(0,0,0,.45);
+  font-family:var(--mono); font-size:10.5px; font-weight:500; color:#EAF3F6;
+  font-variant-numeric:tabular-nums; line-height:1; letter-spacing:-.2px;
+  max-width:calc(100% - 14px);
+}
+@supports (backdrop-filter:blur(3px)){ .cappill{ backdrop-filter:blur(3px); } }
+.cappill .pv{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cappill .sic{ --sz:17px; }
+/* actionable pill (item 7): start a download / update / pause straight from the cover */
+button.cappill{ cursor:pointer; transition:transform .12s ease, box-shadow .12s ease; }
+button.cappill:hover{ box-shadow:inset 0 0 0 1px rgba(255,255,255,.34), 0 2px 9px rgba(0,0,0,.5); }
+button.cappill:active{ transform:scale(.93); }
+.card:active .cap button.cappill{ transform:none; }   /* the card's press effect must not drag it */
+.cap .runbar{
+  position:absolute; left:0; right:0; bottom:0; height:3px; background:rgba(0,0,0,.45);
+}
+.cap .runbar i{ display:block; height:100%; background:var(--run); box-shadow:0 0 8px var(--run); }
+
+/* The meta row under a grid card now carries ONLY the status word: icon and size moved
+   onto the capsule pill, so nothing is said twice. The list layout re-enables icon+size. */
+.meta{ display:flex; align-items:center; gap:6px; font-size:11px; color:var(--dim); }
+.dot{ width:7px; height:7px; border-radius:50%; flex:none; }
+.meta .size{ display:none; font-family:var(--mono); font-variant-numeric:tabular-nums; letter-spacing:-.2px; }
+.meta > .sic, .meta > .icnact{ display:none; }
+.meta .state{ display:block; font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:var(--dim-2); }
+.rowname{ display:none; }              /* only the list layout needs the title as text */
+
+/* ---------- library layouts (2 cols · 3 cols · list) ----------
+   One render path, three skins. The status ICON (shape channel) rides in every layout;
+   the status WORD rides alongside it only where there is room — the list row — because
+   the grids lean on the glyph the legend teaches once. */
+.grid.cols3{ grid-template-columns:repeat(3,1fr); gap:11px 9px; }
+.grid.cols3 .cap{ border-radius:9px; }
+.grid.cols3 .cap .name{ left:6px; right:6px; bottom:6px; font-size:11px; letter-spacing:.25px; }
+/* 3 columns: the pill scales down but keeps both facts — it is still the only status object */
+.grid.cols3 .cappill{ left:5px; top:5px; min-height:20px; padding:2px 6px 2px 2px; gap:4px; font-size:9px; }
+.grid.cols3 .cappill .sic{ --sz:15px; }
+.grid.cols3 .card{ gap:5px; }
+.grid.cols3 .meta{ gap:5px; font-size:10px; }
+.grid.cols3 .meta .size{ font-size:10px; }
+.grid.cols3 .pick{ top:5px; right:5px; width:18px; height:18px; }
+
+.grid.list{ grid-template-columns:1fr; gap:7px; }
+.grid.list .card{
+  flex-direction:row; align-items:center; gap:10px; padding:6px 10px;
+  background:var(--surface); border:1px solid var(--line-soft); border-radius:var(--r-m);
+}
+.grid.list .card.picked{ border-color:rgba(46,217,206,.5); }
+.grid.list .cap{ width:30px; flex:none; border-radius:5px; }
+.grid.list .cap .name{ display:none; }
+/* the 30 px list thumbnail is far too small for a pill — the list row says it all in text */
+.grid.list .cappill{ display:none; }
+.grid.list .rowname{
+  display:block; flex:1; min-width:0; font-size:13px; font-weight:600; letter-spacing:-.1px;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.grid.list .meta{ flex:none; gap:8px; }
+/* the list row is the roomy one: icon + word + size all ride here */
+.grid.list .meta .size{ display:inline; margin-left:0; }
+.grid.list .meta > .sic, .grid.list .meta > .icnact{ display:grid; }
+.grid.list .meta .state{ display:inline; margin-left:0; }
+.grid.list .pick{ position:static; margin:0; flex:none; }
+.grid.list .card:active .cap{ transform:none; }
+.grid.list .card:active{ background:var(--raised); }
+
+/* segmented layout switch in the Library topbar */
+.segs{
+  display:flex; align-self:center; flex:none;
+  border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--surface);
+}
+.segs button{ width:30px; height:30px; display:grid; place-items:center; color:var(--dim-2); }
+.segs button + button{ border-left:1px solid var(--line); }
+.segs button:hover{ color:var(--text); }
+.segs button[aria-pressed="true"]{ background:var(--accent-glow); color:var(--accent); }
+
+.st-cached{ background:var(--ok); } .tx-cached{ color:var(--ok); }
+.st-running{ background:var(--run); animation:blink 1.3s ease-in-out infinite; } .tx-running{ color:var(--run); }
+.st-stale{ background:var(--stale); } .tx-stale{ color:var(--stale); }
+.st-none{ background:var(--none); } .tx-none{ color:var(--none); }
+/* paused is a JOB state, not a fifth cache state: the job still holds the slot (yellow),
+   it just isn't moving (no blink, and the bar below it goes grey). */
+.st-paused{ background:var(--run); } .tx-paused{ color:var(--run); }
+.st-verify{ background:var(--accent); animation:blink 1.3s ease-in-out infinite; } .tx-verify{ color:var(--accent); }
+.tx-updating{ color:var(--run); } .tx-error{ color:var(--danger); } .tx-warn{ color:var(--stale); }
+@keyframes blink{ 50%{ opacity:.35 } }
+
+/* ---------- status ICONS (round 5) ----------
+   Shape is the primary, colour-blind-safe status channel: a filled circle in the
+   status hue carrying a pixel-centred glyph. The glyph disambiguates status even when
+   the hue is unreadable (CVD) or the element is tiny (3-column grid). Words are kept in
+   every roomier layout (list, detail badge, legend, co-owner + client rows); the grid is
+   the only place an icon stands alone, and the legend teaches the glyph set once.
+   Ink is a single dark tone — high contrast on every one of the light status hues.
+   Round 6: the icon is also the primary ACTION target — see `.cappill` / `.icnact`. */
+.sic{
+  --sz:17px;
+  width:var(--sz); height:var(--sz); border-radius:50%;
+  display:grid; place-items:center; flex:none;
+  color:#08120F;                 /* glyph ink */
+  line-height:0;
+}
+.sic svg{ display:block; width:64%; height:64%; overflow:visible; }
+.sic.k-cached  { background:var(--ok); }
+.sic.k-none    { background:var(--none); }
+.sic.k-stale   { background:var(--stale); }
+.sic.k-paused  { background:var(--run); }
+.sic.k-running { background:var(--run); }
+.sic.k-updating{ background:var(--run); }
+.sic.k-verify  { background:var(--accent); }
+.sic.k-error   { background:var(--danger); }
+.sic.k-warn    { background:var(--stale); }
+
+/* Motion = "activity right now", never decoration. Only ACTIVE states move, so a grid at
+   rest is completely still. All of this is switched off by the prefers-reduced-motion
+   block at the end of the stylesheet. */
+/* DOWNLOAD (round 6, calmed down). The old version slid the WHOLE glyph — baseline
+   included — over 1.45 s, which read as restless. Now only the arrow itself drifts, the
+   travel is shorter, the cadence is much slower, and the animated variant drops its
+   baseline entirely so nothing static jitters underneath the moving part. */
+/* The arrow must NEVER fade to nothing: this glyph is the status indicator *and* the
+   button, and an icon that goes blank for part of every cycle reads as broken (caught in a
+   render — the pill was an empty yellow disc). So the fade bottoms out at .35 and the
+   travel is small enough (~3.4 user units ≈ 1.5 px at icon size) that the loop's reset is
+   imperceptible even though it happens while the arrow is still faintly visible. */
+@keyframes dlslide{
+  0%   { transform:translateY(-1.6px); opacity:.35 }
+  30%  { opacity:1 }
+  70%  { opacity:1 }
+  100% { transform:translateY(1.8px);  opacity:.35 }
+}
+.sic.k-running .dla{ animation:dlslide 2.6s ease-in-out infinite; }
+.sic.k-running .dlbase{ display:none; }   /* no line under the ANIMATED arrow (user request) */
+
+/* UPDATE (round 6). Two opposing curved arrows forming a full circle, turning at a
+   constant rate in complete 360° revolutions — linear, no easing wobble, no part-swing.
+   The glyph has 180° rotational symmetry, so every half turn lands back on itself and the
+   loop is seamless. `transform-box:fill-box` makes the origin the glyph's own centre. */
+@keyframes turn{ from{ transform:rotate(0deg) } to{ transform:rotate(360deg) } }
+.sic.k-updating .rot,
+.sic.k-verify .rot{
+  transform-box:fill-box; transform-origin:center;
+  animation:turn 2.2s linear infinite;
+}
+/* paused is deliberately motionless — a still pause glyph is the whole signal */
+
+.sic-lg{ --sz:19px; }           /* legend */
+.sic-sm{ --sz:16px; }           /* list rows, co-owner/client/notification/history rows */
+
+/* selection */
+.card .pick{
+  position:absolute; top:7px; right:7px;
+  width:21px; height:21px; border-radius:50%;
+  border:2px solid rgba(255,255,255,.75); background:rgba(6,11,14,.5);
+  display:none; place-items:center; color:var(--accent-ink);
+}
+body.selecting .card .pick{ display:grid; }
+.card.picked .cap{ box-shadow:0 0 0 2px var(--accent), 0 3px 12px rgba(0,0,0,.4); }
+.card.picked .pick{ background:var(--accent); border-color:var(--accent); }
+.card .pick svg{ opacity:0; }
+.card.picked .pick svg{ opacity:1; }
+
+/* ---------- bulk action bar ---------- */
+.bulk{
+  position:absolute; left:12px; right:12px; bottom:70px; z-index:20;
+  display:flex; align-items:center; gap:10px;
+  padding:10px 10px 10px 14px; border-radius:var(--r-l);
+  background:rgba(23,37,47,.97);
+  border:1px solid var(--raised-2);
+  box-shadow:0 12px 28px -8px rgba(0,0,0,.7);
+  opacity:0; pointer-events:none; transform:translateY(22px);
+  transition:transform .22s cubic-bezier(.2,.8,.3,1), opacity .18s;
+}
+.bulk.up{ opacity:1; pointer-events:auto; transform:none; }
+.bulk .count{ font-size:12.5px; color:var(--dim); line-height:1.25; }
+.bulk .count b{ color:var(--text); font-family:var(--mono); }
+/* the out-of-view counter gets its own line so the bar never wraps its buttons */
+.bulk .count .hid{ display:block; font-size:10.5px; color:var(--dim-2); margin-top:1px; }
+.bulk .btn{ white-space:nowrap; }
+
+/* ---------- buttons ---------- */
+.btn{
+  display:inline-flex; align-items:center; justify-content:center; gap:7px;
+  padding:10px 15px; border-radius:11px;
+  font-size:13px; font-weight:600; letter-spacing:.15px;
+  border:1px solid var(--line); background:var(--raised); color:var(--text);
+  transition:filter .14s, background .14s;
+}
+.btn:hover{ filter:brightness(1.14); }
+.btn:disabled{ opacity:.45; cursor:not-allowed; filter:none; }
+.btn.primary{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+.btn.danger{ background:transparent; border-color:rgba(255,111,111,.45); color:var(--danger); }
+.btn.ghost{ background:transparent; }
+.btn.wide{ width:100%; }
+.btn.sm{ padding:7px 11px; font-size:12px; border-radius:9px; }
+
+/* ---------- sheets & dialogs ---------- */
+.scrimlayer{
+  position:absolute; inset:0; z-index:30; background:rgba(3,7,10,.62);
+  opacity:0; pointer-events:none; transition:opacity .2s;
+  backdrop-filter:blur(2px);
+}
+.scrimlayer.on{ opacity:1; pointer-events:auto; }
+.sheet{
+  position:absolute; left:0; right:0; bottom:0; z-index:31;
+  max-height:88%; display:flex; flex-direction:column;
+  background:var(--surface);
+  border-top-left-radius:var(--r-xl); border-top-right-radius:var(--r-xl);
+  border-top:1px solid var(--line);
+  transform:translateY(101%); transition:transform .26s cubic-bezier(.2,.85,.3,1);
+  box-shadow:0 -18px 40px -12px rgba(0,0,0,.7);
+}
+.sheet.up{ transform:none; }
+.grab{ width:38px; height:4px; border-radius:2px; background:var(--line); margin:9px auto 2px; flex:none; }
+.sheet .body{ overflow-y:auto; padding:10px 18px 22px; scrollbar-width:none; }
+.sheet .body::-webkit-scrollbar{ display:none; }
+
+.dialog{
+  position:absolute; z-index:32; left:22px; right:22px; top:50%;
+  transform:translateY(-50%) scale(.94); opacity:0; pointer-events:none;
+  background:var(--raised); border:1px solid var(--line); border-radius:var(--r-l);
+  padding:20px 18px 16px;
+  /* the huge spread doubles as a scrim over whatever sits below, incl. an open sheet */
+  box-shadow:0 0 0 9999px rgba(3,7,10,.6), 0 24px 50px -12px rgba(0,0,0,.75);
+  transition:opacity .16s, transform .16s;
+}
+.dialog.on{ opacity:1; transform:translateY(-50%) scale(1); pointer-events:auto; }
+.dialog h3{ margin:0 0 9px; font-size:16.5px; letter-spacing:-.2px; }
+.dialog p{ margin:0 0 10px; font-size:13px; line-height:1.5; color:var(--dim); }
+.dialog .row{ display:flex; gap:9px; justify-content:flex-end; }
+.dialog p b{ color:var(--text); font-weight:600; }
+.dialog p b.num{ font-family:var(--mono); font-weight:500; font-variant-numeric:tabular-nums; }
+
+/* delete preview — one bullet per shared depot, because prose stops scanning at three */
+.cflabel{
+  margin:0 0 6px; font-size:9.5px; font-weight:700; letter-spacing:.8px;
+  text-transform:uppercase; color:var(--dim-2);
+}
+.cflist{
+  list-style:none; margin:0 0 11px; padding:0;
+  display:flex; flex-direction:column; gap:5px;
+  max-height:196px; overflow-y:auto; scrollbar-width:none;
+}
+.cflist::-webkit-scrollbar{ display:none; }
+.cflist li{
+  display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 8px;
+  padding:7px 9px; border-radius:var(--r-s);
+  background:var(--surface); border-left:2px solid var(--line);
+}
+.cflist li.free{ border-left-color:rgba(255,111,111,.55); }
+.cflist .did{ font-family:var(--mono); font-size:11.5px; color:var(--text); font-variant-numeric:tabular-nums; }
+.cflist .mk{
+  font-size:8.5px; font-weight:700; letter-spacing:.6px; text-transform:uppercase;
+  border:1px solid currentColor; border-radius:4px; padding:1px 4px;
+}
+.cflist li.keep .mk{ color:var(--dim-2); }
+.cflist li.free .mk{ color:var(--danger); }
+.cflist .dsz{
+  margin-left:auto; font-family:var(--mono); font-size:11px; color:var(--dim);
+  font-variant-numeric:tabular-nums;
+}
+.cflist .why{ flex-basis:100%; font-size:11px; line-height:1.45; color:var(--dim-2); }
+.dialog .cftotal{
+  margin:0 0 14px; padding-top:9px; border-top:1px solid var(--line-soft);
+  font-size:12px; color:var(--dim);
+}
+.dialog .cftotal b{ color:var(--text); font-family:var(--mono); font-weight:500; font-variant-numeric:tabular-nums; }
+.dialog .cfsolo{ margin:0 0 14px; font-size:11.8px; line-height:1.45; color:var(--dim-2); }
+
+/* ---------- detail sheet ---------- */
+.dhead{ display:flex; gap:13px; align-items:flex-start; margin-bottom:14px; }
+.dhead .cap{ width:78px; flex:none; }
+.dhead h2{ margin:0 0 3px; font-size:19px; letter-spacing:-.3px; line-height:1.15; text-wrap:balance; }
+.dhead .appid{ font-family:var(--mono); font-size:11px; color:var(--dim-2); }
+.dhead .facts{ margin-top:8px; display:flex; flex-direction:column; gap:3px; font-size:11.8px; color:var(--dim); }
+.dhead .facts b{ color:var(--text); font-family:var(--mono); font-weight:500; font-variant-numeric:tabular-nums; }
+.badge{
+  display:inline-flex; align-items:center; gap:5px; padding:3px 8px; border-radius:999px;
+  font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:.5px;
+  border:1px solid currentColor; background:rgba(255,255,255,.03);
+}
+
+h4.sec{
+  margin:18px 0 8px; font-size:10.5px; font-weight:700;
+  text-transform:uppercase; letter-spacing:1.1px; color:var(--dim-2);
+  display:flex; align-items:center; gap:8px;
+}
+h4.sec::after{ content:""; flex:1; height:1px; background:var(--line-soft); }
+
+.depots{ display:flex; flex-direction:column; gap:1px; background:var(--line-soft); border-radius:var(--r-s); overflow:hidden; }
+.depotwrap{ background:var(--raised); }
+.depot{
+  display:flex; align-items:center; gap:9px; padding:9px 11px; font-size:12.5px;
+}
+.depotwrap.sh .depot{ cursor:pointer; }
+.depotwrap.sh .depot:hover{ background:var(--raised-2); }
+.depot .id{ font-family:var(--mono); font-size:12px; color:var(--text); font-variant-numeric:tabular-nums; }
+.depot .tag{
+  font-size:9.5px; text-transform:uppercase; letter-spacing:.5px; font-weight:600;
+  color:var(--stale); border:1px solid rgba(239,143,60,.4); border-radius:5px; padding:1px 5px;
+}
+.depot .b{ margin-left:auto; font-family:var(--mono); font-size:11.5px; color:var(--dim); font-variant-numeric:tabular-nums; }
+.depot .chev{ color:var(--dim-2); display:grid; place-items:center; transition:transform .18s; }
+.depotwrap.open .chev{ transform:rotate(90deg); }
+
+/* co-owner panel — who else maps this depot, computed at render time */
+.owners{ display:none; padding:2px 11px 11px; }
+.depotwrap.open .owners{ display:block; }
+.olabel{
+  margin:0 0 6px; font-size:9.5px; font-weight:700; letter-spacing:.8px;
+  text-transform:uppercase; color:var(--dim-2);
+}
+.orow{ display:flex; align-items:center; gap:8px; padding:4px 0; font-size:12px; }
+.orow .on{ color:var(--text); }
+.orow .os{ margin-left:auto; font-size:10px; text-transform:uppercase; letter-spacing:.4px; color:var(--dim-2); }
+.orow.off .on{ color:var(--dim-2); }
+.ohint{ margin:7px 0 0; font-size:10.5px; line-height:1.5; color:var(--dim-2); }
+/* "shared" stays a mapping fact even when nobody cached needs it — but say so */
+.onone{
+  margin:7px 0 0; padding:5px 0 5px 8px; border-left:2px solid var(--line);
+  font-size:10.5px; line-height:1.5; color:var(--dim-2);
+}
+.onone b{ color:var(--dim); font-weight:600; }
+
+/* honest empty state: no mapping rows yet */
+.unknown{
+  border:1px dashed var(--line); border-radius:var(--r-m); padding:14px 13px;
+}
+.unknown .u1{ margin:0 0 7px; font-size:13px; font-weight:600; color:var(--text); }
+.unknown .u2{ margin:0; font-size:11.5px; line-height:1.55; color:var(--dim); }
+.unknown .u3{
+  margin:10px 0 0; padding-top:10px; border-top:1px solid var(--line-soft);
+  font-size:11px; line-height:1.5; color:var(--dim-2);
+}
+.hint{ font-size:11.5px; line-height:1.5; color:var(--dim-2); margin:9px 0 0; }
+
+.legend{ display:grid; grid-template-columns:1fr 1fr; gap:7px 10px; }
+.legend div{ display:flex; align-items:center; gap:7px; font-size:11.5px; color:var(--dim); }
+
+/* inline job progress in detail */
+.inlinejob{
+  border:1px solid rgba(237,197,95,.35); background:rgba(237,197,95,.07);
+  border-radius:var(--r-m); padding:11px 12px; margin-top:14px;
+}
+.inlinejob.held{ border-color:var(--line); background:var(--surface); }
+.inlinejob.ver{ border-color:rgba(46,217,206,.3); background:var(--accent-glow); }
+.inlinejob .t{ display:flex; justify-content:space-between; font-size:12px; color:var(--run); margin-bottom:8px; }
+.inlinejob.held .t{ color:var(--dim-2); }
+.inlinejob.ver .t{ color:var(--accent); }
+.inlinejob .t b{ font-family:var(--mono); font-weight:500; font-variant-numeric:tabular-nums; }
+
+.bar{ height:5px; border-radius:3px; background:rgba(255,255,255,.09); overflow:hidden; }
+.bar i{ display:block; height:100%; border-radius:3px; background:var(--run); transition:width .35s linear; }
+.bar.acc i{ background:var(--accent); }
+/* frozen progress: the bytes are still on the cache, nothing is moving */
+.bar.hold i{ background:var(--dim-2); }
+.bar.verify i{ background:var(--accent); animation:fade 1.1s ease-in-out infinite; }
+@keyframes fade{ 50%{ opacity:.42 } }
+.cap .runbar.hold i{ background:var(--dim-2); box-shadow:none; }
+
+/* ---------- downloads ---------- */
+.jobcard{
+  background:var(--surface); border:1px solid var(--line-soft);
+  border-radius:var(--r-m); padding:12px; margin-bottom:10px;
+}
+.jobcard.active{ border-color:rgba(237,197,95,.32); background:linear-gradient(180deg,rgba(237,197,95,.07),var(--surface)); }
+.jobcard.held{ border-color:var(--line); background:var(--surface); }
+.jobcard.verifying{ border-color:rgba(46,217,206,.3); background:linear-gradient(180deg,var(--accent-glow),var(--surface)); }
+.jobstats .hold{ color:var(--dim-2); }
+.jobstats .ver{ color:var(--accent); }
+.jobacts{ display:flex; gap:8px; justify-content:flex-end; margin-top:11px; }
+/* what a pause actually costs the queue — stated, not hidden */
+.holdnote{
+  margin:10px 0 0; padding:7px 0 7px 9px; border-left:2px solid var(--line);
+  font-size:11px; line-height:1.5; color:var(--dim-2);
+}
+.jobtop{ display:flex; gap:11px; align-items:center; }
+.thumb{ width:38px; aspect-ratio:2/3; border-radius:6px; flex:none; }
+.thumb .name,.thumb .cappill,.thumb .runbar{ display:none; }   /* too small to carry type */
+/* the detail sheet already states status and size in its own badge + facts list */
+.dhead .cap .cappill{ display:none; }
+.thumb .scrim{ background:linear-gradient(180deg,transparent 45%,rgba(4,8,11,.6)); }
+.jobtop .nm{ font-size:13.5px; font-weight:600; letter-spacing:-.1px; }
+.jobtop .sm{ font-size:11px; color:var(--dim-2); font-family:var(--mono); margin-top:2px; font-variant-numeric:tabular-nums; }
+.jobstats{
+  display:flex; justify-content:space-between; margin:10px 0 6px;
+  font-family:var(--mono); font-size:11px; color:var(--dim); font-variant-numeric:tabular-nums;
+}
+.jobstats .pct{ color:var(--run); font-weight:500; }
+
+.qrow{
+  display:flex; align-items:center; gap:10px; padding:10px 11px;
+  background:var(--surface); border:1px solid var(--line-soft);
+  border-radius:var(--r-m); margin-bottom:7px;
+}
+.qrow .grip{ color:var(--dim-2); cursor:grab; }
+.qrow .nm{ font-size:13px; }
+.qrow .pos{ margin-left:auto; font-family:var(--mono); font-size:11px; color:var(--dim-2); }
+
+.hrow{ border:1px solid var(--line-soft); background:var(--surface); border-radius:var(--r-m); margin-bottom:7px; overflow:hidden; }
+.hrow > button{
+  width:100%; display:flex; align-items:center; gap:10px; padding:11px 12px; text-align:left;
+}
+.hrow .nm{ font-size:13px; font-weight:500; }
+.hrow .when{ font-size:10.5px; color:var(--dim-2); font-family:var(--mono); margin-top:2px; }
+.hrow .arrow{ margin-left:auto; color:var(--dim-2); transition:transform .18s; }
+.hrow.open .arrow{ transform:rotate(90deg); }
+.log{
+  display:none; padding:0 12px 12px;
+  font-family:var(--mono); font-size:10.5px; line-height:1.65; color:var(--dim);
+  white-space:pre-wrap; word-break:break-word;
+}
+.hrow.open .log{ display:block; }
+.log .vk{ color:var(--accent); }
+.log .er{ color:var(--danger); }
+
+.empty{ text-align:center; padding:34px 20px; color:var(--dim-2); font-size:12.5px; line-height:1.6; }
+
+/* ---------- settings ---------- */
+.opt{
+  display:flex; gap:11px; align-items:flex-start; padding:12px;
+  border:1px solid var(--line-soft); background:var(--surface);
+  border-radius:var(--r-m); margin-bottom:8px; width:100%; text-align:left;
+  transition:border-color .15s, background .15s;
+}
+.opt[aria-checked="true"]{ border-color:rgba(46,217,206,.5); background:linear-gradient(180deg,var(--accent-glow),var(--surface)); }
+.opt:disabled{ opacity:.55; cursor:not-allowed; }
+.radio{
+  width:17px; height:17px; border-radius:50%; border:2px solid var(--line); flex:none; margin-top:1px;
+  display:grid; place-items:center;
+}
+.opt[aria-checked="true"] .radio{ border-color:var(--accent); }
+.opt[aria-checked="true"] .radio::after{ content:""; width:8px; height:8px; border-radius:50%; background:var(--accent); }
+.opt .ttl{ font-size:13.5px; font-weight:600; display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+.opt .desc{ font-size:11.5px; color:var(--dim-2); line-height:1.45; margin-top:3px; }
+.tag{
+  font-size:9px; font-weight:700; letter-spacing:.6px; text-transform:uppercase;
+  padding:2px 6px; border-radius:5px;
+}
+.tag.def{ background:var(--accent-glow); color:var(--accent); }
+.tag.soon{ background:rgba(138,161,173,.14); color:var(--dim); }
+
+.field{ margin-bottom:11px; }
+.field label{ display:block; font-size:10.5px; text-transform:uppercase; letter-spacing:.8px; color:var(--dim-2); margin-bottom:5px; font-weight:600; }
+.inp{
+  display:flex; align-items:center; gap:8px;
+  border:1px solid var(--line); background:var(--bg); border-radius:10px; padding:10px 11px;
+  font-family:var(--mono); font-size:12.5px; color:var(--text);
+}
+.inp span{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.inp button{ color:var(--dim); }
+.inp button:hover{ color:var(--accent); }
+
+.srow{
+  display:flex; align-items:center; gap:11px; padding:12px;
+  border:1px solid var(--line-soft); background:var(--surface);
+  border-radius:var(--r-m); margin-bottom:8px;
+}
+.srow .ttl,.steamrow .ttl{ display:block; font-size:13.5px; font-weight:600; }
+.srow .desc,.steamrow .desc,.opt .desc{ display:block; font-size:11.5px; color:var(--dim-2); line-height:1.45; margin-top:3px; }
+.srow .grow{ flex:1; min-width:0; }
+.avatar{
+  width:38px; height:38px; border-radius:11px; flex:none;
+  background:linear-gradient(150deg,#1E6E7A,#0D2B33);
+  display:grid; place-items:center; font-family:var(--cond); font-weight:700; font-size:15px;
+  color:var(--accent); box-shadow:inset 0 0 0 1px rgba(46,217,206,.3);
+}
+.toggle{
+  width:44px; height:25px; border-radius:999px; background:var(--line); flex:none;
+  position:relative; transition:background .18s;
+}
+.toggle::after{
+  content:""; position:absolute; top:3px; left:3px; width:19px; height:19px; border-radius:50%;
+  background:#8FA6B2; transition:transform .18s, background .18s;
+}
+.toggle[aria-checked="true"]{ background:rgba(46,217,206,.32); }
+.toggle[aria-checked="true"]::after{ transform:translateX(19px); background:var(--accent); }
+
+.okline{
+  display:none; align-items:center; gap:8px; margin-top:9px;
+  font-size:12px; color:var(--ok); font-family:var(--mono); font-variant-numeric:tabular-nums;
+}
+.okline.on{ display:flex; }
+
+/* ---------- bottom nav ---------- */
+.nav{
+  flex:none; position:relative; z-index:22;
+  display:grid; grid-template-columns:repeat(3,1fr);
+  background:rgba(13,21,27,.96);
+  border-top:1px solid var(--line-soft);
+  padding:7px 6px 11px;
+}
+.nav button{ display:flex; flex-direction:column; align-items:center; gap:3px; color:var(--dim-2); padding:4px 0; position:relative; }
+.nav button .lb{ font-size:10px; font-weight:600; letter-spacing:.3px; }
+.nav button.on{ color:var(--accent); }
+.nav .pip{
+  position:absolute; top:1px; right:calc(50% - 19px);
+  min-width:15px; height:15px; padding:0 4px; border-radius:8px;
+  background:var(--run); color:#20180a; font-size:9.5px; font-weight:700;
+  display:none; place-items:center; font-family:var(--mono);
+}
+.nav .pip.on{ display:grid; }
+
+/* ---------- toast ---------- */
+/* round 7 item 2: the toast sits tight above the nav (12px), same as the bulk bar. When the
+   bulk bar is up it would collide, so positionToast() stacks the toast on top of the bar. */
+.toast{
+  position:absolute; left:16px; right:16px; bottom:12px; z-index:40;
+  background:var(--raised-2); border:1px solid var(--line);
+  border-radius:11px; padding:11px 13px; font-size:12.5px; color:var(--text);
+  box-shadow:0 12px 26px -10px rgba(0,0,0,.8);
+  transform:translateY(20px); opacity:0; pointer-events:none; transition:.22s;
+  display:flex; align-items:center; gap:9px;
+}
+.toast.on{ transform:none; opacity:1; }
+.toast .k{ width:3px; align-self:stretch; border-radius:2px; background:var(--accent); flex:none; }
+.toast.warn .k{ background:var(--stale); }
+
+/* ---------- onboarding ---------- */
+.onb{
+  position:absolute; inset:0; z-index:50; background:var(--bg);
+  display:flex; flex-direction:column; padding:16px 20px 16px;
+  transition:opacity .3s, transform .3s;
+}
+.onb.gone{ opacity:0; transform:scale(1.04); pointer-events:none; }
+body.onboarding .nav{ display:none; }
+.onbhead{ display:flex; align-items:center; gap:11px; flex:none; }
+.mark{
+  width:40px; height:40px; border-radius:12px; display:grid; place-items:center; flex:none;
+  background:linear-gradient(150deg,rgba(46,217,206,.22),rgba(46,217,206,.05));
+  box-shadow:inset 0 0 0 1px rgba(46,217,206,.35); color:var(--accent);
+}
+.wordmark{ font-size:15px; font-weight:700; letter-spacing:-.2px; }
+.stepnum{ font-size:10.5px; letter-spacing:.7px; text-transform:uppercase; color:var(--dim-2); font-weight:600; margin-top:2px; }
+.track{ flex:none; height:3px; border-radius:2px; background:var(--line-soft); margin:13px 0 16px; overflow:hidden; }
+.track i{ display:block; height:100%; background:var(--accent); transition:width .3s ease; }
+
+.onb h2{ margin:0 0 6px; font-size:24px; letter-spacing:-.6px; text-wrap:balance; }
+.onb .lede{ margin:0 0 18px; font-size:12.8px; line-height:1.55; color:var(--dim); }
+.onb .steplbl{ font-size:10px; text-transform:uppercase; letter-spacing:1.1px; color:var(--dim-2); font-weight:700; margin:0 0 9px; }
+.onb .rest{ flex:1; min-height:0; overflow-y:auto; scrollbar-width:none; }
+.onb .rest::-webkit-scrollbar{ display:none; }
+.ostep{ display:none; }
+.ostep.on{ display:block; animation:slidein .28s ease both; }
+@keyframes slidein{ from{ opacity:0; transform:translateX(14px) } to{ opacity:1; transform:none } }
+.onbfoot{ flex:none; padding-top:12px; }
+.skiplink{
+  display:block; width:100%; text-align:center; margin-top:10px;
+  font-size:11.5px; color:var(--dim-2); text-decoration:underline; text-underline-offset:3px;
+}
+.skiplink:hover{ color:var(--accent); }
+
+.steamrow{
+  border:1px solid var(--line); background:var(--surface); border-radius:var(--r-m);
+  padding:13px; display:flex; gap:11px; align-items:center;
+}
+.foot-note{ font-size:11px; line-height:1.5; color:var(--dim-2); margin:10px 0 0; }
+.btn.big{ padding:14px 16px; font-size:14.5px; border-radius:13px; }
+.disclaim{
+  margin-top:14px; padding:10px 12px; border-radius:var(--r-s);
+  border:1px solid var(--line-soft); background:var(--surface);
+  font-size:11px; line-height:1.55; color:var(--dim-2);
+}
+.verify{ margin:0; font-size:12px; line-height:1.62; color:var(--dim); }
+.verify b{ color:var(--text); font-weight:600; }
+.verify b:first-of-type{ font-family:var(--mono); font-weight:500; font-size:11.5px; }
+.bullets{ margin:0; padding-left:16px; }
+.bullets li{ font-size:12px; line-height:1.55; color:var(--dim); margin-bottom:6px; }
+.bullets b{ color:var(--text); font-weight:600; }
+.summary{ display:flex; flex-direction:column; gap:1px; background:var(--line-soft); border-radius:var(--r-m); overflow:hidden; }
+.summary div{ display:flex; gap:10px; padding:11px 12px; background:var(--surface); font-size:12.5px; }
+.summary span:first-child{ color:var(--dim-2); width:96px; flex:none; }
+.summary span:last-child{
+  color:var(--text); font-family:var(--mono); font-size:11.5px;
+  min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+
+/* form inputs */
+input.inp,.inp input{
+  font-family:var(--mono); font-size:12.5px; color:var(--text);
+  background:transparent; border:0; outline:none; width:100%; min-width:0; padding:0;
+}
+input.inp.txt{ background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px 11px; }
+input.inp.txt:focus{ border-color:var(--accent); }
+.inp:focus-within{ border-color:var(--accent); }
+
+/* mocked Valve interstitial — deliberately a placeholder, never a look-alike */
+.valve{
+  position:absolute; inset:0; z-index:60; background:#0E141A;
+  display:none; flex-direction:column;
+}
+.valve.on{ display:flex; animation:rise .26s ease both; }
+@keyframes rise{ from{ transform:translateY(24px); opacity:0 } to{ transform:none; opacity:1 } }
+.chrometab{
+  flex:none; display:flex; align-items:center; gap:8px;
+  padding:14px 14px 12px; background:#16202A; border-bottom:1px solid #22303B;
+}
+.chrometab .lockic{ color:var(--ok); }
+.chrometab .url{ font-family:var(--mono); font-size:11.5px; color:#B9CBD5; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.chrometab .ctlabel{ font-size:9px; text-transform:uppercase; letter-spacing:.6px; color:var(--dim-2); border:1px solid var(--line); border-radius:5px; padding:2px 5px; }
+.valvebody{ flex:1; display:flex; flex-direction:column; justify-content:center; padding:20px; }
+.valvebody .ph{
+  border:1px dashed var(--line); border-radius:var(--r-l);
+  padding:26px 20px; text-align:center; color:var(--dim-2); margin-bottom:20px;
+}
+.phtitle{ margin:12px 0 8px; font-size:15px; font-weight:600; color:var(--text); }
+.phtext{ margin:0 0 14px; font-size:12px; line-height:1.6; color:var(--dim); }
+.phwarn{
+  margin:0; font-family:var(--mono); font-size:10px; line-height:1.5; color:var(--stale);
+  border-top:1px solid var(--line-soft); padding-top:12px;
+}
+
+/* ---------- API mapping chips (mockup aid) ---------- */
+.api{
+  display:none; font-family:var(--mono); font-size:9.5px; letter-spacing:0;
+  color:var(--accent); background:rgba(46,217,206,.09);
+  border:1px solid rgba(46,217,206,.22); border-radius:5px; padding:1px 5px;
+  white-space:nowrap; text-transform:none; font-weight:400;
+}
+body.show-api .api{ display:inline-block; }
+
+/* ---------- page footer ---------- */
+.pagefoot{
+  font-size:11px; letter-spacing:.5px; color:var(--desk-ink);
+  font-family:var(--mono); text-align:center;
+}
+.pagefoot a{ color:inherit; }
+
+/* ============================================================
+   Round 5 additions
+   ============================================================ */
+
+/* finding 5 — sole-holder: soften the "shared" tag to grey when THIS cached game is the
+   only one actually using the depot (mapping still true, but deleting frees it). */
+.depot .tag.solo{ color:var(--none); border-color:rgba(130,150,166,.45); }
+.onone.lead{ margin:0 0 9px; border-left-color:var(--accent); }
+.onone.lead b{ color:var(--text); }
+
+/* finding 8 / icon audit — a status word riding beside an icon in the roomier rows */
+.cw{ font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; }
+.crow{ display:flex; align-items:center; gap:9px; }
+
+/* finding 2 + round-6 cleanup — the bar is a COLUMN: a head line (count + cancel), the
+   plain-language note, then a button row that WRAPS instead of overflowing. Buttons flex,
+   so any combination (download / update / re-download / delete) fits at 390 px, and with
+   the API chips switched on the row simply gains a second line. Sits tight above the nav. */
+.bulk{
+  flex-direction:column; align-items:stretch; gap:7px;
+  padding:10px 12px 11px; bottom:12px;
+}
+.bulkhead{ display:flex; align-items:center; gap:10px; }
+.bulkhead .count{ flex:1; min-width:0; }
+.bulkbtns{ display:flex; flex-wrap:wrap; gap:7px; }
+.bulkbtns .btn{ flex:1 1 auto; min-width:0; justify-content:center; }
+.bulknote{ margin:0; font-size:11px; line-height:1.4; color:var(--dim-2); }
+.bulknote:empty{ display:none; }
+.bulkhead .btn{ flex:none; }
+
+/* multi-delete: name every game the batch will empty, so the count is never abstract */
+#cf-names{ display:flex; flex-wrap:wrap; gap:5px; margin:0 0 11px; }
+#cf-names:empty{ display:none; }
+.cfn{
+  font-size:11px; color:var(--text); background:var(--surface);
+  border:1px solid var(--line); border-radius:6px; padding:3px 7px;
+  max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+
+/* finding 7 — notifications bell badge + panel */
+.iconbtn{ position:relative; }
+.npip{
+  position:absolute; top:1px; right:1px;
+  min-width:15px; height:15px; padding:0 4px; border-radius:8px;
+  background:var(--stale); color:#20180a; font-size:9.5px; font-weight:700;
+  font-family:var(--mono); display:none; place-items:center;
+  box-shadow:0 0 0 2px var(--bg);
+}
+.npip.on{ display:grid; }
+.notif{
+  display:flex; gap:11px; align-items:flex-start;
+  padding:11px 6px; border-bottom:1px solid var(--line-soft);
+}
+.notif:last-of-type{ border-bottom:0; }
+.notif.unread{
+  background:linear-gradient(90deg,var(--accent-glow),transparent 70%);
+  border-radius:var(--r-s);
+}
+.notif .nbody{ flex:1; min-width:0; }
+.notif .nt{ font-size:13px; font-weight:600; color:var(--text); display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+.notif .nt .nw{ font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; }
+.notif .nx{ font-size:11.5px; line-height:1.5; color:var(--dim); margin-top:3px; }
+.notif .nwhen{ font-size:10px; color:var(--dim-2); font-family:var(--mono); margin-top:4px; }
+.notif .undot{ width:7px; height:7px; border-radius:50%; background:var(--accent); flex:none; margin-top:6px; opacity:0; }
+.notif.unread .undot{ opacity:1; }
+
+/* finding 1 — onboarding Back control (steps 2 & 3) */
+.onbnav{ display:flex; gap:10px; }
+.onbnav .btn{ flex:1; }
+
+/* Round 7 (found while rendering): the Library topbar gained a 5th control with the
+   notifications bell and started WRAPPING — the refresh icon dropped onto a second row.
+   The control cluster must never wrap; the title block absorbs the pressure instead, with
+   the secondary stat line truncating rather than pushing the header to two rows. */
+.topbar > div:first-child{ min-width:0; }
+.topbar h1{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.topbar .sub{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.topbar .tools{ display:flex; gap:4px; flex-wrap:nowrap; flex:none; justify-content:flex-end; align-items:center; }
+.topbar .tools .iconbtn{ width:32px; height:32px; }
+.segs button{ width:28px; height:30px; }
+
+/* keep the icon compact where it rides beside a word */
+.badge .sic{ --sz:14px; }
+.orow .sic, .notif .sic{ --sz:16px; }
+
+/* item 7 — the status icon in a LIST row is an action target too. The button is padded
+   out to a comfortable ~30 px touch area while the icon itself stays 17 px. */
+.icnact{
+  display:grid; place-items:center; padding:6px; margin:-6px; border-radius:50%;
+  transition:transform .12s ease, background .12s ease;
+}
+.icnact:hover{ background:rgba(255,255,255,.07); }
+.icnact:active{ transform:scale(.9); }
+
+/* item 1 — notifications are navigational: each row leads to what it is about */
+button.notif{ width:100%; text-align:left; cursor:pointer; }
+button.notif:hover{ background:rgba(255,255,255,.045); border-radius:var(--r-s); }
+.notif .ngo{ align-self:center; color:var(--dim-2); flex:none; }
+button.notif:hover .ngo{ color:var(--accent); }
+
+/* ---------- responsive: real phone = fullscreen ---------- */
+@media (max-width:480px){
+  body{ padding:0; gap:0; background:var(--bg); }
+  .phone{ width:100%; height:100dvh; border-radius:0; padding:0; box-shadow:none; background:var(--bg); }
+  .phone::before,.phone::after,.camera{ display:none; }
+  .screen{ border-radius:0; }
+  .pagefoot{ display:none; }
+  .miniprint{ display:block !important; }
+}
+.miniprint{ display:none; text-align:center; font-family:var(--mono); font-size:9px; color:var(--dim-2); padding:0 0 4px; }
+
+@media (prefers-reduced-motion: reduce){
+  *{ animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important; }
+}
+</style>
+
+<div class="phone">
+  <div class="camera"></div>
+  <div class="screen">
+
+    <div class="sysbar">
+      <span id="clock">9:41</span>
+      <span class="icons">
+        <svg width="14" height="11" viewBox="0 0 14 11" fill="currentColor"><path d="M1 7.5 0 6.4A10 10 0 0 1 14 6.4l-1 1.1A8.5 8.5 0 0 0 1 7.5Zm2.2 2.3-1-1.1a6.6 6.6 0 0 1 9.6 0l-1 1.1a5.2 5.2 0 0 0-7.6 0Z"/><circle cx="7" cy="10.2" r="1.2"/></svg>
+        <svg width="13" height="11" viewBox="0 0 13 11" fill="currentColor"><rect x="0" y="7" width="2.4" height="4" rx=".6"/><rect x="3.5" y="5" width="2.4" height="6" rx=".6"/><rect x="7" y="2.6" width="2.4" height="8.4" rx=".6"/><rect x="10.5" y="0" width="2.4" height="11" rx=".6" opacity=".4"/></svg>
+        <svg width="21" height="11" viewBox="0 0 21 11" fill="none"><rect x=".5" y=".5" width="17" height="10" rx="2.6" stroke="currentColor" opacity=".55"/><rect x="2" y="2" width="11.5" height="7" rx="1.4" fill="currentColor"/><path d="M19 4v3a2 2 0 0 0 0-3Z" fill="currentColor" opacity=".55"/></svg>
+      </span>
+    </div>
+
+    <div class="app">
+
+      <!-- ============ LIBRARY ============ -->
+      <section class="view active" id="v-library">
+        <div class="topbar">
+          <div>
+            <h1>Library</h1>
+            <span class="sub" id="libsub">412 owned · 12 on the cache</span>
+          </div>
+          <div class="tools">
+            <span class="api" style="align-self:center;margin-right:2px">GET /v1/games</span>
+            <div class="segs" id="layoutsegs" role="group" aria-label="Library layout">
+              <button data-layout="grid2" aria-pressed="true" title="Two columns" aria-label="Two columns">
+                <svg width="16" height="16" viewBox="0 0 18 18" fill="currentColor"><rect x="2" y="3" width="6" height="12" rx="1.5"/><rect x="10" y="3" width="6" height="12" rx="1.5"/></svg>
+              </button>
+              <button data-layout="grid3" aria-pressed="false" title="Three columns" aria-label="Three columns">
+                <svg width="16" height="16" viewBox="0 0 18 18" fill="currentColor"><rect x="2" y="3" width="3.6" height="12" rx="1.2"/><rect x="7.2" y="3" width="3.6" height="12" rx="1.2"/><rect x="12.4" y="3" width="3.6" height="12" rx="1.2"/></svg>
+              </button>
+              <button data-layout="list" aria-pressed="false" title="List" aria-label="List">
+                <svg width="16" height="16" viewBox="0 0 18 18" fill="currentColor"><rect x="2" y="3.4" width="14" height="2.6" rx="1.3"/><rect x="2" y="7.7" width="14" height="2.6" rx="1.3"/><rect x="2" y="12" width="14" height="2.6" rx="1.3"/></svg>
+              </button>
+            </div>
+            <button class="iconbtn" id="btn-select" title="Select games" aria-label="Select games">
+              <svg width="19" height="19" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2.5" y="2.5" width="15" height="15" rx="3.5"/><path d="m6.4 10.2 2.4 2.5 4.8-5"/></svg>
+            </button>
+            <button class="iconbtn" id="btn-notifs" title="Notifications" aria-label="Notifications">
+              <span class="npip" id="npip">0</span>
+              <svg width="19" height="19" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M10 2.6a5 5 0 0 0-5 5c0 4.2-1.4 5.6-1.4 5.6h12.8S15 11.8 15 7.6a5 5 0 0 0-5-5Z"/><path d="M8.4 16.4a1.9 1.9 0 0 0 3.2 0"/></svg>
+            </button>
+            <button class="iconbtn" id="btn-refresh" title="Refresh" aria-label="Refresh">
+              <svg width="19" height="19" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M16.5 10a6.5 6.5 0 1 1-1.9-4.6"/><path d="M16.8 2.6v3.6h-3.6"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="scroll" id="libscroll">
+          <div class="ptr" id="ptr"><span><span class="spinner"></span>Refreshing</span></div>
+
+          <div class="ctx">
+            <span class="pulse"></span>
+            <span class="host" id="ctxhost">vault-01</span>
+            <span>online</span>
+            <span class="sep">·</span>
+            <span class="free" id="freespace">1.42 TB free of 3.64 TB</span>
+            <span class="tag soon" id="demopill" style="display:none">Demo</span>
+            <span class="api">GET /v1/cache/summary</span>
+          </div>
+
+          <div class="banner" id="bypass-banner">
+            <span class="glyph">
+              <svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M10 2.6 18.4 17H1.6L10 2.6Z"/><path d="M10 8v3.6M10 14.1v.1"/></svg>
+            </span>
+            <div class="body">
+              Client <b>DEMON</b> downloads are bypassing the cache — check DNS.
+              <div class="acts">
+                <button id="bypass-details">Details <span class="api">GET /v1/clients</span></button>
+                <button class="mute" id="bypass-dismiss">Dismiss</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="search">
+            <span class="mag"><svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="8.8" cy="8.8" r="5.6"/><path d="m13 13 4 4"/></svg></span>
+            <input id="q" type="text" inputmode="search" placeholder="Search your library" autocomplete="off" spellcheck="false" aria-label="Search library by title">
+            <button class="qx" id="qclear" aria-label="Clear search">
+              <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><path d="m5.5 5.5 9 9M14.5 5.5l-9 9"/></svg>
+            </button>
+          </div>
+
+          <div class="chips" id="chips" role="group" aria-label="Filter library"></div>
+          <div class="grid" id="grid"></div>
+          <p class="hint" style="text-align:center;margin:18px 0 0">Long-press a game to select several.</p>
+        </div>
+
+        <div class="bulk" id="bulkbar">
+          <div class="bulkhead">
+            <span class="count"><b id="bulkcount">0</b> selected<span id="bulkhidden"></span></span>
+            <button class="btn ghost sm" id="bulk-cancel">Cancel</button>
+          </div>
+          <p class="bulknote" id="bulknote"></p>
+          <div class="bulkbtns">
+            <button class="btn danger sm" id="bulk-delete" style="display:none"></button>
+            <button class="btn ghost sm" id="bulk-secondary" style="display:none"></button>
+            <button class="btn primary sm" id="bulk-prefill">Download <span class="api" style="color:var(--accent-ink);background:rgba(4,33,31,.14);border-color:rgba(4,33,31,.25)">POST /v1/prefill</span></button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ DOWNLOADS ============ -->
+      <section class="view" id="v-downloads">
+        <div class="topbar">
+          <div>
+            <h1>Downloads</h1>
+            <span class="sub" id="dlsub">Cache downloads on vault-01</span>
+          </div>
+          <span class="api" style="align-self:center">GET /v1/jobs</span>
+        </div>
+        <div class="scroll" id="dlscroll"></div>
+      </section>
+
+      <!-- ============ SETTINGS ============ -->
+      <section class="view" id="v-settings">
+        <div class="topbar"><div><h1>Settings</h1><span class="sub">vault-app 0.1 · mockup build</span></div></div>
+        <div class="scroll">
+
+          <h4 class="sec">How the app reaches the server</h4>
+          <button class="opt" data-profile="vpn" aria-checked="true" role="radio">
+            <span class="radio"></span>
+            <span>
+              <span class="ttl">System VPN <span class="tag def">Default</span></span>
+              <span class="desc">Plain HTTPS to an internal host. Works with the Tailscale app, Twingate, WireGuard — whatever VPN Android already carries.</span>
+            </span>
+          </button>
+          <button class="opt" data-profile="tsnet" aria-checked="false" role="radio" disabled>
+            <span class="radio"></span>
+            <span>
+              <span class="ttl">Embedded Tailscale <span class="tag soon">Coming soon</span></span>
+              <span class="desc">The app joins your tailnet itself with an auth key. No VPN app, no system profile.</span>
+            </span>
+          </button>
+          <button class="opt" data-profile="public" aria-checked="false" role="radio">
+            <span class="radio"></span>
+            <span>
+              <span class="ttl">Public domain</span>
+              <span class="desc">HTTPS to a public URL behind your reverse proxy. TLS required; put forward-auth in front of the API key.</span>
+            </span>
+          </button>
+
+          <h4 class="sec">Server</h4>
+          <div class="field">
+            <label for="f-name">Vault name</label>
+            <input class="inp txt" id="f-name" type="text" value="vault-01" placeholder="e.g. vault-01" spellcheck="false" autocomplete="off" maxlength="24">
+          </div>
+          <div class="field">
+            <label for="f-url">Server URL</label>
+            <div class="inp"><span id="f-url">https://vault-01.internal:8000</span>
+              <button aria-label="Edit URL"><svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M13.4 3.3 16.7 6.6 7 16.3l-4.2.9.9-4.2 9.7-9.7Z"/></svg></button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="f-key">API key</label>
+            <div class="inp"><span id="f-key">••••••••••••••••••••••••</span>
+              <button id="revealkey" aria-label="Reveal API key"><svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.6 10S4.7 4.6 10 4.6 18.4 10 18.4 10 15.3 15.4 10 15.4 1.6 10 1.6 10Z"/><circle cx="10" cy="10" r="2.5"/></svg></button>
+            </div>
+          </div>
+          <button class="btn wide" id="testconn">Test connection <span class="api">GET /v1/health</span></button>
+          <div class="okline" id="testok">
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m4 10.6 4 4L16.4 5.6"/></svg>
+            <span>200 OK · 34 ms · 1.42 TB free</span>
+          </div>
+
+          <h4 class="sec">Steam identity</h4>
+          <div class="srow">
+            <span class="avatar">VK</span>
+            <span class="grow">
+              <span class="ttl">vaultkeeper_jb</span>
+              <span class="desc">SteamID64 76561198042117903 · library synced 4 min ago</span>
+            </span>
+            <button class="btn ghost sm">Sign out</button>
+          </div>
+          <p class="hint">Sign-in opens Valve's own login page. SteamVault never sees your password, and your library is read on this phone — never through the cache server. (ADR-0004)</p>
+
+          <h4 class="sec">Library layout</h4>
+          <button class="opt" data-layout="grid2" aria-checked="true" role="radio">
+            <span class="radio"></span>
+            <span>
+              <span class="ttl">Two columns <span class="tag def">Default</span></span>
+              <span class="desc">Large capsules, two per row. Artwork does the recognising.</span>
+            </span>
+          </button>
+          <button class="opt" data-layout="grid3" aria-checked="false" role="radio">
+            <span class="radio"></span>
+            <span>
+              <span class="ttl">Three columns</span>
+              <span class="desc">Denser grid — about 50 % more titles per screen. Worth it once the library runs into the hundreds.</span>
+            </span>
+          </button>
+          <button class="opt" data-layout="list" aria-checked="false" role="radio">
+            <span class="radio"></span>
+            <span>
+              <span class="ttl">List</span>
+              <span class="desc">One row per game: small capsule, title, size, status. Fastest to scan and the only layout that never truncates a title.</span>
+            </span>
+          </button>
+          <p class="hint">Also switchable from the icons in the library header. The real app remembers this on the device — it is a per-phone preference, not a server setting.</p>
+
+          <h4 class="sec">Alerts</h4>
+          <div class="srow">
+            <span class="grow">
+              <span class="ttl">Cache bypass warnings</span>
+              <span class="desc">Warn when a machine that reports installed games never shows up in the cache log.</span>
+            </span>
+            <button class="toggle" id="tg-bypass" role="switch" aria-checked="true" aria-label="Cache bypass warnings"></button>
+          </div>
+          <div class="srow">
+            <span class="grow">
+              <span class="ttl">Show API mapping</span>
+              <span class="desc">Mockup aid: label every action with the vault-api endpoint behind it.</span>
+            </span>
+            <button class="toggle" id="tg-api" role="switch" aria-checked="false" aria-label="Show API mapping"></button>
+          </div>
+          <div class="srow">
+            <span class="grow">
+              <span class="ttl">Reconnect / switch account</span>
+              <span class="desc">Run the first-launch flow again — point the app at another server or link a different Steam account.</span>
+            </span>
+            <button class="btn ghost sm" id="replay-onb">Start</button>
+          </div>
+
+          <h4 class="sec">About</h4>
+          <p class="hint">SteamVault is a community project and is not affiliated with Valve Corporation. "Steam" is a trademark of Valve Corporation.</p>
+        </div>
+      </section>
+
+      <!-- ============ OVERLAYS ============ -->
+      <div class="scrimlayer" id="scrim"></div>
+
+      <div class="sheet" id="detail" role="dialog" aria-label="Game detail">
+        <div class="grab"></div>
+        <div class="body" id="detail-body"></div>
+      </div>
+
+      <div class="sheet" id="clients" role="dialog" aria-label="Client status">
+        <div class="grab"></div>
+        <div class="body">
+          <h2 style="margin:4px 0 4px;font-size:19px;letter-spacing:-.3px">Clients <span class="api">GET /v1/clients</span></h2>
+          <p class="hint" style="margin:0 0 4px">Machines running vault-agent, matched against what actually arrived at the cache.</p>
+
+          <h4 class="sec">Bypassing</h4>
+          <div class="jobcard" style="border-color:rgba(239,143,60,.35)">
+            <div class="jobtop">
+              <span class="sic sic-sm k-warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5.5V13.2"/><path d="M12 17.7v.02"/></svg></span>
+              <span class="grow" style="flex:1">
+                <div class="nm">DEMON <span class="cw tx-warn">Bypassing</span></div>
+                <div class="sm">reported 38 games · 0 cache requests in 7 d</div>
+              </span>
+            </div>
+            <p class="hint" style="margin-top:9px">
+              The agent reports installed games, but no download from this machine has ever passed through vault-core.
+              Most likely: DNS-over-HTTPS is on in the browser/OS, or the machine resolves <span style="font-family:var(--mono)">*.steamcontent.com</span> over IPv6.
+            </p>
+            <div style="display:flex;gap:8px;margin-top:11px">
+              <button class="btn sm" onclick="toast('Setup guide would open here.')">DNS setup guide</button>
+              <button class="btn ghost sm" onclick="toast('Ignored — DEMON will stay quiet.')">Ignore client</button>
+            </div>
+          </div>
+
+          <h4 class="sec">Healthy</h4>
+          <div class="jobcard">
+            <div class="jobtop">
+              <span class="sic sic-sm k-cached"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5 10 17.5 19 7"/></svg></span>
+              <span style="flex:1"><div class="nm">RIG-01 <span class="cw tx-cached">Healthy</span></div><div class="sm">reported 61 games · 41.8 GB served · 96 % hit</div></span>
+            </div>
+          </div>
+          <div class="jobcard">
+            <div class="jobtop">
+              <span class="sic sic-sm k-cached"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5 10 17.5 19 7"/></svg></span>
+              <span style="flex:1"><div class="nm">steamdeck-couch <span class="cw tx-cached">Healthy</span></div><div class="sm">reported 24 games · 12.4 GB served · 88 % hit</div></span>
+            </div>
+          </div>
+          <button class="btn wide ghost" style="margin-top:12px" onclick="closeAll()">Close</button>
+        </div>
+      </div>
+
+      <div class="sheet" id="notifs" role="dialog" aria-label="Notifications">
+        <div class="grab"></div>
+        <div class="body">
+          <h2 style="margin:4px 0 4px;font-size:19px;letter-spacing:-.3px">Notifications <span class="api">GET /v1/jobs · /v1/games · /v1/clients</span></h2>
+          <p class="hint" style="margin:0 0 6px">Polled from the server — there is no push in v1. Each line is a change the app noticed between polls.</p>
+          <div id="notiflist"></div>
+          <button class="btn wide ghost" style="margin-top:12px" onclick="closeAll()">Close</button>
+        </div>
+      </div>
+
+      <div class="dialog" id="confirm" role="alertdialog" aria-label="Confirm deletion">
+        <h3 id="cf-title">Delete from cache?</h3>
+        <p id="cf-text"></p>
+        <div id="cf-names"></div>
+        <div id="cf-note"></div>
+        <div class="row">
+          <button class="btn ghost sm" id="cf-no">Keep</button>
+          <button class="btn danger sm" id="cf-yes">Delete <span class="api" style="color:var(--danger);border-color:rgba(255,111,111,.3);background:rgba(255,111,111,.08)">DELETE /v1/cache/{appid}</span></button>
+        </div>
+      </div>
+
+      <div class="toast" id="toast"><span class="k"></span><span id="toast-text"></span></div>
+
+      <!-- ============ ONBOARDING (first launch) ============ -->
+      <div class="onb" id="onb">
+
+        <header class="onbhead">
+          <div class="mark">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 2.6 20.5 6v6.1c0 5-3.6 8.3-8.5 9.3-4.9-1-8.5-4.3-8.5-9.3V6L12 2.6Z"/><circle cx="12" cy="11.4" r="2.6"/><path d="M12 14v3.2"/></svg>
+          </div>
+          <div style="flex:1">
+            <div class="wordmark">SteamVault</div>
+            <div class="stepnum" id="stepnum">Step 1 of 3 · Connect</div>
+          </div>
+          <button class="btn ghost sm" id="onb-skip">Skip</button>
+        </header>
+        <div class="track"><i id="track-i" style="width:33%"></i></div>
+
+        <div class="rest">
+
+          <!-- ---- step 1: server connection ---- -->
+          <section class="ostep on" data-step="1">
+            <h2>Connect to your vault</h2>
+            <p class="lede">SteamVault runs on your own machine. Tell the app how to reach it.</p>
+
+            <p class="steplbl">Connection profile</p>
+            <button class="opt" data-onb="vpn" aria-checked="true" role="radio">
+              <span class="radio"></span>
+              <span><span class="ttl">System VPN <span class="tag def">Recommended</span></span>
+              <span class="desc">Plain HTTPS over a VPN Android already runs — Tailscale, Twingate, WireGuard. Nothing extra to install.</span></span>
+            </button>
+            <button class="opt" data-onb="tsnet" aria-checked="false" role="radio" disabled>
+              <span class="radio"></span>
+              <span><span class="ttl">Embedded Tailscale <span class="tag soon">Coming soon</span></span>
+              <span class="desc">The app joins your tailnet on its own with an auth key.</span></span>
+            </button>
+            <button class="opt" data-onb="public" aria-checked="false" role="radio">
+              <span class="radio"></span>
+              <span><span class="ttl">Public domain</span>
+              <span class="desc">HTTPS through your reverse proxy. TLS required.</span></span>
+            </button>
+
+            <p class="steplbl" style="margin-top:18px">Server</p>
+            <div class="field">
+              <label for="onb-name">Name your vault <span style="text-transform:none;letter-spacing:0;font-weight:400">(optional)</span></label>
+              <input class="inp txt" id="onb-name" type="text" value="vault-01" placeholder="e.g. vault-01" spellcheck="false" autocomplete="off" maxlength="24">
+              <p class="foot-note" style="margin-top:6px">Defaults to the server's hostname. Shown in the library header and on the Downloads screen.</p>
+            </div>
+            <div class="field">
+              <label for="onb-url">Server URL</label>
+              <input class="inp txt" id="onb-url" type="url" value="https://vault-01.internal:8000" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="onb-key">API key</label>
+              <div class="inp">
+                <input id="onb-key" type="password" value="sv_7f2c9a41d8e3b60517ac" spellcheck="false" autocomplete="off">
+                <button id="onb-eye" aria-label="Reveal API key"><svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.6 10S4.7 4.6 10 4.6 18.4 10 18.4 10 15.3 15.4 10 15.4 1.6 10 1.6 10Z"/><circle cx="10" cy="10" r="2.5"/></svg></button>
+              </div>
+            </div>
+            <button class="btn wide" id="onb-test">Test connection <span class="api">GET /v1/health</span></button>
+            <div class="okline" id="onb-testok">
+              <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m4 10.6 4 4L16.4 5.6"/></svg>
+              <span>200 OK · 34 ms · vault-api 0.6.0 · 1.42 TB free</span>
+            </div>
+            <p class="foot-note">The key is stored on this phone only. It never leaves the app except as the <span style="font-family:var(--mono)">X-Api-Key</span> header on requests to your server.</p>
+          </section>
+
+          <!-- ---- step 2: steam identity ---- -->
+          <section class="ostep" data-step="2">
+            <h2>Signing in with Steam lets the app show your library</h2>
+            <p class="lede">Without it SteamVault still manages the cache — the grid just lists app ids instead of covers and names.</p>
+
+            <h4 class="sec">What gets fetched</h4>
+            <ul class="bullets">
+              <li><b>SteamID64</b> — the public account number Valve returns after sign-in.</li>
+              <li><b>Persona name</b> — your public display name.</li>
+              <li><b>Avatar</b> — your public profile picture.</li>
+              <li><b>Owned games</b> — the list behind your library grid.</li>
+            </ul>
+            <p class="foot-note">All of it is public profile data, and <b style="color:var(--text)">this phone</b> fetches it straight from Valve. It never travels through your cache server.</p>
+
+            <div class="disclaim">
+              SteamVault is a community project and is not affiliated with Valve Corporation.
+              "Steam" is a trademark of Valve Corporation.
+            </div>
+
+            <div class="steamrow" id="steamrow" style="margin-top:16px">
+              <span class="avatar" id="onb-av">
+                <svg width="19" height="19" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="10" cy="6.6" r="3.4"/><path d="M3.4 17.4a6.6 6.6 0 0 1 13.2 0"/></svg>
+              </span>
+              <span style="flex:1;min-width:0">
+                <span class="ttl" id="onb-ttl">Not signed in</span>
+                <span class="desc" id="onb-desc">Sign-in happens on Valve's own page.</span>
+              </span>
+            </div>
+            <button class="btn primary wide big" id="onb-signin" style="margin-top:10px">
+              <svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M11 3.4h5.6V9"/><path d="M16.6 3.4 9 11"/><path d="M14.4 12v3.6a1.6 1.6 0 0 1-1.6 1.6H4.4a1.6 1.6 0 0 1-1.6-1.6V7.2a1.6 1.6 0 0 1 1.6-1.6H8"/></svg>
+              Sign in through Steam
+            </button>
+
+            <h4 class="sec">How can I verify this is legitimate?</h4>
+            <p class="verify">
+              The button sends you to <b>https://steamcommunity.com</b> — check the address bar before
+              you type anything. If you are already signed in to Steam in that browser, all you do
+              there is press <b>Sign In</b>; there is nothing else to fill in.
+              SteamVault never receives your username or password. Valve hands back only your
+              SteamID64, and there is no code path in this app or on the server that accepts Steam
+              credentials at all (ADR-0004).
+            </p>
+            <p class="foot-note">Not ready to link an account? Continue without one — you can sign in later under Settings.</p>
+          </section>
+
+          <!-- ---- step 3: ready ---- -->
+          <section class="ostep" data-step="3">
+            <h2>You're set</h2>
+            <p class="lede">Your server answered and the library is loaded. Here's what the app will use.</p>
+            <div class="summary" id="onb-summary"></div>
+            <p class="foot-note">All of this is editable later under Settings → Server and Steam identity.</p>
+          </section>
+
+        </div>
+
+        <div class="onbfoot">
+          <div class="onbnav">
+            <button class="btn ghost wide" id="onb-back" style="display:none">Back</button>
+            <button class="btn primary wide" id="onb-next" disabled>Continue</button>
+          </div>
+          <button class="skiplink" id="onb-demo">Skip for now — browse in demo mode</button>
+        </div>
+        <p class="miniprint" style="margin:8px 0 0">MOCKUP — not affiliated with Valve</p>
+      </div>
+
+      <!-- ---- mocked Valve login interstitial (deliberately NOT a look-alike) ---- -->
+      <div class="valve" id="valve">
+        <div class="chrometab">
+          <span class="lockic"><svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="4" y="8.6" width="12" height="8.4" rx="2"/><path d="M7 8.6V6a3 3 0 0 1 6 0v2.6"/></svg></span>
+          <span class="url">steamcommunity.com/openid/login</span>
+          <span class="ctlabel">Custom Tab</span>
+        </div>
+        <div class="valvebody">
+          <div class="ph">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+            <p class="phtitle">Valve's sign-in page loads here</p>
+            <p class="phtext">In the real app this is Valve's own OpenID page, opened in a browser tab. SteamVault cannot read it — it only receives your SteamID64 when Valve redirects back.</p>
+            <p class="phwarn">MOCKUP · this is a placeholder, not Valve's page. Nothing here asks for or accepts a password.</p>
+          </div>
+          <button class="btn primary wide" id="valve-ok">Simulate a successful sign-in</button>
+          <button class="btn ghost wide" id="valve-cancel" style="margin-top:8px">Cancel</button>
+        </div>
+      </div>
+
+    </div>
+
+    <nav class="nav">
+      <button data-view="library" class="on">
+        <svg width="21" height="21" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2.6" y="2.6" width="7" height="7" rx="1.8"/><rect x="12.4" y="2.6" width="7" height="7" rx="1.8"/><rect x="2.6" y="12.4" width="7" height="7" rx="1.8"/><rect x="12.4" y="12.4" width="7" height="7" rx="1.8"/></svg>
+        <span class="lb">Library</span>
+      </button>
+      <button data-view="downloads">
+        <span class="pip" id="navpip">0</span>
+        <svg width="21" height="21" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M11 2.8v11.4"/><path d="m6.4 9.8 4.6 4.6 4.6-4.6"/><path d="M3.4 18.6h15.2"/></svg>
+        <span class="lb">Downloads</span>
+      </button>
+      <button data-view="settings">
+        <!-- clean, symmetric gear: one body circle, one hub, eight evenly spaced teeth
+             (45° apart, identical length) — the old single-path gear rendered lopsided -->
+        <svg width="21" height="21" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+          <circle cx="11" cy="11" r="5.9"/>
+          <circle cx="11" cy="11" r="2.5"/>
+          <path d="M11 5.1V2.9M11 19.1v-2.2M16.9 11h2.2M2.9 11h2.2"/>
+          <path d="m15.17 6.83 1.56-1.56M5.27 16.73l1.56-1.56M15.17 15.17l1.56 1.56M5.27 5.27l1.56 1.56"/>
+        </svg>
+        <span class="lb">Settings</span>
+      </button>
+    </nav>
+
+  </div>
+</div>
+
+<p class="pagefoot">MOCKUP — not affiliated with Valve · design prototype, no real server behind it</p>
+
+<script>
+/* =========================================================
+   Data — 16 fake titles. Sizes are plausible, not real.
+   status: cached (current) · running · stale · none
+
+   A game's `dep` list IS its mapping-row set: one entry per depot vault-api has
+   attributed to that app, `{id, gb}` where gb is null when nothing is on disk.
+   Sharing is NEVER stored — it is derived from the mapping rows of all games
+   (see depotOwners below), so deleting or downloading a game updates every
+   "shared" label on its own. `dep: []` means "no mapping rows yet", which is
+   the honest state before the very first download.
+   ========================================================= */
+const GAMES = [
+  {id:620410, name:"Nebula Drift",        st:"cached",  gb:48.2, h1:196,h2:262,p:1, last:"2026-08-05 04:12",
+   dep:[{id:620411,gb:41.6},{id:620412,gb:6.2},{id:228990,gb:0.4}]},
+  {id:731900, name:"Ironwood Hollow",     st:"cached",  gb:22.7, h1:96, h2:38, p:3, last:"2026-08-05 04:31",
+   dep:[{id:731901,gb:21.1},{id:731903,gb:1.2},{id:228990,gb:0.4}]},
+  {id:884210, name:"Velocity Circuit 3",  st:"stale",   gb:63.8, h1:14, h2:334,p:0, last:"2026-07-28 09:03",
+   dep:[{id:884211,gb:52.0},{id:884212,gb:9.4},{id:442790,gb:2.4}]},
+  {id:412330, name:"Pale Meridian",       st:"none",    gb:null, h1:268,h2:212,p:5, last:null, dep:[]},
+  {id:990120, name:"Deep Signal",         st:"cached",  gb:34.1, h1:186,h2:222,p:2, last:"2026-08-04 22:55",
+   dep:[{id:990121,gb:30.8},{id:990125,gb:3.3}]},
+  /* the 3-shared-depot case: 228990 and 442790 have a cached co-owner, 317410 does not */
+  {id:205470, name:"Tundra Protocol",     st:"cached",  gb:47.4, h1:205,h2:188,p:4, last:"2026-08-03 16:20",
+   dep:[{id:205471,gb:36.9},{id:205472,gb:5.9},{id:228990,gb:0.4},{id:442790,gb:2.4},{id:317410,gb:1.8}]},
+  {id:663180, name:"Saltwater Kings",     st:"none",    gb:null, h1:172,h2:206,p:1, last:null, dep:[]},
+  {id:771240, name:"Orbital Freight Co.", st:"cached",  gb:8.9,  h1:44, h2:18, p:0, last:"2026-08-05 03:48",
+   dep:[{id:771241,gb:8.5},{id:771244,gb:0.4}]},
+  {id:349900, name:"Ashfall",             st:"stale",   gb:27.6, h1:6,  h2:300,p:3, last:"2026-07-19 11:40",
+   dep:[{id:349901,gb:24.9},{id:349902,gb:2.7}]},
+  {id:118850, name:"Rook & Rider",        st:"cached",  gb:3.4,  h1:150,h2:104,p:5, last:"2026-08-02 07:14",
+   dep:[{id:118851,gb:3.4}]},
+  /* previously deleted: mapping rows survived, so its depots are still listed. It only
+     still reports bytes because Tundra Protocol keeps depot 317410 on disk. */
+  {id:950310, name:"Meridian Rally",      st:"none",    gb:1.8,  h1:32, h2:352,p:2, last:null,
+   dep:[{id:950311,gb:null},{id:950312,gb:null},{id:317410,gb:1.8}]},
+  {id:524080, name:"Hollow Kite",         st:"cached",  gb:6.1,  h1:284,h2:246,p:4, last:"2026-08-01 19:02",
+   dep:[{id:524081,gb:6.1}]},
+  {id:640220, name:"Crimson Ledger",      st:"none",    gb:null, h1:352,h2:318,p:0, last:null, dep:[]},
+  {id:803350, name:"Signal Garden",       st:"cached",  gb:15.8, h1:128,h2:170,p:1, last:"2026-08-04 12:37",
+   dep:[{id:803351,gb:14.2},{id:803352,gb:1.6}]},
+  {id:471690, name:"Voidbreaker Arena",   st:"stale",   gb:39.5, h1:318,h2:258,p:3, last:"2026-07-30 21:11",
+   dep:[{id:471691,gb:35.0},{id:471692,gb:4.5}]},
+  {id:296140, name:"Last Lumen",          st:"cached",  gb:11.2, h1:52, h2:196,p:5, last:"2026-08-05 01:26",
+   dep:[{id:296141,gb:11.2}]}
+];
+
+/* --- derived mapping facts: never stored, always recomputed --- */
+const depotOwners = did => GAMES.filter(g => g.dep.some(d => d.id===did));
+const isShared    = did => depotOwners(did).length > 1;
+const coOwners    = (did, self) => depotOwners(did).filter(g => g.id!==self);
+/* Round 4: "shared" is a MAPPING fact, but whether a depot can actually be reclaimed is a
+   CACHE-STATE fact. A depot whose every co-owner is uncached is nobody's dependency — keeping
+   it would strand the bytes with no game able to use them. */
+const holders     = (did, self) => coOwners(did, self).filter(g => g.st!=="none");
+
+/* Bytes live on disk once, but every mapping row carries its own copy of the size.
+   Writing through all owners keeps those copies from disagreeing. */
+function setDepotBytes(did, val){
+  depotOwners(did).forEach(o => o.dep.forEach(d => { if(d.id===did) d.gb = val; }));
+}
+function recalcSize(o){
+  const sum = o.dep.reduce((a,d)=>a+(d.gb||0),0);
+  o.gb = sum > 0 ? +sum.toFixed(1) : null;
+}
+
+/* finding 6 — status invariant: "stale" and "cached" describe cache CONTENT, so neither can
+   survive the bytes going away. Enforced on every repaint so the filter counts and the
+   "Updating" filter always reflect what is actually on disk after a deletion. In the real
+   app this is a vault-api status RULE, not a UI cosmetic: GET /v1/games must never report
+   st=stale (or cached) for an app whose cached depot content is zero. */
+function enforceStatusInvariant(){
+  GAMES.forEach(g=>{
+    if((g.st==="stale" || g.st==="cached") && (g.gb==null || g.gb===0)) g.st="none";
+  });
+}
+
+/* What a delete would actually do, per depot. Used by the confirm dialog, by the
+   detail-sheet hint and by the delete itself, so all three cannot drift apart. */
+/* Round 6 (item 6): the plan is computed for a SET of apps, so multi-delete is the same
+   arithmetic as single delete rather than a second implementation that can drift.
+   The set matters: two selected games sharing a depot free it together, even though
+   neither of them alone would — `others` excludes everything being deleted in this batch.
+   Depots are de-duplicated across the selection, because the bytes exist on disk once. */
+function multiPlan(ids){
+  const set = new Set(ids);
+  const seen = new Map();
+  ids.forEach(id => game(id).dep.forEach(d => { if(!seen.has(d.id)) seen.set(d.id, d); }));
+  const rows = [...seen.values()].map(d=>{
+    const owners = depotOwners(d.id);
+    const others = owners.filter(o => !set.has(o.id));        // co-owners that survive this batch
+    const keep   = others.filter(o => o.st!=="none");         // ...and actually hold cache content
+    return { d, others, holders:keep, shared:owners.length>1, free:keep.length===0 };
+  });
+  const sum = f => +rows.filter(f).reduce((a,r)=>a+(r.d.gb||0),0).toFixed(1);
+  return {
+    ids, rows,
+    shared:   rows.filter(r=>r.shared),
+    freed:    sum(r=>r.free),
+    kept:     sum(r=>!r.free),
+    occupied: +rows.reduce((a,r)=>a+(r.d.gb||0),0).toFixed(1)
+  };
+}
+function deletePlan(g){ return multiPlan([g.id]); }
+
+/* target sizes used when a download finishes for a not-cached game */
+const TARGET = {412330:29.8, 663180:17.3, 950310:24.6, 640220:9.7};
+
+const STATE = {
+  view:"library",
+  filter:"all",
+  selecting:false,
+  picked:new Set(),
+  openApp:null,
+  bypassOn:true,
+  freeTB:1.42,
+  demo:false,
+  q:"",
+  visible:new Set(),
+  vault:"vault-01",
+  layout:"grid2"        // grid2 · grid3 · list — a per-device preference (see NOTES)
+};
+
+let JOBS = [
+  {jid:118, appid:118850, name:"Rook & Rider",   st:"done",  fin:"today 07:14",
+   log:"Downloaded 3.41 GB in 00:00:52 (avg 67.1 MiB/s)\n<span class='vk'>[vault-api]</span> Depot mapping updated (replace-semantics for this app): added=[118851] removed=[] unchanged=[]"},
+  {jid:117, appid:471690, name:"Voidbreaker Arena", st:"error", fin:"yesterday 21:11",
+   log:"<span class='er'>Failed to download depot 471691: Connection reset by peer</span>\nSteamPrefill exited with code 1\n<span class='vk'>[vault-api]</span> Mapping untouched — a failed run is not evidence about depot ownership."},
+  {jid:116, appid:205470, name:"Tundra Protocol", st:"done", fin:"2 days ago 16:20",
+   log:"Downloaded 47.40 GB in 00:12:46 (avg 63.4 MiB/s)\n<span class='vk'>[vault-api]</span> Depot mapping updated: added=[205471, 205472, 442790] removed=[] unchanged=[228990, 317410]"}
+];
+let nextJid = 119;
+
+/* ---------- helpers ---------- */
+const $  = (s,r=document)=>r.querySelector(s);
+const $$ = (s,r=document)=>Array.from(r.querySelectorAll(s));
+const game = id => GAMES.find(g=>g.id===id);
+const gb = v => v==null ? "—" : (v>=100 ? v.toFixed(0) : v.toFixed(1)) + " GB";
+/* "Downloading" vs "Updating" is the item-5 split: a first-time fetch is a download, only a
+   refresh of existing cache content is an update. Same word set everywhere (card, badge,
+   legend, Downloads subtitle, filter chip). */
+const LABEL = {cached:"Current", running:"Downloading", updating:"Updating", stale:"Update ready",
+               none:"Not cached", paused:"Paused", verify:"Verifying", error:"Failed", warn:"Warning"};
+
+/* the job that currently occupies the worker slot for this app, whatever it is doing */
+const LIVE = ["running","paused","verify"];
+const jobFor = id => JOBS.find(j=>j.appid===id && LIVE.includes(j.st));
+
+/* ---------- status icons (round 5) ----------
+   Shape is the colour-blind-safe status channel. Glyphs are drawn on a 24-unit grid with
+   stroke widths that survive down to ~10 px, centred by CSS grid/place-items. The same
+   glyph markup serves the idle and active variants of a state; the ACTIVE animation is
+   attached by the parent `.k-running`/`.k-updating`/`.k-verify` class, so a state at rest
+   never moves (see the CSS "Motion = activity" note). */
+const GLYPH = {
+  check:   '<path d="M5 12.5 10 17.5 19 7"/>',
+  /* .dla = the arrow (the only animated part); .dlbase = the baseline, hidden while animating */
+  download:'<g class="dla"><path d="M12 3.5V13"/><path d="M7.4 8.7 12 13.3 16.6 8.7"/></g><path class="dlbase" d="M5 19.6h14"/>',
+  /* two opposing curved arrows forming one circle — 180° rotationally symmetric, so a
+     continuous linear turn loops seamlessly. Each arc ends in a corner-bracket head, the
+     same head style the rest of the glyph set uses. */
+  refresh: '<g class="rot">'
+         + '<path d="M4.5 12a7.5 7.5 0 0 1 12.8-5.3"/><path d="M17.3 2.7v4h-4"/>'
+         + '<path d="M19.5 12a7.5 7.5 0 0 1-12.8 5.3"/><path d="M6.7 21.3v-4h4"/>'
+         + '</g>',
+  bang:    '<path d="M12 5.5V13.2"/><path d="M12 17.7v.02"/>',
+  pause:   '<rect x="7" y="5.6" width="3.4" height="12.8" rx="1.3"/><rect x="13.6" y="5.6" width="3.4" height="12.8" rx="1.3"/>'
+};
+const KIND_GLYPH = {
+  cached:"check", none:"download", stale:"refresh", running:"download",
+  updating:"refresh", verify:"refresh", paused:"pause", error:"bang", warn:"bang"
+};
+function sic(kind, extra=""){
+  const g = KIND_GLYPH[kind] || "download";
+  const fillGlyph = (g==="pause");
+  return `<span class="sic k-${kind} ${extra}" aria-hidden="true"><svg viewBox="0 0 24 24" `
+    + (fillGlyph ? `fill="currentColor">` : `fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round">`)
+    + GLYPH[g] + `</svg></span>`;
+}
+/* The status a card/badge should SHOW: a live job overrides the cache state, and a running
+   job splits into "updating" vs "running".
+   Round 6 (item 5) — the split is decided ONCE, at enqueue time, from whether the app had
+   cache content then, and stored on the job as `upd`. It must never be re-derived from
+   g.st afterwards: pump() sets g.st="running" for the duration of the job, which erases the
+   "was it stale?" evidence and was exactly how fresh downloads leaked into "updating".
+     upd === false  → fresh download  → "Downloading" (arrow slides)
+     upd === true   → refresh/update  → "Updating"    (arrows turn) */
+function dispKind(g){
+  const job = jobFor(g.id);
+  if(job){
+    if(job.st==="running") return job.upd ? "updating" : "running";
+    return job.st;                 // paused | verify
+  }
+  return g.st;                     // cached | stale | none
+}
+/* is this app's cache genuinely populated right now? the one test that decides fresh-vs-update */
+const hasContent = g => g.st!=="none" && g.gb!=null && g.gb>0;
+
+/* item 7 — what tapping the status icon/pill does. Returns null when there is no honest
+   action, so a non-actionable icon renders as a plain span and never looks tappable.
+   cached is deliberately inert: silently re-downloading a current game is exactly what
+   round 5 removed from the bulk bar, and the rule has to hold here too.
+   running → pause keeps the symmetry introduced for the detail sheet in round 4/5. */
+function statusAct(g){
+  if(STATE.selecting) return null;         // in multi-select a tap must toggle selection
+  const job = jobFor(g.id);
+  if(job){
+    if(job.st==="running") return {call:`pauseJob(${job.jid})`,  title:"Pause download"};
+    if(job.st==="paused")  return {call:`resumeJob(${job.jid})`, title:"Resume download"};
+    return null;                           // verify: mid-handshake, nothing sane to offer
+  }
+  if(g.st==="none")  return {call:`prefill([${g.id}])`, title:"Download to cache"};
+  if(g.st==="stale") return {call:`prefill([${g.id}])`, title:"Update cached copy"};
+  return null;                             // cached — never a silent re-download
+}
+/* the capsule pill: status icon + the number, as one object on the artwork (item 2) */
+function pillHTML(g){
+  const k = dispKind(g), job = jobFor(g.id);
+  const num = job ? `${(job.pct||0).toFixed(0)} %` : (g.gb==null ? "" : gb(g.gb));
+  const inner = `${sic(k)}${num?`<span class="pv">${num}</span>`:""}`;
+  const a = statusAct(g);
+  if(!a) return `<span class="cappill">${inner}</span>`;
+  return `<button class="cappill act" title="${a.title}" aria-label="${a.title} — ${g.name}"
+    onmousedown="event.stopPropagation()" ontouchstart="event.stopPropagation()"
+    onclick="event.stopPropagation();${a.call}">${inner}</button>`;
+}
+/* the same action, wrapped around the icon in a list row */
+function metaIcon(g){
+  const k = dispKind(g), a = statusAct(g);
+  if(!a) return sic(k);
+  return `<button class="icnact" title="${a.title}" aria-label="${a.title} — ${g.name}"
+    onmousedown="event.stopPropagation()" ontouchstart="event.stopPropagation()"
+    onclick="event.stopPropagation();${a.call}">${sic(k)}</button>`;
+}
+
+function capHTML(g, cls=""){
+  const job = jobFor(g.id);
+  const held = job && job.st==="paused";
+  return `<div class="cap p${g.p} ${cls}" style="--h1:${g.h1};--h2:${g.h2}">
+      <div class="art"></div><div class="scrim"></div>
+      ${pillHTML(g)}
+      <div class="name">${g.name}</div>
+      ${job?`<div class="runbar${held?" hold":""}"><i style="width:${job.pct}%"></i></div>`:""}
+    </div>`;
+}
+
+/* The toast lives 12 px above the bottom nav. While the bulk bar is up it stacks on top of
+   the bar instead of overlapping it — recomputed on every toast AND whenever the bar's
+   visibility changes, so entering/leaving multi-select with a toast on screen stays clean. */
+function positionToast(){
+  const bar = $("#bulkbar");
+  $("#toast").style.bottom = bar.classList.contains("up")
+    ? (bar.offsetHeight + 20) + "px"      // 12px bar inset + bar height + 8px gap
+    : "12px";
+}
+function toast(msg, warn){
+  const t=$("#toast"); $("#toast-text").textContent=msg;
+  t.classList.toggle("warn", !!warn);
+  positionToast();
+  t.classList.add("on");
+  clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove("on"), 2600);
+}
+
+/* =========================================================
+   Library
+   ========================================================= */
+/* Round 6 (item 5) — the old single "Updating" chip meant `running || stale`, so a fresh
+   first-time download landed under "Updating", which is simply untrue. Split into two
+   honest chips instead of inventing a vaguer word like "Active":
+     Downloading  — a job is in flight for this app (fresh OR update; both really are
+                    downloads, and the card/pill still distinguishes the two)
+     Update ready — cached content exists and a newer manifest is upstream, nothing running
+   The two are mutually exclusive, because a running job replaces g.st with "running". */
+const FILTERS = [
+  {k:"all",    l:"All",          f:()=>true},
+  {k:"cached", l:"Cached",       f:g=>g.st==="cached"},
+  {k:"none",   l:"Not cached",   f:g=>g.st==="none"},
+  {k:"dl",     l:"Downloading",  f:g=>!!jobFor(g.id)},
+  {k:"upd",    l:"Update ready", f:g=>g.st==="stale"}
+];
+
+/* search and chips are ANDed: the counts always describe what the grid can show */
+const matchQ = g => !STATE.q || g.name.toLowerCase().includes(STATE.q);
+
+function renderChips(){
+  enforceStatusInvariant();
+  $("#chips").innerHTML = FILTERS.map(f=>
+    `<button class="chip" data-f="${f.k}" aria-pressed="${STATE.filter===f.k}">
+       ${f.l}<span class="n">${GAMES.filter(g=>matchQ(g)&&f.f(g)).length}</span></button>`).join("");
+}
+
+/* one render path for all three layouts — only the container class changes.
+   DOM order is cap · checkbox · title · meta, which is exactly the list row; the two
+   grid layouts hide the title and float the checkbox over the capsule. */
+const LAYOUT_CLASS = {grid2:"", grid3:"cols3", list:"list"};
+const LAYOUT_NAME  = {grid2:"Two columns", grid3:"Three columns", list:"List"};
+
+function renderGrid(){
+  enforceStatusInvariant();
+  const flt = FILTERS.find(f=>f.k===STATE.filter);
+  const list = GAMES.filter(g=>matchQ(g)&&flt.f(g));
+  STATE.visible = new Set(list.map(g=>g.id));
+  $("#grid").className = ("grid " + LAYOUT_CLASS[STATE.layout]).trim();
+  $("#grid").innerHTML = list.map(g=>{
+    const live = jobFor(g.id);
+    const k = dispKind(g);                                   // cached|none|stale|running|updating|paused|verify
+    const size = live ? `${(live.pct||0).toFixed(0)} %` : gb(g.gb);
+    /* icon + size live on the capsule pill now; the meta row keeps the status WORD (visible
+       in the grids, joined by icon + size again in the list) so nothing is duplicated and
+       the word stays in the DOM for screen readers in every layout. */
+    /* data-dk is the card's STRUCTURAL signature: as long as it is unchanged the card can be
+       patched in place on a progress tick (see patchGridProgress) instead of rebuilt, which
+       is what keeps the status-icon animation alive. */
+    return `<div class="card ${STATE.picked.has(g.id)?"picked":""}" data-id="${g.id}" data-dk="${k}" role="button" tabindex="0">
+      ${capHTML(g)}
+      <span class="pick"><svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="3"><path d="m4 10.6 4 4L16.4 5.6"/></svg></span>
+      <span class="rowname">${g.name}</span>
+      <div class="meta">
+        ${metaIcon(g)}
+        <span class="state tx-${k}">${LABEL[k]}</span>
+        <span class="size">${size}</span>
+      </div>
+    </div>`;
+  }).join("");
+  if(!list.length){
+    $("#grid").innerHTML = STATE.q
+      ? `<div class="noresult">
+           <p>No game in your library matches <b>“${STATE.q}”</b>${STATE.filter!=="all"?" with this filter":""}.</p>
+           <button class="btn sm" onclick="clearSearch()">Clear search</button>
+         </div>`
+      : `<p class="empty" style="grid-column:1/-1">Nothing here with this filter.</p>`;
+  }
+
+  const cached = GAMES.filter(g=>g.st!=="none").length;
+  $("#libsub").textContent = `412 owned · ${cached} on the cache`;
+  $("#ctxhost").textContent = STATE.vault;
+  $("#freespace").textContent = `${STATE.freeTB.toFixed(2)} TB free of 3.64 TB`;
+  $("#bypass-banner").style.display = STATE.bypassOn ? "" : "none";
+  $("#demopill").style.display = STATE.demo ? "" : "none";
+  wireCards();
+  syncBulk();
+}
+
+function wireCards(){
+  $$("#grid .card").forEach(card=>{
+    const id = +card.dataset.id;
+    let timer=null, longed=false;
+
+    const start = e => {
+      longed=false;
+      timer=setTimeout(()=>{ longed=true; enterSelect(id); }, 420);
+    };
+    const cancel = () => clearTimeout(timer);
+
+    card.addEventListener("mousedown", start);
+    card.addEventListener("touchstart", start, {passive:true});
+    ["mouseup","mouseleave","touchend","touchmove","touchcancel"].forEach(ev=>card.addEventListener(ev,cancel));
+    card.addEventListener("contextmenu", e=>{ e.preventDefault(); enterSelect(id); });
+    card.addEventListener("click", ()=>{
+      if(longed){ longed=false; return; }
+      if(STATE.selecting) togglePick(id); else openDetail(id);
+    });
+    card.addEventListener("keydown", e=>{
+      if(e.key==="Enter"||e.key===" "){ e.preventDefault(); STATE.selecting?togglePick(id):openDetail(id); }
+    });
+  });
+}
+
+function enterSelect(id){
+  closeAll();                       // entering multi-select is a mode change: dismiss overlays
+  STATE.selecting = true;
+  document.body.classList.add("selecting");
+  if(id!=null) STATE.picked.add(id);
+  syncBulk(); renderGrid();
+}
+function exitSelect(){
+  STATE.selecting=false; STATE.picked.clear();
+  document.body.classList.remove("selecting");
+  syncBulk(); renderGrid();
+}
+function togglePick(id){
+  STATE.picked.has(id) ? STATE.picked.delete(id) : STATE.picked.add(id);
+  if(!STATE.picked.size) return exitSelect();
+  syncBulk(); renderGrid();
+}
+function syncBulk(){
+  $("#bulkcount").textContent = STATE.picked.size;
+  // selections survive a search — say so when some of them are filtered out of view
+  const hidden = Array.from(STATE.picked).filter(id=>!STATE.visible.has(id)).length;
+  $("#bulkhidden").innerHTML = hidden ? `<span class="hid">${hidden} out of view</span>` : "";
+  $("#bulkbar").classList.toggle("up", STATE.selecting);
+  $("#btn-select").classList.toggle("on", STATE.selecting);
+  if(!STATE.selecting){ STATE.bulk=null; STATE.bulkDelete=[]; positionToast(); return; }
+
+  /* finding 2 — the primary never silently re-downloads a cached game. We split the
+     selection by real cache state and let the button target only what genuinely needs
+     bytes: fresh (not cached) first; failing that, updates for stale copies; and only an
+     explicit secondary re-downloads current copies. The count is spelled out ("Download 3
+     of 5 — 2 already cached") and mirrored in the toast. Backend note: this is a CLIENT
+     filter applied before POST /v1/prefill — the app decides which app ids to send. */
+  const picks = Array.from(STATE.picked).map(game).filter(Boolean);
+  const isBusy = g => JOBS.some(j=>j.appid===g.id && (LIVE.includes(j.st)||j.st==="queued"));
+  const busy = picks.filter(isBusy);
+  const rest = picks.filter(g=>!isBusy(g));
+  const free  = rest.filter(g=>g.st==="none");
+  const stale = rest.filter(g=>g.st==="stale");
+  const cur   = rest.filter(g=>g.st==="cached");
+  const N = picks.length;
+
+  const prim = $("#bulk-prefill"), sec = $("#bulk-secondary"), note = $("#bulknote");
+  const del = $("#bulk-delete");
+  const CHIP = chip("POST /v1/prefill","on");
+  const plural = n => n===1 ? "1 game" : n+" games";
+  sec.style.display = "none";
+  prim.disabled = false; prim.classList.add("primary");
+
+  /* item 6 — bulk delete. Only games that actually hold cache content can be deleted, so a
+     mixed selection is split honestly exactly like the download side: the label says how
+     many of the selection it will really touch, and the confirm dialog does the
+     shared-depot arithmetic across the whole batch (multiPlan). */
+  const dels = rest.filter(g=>g.st!=="none");
+  if(dels.length){
+    del.style.display = "";
+    del.innerHTML = (dels.length<N ? `Delete ${dels.length} of ${N}` : `Delete ${plural(dels.length)}`)
+                  + " " + chip("DELETE /v1/cache/{appid}","danger");
+    STATE.bulkDelete = dels.map(g=>g.id);
+  } else {
+    del.style.display = "none";
+    STATE.bulkDelete = [];
+  }
+
+  if(free.length){
+    STATE.bulk = {targets:free.map(g=>g.id)};
+    prim.innerHTML = (N>free.length ? `Download ${free.length} of ${N}` : `Download ${plural(free.length)}`) + " " + CHIP;
+    const skipped = N - free.length;
+    note.textContent = skipped
+      ? `${skipped} already cached — not re-downloaded${stale.length?` · ${stale.length} of them ${stale.length>1?"have":"has"} an update available`:""}.`
+      : (free.length>1 ? `All ${free.length} are new to the cache.` : "");
+  } else if(stale.length){
+    // all selected are already cached; the honest primary is to UPDATE the stale ones
+    STATE.bulk = {targets:stale.map(g=>g.id)};
+    prim.innerHTML = `Update ${plural(stale.length)} ` + CHIP;
+    note.textContent = `All selected are already cached. ${stale.length} ${stale.length>1?"have a newer version":"has a newer version"}${cur.length?` · ${cur.length} already current`:""}.`;
+    if(cur.length){ sec.style.display=""; sec.textContent = `Re-download ${cur.length}`; STATE.bulk.secondaryTargets = cur.map(g=>g.id); }
+  } else {
+    // nothing to download: every selection is current (or already has a job in flight)
+    STATE.bulk = {targets:[]};
+    prim.classList.remove("primary"); prim.disabled = true;
+    prim.textContent = (busy.length===N && N) ? "Already downloading" : "All cached — nothing to download";
+    note.textContent = (busy.length===N && N)
+      ? "Every selected game already has a job in flight."
+      : "Every selected game is current. Re-download only if you need to refetch from Steam.";
+    if(cur.length){ sec.style.display=""; sec.textContent = `Re-download ${cur.length}`; STATE.bulk.secondaryTargets = cur.map(g=>g.id); }
+  }
+  // the bar's height is only final once its buttons are set — restack the toast on top of it
+  positionToast();
+}
+
+/* =========================================================
+   Detail sheet
+   ========================================================= */
+function openDetail(id){
+  const g = game(id); STATE.openApp=id;
+  renderDetail();
+  $("#scrim").classList.add("on");
+  $("#detail").classList.add("up");
+}
+function renderDetail(){
+  const g = game(STATE.openApp); if(!g) return;
+  const job = JOBS.find(j=>j.appid===g.id && (LIVE.includes(j.st)||j.st==="queued"));
+  const plan = deletePlan(g);
+  const shared = plan.shared;
+  const keptRows = shared.filter(r=>!r.free);      // a cached co-owner holds these
+  const freeRows = shared.filter(r=>r.free);       // shared on paper, orphaned in fact
+  const sz = rs => gb(+rs.reduce((a,r)=>a+(r.d.gb||0),0).toFixed(1));
+  const known = g.dep.length > 0;
+  // the badge follows the live job (paused/verify/updating/running), else the cache state
+  const dk = dispKind(g);
+
+  let action;
+  if(job && job.st==="running"){
+    // finding 4 — Pause is available from the detail sheet too, symmetric with Resume
+    action = `<button class="btn wide" onclick="pauseJob(${job.jid})">Pause download <span class="api">POST /v1/jobs/${job.jid}/pause</span></button>`;
+  } else if(job && job.st==="paused"){
+    action = `<button class="btn primary wide" onclick="resumeJob(${job.jid})">Resume download <span class="api" style="color:var(--accent-ink);background:rgba(4,33,31,.14);border-color:rgba(4,33,31,.25)">POST /v1/jobs/${job.jid}/resume</span></button>`;
+  } else if(job && job.st==="verify"){
+    action = `<button class="btn wide" disabled>Verifying cached chunks…</button>`;
+  } else if(job){
+    action = `<button class="btn wide" disabled>Queued — position ${queuePos(job)}</button>`;
+  } else if(g.st==="none"){
+    action = `<button class="btn primary wide" onclick="prefill([${g.id}])">Download to cache <span class="api" style="color:var(--accent-ink);background:rgba(4,33,31,.14);border-color:rgba(4,33,31,.25)">POST /v1/prefill</span></button>`;
+  } else if(g.st==="stale"){
+    action = `<button class="btn primary wide" onclick="prefill([${g.id}])">Update cached copy <span class="api" style="color:var(--accent-ink);background:rgba(4,33,31,.14);border-color:rgba(4,33,31,.25)">POST /v1/prefill</span></button>`;
+  } else {
+    action = `<button class="btn wide" onclick="prefill([${g.id}])">Download again</button>`;
+  }
+
+  $("#detail-body").innerHTML = `
+    <div class="dhead">
+      ${capHTML(g)}
+      <div style="flex:1;min-width:0">
+        <h2>${g.name}</h2>
+        <div class="appid">appid ${g.id} <span class="api">GET /v1/games/${g.id}</span></div>
+        <div class="facts">
+          <span>On the cache <b>${gb(g.gb)}</b></span>
+          <span>Depots ${known?`<b>${g.dep.length}</b>${shared.length?` · <b>${shared.length}</b> shared`:""}`:`<b>unknown</b>`}</span>
+          <span>Last download <b>${g.last||"never"}</b></span>
+        </div>
+        <div style="margin-top:9px"><span class="badge tx-${dk}">${sic(dk,"sic-sm")}${LABEL[dk]}</span></div>
+      </div>
+    </div>
+
+    ${job && job.st==="running" ? `
+      <div class="inlinejob" data-jid="${job.jid}">
+        <div class="t"><span>${job.upd?"Updating":"Downloading"} · job #${job.jid}</span><b class="ij-pct">${job.pct.toFixed(0)} %</b></div>
+        <div class="bar"><i style="width:${job.pct}%"></i></div>
+        <div class="t" style="margin:8px 0 0;color:var(--dim)"><b class="ij-speed">${job.speed.toFixed(0)} MiB/s</b><b class="ij-bytes">${gb(job.target*job.pct/100)} of ${gb(job.target)}</b></div>
+      </div>` : ""}
+
+    ${job && job.st==="paused" ? `
+      <div class="inlinejob held">
+        <div class="t"><span>Paused · job #${job.jid}</span><b>${job.pct.toFixed(0)} %</b></div>
+        <div class="bar hold"><i style="width:${job.pct}%"></i></div>
+        <div class="t" style="margin:8px 0 0"><b>${gb(job.target*job.pct/100)} already on the cache</b></div>
+      </div>` : ""}
+
+    ${job && job.st==="verify" ? `
+      <div class="inlinejob ver">
+        <div class="t"><span>Verifying cached chunks… · job #${job.jid}</span><b>${job.pct.toFixed(0)} %</b></div>
+        <div class="bar verify"><i style="width:${job.pct}%"></i></div>
+      </div>` : ""}
+
+    <div style="display:flex;gap:9px;margin-top:14px">
+      <div style="flex:1">${action}</div>
+      ${g.st!=="none" ? `<button class="btn danger" onclick="askDelete(${g.id})" aria-label="Delete from cache">
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3.6 5.4h12.8M8 5.4V3.6h4v1.8M5.2 5.4l.8 11h8l.8-11"/></svg></button>` : ""}
+    </div>
+
+    <h4 class="sec">${known?"Depots on the server":"Depots"}</h4>
+    ${known ? `
+      <div class="depots">
+        ${g.dep.map(d=>depotRow(d, g)).join("")}
+      </div>
+      ${shared.length?`<p class="hint">${
+        keptRows.length && freeRows.length
+          ? `Shared depots hold content more than one game maps. Deleting this game would keep ${keptRows.length} of them (${sz(keptRows)} — another cached game needs them) and free the other ${freeRows.length} (${sz(freeRows)} — no cached co-owner).`
+        : keptRows.length
+          ? `Shared depots hold content more than one game maps. Deleting this game keeps them — ${sz(keptRows)} stays on disk.`
+          : `${freeRows.length === 1 ? "This shared depot is" : `All ${freeRows.length} shared depots are`} mapped only to games that are not cached, so deleting this game frees ${freeRows.length === 1 ? "it" : "them"} too (${sz(freeRows)}).`
+      }</p>`:""}
+    ` : `
+      <div class="unknown">
+        <p class="u1">Depots unknown until the first download</p>
+        <p class="u2">vault-api learns which depots belong to a game by watching what a
+        download writes, so there is nothing to list — and no size to quote — before
+        that first run.</p>
+        <p class="u3">Optional: a manifest oracle on the server (Phase 3 setting) can look
+        the depot list up from Steam ahead of time and fill this in earlier.</p>
+      </div>
+    `}
+
+    <h4 class="sec">Status icons</h4>
+    <div class="legend">
+      <div>${sic("cached","sic-lg")}<span>Current — cached, manifest matches</span></div>
+      <div>${sic("none","sic-lg")}<span>Not cached — nothing on the server</span></div>
+      <div>${sic("stale","sic-lg")}<span>Update ready — newer manifest upstream</span></div>
+      <div>${sic("running","sic-lg")}<span>Downloading — fresh download in flight</span></div>
+      <div>${sic("updating","sic-lg")}<span>Updating — refreshing a cached copy</span></div>
+      <div>${sic("paused","sic-lg")}<span>Paused — stopped, bytes kept on cache</span></div>
+      <div>${sic("error","sic-lg")}<span>Failed — the last run errored</span></div>
+    </div>
+    <p class="hint" style="margin-top:8px">The icon is the same shape whether you can read the colour or not, and on a cover it doubles as the button: tap it to start a download or an update. Only the two active states move — the download arrow drifts down, the two update arrows turn a full circle — so a library at rest is completely still.</p>
+
+    <button class="btn wide ghost" style="margin-top:16px" onclick="closeAll()">Close</button>
+  `;
+}
+
+/* One depot row. "shared" is a computed fact, and the who-with detail is one tap away
+   rather than crammed into the row. A co-owner that is currently uncached is still a
+   co-owner: deletion removes cache content, not mapping rows.
+   Round 4: the row keeps saying "shared" — it is true — but the panel distinguishes
+   "someone else is holding this" from "everyone mapping it is uncached", because only
+   the first one means the depot survives a delete. */
+function depotRow(d, g){
+  const others = coOwners(d.id, g.id);
+  const keep   = holders(d.id, g.id);            // OTHER cached co-owners
+  const sh   = others.length > 0;
+  const many = others.length > 1;
+  // finding 5 — cache-state truth over mapping truth:
+  const sole   = sh && keep.length===0 && g.st!=="none";   // THIS cached game is the only holder
+  const orphan = sh && keep.length===0 && g.st==="none";   // shared on paper, nobody cached
+  return `<div class="depotwrap${sh?" sh":""}">
+    <div class="depot" ${sh?`role="button" tabindex="0" onclick="toggleDepot(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleDepot(this)}" aria-expanded="false"`:""}>
+      <span class="id">${d.id}</span>
+      ${sh?`<span class="tag${sole?" solo":""}">${sole?"shared · sole holder":"shared"}</span>`:""}
+      <span class="b">${d.gb==null?"—":gb(d.gb)}</span>
+      ${sh?`<span class="chev"><svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><path d="m7.5 4.5 6 5.5-6 5.5"/></svg></span>`:""}
+    </div>
+    ${sh?`<div class="owners">
+      ${sole?`<p class="onone lead"><b>You are the only cached game using this depot — deleting frees it.</b> The other game${many?"s":""} mapping it ${many?"are":"is"} not cached, so the mapping is kept but nothing else is holding these bytes.</p>`:""}
+      <p class="olabel">Also mapped to</p>
+      ${others.map(o=>`<div class="orow${o.st==="none"?" off":""}">
+        ${sic(o.st,"sic-sm")}
+        <span class="on">${o.name}</span>
+        <span class="os">${o.st==="none"?"not cached · mapping kept":LABEL[o.st]}</span>
+      </div>`).join("")}
+      ${orphan?`<p class="onone"><b>No cached game uses this depot.</b> Its bytes are stranded — nothing on the cache maps it right now.</p>`:""}
+      <p class="ohint">${keep.length
+        ? "This depot is only removed once no mapped game needs it."
+        : "Nothing cached is holding these bytes, so deleting this game frees the depot too."}</p>
+    </div>`:""}
+  </div>`;
+}
+function toggleDepot(el){
+  const w = el.parentNode;
+  const open = w.classList.toggle("open");
+  el.setAttribute("aria-expanded", open);
+}
+
+function closeAll(){
+  $("#scrim").classList.remove("on");
+  $("#detail").classList.remove("up");
+  $("#clients").classList.remove("up");
+  $("#notifs").classList.remove("up");
+  $("#confirm").classList.remove("on");
+  STATE.openApp=null;
+}
+
+/* =========================================================
+   Delete flow
+   ========================================================= */
+let pendingDelete = null;
+
+/* The dialog is a bullet list, not a sentence: with three shared depots the prose version
+   was unreadable, and each depot has its own reason to stay or go. Exclusive depots are
+   not listed — they are always freed and the totals cover them. */
+function askDelete(arg){
+  const ids = Array.isArray(arg) ? arg.slice() : [arg];
+  pendingDelete = ids;
+  // deletion is only offered for games with cache content, so their depots are known
+  const p = multiPlan(ids);
+  const many = ids.length > 1;
+  const names = ids.map(i=>game(i).name);
+  $("#cf-title").textContent = many ? `Delete ${ids.length} games from cache?` : "Delete from cache?";
+  $("#cf-text").innerHTML = many
+    ? `Deleting <b>${ids.length} games</b> frees about <b class="num">${gb(p.freed)}</b>
+       of the <b class="num">${gb(p.occupied)}</b> they occupy.`
+    : `Deleting <b>${names[0]}</b> frees about <b class="num">${gb(p.freed)}</b>
+       of the <b class="num">${gb(p.occupied)}</b> it occupies.`;
+  $("#cf-names").innerHTML = many ? names.map(n=>`<span class="cfn">${n}</span>`).join("") : "";
+  $("#cf-note").innerHTML = p.shared.length
+    ? `<p class="cflabel">${p.shared.length} shared depot${p.shared.length>1?"s":""}</p>
+       <ul class="cflist">
+         ${p.shared.map(r=>`<li class="${r.free?"free":"keep"}">
+           <span class="did">${r.d.id}</span>
+           <span class="mk">${r.free?"freed":"kept"}</span>
+           <span class="dsz">${r.d.gb==null?"—":gb(r.d.gb)}</span>
+           <span class="why">${r.free
+             ? (r.others.length
+                 // some co-owners survive this delete, they just have nothing cached
+                 ? `no cached co-owner — ${r.others.map(o=>o.name).join(", ")} ${r.others.length>1?"are":"is"} not cached`
+                 // multi-delete: every game mapping this depot is in the batch itself
+                 : `every game mapping this depot is in this selection`)
+             : `${r.holders.map(o=>o.name).join(", ")} still cached`}</span>
+         </li>`).join("")}
+       </ul>
+       <p class="cftotal"><b>${gb(p.freed)}</b> freed · <b>${gb(p.kept)}</b> stays on disk</p>`
+    : `<p class="cfsolo">No shared depots — the full ${gb(p.occupied)} is freed.</p>`;
+  $("#confirm").classList.add("on");
+  $("#scrim").classList.add("on");
+}
+$("#cf-no").onclick = ()=>{ $("#confirm").classList.remove("on"); if(STATE.openApp==null) $("#scrim").classList.remove("on"); };
+$("#cf-yes").onclick = ()=>{
+  const ids = Array.isArray(pendingDelete) ? pendingDelete : [pendingDelete];
+  const p = multiPlan(ids);
+  const keptShared = p.shared.filter(r=>!r.free).length;
+  const was = new Map(ids.map(id=>[id, game(id).gb]));   // capture before any byte is cleared
+  // cache content goes, MAPPING ROWS STAY (real API semantics) — so a deleted game keeps
+  // counting as a co-owner of its shared depots even while it is uncached.
+  // What decides whether the BYTES survive is the co-owners' cache state, not the mapping:
+  // a shared depot nobody cached still needs is deleted with the game(s).
+  p.rows.filter(r=>r.free).forEach(r=>{
+    setDepotBytes(r.d.id, null);
+    r.others.forEach(recalcSize);         // an uncached co-owner stops reporting those bytes
+  });
+  ids.forEach(id=>{
+    const g = game(id);
+    g.st="none"; g.last=null; recalcSize(g);
+    TARGET[id] = TARGET[id] || was.get(id) || 20.0;
+  });
+  STATE.freeTB = +(STATE.freeTB + p.freed/1024).toFixed(2);
+  $("#confirm").classList.remove("on");
+  closeAll();
+  if(STATE.selecting) exitSelect();
+  renderChips(); renderGrid();
+  const what = ids.length>1 ? `${ids.length} games deleted · ` : "";
+  toast(`${what}Freed ${gb(p.freed)}${keptShared?` · ${keptShared} shared depot${keptShared>1?"s":""} kept`:""}`);
+};
+
+/* =========================================================
+   Prefill jobs — one runs at a time, rest queue
+   ========================================================= */
+function queuePos(job){
+  // JOBS holds newest first; the queue runs oldest first
+  return JOBS.filter(j=>j.st==="queued").reverse().findIndex(j=>j.jid===job.jid)+1;
+}
+function prefill(ids, opt={}){
+  let added=0, dedup=0;
+  ids.forEach(id=>{
+    const g = game(id);
+    if(JOBS.some(j=>j.appid===id && (LIVE.includes(j.st)||j.st==="queued"))){ dedup++; return; }
+    JOBS.unshift({jid:nextJid++, appid:id, name:g.name, st:"queued", pct:0, speed:0,
+                  target: g.gb || TARGET[id] || 20.0,
+                  // decided ONCE, here, while the pre-job cache state is still known (item 5)
+                  upd: hasContent(g)});   // true = refresh an existing copy, false = fresh download
+    added++;
+  });
+  pump();
+  if(STATE.selecting) exitSelect();
+  renderChips(); renderGrid(); renderDownloads(); renderDetail();
+  // mirror the bulk semantics in the toast so nothing is downloaded silently
+  const extra = (opt.skipped ? ` · ${opt.skipped} already cached, left as is` : "")
+              + (opt.redownload ? " · re-downloading on request" : "");
+  toast(added
+    ? `${added} job${added>1?"s":""} queued${dedup?` · ${dedup} already pending`:""}${extra} · 202 Accepted`
+    : `Already queued — no duplicate job created`);
+}
+function pump(){
+  // a paused (or verifying) job still holds the single worker slot — the queue waits
+  if(JOBS.some(j=>LIVE.includes(j.st))) return;
+  const next = JOBS.filter(j=>j.st==="queued").pop();   // FIFO: oldest queued
+  if(!next) return;
+  next.st="running"; next.pct=0; next.speed=0;
+  game(next.appid).st="running";
+}
+function cancelJob(jid){
+  const j = JOBS.find(x=>x.jid===jid); if(!j) return;
+  const g = game(j.appid);
+  j.st="error"; j.fin="just now";
+  j.log = "<span class='er'>Aborted on request — SteamPrefill terminated.</span>\n<span class='vk'>[vault-api]</span> Mapping untouched.";
+  g.st = g.gb ? "stale" : "none";
+  pump(); renderChips(); renderGrid(); renderDownloads(); renderDetail();
+  toast("Job cancelled", true);
+}
+
+/* Pause/resume. There is no wire protocol to suspend a Steam download: pause means
+   vault-api terminates the SteamPrefill subprocess, resume means it starts a fresh run
+   for the same app. Nothing is lost because the CACHE ITSELF is the progress store —
+   chunks already written are found again, which is what the verify phase is doing. */
+function pauseJob(jid){
+  const j = JOBS.find(x=>x.jid===jid); if(!j || j.st!=="running") return;
+  j.st="paused"; j.speed=0; j.pausedAt=j.pct;
+  renderGrid(); renderDownloads(); renderDetail();
+  toast(`Paused at ${j.pct.toFixed(0)} % · ${gb(j.target*j.pct/100)} already on the cache`, true);
+}
+function resumeJob(jid){
+  const j = JOBS.find(x=>x.jid===jid); if(!j || j.st!=="paused") return;
+  // a resumed run re-checks what is already on disk before it fetches anything new
+  j.st="verify"; j.verifyUntil = Date.now() + 1700;
+  renderGrid(); renderDownloads(); renderDetail();
+  toast("Resuming — verifying cached chunks first");
+}
+
+function syncPip(){
+  const pending = JOBS.filter(x=>LIVE.includes(x.st)||x.st==="queued").length;
+  $("#navpip").textContent = pending;
+  $("#navpip").classList.toggle("on", pending>0);
+}
+/* =========================================================
+   Painting: full rebuild vs. in-place patch  (round 7, item 1)
+
+   THE BUG: a progress tick used to call renderGrid()/renderDownloads()/renderDetail(),
+   each of which reassigns innerHTML. That destroys and recreates the animated status-icon
+   <svg> nodes ~every 420 ms, and a CSS animation on a brand-new node starts from 0% — so a
+   live download/update never got past the first fraction of its 2.6 s / 2.2 s loop and
+   looked hectic, while the detail-sheet legend (rendered once) animated as designed.
+
+   THE RULE: rebuild DOM only when a card's STATE changes (status transition, filter,
+   layout, selection). While a job is merely progressing, patch the volatile values in
+   place — the % text, the bar widths, speed/ETA — and leave every animated node alone.
+   ========================================================= */
+
+/* full rebuild — for state transitions only (job start/pause/resume/verify/finish/cancel) */
+function repaintAll(appid){
+  if(STATE.view==="library") renderGrid();
+  if(STATE.view==="downloads") renderDownloads();
+  if(appid!=null && STATE.openApp===appid) renderDetail();
+  syncPip();
+}
+
+/* in-place patches — no node is created or replaced, so animations keep running */
+function patchGridProgress(){
+  JOBS.filter(j=>LIVE.includes(j.st)).forEach(j=>{
+    const card = $(`#grid .card[data-id="${j.appid}"]`);
+    if(!card) return;
+    // if the card's structural signature moved on, only a rebuild is correct
+    if(card.dataset.dk !== dispKind(game(j.appid))){ renderGrid(); return; }
+    const pct = j.pct||0, txt = `${pct.toFixed(0)} %`;
+    const pv = card.querySelector(".cappill .pv");   if(pv) pv.textContent = txt;
+    const sz = card.querySelector(".meta .size");    if(sz) sz.textContent = txt;
+    const bi = card.querySelector(".cap .runbar i"); if(bi) bi.style.width = pct+"%";
+  });
+}
+function patchDownloadsProgress(){
+  const run = JOBS.find(j=>LIVE.includes(j.st));
+  const card = $("#dlscroll .jobcard[data-jid]");
+  if(!run || !card) return;
+  // a different job in the slot, or a changed job state, means the card must be rebuilt
+  if(+card.dataset.jid !== run.jid || card.dataset.dk !== (run.st==="paused"?"paused":run.st==="verify"?"verify":(run.upd?"updating":"running"))){
+    renderDownloads(); return;
+  }
+  const set = (sel,txt)=>{ const e=card.querySelector(sel); if(e) e.textContent=txt; };
+  set(".js-done", `${gb(run.target*run.pct/100)} of ${gb(run.target)}`);
+  set(".js-pct",  `${run.pct.toFixed(0)} %`);
+  const bi = card.querySelector(".bar i"); if(bi) bi.style.width = run.pct+"%";
+  if(run.st==="running"){
+    set(".js-speed", `${run.speed.toFixed(0)} MiB/s`);
+    set(".js-eta",   `ETA ${eta(run)}`);
+  }
+}
+function patchDetailProgress(){
+  const g = game(STATE.openApp); if(!g) return;
+  const j = jobFor(g.id);        if(!j) return;
+  const box = $("#detail-body .inlinejob[data-jid]");
+  if(!box || +box.dataset.jid !== j.jid) return;      // paused/verify blocks don't progress
+  const set = (sel,txt)=>{ const e=box.querySelector(sel); if(e) e.textContent=txt; };
+  set(".ij-pct",   `${j.pct.toFixed(0)} %`);
+  set(".ij-speed", `${j.speed.toFixed(0)} MiB/s`);
+  set(".ij-bytes", `${gb(j.target*j.pct/100)} of ${gb(j.target)}`);
+  const bi = box.querySelector(".bar i"); if(bi) bi.style.width = j.pct+"%";
+  // the detail badge/facts are structural — they only change on a transition, which repaints
+}
+/* one progress tick: patch everything currently on screen, rebuild nothing */
+function tickProgress(appid){
+  if(STATE.view==="library")   patchGridProgress();
+  if(STATE.view==="downloads") patchDownloadsProgress();
+  if(appid!=null && STATE.openApp===appid) patchDetailProgress();
+  syncPip();
+}
+
+setInterval(()=>{
+  // the verify phase after a resume: no bytes move, the run is re-checking the cache
+  const v = JOBS.find(x=>x.st==="verify");
+  if(v){
+    if(Date.now() >= v.verifyUntil){
+      v.st="running"; v.speed=0;
+      repaintAll(v.appid);         // verify → running is a STATE TRANSITION: rebuild once
+    } else {
+      tickProgress(v.appid);       // still verifying: nothing structural moves
+    }
+    return;
+  }
+  const j = JOBS.find(x=>x.st==="running");
+  if(!j){ syncPip(); return; }     // idle or paused: nothing to animate
+  j.speed = 52 + Math.random()*46;
+  j.pct = Math.min(100, j.pct + 1.6 + Math.random()*2.2);
+  if(j.pct>=100){
+    const g = game(j.appid);
+    j.st="done"; j.fin="just now";
+    const firstEver = g.dep.length===0;
+    // the first successful download is what TEACHES vault-api this app's depots
+    if(firstEver) g.dep = [{id:g.id+1, gb:null}, {id:g.id+2, gb:null}];
+    const excl = g.dep.filter(d=>!isShared(d.id));
+    const shrd = g.dep.filter(d=>isShared(d.id));
+    j.log = `Downloaded ${j.target.toFixed(2)} GB in 00:0${1+Math.floor(Math.random()*8)}:${(10+Math.floor(Math.random()*49))} (avg ${(58+Math.random()*20).toFixed(1)} MiB/s)\n<span class='vk'>[vault-api]</span> Depot mapping ${firstEver?"created from the observed cache diff":"updated (replace-semantics for this app)"}: added=[${excl.map(d=>d.id).join(", ")}] removed=[] unchanged=[${shrd.map(d=>d.id).join(", ")}]`;
+    g.st="cached"; g.last="just now";
+    // split the downloaded bytes across the depots that have none, exactly —
+    // the per-depot numbers must add up to what the game reports. A shared depot that
+    // is already on disk costs nothing; a shared depot that was freed is re-fetched.
+    const onDisk  = g.dep.filter(d=>d.gb!=null);
+    const pending = g.dep.filter(d=>d.gb==null);
+    let left = +(j.target - onDisk.reduce((a,d)=>a+d.gb,0)).toFixed(1);
+    pending.forEach((d,i)=>{
+      const share = i===pending.length-1 ? left : +(left*(0.55+Math.random()*.25)).toFixed(1);
+      setDepotBytes(d.id, share); left = +(left-share).toFixed(1);
+    });
+    recalcSize(g);
+    g.dep.forEach(d=> coOwners(d.id, g.id).forEach(recalcSize));
+    STATE.freeTB = Math.max(0, +(STATE.freeTB - j.target/1024).toFixed(2));
+    pump();
+    toast(`${g.name} cached · ${gb(j.target)}`);
+    // a finished job is a notification event; drop any now-stale "update ready" item
+    NOTES = NOTES.filter(n=>!(n.kind==="update" && n.appid===g.id));
+    pushNote("done", g.name,
+      `${j.upd?"Update":"Download"} finished — ${gb(j.target)} now current on the cache.`,
+      {appid:g.id});
+    renderChips();
+    repaintAll(j.appid);           // finished: the card changes shape, so rebuild once
+    return;
+  }
+  tickProgress(j.appid);           // merely progressing: patch, never rebuild
+}, 420);
+
+/* =========================================================
+   Downloads screen
+   ========================================================= */
+/* API chip markup for the job-control endpoints (see NOTES: none of these exist yet) */
+const chip = (t, tone) => `<span class="api"${tone==="danger"
+  ? ' style="color:var(--danger);border-color:rgba(255,111,111,.3);background:rgba(255,111,111,.08)"'
+  : tone==="on" ? ' style="color:var(--accent-ink);background:rgba(4,33,31,.14);border-color:rgba(4,33,31,.25)"' : ""}>${t}</span>`;
+
+function renderDownloads(){
+  const run = JOBS.find(j=>LIVE.includes(j.st));
+  const q   = JOBS.filter(j=>j.st==="queued").reverse();  // oldest first
+  const hist= JOBS.filter(j=>j.st==="done"||j.st==="error");
+
+  let html = "";
+
+  html += `<h4 class="sec">Active</h4>`;
+  if(run){
+    const g = game(run.appid);
+    const held = run.st==="paused", ver = run.st==="verify";
+    const dk = held?"paused" : ver?"verify" : (run.upd?"updating":"running");
+    html += `<div class="jobcard ${held?"held":ver?"verifying":"active"}" data-jid="${run.jid}" data-dk="${dk}">
+      <div class="jobtop">
+        ${capHTML(g,"thumb")}
+        <div style="flex:1;min-width:0">
+          <div class="nm">${g.name}</div>
+          <div class="sm">job #${run.jid} · appid ${g.id}</div>
+        </div>
+        <span class="badge tx-${dk}">${sic(dk,"sic-sm")}${LABEL[dk]}</span>
+      </div>
+      <div class="jobstats">
+        <span class="js-done">${gb(run.target*run.pct/100)} of ${gb(run.target)}</span>
+        <span class="js-pct ${held?"hold":ver?"ver":"pct"}">${run.pct.toFixed(0)} %</span>
+      </div>
+      <div class="bar ${held?"hold":ver?"verify":""}"><i style="width:${run.pct}%"></i></div>
+      <div class="jobstats" style="margin:7px 0 0">
+        ${held ? `<span>Stopped — bytes stay on the cache</span><span>no ETA</span>`
+        : ver  ? `<span>Verifying cached chunks…</span><span>resuming</span>`
+        :        `<span class="js-speed">${run.speed.toFixed(0)} MiB/s</span><span class="js-eta">ETA ${eta(run)}</span>`}
+      </div>
+      ${held ? `<p class="holdnote">A paused job keeps the worker slot: vault-api runs one download at a time, so the queue waits until this one resumes or is cancelled.</p>` : ""}
+      <div class="jobacts">
+        ${held ? `<button class="btn primary sm" onclick="resumeJob(${run.jid})">Resume ${chip(`POST /v1/jobs/${run.jid}/resume`,"on")}</button>`
+        : ver  ? `<button class="btn sm" disabled>Resuming…</button>`
+        :        `<button class="btn sm" onclick="pauseJob(${run.jid})">Pause ${chip(`POST /v1/jobs/${run.jid}/pause`)}</button>`}
+        <!-- cancel stays available in every state: no phase of a job is a dead end -->
+        <button class="btn ghost sm" onclick="cancelJob(${run.jid})">Cancel ${chip(`DELETE /v1/jobs/${run.jid}`,"danger")}</button>
+      </div>
+    </div>`;
+  } else {
+    html += `<p class="empty">No download running.<br>Pick a game in the library to start one.</p>`;
+  }
+
+  html += `<h4 class="sec">Queue <span style="text-transform:none;letter-spacing:0;font-weight:400;color:var(--dim-2)">${q.length}</span></h4>`;
+  if(q.length){
+    html += q.map((j,i)=>`<div class="qrow">
+      <span class="grip"><svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor"><circle cx="7" cy="4" r="1.5"/><circle cx="13" cy="4" r="1.5"/><circle cx="7" cy="10" r="1.5"/><circle cx="13" cy="10" r="1.5"/><circle cx="7" cy="16" r="1.5"/><circle cx="13" cy="16" r="1.5"/></svg></span>
+      <span class="nm">${j.name}</span>
+      <span class="pos">#${i+1}</span>
+      <button class="btn ghost sm" onclick="cancelJob(${j.jid})">Remove ${chip(`DELETE /v1/jobs/${j.jid}`,"danger")}</button>
+    </div>`).join("");
+    html += `<p class="hint">vault-api runs one job at a time, oldest first. Drag to reorder is planned — the queue is FIFO today.${
+      run && run.st!=="running" ? ` <b style="color:var(--run)">Nothing starts while job #${run.jid} is paused.</b>` : ""}</p>`;
+  } else {
+    html += `<p class="hint" style="margin-top:0">Nothing waiting.</p>`;
+  }
+
+  html += `<h4 class="sec">History</h4>`;
+  html += hist.map(j=>`<div class="hrow" data-jid="${j.jid}">
+      <button onclick="this.parentNode.classList.toggle('open')">
+        ${sic(j.st==="done"?"cached":"error","sic-sm")}
+        <span style="flex:1;min-width:0">
+          <span class="nm">${j.name}</span>
+          <div class="when">job #${j.jid} · ${j.st} · ${j.fin} <span class="api">GET /v1/jobs/${j.jid}</span></div>
+        </span>
+        <span class="arrow"><svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><path d="m7.5 4.5 6 5.5-6 5.5"/></svg></span>
+      </button>
+      <div class="log">${j.log}</div>
+    </div>`).join("");
+
+  $("#dlscroll").innerHTML = html;
+  const runLabel = run ? LABEL[run.st==="running" ? (run.upd?"updating":"running") : run.st].toLowerCase() : "";
+  $("#dlsub").textContent = run
+    ? `${STATE.vault} · 1 ${runLabel} · ${q.length} queued`
+    : `${STATE.vault} · idle · ${hist.length} in history`;
+}
+function eta(j){
+  const left = j.target*(100-j.pct)/100 * 1024;      // MiB
+  const s = Math.max(1, left / Math.max(1,j.speed));
+  const m = Math.floor(s/60), ss = Math.floor(s%60);
+  return `${String(m).padStart(2,"0")}:${String(ss).padStart(2,"0")}`;
+}
+
+/* =========================================================
+   Notifications (finding 7)
+   No push in v1: the real app derives these by POLLING GET /v1/jobs, /v1/games and
+   /v1/clients and diffing against the previous poll. This mockup seeds an initial set
+   from the current state and pushes live items as mock events fire (a finished download,
+   a job error). kind → icon+word: done=Cached, update=Update ready, warn=Warning,
+   error=Failed. Every item carries a WORD, not just a colour (icon audit, finding 8).
+   ========================================================= */
+let NOTES = [];
+let nextNid = 1;
+const NOTE_KIND = {
+  done:  {ic:"cached", tx:"tx-cached", w:"Cached"},
+  update:{ic:"stale",  tx:"tx-stale",  w:"Update ready"},
+  warn:  {ic:"warn",   tx:"tx-warn",   w:"Warning"},
+  error: {ic:"error",  tx:"tx-error",  w:"Failed"}
+};
+/* Every note carries where it LEADS (item 1): an appid opens that game's detail sheet, a
+   client warning opens the clients sheet, a job error opens Downloads with its history row
+   expanded. A note the user cannot act on would be a dead end. */
+function seedNotes(){
+  NOTES = []; nextNid = 1;
+  if(STATE.bypassOn)
+    NOTES.push({nid:nextNid++, kind:"warn", title:"DEMON is bypassing the cache",
+      text:"Reports 38 installed games but nothing has reached the cache in 7 days — check DNS.",
+      when:"2 h ago", read:false, go:"clients"});
+  GAMES.filter(g=>g.st==="stale").forEach(g=>
+    NOTES.push({nid:nextNid++, kind:"update", title:g.name,
+      text:"A newer manifest is available upstream — an update is ready to download.",
+      when:"today", read:false, appid:g.id}));
+  const err = JOBS.find(j=>j.st==="error");
+  if(err) NOTES.push({nid:nextNid++, kind:"error", title:err.name,
+    text:"Last download failed — depot 471691: connection reset by peer.",
+    when:"yesterday", read:false, go:"job", jid:err.jid});
+  const done = JOBS.find(j=>j.st==="done");
+  if(done) NOTES.push({nid:nextNid++, kind:"done", title:done.name,
+    text:"Download finished — now current on the cache.",
+    when:done.fin, read:true, appid:done.appid});
+  syncNoteBadge();
+}
+function pushNote(kind, title, text, extra={}){
+  NOTES.unshift(Object.assign({nid:nextNid++, kind, title, text, when:"just now", read:false}, extra));
+  syncNoteBadge();
+  if($("#notifs").classList.contains("up")) renderNotifs();
+}
+/* tapping a note navigates to the thing it is about, and the panel gets out of the way */
+function openNote(nid){
+  const n = NOTES.find(x=>x.nid===nid); if(!n) return;
+  closeAll();                                   // the panel is a transient surface like any other
+  if(n.appid!=null && game(n.appid)){ go("library"); openDetail(n.appid); return; }
+  if(n.go==="clients"){ go("library"); $("#scrim").classList.add("on"); $("#clients").classList.add("up"); return; }
+  if(n.go==="job"){
+    go("downloads");
+    // expand the history entry this note is about, and bring it into view.
+    // NB: scroll the LIST, never scrollIntoView() — that also scrolls the overflow:hidden
+    // app shell, which silently shifts the whole screen (and every absolutely positioned
+    // surface with it, e.g. the bulk bar).
+    const row = $(`#dlscroll .hrow[data-jid="${n.jid}"]`), sc = $("#dlscroll");
+    if(row){
+      row.classList.add("open");
+      sc.scrollTop += row.getBoundingClientRect().top - sc.getBoundingClientRect().top - 60;
+    }
+    return;
+  }
+  go("library");
+}
+function unreadCount(){ return NOTES.filter(n=>!n.read).length; }
+function syncNoteBadge(){
+  const c = unreadCount(), p = $("#npip");
+  p.textContent = c>9 ? "9+" : c;
+  p.classList.toggle("on", c>0);
+}
+const NOTE_DEST = n => n.appid!=null ? "Opens this game"
+                     : n.go==="clients" ? "Opens the client list"
+                     : n.go==="job" ? "Opens this job in Downloads" : "";
+function renderNotifs(){
+  $("#notiflist").innerHTML = NOTES.length ? NOTES.map(n=>{
+    const k = NOTE_KIND[n.kind] || NOTE_KIND.done;
+    return `<button class="notif ${n.read?"":"unread"}" onclick="openNote(${n.nid})" aria-label="${k.w}: ${n.title}. ${NOTE_DEST(n)}">
+      ${sic(k.ic)}
+      <div class="nbody">
+        <div class="nt"><span class="nw ${k.tx}">${k.w}</span>${n.title}</div>
+        <div class="nx">${n.text}</div>
+        <div class="nwhen">${n.when}</div>
+      </div>
+      <span class="undot"></span>
+      <span class="ngo"><svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><path d="m7.5 4.5 6 5.5-6 5.5"/></svg></span>
+    </button>`;
+  }).join("") : `<p class="empty" style="padding:26px 10px">Nothing to report.<br>Downloads, updates and bypass warnings show up here.</p>`;
+}
+function openNotifs(){
+  renderNotifs();
+  $("#scrim").classList.add("on");
+  $("#notifs").classList.add("up");
+  NOTES.forEach(n=>n.read=true);   // opening the panel marks everything read
+  syncNoteBadge();
+}
+$("#btn-notifs").onclick = openNotifs;
+
+/* =========================================================
+   Navigation & chrome
+   ========================================================= */
+/* Rule: every navigation event dismisses transient surfaces first
+   (detail sheet, clients sheet, confirm dialog, scrim). */
+function go(v){
+  closeAll();
+  STATE.view=v;
+  $$(".view").forEach(s=>s.classList.toggle("active", s.id==="v-"+v));
+  $$(".nav button").forEach(b=>b.classList.toggle("on", b.dataset.view===v));
+  if(v==="downloads") renderDownloads();
+  if(v!=="library" && STATE.selecting) exitSelect();
+}
+$$(".nav button").forEach(b=> b.onclick = ()=>go(b.dataset.view));
+
+/* search — live substring filter, ANDed with the chips, selections preserved */
+function applySearch(v){
+  STATE.q = v.trim().toLowerCase();
+  $(".search").classList.toggle("filled", $("#q").value.length>0);
+  renderChips(); renderGrid();
+}
+function clearSearch(){ $("#q").value=""; applySearch(""); $("#q").focus(); }
+$("#q").addEventListener("input", e=> applySearch(e.target.value));
+$("#q").addEventListener("keydown", e=>{
+  if(e.key==="Escape"){ e.stopPropagation(); clearSearch(); }   // clears the field, not the app
+});
+$("#qclear").onclick = clearSearch;
+
+$("#chips").addEventListener("click", e=>{
+  const c = e.target.closest(".chip"); if(!c) return;
+  STATE.filter = c.dataset.f; renderChips(); renderGrid();
+});
+
+/* layout — one value, two controls (topbar segment + Settings), always in sync.
+   Search, chips and multi-select are layout-agnostic: they act on ids, not on cells. */
+function setLayout(v, announce){
+  if(!LAYOUT_CLASS.hasOwnProperty(v)) return;
+  STATE.layout = v;
+  $$("#layoutsegs button").forEach(b=> b.setAttribute("aria-pressed", String(b.dataset.layout===v)));
+  $$(".opt[data-layout]").forEach(o=> o.setAttribute("aria-checked", String(o.dataset.layout===v)));
+  renderGrid();
+  if(announce) toast(`${LAYOUT_NAME[v]} layout`);
+}
+$("#layoutsegs").addEventListener("click", e=>{
+  const b = e.target.closest("button[data-layout]"); if(!b) return;
+  setLayout(b.dataset.layout, true);
+});
+$$(".opt[data-layout]").forEach(o=> o.onclick = ()=> setLayout(o.dataset.layout, false));
+
+$("#btn-select").onclick = ()=> STATE.selecting ? exitSelect() : enterSelect(null);
+$("#bulk-cancel").onclick = exitSelect;
+$("#bulk-prefill").onclick = ()=>{
+  const b = STATE.bulk;
+  if(!b || !b.targets.length) return toast("Nothing to download in this selection.");
+  prefill(b.targets, {skipped: STATE.picked.size - b.targets.length});
+};
+$("#bulk-secondary").onclick = ()=>{
+  const b = STATE.bulk;
+  if(!b || !b.secondaryTargets || !b.secondaryTargets.length) return;
+  prefill(b.secondaryTargets, {redownload:true, skipped: STATE.picked.size - b.secondaryTargets.length});
+};
+$("#bulk-delete").onclick = ()=>{
+  const ids = STATE.bulkDelete;
+  if(!ids || !ids.length) return toast("Nothing cached in this selection.");
+  askDelete(ids);
+};
+$("#scrim").onclick = closeAll;
+/* Escape stands in for Android's back gesture: dismiss the top transient surface,
+   then leave multi-select, before anything else happens */
+document.addEventListener("keydown", e=>{
+  if(e.key!=="Escape") return;
+  const openSurface = $("#detail").classList.contains("up")
+                   || $("#clients").classList.contains("up")
+                   || $("#notifs").classList.contains("up")
+                   || $("#confirm").classList.contains("on");
+  if(openSurface) closeAll();
+  else if(STATE.selecting) exitSelect();
+});
+
+$("#bypass-details").onclick = ()=>{ $("#scrim").classList.add("on"); $("#clients").classList.add("up"); };
+$("#bypass-dismiss").onclick = ()=>{ STATE.bypassOn=false; renderGrid(); toast("Warning hidden until the next report.", true); };
+
+/* pull to refresh */
+(function(){
+  const sc = $("#libscroll"); let y0=null;
+  sc.addEventListener("touchstart", e=>{ if(sc.scrollTop<=0) y0=e.touches[0].clientY; }, {passive:true});
+  sc.addEventListener("touchmove", e=>{
+    if(y0==null) return;
+    if(e.touches[0].clientY - y0 > 62){ y0=null; doRefresh(); }
+  }, {passive:true});
+  sc.addEventListener("touchend", ()=> y0=null);
+})();
+$("#btn-refresh").onclick = doRefresh;
+function doRefresh(){
+  closeAll();                       // a refresh reloads what an open sheet was showing
+  const p=$("#ptr"); if(p.classList.contains("on")) return;
+  p.classList.add("on");
+  setTimeout(()=>{ p.classList.remove("on"); renderChips(); renderGrid(); toast("Library refreshed · 16 apps, 1 warning"); }, 1000);
+}
+
+/* settings */
+$$(".opt[data-profile]").forEach(o=> o.onclick = ()=>{
+  $$(".opt[data-profile]").forEach(x=>x.setAttribute("aria-checked","false"));
+  o.setAttribute("aria-checked","true");
+  const p=o.dataset.profile;
+  $("#f-url").textContent = p==="public" ? "https://vault.example.net" : "https://vault-01.internal:8000";
+  toast(p==="public" ? "Public domain — TLS and forward-auth strongly recommended." : "System VPN profile active.");
+});
+/* vault name — one value, edited in two places, shown in three */
+function setVault(name, echoTo){
+  STATE.vault = (name||"").trim() || "vault-01";
+  if(echoTo!=="settings") $("#f-name").value = STATE.vault;
+  if(echoTo!=="onb") $("#onb-name").value = STATE.vault;
+  renderGrid(); renderDownloads();
+}
+$("#f-name").addEventListener("input", e=> setVault(e.target.value,"settings"));
+$("#onb-name").addEventListener("input", e=> setVault(e.target.value,"onb"));
+
+let keyShown=false;
+$("#revealkey").onclick = ()=>{
+  keyShown=!keyShown;
+  $("#f-key").textContent = keyShown ? "sv_7f2c9a41d8e3b60517ac" : "••••••••••••••••••••••••";
+};
+$("#testconn").onclick = e=>{
+  const b=e.currentTarget; b.disabled=true; b.textContent="Testing…";
+  $("#testok").classList.remove("on");
+  setTimeout(()=>{ b.disabled=false; b.innerHTML='Test connection <span class="api">GET /v1/health</span>'; $("#testok").classList.add("on"); }, 900);
+};
+$("#tg-bypass").onclick = e=>{
+  const on = e.currentTarget.getAttribute("aria-checked")!=="true";
+  e.currentTarget.setAttribute("aria-checked", on);
+  STATE.bypassOn = on; renderGrid();
+};
+$("#tg-api").onclick = e=>{
+  const on = e.currentTarget.getAttribute("aria-checked")!=="true";
+  e.currentTarget.setAttribute("aria-checked", on);
+  document.body.classList.toggle("show-api", on);
+};
+
+/* =========================================================
+   Onboarding — 3 steps: connect · Steam identity · ready
+   ========================================================= */
+const ONB = {step:1, tested:false, signedIn:false, profile:"vpn"};
+const STEP_NAME = {1:"Connect", 2:"Steam identity", 3:"Ready"};
+const PROFILE_NAME = {vpn:"System VPN", tsnet:"Embedded Tailscale", public:"Public domain"};
+
+function onbRender(){
+  $$(".ostep").forEach(s=> s.classList.toggle("on", +s.dataset.step===ONB.step));
+  $("#stepnum").textContent = `Step ${ONB.step} of 3 · ${STEP_NAME[ONB.step]}`;
+  $("#track-i").style.width = (ONB.step/3*100).toFixed(0)+"%";
+  // finding 1 — Back appears on steps 2 & 3 only; step 1 has nowhere to go back to.
+  // Entered values persist across back/forward because they live in the DOM inputs and the
+  // ONB object, neither of which a step change touches.
+  $("#onb-back").style.display = ONB.step>1 ? "" : "none";
+  const next = $("#onb-next");
+  if(ONB.step===1){ next.textContent="Continue"; next.disabled = !ONB.tested; }
+  if(ONB.step===2){ next.textContent = ONB.signedIn ? "Continue" : "Continue without an account"; next.disabled=false; }
+  // don't let the footer button compete with "Sign in with Steam"
+  next.classList.toggle("primary", !(ONB.step===2 && !ONB.signedIn));
+  $("#onb-demo").style.display = ONB.step===3 ? "none" : "block";
+  if(ONB.step===3){
+    next.textContent="Open library"; next.disabled=false;
+    $("#onb-summary").innerHTML = `
+      <div><span>Vault</span><span>${STATE.vault}</span></div>
+      <div><span>Profile</span><span>${PROFILE_NAME[ONB.profile]}</span></div>
+      <div><span>Server</span><span>${$("#onb-url").value}</span></div>
+      <div><span>API key</span><span>••••••••••••••••${$("#onb-key").value.slice(-4)}</span></div>
+      <div><span>Steam</span><span>${ONB.signedIn ? "vaultkeeper_jb · 412 games" : "not linked (demo data)"}</span></div>
+      <div><span>Cache</span><span>16 tracked apps · 1.42 TB free</span></div>`;
+  }
+}
+function onbOpen(step){
+  closeAll();
+  ONB.step = step || 1;
+  $("#onb").classList.remove("gone");
+  document.body.classList.add("onboarding");
+  onbRender();
+}
+function onbFinish(demo){
+  $("#onb").classList.add("gone");
+  document.body.classList.remove("onboarding");
+  STATE.demo = !!demo || !ONB.signedIn;
+  go("library"); renderGrid();
+  if(STATE.demo) toast("Demo mode — sample library, no server attached.", true);
+}
+
+$$(".opt[data-onb]").forEach(o=> o.onclick = ()=>{
+  $$(".opt[data-onb]").forEach(x=>x.setAttribute("aria-checked","false"));
+  o.setAttribute("aria-checked","true");
+  ONB.profile = o.dataset.onb;
+  $("#onb-url").value = ONB.profile==="public" ? "https://vault.example.net" : "https://vault-01.internal:8000";
+  // a changed target invalidates the previous test
+  ONB.tested=false; $("#onb-testok").classList.remove("on"); onbRender();
+});
+$("#onb-eye").onclick = ()=>{
+  const f=$("#onb-key"); f.type = f.type==="password" ? "text" : "password";
+};
+$("#onb-url").addEventListener("input", ()=>{ ONB.tested=false; $("#onb-testok").classList.remove("on"); onbRender(); });
+$("#onb-test").onclick = e=>{
+  const b=e.currentTarget; b.disabled=true; b.textContent="Testing…";
+  $("#onb-testok").classList.remove("on");
+  setTimeout(()=>{
+    b.disabled=false; b.innerHTML='Test connection <span class="api">GET /v1/health</span>';
+    $("#onb-testok").classList.add("on");
+    ONB.tested=true; onbRender();
+  }, 950);
+};
+
+/* Steam sign-in → mocked interstitial → back with a persona */
+$("#onb-signin").onclick = ()=> $("#valve").classList.add("on");
+$("#valve-cancel").onclick = ()=> $("#valve").classList.remove("on");
+$("#valve-ok").onclick = ()=>{
+  $("#valve").classList.remove("on");
+  ONB.signedIn = true;
+  $("#onb-av").textContent = "VK";
+  $("#onb-ttl").textContent = "Signed in as vaultkeeper_jb";
+  $("#onb-desc").textContent = "SteamID64 76561198042117903 · 412 games found";
+  $("#onb-signin").textContent = "Signed in as vaultkeeper_jb";
+  $("#onb-signin").disabled = true;
+  onbRender();
+  toast("Steam identity linked · SteamID64 received");
+};
+
+$("#onb-next").onclick = ()=>{
+  if(ONB.step < 3){ ONB.step++; onbRender(); $(".onb .rest").scrollTop = 0; }
+  else onbFinish(false);
+};
+$("#onb-back").onclick = ()=>{
+  if(ONB.step > 1){ ONB.step--; onbRender(); $(".onb .rest").scrollTop = 0; }
+};
+$("#onb-skip").onclick   = ()=> onbFinish(true);
+$("#onb-demo").onclick   = ()=> onbFinish(true);
+$("#replay-onb").onclick = ()=> onbOpen(1);
+
+/* clock */
+function tickClock(){
+  const d=new Date();
+  $("#clock").textContent = `${d.getHours()}:${String(d.getMinutes()).padStart(2,"0")}`;
+}
+tickClock(); setInterval(tickClock, 20000);
+
+/* boot — #library / #downloads / #settings / #demo skip straight past onboarding */
+const HASH = location.hash.replace("#","");
+renderChips(); renderGrid(); renderDownloads(); syncBulk(); seedNotes();
+if(["library","downloads","settings","demo"].includes(HASH)){
+  $("#onb").classList.add("gone");
+  STATE.demo = true; renderGrid();
+  go(HASH==="demo" ? "library" : HASH);
+} else {
+  document.body.classList.add("onboarding");
+  onbRender();
+}
+</script>
