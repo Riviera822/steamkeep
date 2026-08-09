@@ -357,17 +357,33 @@ for users who expose the API differently.
       titles (status update / optional cleanup hint, see ADR-0002)
 
 ### Phase 3 — Scheduler & Update Logic
+
+Closing plan (2026-08-09, user decision "implement everything"): remaining
+packages are 3.8b grace window (in flight) · 3.9 oracle incl. open-beta
+branch manifests (ADR-0007 addendum B) · 3.10 vault-core cache-event log
+(ADR-0008) · 3.11 event sweep = miss-trigger + client hit stats/bypass ·
+3.12 job control + optional auto-GC · 3.13 webhooks. api/-packages run
+strictly serially; 3.10 (core/) runs in parallel.
+
 - [ ] Miss-triggered prefill completion: a cache miss on an unknown/partial
-      app queues a prefill job for that app (hybrid decision, ADR-0001)
-- [ ] Job outcome honesty: a prefill run that observed zero depots and has
+      app queues a prefill job for that app (hybrid decision, ADR-0001;
+      feed design decided in ADR-0008 → WP 3.10 core log + WP 3.11 sweep)
+- [x] Job outcome honesty: a prefill run that observed zero depots and has
       zero cached bytes must not end 'done' (WP 1.7 finding: SteamPrefill
       exits 0 for unowned apps → green badge for a never-cached game)
+      *(WP 3.3: summary parsing with digits-and-separators row detection,
+      cp850-safe decode chain, 0/0 ⇒ error)*
 - [ ] Job control: pause/resume/cancel (`DELETE /v1/jobs/{id}`,
       pause = terminate the SteamPrefill subprocess, resume = re-run —
       already-cached chunks replay as disk-speed HITs, so the cache
       itself is the progress store; user feature decision 2026-08-06)
-- [ ] Manifest comparison (stale detection)
-- [ ] Configurable cron window (e.g. 09:00–17:00, every 3 h)
+- [x] Manifest comparison (stale detection)
+      *(ADR-0006: staleness via non-forced prefill (Tier 1), depot_manifests
+      latest-per-(app,depot) from WP 3.2 ingestion, needs_force lifecycle
+      with CAS-protected clear from WP 3.4)*
+- [x] Configurable cron window (e.g. 09:00–17:00, every 3 h)
+      *(WP 3.5: schedule_window parsing incl. overnight windows + 24:00 end,
+      OnCalendar-style sweeps from agent reports)*
 - [ ] Manifest-based garbage collection (`/v1/cache/{appid}/gc`, optional
       auto-GC after successful update prefill)
       *(WP 3.7 done: read-only GC core — `plan_gc()` with exact on-disk
