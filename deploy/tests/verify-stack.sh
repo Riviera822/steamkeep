@@ -242,6 +242,57 @@ noKey=$(docker compose --env-file /dev/null -f "$compose_file" -p "$PROJECT" con
 say "$noKey" | sed 's/^/    /'
 assert_contains "$noKey" "VAULT_API_KEY" "compose refuses to render without VAULT_API_KEY"
 
+# --- Known gap, honestly flagged (WP D1) ------------------------------------
+# Steps 3e and 5i (this one and the one in section 5 below) are new in this
+# work package and have never been run against a real Docker host: WP D1's
+# environment had no Docker available, the same standing constraint prior
+# work packages have flagged (core/README.md "Known gap, honestly flagged").
+# Everything about them was validated statically instead -- YAML parse of
+# compose.yaml, an env-var cross-reference against .env.example, `sh -n` on
+# this whole script, and the awk/sed extraction logic below replayed against
+# a synthetic docker-compose-config-shaped fixture (both quoted and unquoted
+# value styles, and the case where the extracted service is last before a
+# top-level key). What is NOT yet confirmed: the real, version-specific
+# `docker compose config` rendering this depends on, and the actual
+# MISS -> event-log-line round trip in 5i. Both are confirmed by this
+# script's first real run on the deploy target -- treat that run's PASS/FAIL
+# on 3e/5i specifically as the first real evidence, not a formality.
+step "3e. Phase-3 knobs (VAULT_EVENT_LOG / VAULT_GC_GRACE_DAYS / VAULT_AUTO_GC): feature-off defaults pass through unchanged"
+say 'The test .env above (section 3) sets none of the three -- deploy/README.md'
+say '"Phase-3 knobs" -- so the rendered config must show vault-core with an empty'
+say 'event-log path and vault-api with the same defaults api/README.md documents'
+say '(grace window 14 days, auto-GC off). Quoting style varies across Compose'
+say 'versions, so values are compared with surrounding quotes stripped.'
+run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' --profile dns config"
+rendered_default=$(dc --profile dns config 2>/dev/null)
+# Extract just one service's block: from its "  <name>:" key line up to (but
+# not including) the next line at the same two-space service-key indent --
+# robust regardless of which services precede/follow or whether the dns
+# profile happens to be included in this render.
+# Stop at either a sibling service key (two-space indent) or the next
+# top-level key (zero indent, e.g. "volumes:" following the last service) --
+# whichever comes first, so the block never runs past this one service's
+# lines even if it happens to be the last one rendered.
+core_block=$(printf '%s\n' "$rendered_default" | awk '/^  vault-core:/{f=1;next} f && (/^  [A-Za-z0-9_-]+:/ || /^[A-Za-z]/){exit} f')
+api_block=$(printf '%s\n' "$rendered_default" | awk '/^  vault-api:/{f=1;next} f && (/^  [A-Za-z0-9_-]+:/ || /^[A-Za-z]/){exit} f')
+
+# Precondition, checked BEFORE the emptiness check below means anything:
+# `assert_eq "" "$event_log_val"` also reads as "pass" if VAULT_EVENT_LOG is
+# entirely ABSENT from the rendered block (grep finds nothing -> the variable
+# is empty too) -- exactly the regression this step exists to catch if
+# someone ever deletes the compose.yaml passthrough line. Gate on the key
+# actually being present exactly once first (LEARNINGS "Testing discipline":
+# fail-closed assertions need a precondition, not just an outcome check).
+event_log_key_count=$(printf '%s\n' "$core_block" | grep -c 'VAULT_EVENT_LOG:')
+assert_eq "1" "$event_log_key_count" "vault-core: VAULT_EVENT_LOG key is present exactly once in the rendered block (precondition for the emptiness check below)"
+
+event_log_val=$(printf '%s\n' "$core_block" | grep 'VAULT_EVENT_LOG:' | head -1 | sed -e 's/^[[:space:]]*VAULT_EVENT_LOG:[[:space:]]*//' -e 's/"//g')
+grace_val=$(printf '%s\n' "$api_block" | grep 'VAULT_GC_GRACE_DAYS:' | head -1 | sed -e 's/^[[:space:]]*VAULT_GC_GRACE_DAYS:[[:space:]]*//' -e 's/"//g')
+autogc_val=$(printf '%s\n' "$api_block" | grep 'VAULT_AUTO_GC:' | head -1 | sed -e 's/^[[:space:]]*VAULT_AUTO_GC:[[:space:]]*//' -e 's/"//g')
+assert_eq "" "$event_log_val"    "vault-core: VAULT_EVENT_LOG renders empty (feature off) by default"
+assert_eq "14" "$grace_val"      "vault-api: VAULT_GC_GRACE_DAYS default (14) passes through"
+assert_eq "off" "$autogc_val"    "vault-api: VAULT_AUTO_GC default (off) passes through"
+
 # =============================================================================
 section "4. Stack up (vault-core + vault-api)"
 # =============================================================================
@@ -343,6 +394,80 @@ logcfg=$(docker inspect --format '{{.HostConfig.LogConfig.Type}} {{.HostConfig.L
 assert_contains "$logcfg" "json-file" "vault-core uses the json-file driver"
 assert_contains "$logcfg" "max-size" "vault-core has a max-size limit"
 assert_contains "$logcfg" "max-file" "vault-core has a max-file limit"
+
+# =============================================================================
+# 5i. Cache-event log (VAULT_EVENT_LOG), enabled ONLY for this check.
+#
+# Sections 1-5h deliberately ran with VAULT_EVENT_LOG unset (the shipped
+# default, section 3e above), so they exercise what a plain `docker compose
+# up` actually gets. This step turns the feature on for vault-core alone,
+# removes the depot object's already-cached copy from 5e so the next request
+# is a REAL cache miss (not a warm HIT replaying from disk), and checks the
+# resulting line against core/README.md "Cache-event log"'s 9-field v1
+# format -- then reverts vault-core to the feature-off default before
+# section 8's fail-fast guards run.
+#
+# Known gap, honestly flagged (WP D1): this step (like 3e above) is new in
+# this work package and has never executed against a real Docker host --
+# WP D1's environment had no Docker available, same standing constraint
+# prior work packages have flagged (core/README.md "Known gap, honestly
+# flagged"). The shell logic was checked with `sh -n` and the field-parsing
+# below was replayed against core/README.md's own documented example line
+# (v1/MISS/200 in the right positions, 9 tab-separated fields), but the
+# actual container behaviour -- the real MISS reaching event.log, the
+# `docker compose up -d vault-core` recreate picking up the new env var,
+# and the healthcheck timing -- is confirmed only by this script's first
+# real run on the deploy target.
+# =============================================================================
+step "5i. Cache-event log: enable, force a fresh MISS, verify the v1 line, revert"
+say 'VAULT_EVENT_LOG is off by default (core/README.md "Docker: VAULT_EVENT_LOG").'
+say 'This step is the one place in this script that turns it on, to prove the'
+say 'deploy/ wiring (compose.yaml passthrough + the shared /vault volume) actually'
+say 'produces a usable line end to end, not just that the variable is plumbed.'
+
+printf '\nVAULT_EVENT_LOG=/vault/logs/event.log\n' >> "$env_file"
+run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' up -d vault-core"
+i=0
+while [ "$i" -lt 30 ]; do
+    core_h=$(docker inspect --format '{{.State.Health.Status}}' "$(dc ps -q vault-core)" 2>/dev/null || echo starting)
+    [ "$core_h" = "healthy" ] && break
+    i=$((i + 1)); sleep 2
+done
+assert_eq "healthy" "$core_h" "vault-core is healthy again after enabling VAULT_EVENT_LOG"
+
+say ''
+say 'Removing the object 5e already cached, so the next request is a genuine MISS'
+say 'against the real Steam CDN, not a HIT replayed from local disk.'
+run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' exec -T vault-core sh -c 'rm -f /vault/cache/depot/$DEPOT/chunk/$CHUNK'"
+
+evlog_miss=$(curl -s -o /dev/null -w 'http=%{http_code}' --max-time 120 -H "Host: $CDN_HOST" "$CORE_URL$DEPOT_URI")
+say "    MISS (event-log check)  $evlog_miss"
+assert_contains "$evlog_miss" "http=200" "the forced fresh MISS still succeeds against the real Steam CDN"
+
+evline=$(dc exec -T vault-core sh -c "grep '$CHUNK' /vault/logs/event.log | tail -1" | tr -d '\r')
+say "    event-log line: $evline"
+field_count=$(printf '%s' "$evline" | awk -F'\t' '{print NF}')
+field1=$(printf '%s' "$evline" | awk -F'\t' '{print $1}')
+field4=$(printf '%s' "$evline" | awk -F'\t' '{print $4}')
+field9=$(printf '%s' "$evline" | awk -F'\t' '{print $9}')
+assert_eq "9" "$field_count"  "the event-log line has exactly 9 tab-separated fields (core/README.md format)"
+assert_eq "v1" "$field1"      "field 1 is the v1 format version"
+assert_eq "MISS" "$field4"    "field 4 records MISS for this forced fresh fetch"
+assert_eq "200" "$field9"     "field 9 (HTTP status) is 200"
+
+say ''
+say 'Reverting: strip VAULT_EVENT_LOG back out of the test .env and recreate'
+say 'vault-core so section 8'"'"'s fail-fast guards below run against the shipped'
+say 'feature-off default, not this check'"'"'s override.'
+sed -i '/^VAULT_EVENT_LOG=/d' "$env_file"
+run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' up -d vault-core"
+i=0
+while [ "$i" -lt 30 ]; do
+    core_h=$(docker inspect --format '{{.State.Health.Status}}' "$(dc ps -q vault-core)" 2>/dev/null || echo starting)
+    [ "$core_h" = "healthy" ] && break
+    i=$((i + 1)); sleep 2
+done
+assert_eq "healthy" "$core_h" "vault-core is healthy again after reverting VAULT_EVENT_LOG to the feature-off default"
 
 # =============================================================================
 section "6. vault-api behaviour"

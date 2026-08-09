@@ -29,6 +29,15 @@ deploy/
 
 - Docker Engine with Compose v2 (`docker compose`, not `docker-compose`).
   Verified against **Docker Engine 29.1.3 / Compose 2.40.3** on Ubuntu 26.04.
+  **Known gap, honestly flagged (WP D1):** that verification predates the
+  Phase-3 knobs section below. `deploy/tests/verify-stack.sh` steps 3e and
+  5i, which exercise `VAULT_EVENT_LOG` / `VAULT_GC_GRACE_DAYS` /
+  `VAULT_AUTO_GC`, were added in WP D1 in an environment with no Docker
+  available and have not yet run against a real Docker host — only
+  statically validated (YAML parse, `sh -n`, extraction logic replayed
+  against synthetic fixtures; see the comments at the top of each step in
+  `verify-stack.sh`). Pending confirmation on the deploy target's first real
+  run of the suite.
 - Outbound internet (the cache fetches from the Steam CDN on a miss).
 - Disk space for the cache. There is no eviction, ever — that is the
   project's whole point (`docs/PROJECT_PLAN.md` §3). You delete games
@@ -267,6 +276,33 @@ once, and there is no way to move just one with this variable.
 has the full recipe for putting this on a dedicated ZFS dataset, including
 `recordsize`/`atime`/`compression` reasoning specific to Steam depot chunks
 and the port-80/DNS gotchas that come up on a NAS specifically.
+
+---
+
+## Phase-3 knobs: cache-event log and garbage collection
+
+Three Phase-3 settings, all optional, all off/at-their-safe-default unless you
+set them in `deploy/.env` (`.env.example` documents each in full):
+
+| Variable              | Required | Default      | Purpose                                                            |
+|-----------------------|----------|--------------|---------------------------------------------------------------------|
+| `VAULT_EVENT_LOG`      | no       | *(empty — feature off)* | vault-core: path to the machine-readable cache-event log (WP 3.10, ADR-0008), e.g. `/vault/logs/event.log`. No consumer exists yet — this is groundwork for WP 3.11's miss-triggered prefill completion and bypass detection. See `core/README.md` "Cache-event log" |
+| `VAULT_GC_GRACE_DAYS`  | no       | `14`         | vault-api: days a freshly stored chunk is protected from garbage collection purely by its own store time (protects beta-branch/demo content GC cannot otherwise see); `0` disables the window. See `api/README.md` "The recently-stored grace window" |
+| `VAULT_AUTO_GC`        | no       | `off`        | vault-api: `off` \| `dry-run` \| `execute` — automatically queue a GC job after a prefill that actually updated something. See `api/README.md` "Auto-GC" |
+
+**The cache-event log needs no extra volume.** `VAULT_EVENT_LOG` (once set)
+writes into `/vault/logs/`, which lives on the exact same `/vault` volume
+`cache/` and `tmp/` already share — `core/Dockerfile` pre-creates it there.
+vault-api already mounts that identical volume (see the "Volumes" table
+above), so it can already read `/vault/logs/event.log` today, with zero
+`compose.yaml` changes required. Nothing consumes the file yet — turning it
+on before WP 3.11's sweeper exists just grows an unbounded file, exactly as
+`core/README.md` warns.
+
+**Turning on auto-GC deletes files automatically once you pick `execute`.**
+Start with `dry-run` and read a few job logs (`GET /v1/jobs/{id}`) before
+trusting `execute` on a deployment you care about — `api/README.md` "Auto-GC"
+has the full decision tree for when it fires.
 
 ---
 

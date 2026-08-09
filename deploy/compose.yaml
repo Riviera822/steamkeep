@@ -46,6 +46,16 @@ services:
       # answers *.steamcontent.com with vault-core's own address, which would
       # make every cache miss proxy back into this container forever.
       VAULT_RESOLVER: ${VAULT_RESOLVER:-1.1.1.1}
+      # Optional cache-event log (WP 3.10, ADR-0008; core/README.md
+      # "Cache-event log"). Empty (the default from core/Dockerfile) means
+      # OFF: core/docker/25-vault-eventlog.sh strips the access_log
+      # directives entirely, so nothing is created or written. Same
+      # default-empty passthrough pattern as CACHE_IP below for vault-dns.
+      # No consumer exists yet (that's WP 3.11) -- see .env.example before
+      # turning this on. When set, it must be a path under /vault/; see the
+      # volume note on vault-api's /vault mount below for why no extra mount
+      # is needed here for vault-api to read it later.
+      VAULT_EVENT_LOG: ${VAULT_EVENT_LOG:-}
     ports:
       # PORT 80 IS NOT NEGOTIABLE FOR REAL CLIENTS. Steam CDN traffic is plain
       # HTTP and the Steam client will only ever ask for port 80 -- a cache on
@@ -114,6 +124,12 @@ services:
       VAULT_WORKER_POLL_SECONDS: ${VAULT_WORKER_POLL_SECONDS:-1.0}
       VAULT_SIZE_CACHE_TTL: ${VAULT_SIZE_CACHE_TTL:-60}
       VAULT_AGENT_REPORT_KEEP: ${VAULT_AGENT_REPORT_KEEP:-20}
+      # Manifest-based GC (WP 3.8b/3.12, api/README.md "The recently-stored
+      # grace window" / "Auto-GC"). Defaults match vault-api's own built-in
+      # defaults byte-for-byte, so a deployment that never touches either
+      # variable in .env sees identical behaviour to today.
+      VAULT_GC_GRACE_DAYS: ${VAULT_GC_GRACE_DAYS:-14}
+      VAULT_AUTO_GC: ${VAULT_AUTO_GC:-off}
       # VAULT_DB_PATH, VAULT_CACHE_ROOT and VAULT_STEAMPREFILL_PATH are baked
       # into the image (they describe the image's own layout, not a deployment
       # choice) -- see api/Dockerfile.
@@ -133,6 +149,18 @@ services:
       # there. Both services must agree on named-volume vs. bind-mount and on the
       # exact path; this line is kept textually identical to vault-core's on
       # purpose.
+      #
+      # This is ALSO where the cache-event log lives when VAULT_EVENT_LOG is
+      # set on vault-core above: core/Dockerfile pre-creates /vault/logs/
+      # inside this same one volume, next to cache/ and tmp/. Because this
+      # line already mounts the identical /vault volume into vault-api, no
+      # additional volume or mount is needed for vault-api to read
+      # /vault/logs/event.log once WP 3.11's sweeper ships and actually wants
+      # to (WP 3.10/ADR-0008 deliberately left this wiring to whichever
+      # package first consumes the file). Deliberately not narrowed to a
+      # read-only logs/-only bind here: WP 3.11 owns the cursor/truncation
+      # contract (core/README.md "Rotation and the USR1 contract") and can
+      # decide its own access shape when it lands.
       - ${VAULT_CACHE_PATH:-vault-cache}:/vault
       # SQLite database (mapping, jobs, agent reports). Small; back this up.
       - vault-db:/data

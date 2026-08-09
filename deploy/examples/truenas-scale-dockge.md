@@ -177,6 +177,18 @@ move only one of them with this variable, by design.
 `docker compose up -d` (or the equivalent Dockge "Start"/"Restart" button)
 picks it up on next start.
 
+### 4.4 A quota note if you also turn on the cache-event log
+
+If you later enable `VAULT_EVENT_LOG` (`deploy/README.md` "Phase-3 knobs" --
+off by default, no reason to touch it before something actually consumes the
+file), its path lands inside this same dataset: `core/Dockerfile` pre-creates
+`logs/` alongside `cache/` and `tmp/` under the one `/vault` mount, and
+`VAULT_CACHE_PATH` redirects all three together, not just `cache/`. Worth
+knowing before you set a tight `zfs set quota=...` on `<pool>/steamvault-cache`
+(§4.1) -- the event log competes for the same quota as the depot cache itself,
+though at a much smaller scale (one TSV line per request, not per-chunk
+bytes).
+
 ---
 
 ## 5. The port-80 conflict (Traefik and friends)
