@@ -28,9 +28,11 @@ The three things these tests are built around:
 from __future__ import annotations
 
 import os
+import posixpath
 import sqlite3
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Sequence
 
 import pytest
@@ -1877,6 +1879,52 @@ def test_safe_child_path_builds_a_direct_child(tmp_path: Path) -> None:
     assert deletion.safe_child_path(str(tmp_path), "441") == os.path.join(
         str(tmp_path), "441"
     )
+
+
+@pytest.mark.parametrize("name", ["a\\b", "C:x", "a:b"])
+def test_safe_child_path_refuses_backslash_and_colon_even_under_simulated_posix(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Pins the WP 5.1-aftermath fixes as MUTATION-PROOF, host-independent
+    tests -- not just rows in the parametrized case above.
+
+    None of these three is a reliable regression pin on its own on Windows:
+    ``ntpath.basename("a\\b") == "b"`` (backslash IS a separator there), and
+    ``ntpath`` reads a leading ``"C:"``/``"a:"`` as a drive letter -- so the
+    PRE-fix up-front check (``os.path.basename(name) != name``) already
+    raised on its own for all three there. Reverting the explicit ``"\\" in
+    name`` or ``":" in name`` arms these fixes add would NOT make the
+    parametrized cases above fail on a Windows dev machine -- exactly how
+    the backslash gap shipped past review in the first place (WP 3.8) and
+    was only caught once CI ran ``api`` pytest on ``ubuntu-latest`` for the
+    first time (WP 5.1 aftermath); the colon gap was found the same way in
+    review, without needing a second production incident.
+    ``posixpath`` treats backslash and colon as ordinary filename
+    characters: ``posixpath.basename`` returns ``"a\\b"``, ``"C:x"`` and
+    ``"a:b"`` all UNCHANGED (nothing to split on), so none of the old checks
+    fired there.
+
+    Swaps ``deletion``'s ``os`` name for a stand-in whose ``.path`` is the
+    real ``posixpath`` module, for the duration of one call, to reproduce
+    that platform deterministically on ANY host running this suite,
+    including a Windows one -- ``safe_child_path`` never touches the
+    filesystem (pure string manipulation over ``os.path``, per its own
+    docstring), so this is a faithful simulation, not a mock of the function
+    under test. Patching ``deletion.os`` itself (rather than mutating
+    ``os.path`` on the real, singleton ``os`` module) confines the swap to
+    this module's own name binding -- nothing else importing the real ``os``
+    module is affected, even transiently. A POSIX-shaped absolute parent is
+    used (not ``tmp_path``, which is host-native) so the earlier
+    ``os.path.isabs`` check does not itself misfire under the swap.
+    ``monkeypatch`` undoes the swap automatically when this test returns.
+
+    Revert either the ``"\\" in name`` or the ``":" in name`` arm in
+    ``safe_child_path`` and the corresponding case here fails on every
+    platform, not only on Linux CI.
+    """
+    monkeypatch.setattr(deletion, "os", SimpleNamespace(path=posixpath))
+    with pytest.raises(deletion.UnsafeDepotTargetError):
+        deletion.safe_child_path("/vault/cache/depot/441", name)
 
 
 def test_remove_file_settling_reports_an_already_absent_file_as_not_ours(

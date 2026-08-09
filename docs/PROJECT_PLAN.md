@@ -494,7 +494,11 @@ parallel/serial decisions, merge discipline, open user decisions):
       First gate exposed a real WP 3.10 bug — 25-vault-eventlog.sh's
       survivor check made vault-core unable to start in its default
       config; fixed in a separate fix(core) commit. Image build/publish
-      remains WP 5.5, user-gated. Opus PASS + delta-confirmed.)*
+      remains WP 5.5, user-gated. Opus PASS + delta-confirmed. CI run #1
+      on real runners: 4/5 jobs green incl. all three locally-unverifiable
+      ones; the api/pytest Linux job found a second real bug — a
+      Windows-only-measured path guard accepting `a\b`/`C:x` on POSIX —
+      fixed as fix(api), run #2 green expected.)*
 - [x] CONTRIBUTING.md, issue templates, example configs
       *(WP 5.4: root `CONTRIBUTING.md` with verified per-component test
       commands (api pytest: 704 passed/1 skipped; agent go build/vet/test:
