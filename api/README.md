@@ -56,6 +56,7 @@ api/
 │   ├── manifest_ingest.py  # scan temp-cache -> parse -> store -> archive (WP 3.2)
 │   ├── schedule_window.py # window parsing/containment, pure (WP 3.5)
 │   ├── scheduler.py      # the second background thread: sweeps (WP 3.5)
+│   ├── gc.py             # GC core: keep-set resolution + plan_gc, read-only (WP 3.7)
 │   ├── validation.py     # shared request types (AppId) — one coercion rule
 │   └── routers/
 │       ├── health.py     # GET /v1/health — the ONE public router
@@ -1899,6 +1900,159 @@ interval and staleness bound, so an operator can see what enabling the window
 - No `deploy/` changes — the new `VAULT_SCHEDULE_*` variables are documented
   in `api/.env.example`; wiring them (and a `TZ`) into the Compose file is a
   follow-up on top of WP 1.9.
+
+## Garbage-collection core (WP 3.7, ADR-0007)
+
+Plan A13 ("reclaim space from outdated chunks per game") and §5's "stale
+chunks waste space forever". `vault_api/gc.py` is the *deciding* half of that
+feature; WP 3.8 is the *acting* half.
+
+> For one depot, the chunks worth keeping are the UNION of the current
+> manifests of every app that has a claim on that depot; everything else in
+> that depot's `chunk/` directory is an orphan left behind by a game update.
+
+**This module mutates nothing.** No file is written, renamed or removed, no
+row is inserted or updated. `plan_gc` returns a `GcPlan` — a dry run that can
+be inspected in a response, a test or a review before anything acts on it.
+`tests/test_gc.py::test_plan_gc_is_read_only` snapshots every path and size
+under the cache root and the archive, plans, and compares.
+
+### Where a keep set comes from
+
+Per (app, depot), first success wins:
+
+| # | Source | What it gives |
+|---|---|---|
+| 1 | `depot_manifests` row (WP 3.2) | the manifest **id** vault-api believes is current — not a chunk set |
+| 1a | archived `.bin` — `{archive_dir}/{depotid}_{manifestid}.bin` | that manifest's chunks (`manifests.parse_bin_payload`) |
+| 1b | cache-stored copy — `depot/<id>/manifest/<manifestid>/5/<code>` | the same chunks from the other on-disk format (`parse_cache_manifest`) |
+| 2 | no row at all → the depot's **newest** cache-stored manifest | chunks, from the only evidence available |
+
+**GC never falls back from a newer manifest it cannot read to an older one it
+can.** If a recorded manifest id is known but neither source yields its chunk
+set, the app is unresolved and the depot is skipped; if the newest stored
+manifest cannot be parsed, an older one is *not* substituted. Keeping an old
+manifest's chunk set would plan the deletion of exactly the chunks the current
+version needs — the one failure mode a garbage collector must not have.
+Multiple stored copies *of the same manifest id* are tried in turn (a
+truncated store-on-miss write is real), which is a different thing entirely.
+
+"Newest" is decided by mtime. `proxy_store` stamps stored files with the
+upstream `Last-Modified` (ADR-0007's measured reason for rejecting time-based
+GC), so these are Steam's publish times — which for *ordering manifests of one
+depot* is the right signal, not the trap it is for chunks. It is still only
+used where vault-api has no recorded manifest id of its own.
+
+### The uncached-app decision (the one this package had to reconcile)
+
+Two accepted documents pulled in opposite directions for one case: a depot
+mapped to an app with **no cache content and no recorded manifest**.
+
+- ADR-0007's readiness gate: "if any mapped app has no resolvable manifest,
+  the depot is skipped — never GC on partial knowledge."
+- ADR-0003's addendum (WP 3.6): a co-owner without cache content does **not**
+  protect bytes, because mapping rows survive deletion and a rule keyed on
+  them alone leaks a shared depot forever. Its closing line hands the question
+  to this package: *"for consistency, an uncached mapped app should not pin
+  chunks in a shared depot's keep set; decide when GC is built."*
+
+**Decision:** an app that is verifiably idle, never prefilled, job-free **and**
+has no `depot_manifests` row is *excluded from the union requirement* — it
+neither contributes chunks nor blocks the depot.
+
+1. The gate protects against **partial** knowledge — an app we know has bytes
+   on disk but whose manifest we cannot read. An uncached app has, by the same
+   conservative predicate WP 3.6 already uses, nothing on disk to protect:
+   that is complete knowledge of an empty claim, not partial knowledge.
+2. Treating it as a blocker would reproduce the WP 3.6 leak in a new place —
+   one never-prefilled app mapped to a shared depot would freeze GC for that
+   depot forever, with no operator action available to fix it (mapping rows
+   survive by design).
+3. The direction stays fail-closed: a missing `apps` row, a non-idle status,
+   a set `last_prefill_at`, a queued/running job or an unreadable row all
+   resolve to "has content" ⇒ the app counts ⇒ an unresolvable manifest skips
+   the depot. Only the verifiably-empty case is excluded.
+4. Symmetrically, an app that **does** have a `depot_manifests` row always
+   counts even without cache content: a recorded manifest is a claim vault-api
+   itself wrote down, and an unreadable claim is exactly what the gate is for.
+
+**Sub-decision:** a depot where *every* mapped app is excluded is **skipped**
+(`skipped_no_counting_apps`), not emptied. The exclusion rule exists so an
+uncached co-owner cannot *block* a depot that has other resolvable claims; it
+is not an authorisation to wipe a depot nobody has knowledge about. That case
+already belongs to `DELETE /v1/cache/{appid}`'s last-remnant rule (ADR-0003
+addendum), which rechecks co-owners at execute time and sets `needs_force` —
+neither of which GC has.
+
+### Depot statuses
+
+| Status | Meaning |
+|---|---|
+| `planned` | keep set resolved, orphans computed — **the only status that may carry orphans** |
+| `skipped_unusable_depotid` | the mapping row's depot id is not a positive integer (poisoned DB) |
+| `skipped_missing_dir` | `depot/<id>/` does not exist — nothing cached, nothing to reclaim |
+| `skipped_unmapped` | no usable `depot_app_map` row names this depot |
+| `skipped_unreadable_owner` | a mapping row has an unreadable app id ⇒ the claim set is incomplete |
+| `skipped_no_counting_apps` | every mapped app is verifiably uncached with no recorded manifest |
+| `skipped_no_manifest` | ADR-0007's readiness gate: a counting app's manifest could not be resolved |
+
+### Guarantees (each pinned by a named test, each mutation-tested)
+
+- `DepotGcPlan.orphan_chunks` is non-empty **only** under `planned`. WP 3.8
+  deleting "whatever the plan says" therefore deletes nothing on a skip.
+- Only files directly inside `depot/<id>/chunk/` are ever orphan candidates.
+  The `manifest/` subtree is structurally out of reach — a GC that walked the
+  whole depot directory would classify every stored manifest as an orphan,
+  since their filenames are per-request codes, not chunk ids.
+- An orphan candidate's filename is exactly 40 lowercase hex characters.
+  Anything else in `chunk/` (a subdirectory, a link, an uppercase or truncated
+  name, a temp file) is reported as *unrecognised* and never planned. This is
+  also what makes every id in `orphan_chunks` safe to join onto a path: WP 3.8
+  needs no further validation of it.
+- Every id that becomes a path is validated first — depot ids through the
+  reviewed WP 1.6 guards (`deletion.coerce_positive_id` / `depot_dir_path`,
+  reused rather than re-implemented), manifest ids through
+  `gc.valid_manifest_id` (ASCII decimals only, so a poisoned
+  `depot_manifests.manifestid` such as `'../../etc'` never becomes a path
+  component).
+- `orphan_bytes` / `kept_bytes` are the **exact on-disk** sizes
+  (`DirEntry.stat().st_size`), not the manifest's declared `cb_compressed`. A
+  kept chunk whose two sizes disagree is counted in `size_mismatch_count` — a
+  free corruption signal (research §2 proved them byte-exact against ~12,000
+  real files) that deliberately does not change what is planned.
+- Set-based throughout: one `scandir` per `chunk/` and per `manifest/` subtree,
+  at most one parse per distinct manifest file per run (memoised), and a
+  dict/set difference for the orphans — no quadratic join at the real sizes
+  involved (72283 chunks in the largest manifest seen in Phase-3 research).
+
+### Duplicate stored manifests
+
+Manifest URLs carry a per-request code, so the same manifest legitimately
+lands on disk several times (research §2 observed 3×). `dedupe_candidates`
+reports, per `(depot, manifest id)`, the newest copy as `keep` and the rest as
+`duplicates` with their sizes. These are reported for **every** depot,
+including skipped ones and independently of the keep set: a second copy of one
+manifest is redundant no matter which manifest is current. Byte-identity is
+**not** verified here — the sizes are carried precisely so WP 3.8 can decide
+how much it wants to check before removing anything.
+
+### What `plan_gc` deliberately does NOT do
+
+- **Delete anything.** No chunk, no manifest, no directory, no database row.
+  WP 3.8 owns execution, through the WP 1.6 guard path.
+- No HTTP endpoint, no job type, no worker wiring, no `POST /v1/cache/{appid}/gc`
+  — all WP 3.8.
+- No `needs_force` / status / size-cache bookkeeping. Reclaiming bytes changes
+  what is on disk for an app, so that bookkeeping is real work — it belongs
+  with the code that actually changes the disk.
+- No deletion of *old* manifests, only of redundant copies of the same one.
+  Nothing in ADR-0007 asks for superseded manifests to go, and they are the
+  cheapest possible evidence of what a depot used to hold.
+- No unmapped-depot GC: `plan_gc` is per app and only considers depots that
+  app maps. Depots on disk with no mapping row at all are surfaced by
+  `GET /v1/cache/summary` (WP 1.5) and are not this module's business.
+- No third-party manifest oracle (ADR-0006 decision 4, gated) — the sources
+  are vault-api's own record, its own archive, and the cache tree.
 
 ## Auth
 

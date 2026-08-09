@@ -370,6 +370,12 @@ for users who expose the API differently.
 - [ ] Configurable cron window (e.g. 09:00–17:00, every 3 h)
 - [ ] Manifest-based garbage collection (`/v1/cache/{appid}/gc`, optional
       auto-GC after successful update prefill)
+      *(WP 3.7 done: read-only GC core — `plan_gc()` with exact on-disk
+      orphan bytes, shared-depot UNION keep sets, ADR-0007 readiness gate,
+      uncached-app exclusion per ADR-0007 addendum, stored-manifest dedupe
+      candidates; 86 tests, mutation-tested fail-closed directions,
+      verified against the real PoC cache (0 orphans, research-doc parity).
+      Endpoint + execution = WP 3.8, Opus + Fable mandatory)*
 - [ ] Per-client hit statistics + bypass detection (`/v1/clients`)
 - [ ] Optional generic webhook notifications (Discord/Slack/ntfy-compatible;
       built as a generic webhook feature, not vendor-specific)

@@ -433,27 +433,39 @@ def parse_bin_filename(path: str) -> tuple[int, int, int, int]:
     return values[0], values[1], values[2], values[3]
 
 
-def parse_steamprefill_bin(path: str) -> "PrefillManifest":
-    """Parse one SteamPrefill temp-cache ``.bin`` manifest file.
+def parse_bin_payload(
+    path: str,
+    *,
+    filename_depot_id: int | None = None,
+    filename_manifest_id: int | None = None,
+) -> "PrefillManifest":
+    """Parse a SteamPrefill-**format** ``.bin`` manifest whose filename this
+    function does not itself interpret.
 
-    Validates the filename contract, parses the protobuf payload (manifest
-    id, depot id, and every chunk id/compressed-length pair nested under
-    the repeated ``FileData``/``ChunkData`` fields), and **cross-checks the
-    filename's depot/manifest ids against the payload's** — a mismatch is
-    treated as a corruption signal and raises ``ManifestParseError``, per
-    this work package's scope.
+    **Why this exists (WP 3.7).** ``parse_steamprefill_bin`` below is the
+    ingestion-path entry point and insists on SteamPrefill's own four-segment
+    ``{originalAppId}_{containingAppId}_{depotId}_{manifestId}.bin`` filename
+    contract. But ``vault_api.manifest_archive`` deliberately re-names its
+    durable copies to ``{depotid}_{manifestid}.bin`` (two segments, keyed on
+    what GC actually looks up), so garbage collection reading its own archive
+    would be rejected by that contract for a file this project wrote itself.
+    This function parses the same bytes with the same reader and takes the
+    expected ids as **arguments** instead of scraping them out of the name —
+    the caller (``vault_api.gc``) knows which (depot, manifest) pair it asked
+    for and passes them, so the corruption cross-check is preserved rather
+    than dropped.
 
-    Raises ``ManifestParseError`` for: a filename that doesn't match the
-    contract, a file that can't be read, an empty file, a file bigger than
-    ``MAX_MESSAGE_SIZE``, any malformed/truncated protobuf content, a
-    missing required field, an id mismatch between filename and payload, or
-    more chunks than ``MAX_CHUNK_COUNT``. No other exception escapes.
+    ``filename_depot_id``/``filename_manifest_id`` are optional only so a
+    caller with genuinely no expectation can parse a payload; every caller in
+    this codebase passes both, and skipping them means giving up the
+    corruption signal.
+
+    Raises ``ManifestParseError`` for: a file that can't be read, an empty
+    file, a file bigger than ``MAX_MESSAGE_SIZE``, any malformed/truncated
+    protobuf content, a missing required field, an id mismatch against the
+    expected ids, or more chunks than ``MAX_CHUNK_COUNT``. No other exception
+    escapes.
     """
-    original_app_id, containing_app_id, filename_depot_id, filename_manifest_id = (
-        parse_bin_filename(path)
-    )
-    del original_app_id, containing_app_id  # not part of the common GC shape (item 4)
-
     context = f"steamprefill .bin {path!r}"
 
     try:
@@ -471,12 +483,12 @@ def parse_steamprefill_bin(path: str) -> "PrefillManifest":
     manifest_id = _first_varint(top_fields, 2, "manifest id", context=context)
     depot_id = _first_varint(top_fields, 4, "depot id", context=context)
 
-    if depot_id != filename_depot_id:
+    if filename_depot_id is not None and depot_id != filename_depot_id:
         raise ManifestParseError(
             f"{context}: payload depot id {depot_id} does not match filename depot id "
             f"{filename_depot_id} (corruption signal)"
         )
-    if manifest_id != filename_manifest_id:
+    if filename_manifest_id is not None and manifest_id != filename_manifest_id:
         raise ManifestParseError(
             f"{context}: payload manifest id {manifest_id} does not match filename "
             f"manifest id {filename_manifest_id} (corruption signal)"
@@ -505,6 +517,39 @@ def parse_steamprefill_bin(path: str) -> "PrefillManifest":
         manifest_id=manifest_id,
         chunks=chunks,
         source=SOURCE_STEAMPREFILL_BIN,
+    )
+
+
+def parse_steamprefill_bin(path: str) -> "PrefillManifest":
+    """Parse one SteamPrefill temp-cache ``.bin`` manifest file.
+
+    Validates the filename contract, parses the protobuf payload (manifest
+    id, depot id, and every chunk id/compressed-length pair nested under
+    the repeated ``FileData``/``ChunkData`` fields), and **cross-checks the
+    filename's depot/manifest ids against the payload's** — a mismatch is
+    treated as a corruption signal and raises ``ManifestParseError``, per
+    this work package's scope.
+
+    Raises ``ManifestParseError`` for: a filename that doesn't match the
+    contract, a file that can't be read, an empty file, a file bigger than
+    ``MAX_MESSAGE_SIZE``, any malformed/truncated protobuf content, a
+    missing required field, an id mismatch between filename and payload, or
+    more chunks than ``MAX_CHUNK_COUNT``. No other exception escapes.
+
+    The payload parsing itself lives in ``parse_bin_payload`` above (split out
+    in WP 3.7 so GC can read ``vault_api.manifest_archive``'s deliberately
+    differently-named copies); this function is exactly "the filename contract
+    plus that parse", unchanged in behaviour.
+    """
+    original_app_id, containing_app_id, filename_depot_id, filename_manifest_id = (
+        parse_bin_filename(path)
+    )
+    del original_app_id, containing_app_id  # not part of the common GC shape (item 4)
+
+    return parse_bin_payload(
+        path,
+        filename_depot_id=filename_depot_id,
+        filename_manifest_id=filename_manifest_id,
     )
 
 

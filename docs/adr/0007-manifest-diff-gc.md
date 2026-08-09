@@ -32,6 +32,26 @@ Two independent, measured reasons:
   HITs would require access-log parsing, the LanCache anti-pattern this
   project exists to eliminate (plan §1).
 
+## Addendum (2026-08-09, WP 3.7): uncached mapped apps in the keep set
+
+Resolves the open note at the end of ADR-0003's addendum. In `plan_gc`:
+
+- An app that is **verifiably idle, never prefilled, job-free AND has no
+  `depot_manifests` row** is excluded from the union requirement — it
+  neither pins chunks nor blocks the readiness gate. A blocking uncached
+  co-owner would reproduce the WP 3.6 last-remnant leak (mapping rows
+  survive deletion by design, so the block would be permanent).
+- Fail-closed retained: a missing `apps` row, non-idle status, a set
+  `last_prefill_at`, an active job, or an unreadable row all make the app
+  COUNT. An uncached app WITH a recorded manifest row also counts — a
+  claim vault-api wrote down but cannot resolve is exactly the partial
+  knowledge the gate exists for.
+- A depot where EVERY mapped app is excluded is `skipped_no_counting_apps`,
+  never "everything is an orphan". That end state belongs to
+  `DELETE /v1/cache/{appid}`'s last-remnant rule (execute-time recheck,
+  `needs_force` bookkeeping); GC does not grow a second, weaker deletion
+  path for the same state.
+
 ## Honest limits
 
 GC can delete chunks a client pinned to an unrecorded/beta manifest still

@@ -82,11 +82,18 @@ def is_link_like(path: str) -> bool:
     return bool(isjunction is not None and isjunction(path))
 
 
-def _entry_is_link_like(entry: os.DirEntry) -> bool:
+def entry_is_link_like(entry: os.DirEntry) -> bool:
     """``is_link_like`` for an already-listed directory entry (no extra stat).
 
     ``DirEntry.is_junction()`` exists from CPython 3.12; ``getattr`` keeps
     older interpreters working (symlink detection only).
+
+    **Public (WP 3.7):** ``vault_api.gc`` scans a depot's ``chunk/`` directory
+    entry by entry and must refuse to treat a link as a deletable chunk. Doing
+    that through the path-based ``is_link_like`` would cost one extra ``lstat``
+    per file — measurable on the 70k-chunk depots this project really sees —
+    so the entry-based check is shared rather than duplicated (it was
+    ``_entry_is_link_like`` until GC needed it; renamed, not reimplemented).
     """
     if entry.is_symlink():
         return True
@@ -126,7 +133,7 @@ def walk_file_stats(path: str) -> Iterator[os.stat_result]:
         return
     for entry in entries:
         try:
-            if _entry_is_link_like(entry):
+            if entry_is_link_like(entry):
                 continue
             if entry.is_dir(follow_symlinks=False):
                 yield from walk_file_stats(entry.path)

@@ -90,6 +90,11 @@ These are not style preferences; each entry cost a review round to learn.
 - envsubst on config templates: a colliding env var REPLACES runtime
   variables with its value (not blanks) and `nginx -t` still passes —
   always restrict with an allowlist filter (WP 1.9).
+- A consumer that renames a producer's files breaks filename-contract
+  parsers: manifest_archive stores `{depotid}_{manifestid}.bin` while the
+  parser demanded SteamPrefill's 4-field name — keep payload parsing and
+  filename-contract validation separable, with the caller supplying the
+  expected ids so the corruption cross-check survives (WP 3.7).
 
 ## Containers
 - A non-root container user needs a real, writable HOME — tools that
