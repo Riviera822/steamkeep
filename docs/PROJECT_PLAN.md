@@ -375,11 +375,15 @@ for users who expose the API differently.
 ### Phase 3 — Scheduler & Update Logic
 
 Closing plan (2026-08-09, user decision "implement everything"): remaining
-packages are 3.8b grace window (in flight) · 3.9 oracle incl. open-beta
+packages are 3.8b grace window (merged) · 3.9 oracle incl. open-beta
 branch manifests (ADR-0007 addendum B) · 3.10 vault-core cache-event log
 (ADR-0008) · 3.11 event sweep = miss-trigger + client hit stats/bypass ·
 3.12 job control + optional auto-GC · 3.13 webhooks. api/-packages run
 strictly serially; 3.10 (core/) runs in parallel.
+
+Branch-dispatch structure for ALL remaining phases (package briefs,
+parallel/serial decisions, merge discipline, open user decisions):
+`docs/WORKPACKAGES.md` (2026-08-09).
 
 - [ ] Miss-triggered prefill completion: a cache miss on an unknown/partial
       app queues a prefill job for that app (hybrid decision, ADR-0001;
