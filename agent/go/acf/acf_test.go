@@ -93,8 +93,10 @@ func TestEscapedNewlineAndTab(t *testing.T) {
 }
 
 // TestUnknownEscapePreservesBackslash: \q is not a recognized escape. The
-// pinned decision (agent/vault_agent/acf.py, WP 2.1 review) is to
-// PRESERVE the backslash rather than silently drop it — a single
+// pinned decision (WP 2.1 review, originally made in the since-removed
+// Python reference implementation agent/vault_agent/acf.py — see
+// acf.go's package doc) is to PRESERVE the backslash rather than
+// silently drop it — a single
 // backslash before an unescaped char is far more likely to be sloppy
 // real-world VDF (an under-escaped Windows path) than an intentional
 // escape, and dropping it would silently produce a different, wrong

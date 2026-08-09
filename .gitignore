@@ -49,17 +49,12 @@ __pycache__/
 # dns/tests/test-dnsmasq-config.ps1 (WP 1.8); only survives a crashed run.
 dns/tests/_tmp/
 
-# vault-agent (agent/) — Python virtualenv, test-only (WP 2.1); runtime is
-# stdlib only.
-agent/.venv/
-
-# vault-agent Go port (agent/go/, WP 2.1b, ADR-0005) — cross-compiled probe/
-# agent binaries are build output, never committed; only agent/go/go.mod,
-# go.sum (if any deps are added later), and *.go source are tracked.
-agent/go/probe
-agent/go/probe.exe
-agent/go/cmd/probe/probe
-agent/go/cmd/probe/probe.exe
+# vault-agent Go port (agent/go/, WP 2.1b, ADR-0005) — cross-compiled agent
+# binaries are build output, never committed; only agent/go/go.mod,
+# go.sum (if any deps are added later), and *.go source are tracked. The
+# Python reference implementation (agent/vault_agent/, its venv, its
+# pytest.ini/requirements-dev.txt) was removed at the Phase-2 close-out
+# (WP 2.6, ADR-0005 addendum) — its entries are gone from here too.
 agent/go/*.exe
 agent/go/**/*.exe
 agent/go/vault-agent

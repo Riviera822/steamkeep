@@ -95,9 +95,12 @@ func tokenize(text string) ([]token, error) {
 						out.WriteRune(next)
 					default:
 						// Unknown escape: PRESERVE the backslash rather
-						// than silently dropping it. See parser.go /
-						// vault_agent/acf.py for the full rationale
-						// (under-escaped Windows paths like
+						// than silently dropping it. See parser.go and
+						// acf.go's package doc (the rationale was
+						// originally written up in the since-removed
+						// Python reference implementation,
+						// agent/vault_agent/acf.py) for the full
+						// rationale (under-escaped Windows paths like
 						// "C:\Steam\common" must survive unchanged).
 						out.WriteRune('\\')
 						out.WriteRune(next)

@@ -7,7 +7,9 @@ import (
 
 // fixturesDir returns the ABSOLUTE path to agent/tests/fixtures — the
 // SAME fixture corpus the Python executable specification (agent/
-// vault_agent/acf.py) is tested against (agent/tests/fixtures/*), never
+// vault_agent/acf.py, removed at the Phase-2 close-out, WP 2.6 — see
+// acf.go's package doc) was tested against, and that this package's own
+// tests (agent/tests/fixtures/*) continue to consume unchanged, never
 // copied. runtime.Caller(0) gives this source file's own path regardless
 // of the test binary's working directory, so `go test ./...` from any
 // directory finds the fixtures reliably.

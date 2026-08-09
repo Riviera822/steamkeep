@@ -16,7 +16,8 @@ import (
 // decides how to surface them (stderr, a structured logger, a metrics
 // counter, ...). See agent/README.md's "Resilience contract" table for
 // the exact situation -> warning mapping this mirrors from the Python
-// spec (agent/vault_agent/acf.py's discover_installed).
+// spec's discover_installed (agent/vault_agent/acf.py, removed at the
+// Phase-2 close-out, WP 2.6 — see acf.go's package doc).
 type Warning struct {
 	Message string
 }

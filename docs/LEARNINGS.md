@@ -60,6 +60,16 @@ These are not style preferences; each entry cost a review round to learn.
   corrupt reports — force InvariantCulture (WP 0.3).
 - `$null` numeric comparisons pass silently (`$x -ge $null` is true) — gate
   assertions on preconditions or they become false positives (WP 1.7).
+- `$ErrorActionPreference = "Stop"` makes every later `Write-Error`
+  terminating: `exit 2` lines after it are unreachable and the script
+  reports exit 1. Set Stop only after input validation (WP 2.6, measured
+  on all four usage paths).
+- `Set-Acl` on an already-protected ACL fails with SeSecurityPrivilege for
+  non-admin accounts on the SECOND call — use `icacls /inheritance:r
+  /grant:r` (idempotent, measured 3x); Task Scheduler XML rejects
+  `[TimeSpan]::MaxValue` repetition durations; em dashes in BOM-less UTF-8
+  break the PS 5.1 parser under the system codepage — packaging scripts
+  are pure ASCII (WP 2.6).
 
 ## dnsmasq / vault-dns
 - `address=/zone/ip` alone FORWARDS AAAA upstream on modern dnsmasq —
@@ -142,6 +152,11 @@ These are not style preferences; each entry cost a review round to learn.
 - time.Sleep in retry loops is not ctx-cancellable — select on
   ctx.Done() vs time.After (WP 2.2). CGO_ENABLED=0 explicitly or
   "static binary" claims are false on the native target (WP 2.2).
+
+- Removal reviews audit CONTENT, not just references: a deleted reference
+  implementation can be the only home of documentation living code still
+  cites (the EAppState bit table existed nowhere else) — port embedded
+  knowledge before deleting its host (WP 2.6 blocker).
 
 ## Testing discipline
 - Fail-closed defaults need tests that pin the DEFAULT direction: flip each

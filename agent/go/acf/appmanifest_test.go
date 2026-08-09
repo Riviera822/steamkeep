@@ -1,8 +1,10 @@
 // Tests for appmanifest_<appid>.acf extraction, incl. StateFlags
 // variants. Ported 1:1 from agent/tests/test_appmanifest.py.
 //
-// StateFlags semantics (documented in agent/vault_agent/acf.py): bit 4
-// means "fully installed". Empirically verified against every real
+// StateFlags semantics (originally documented in agent/vault_agent/acf.py,
+// removed at the Phase-2 close-out, WP 2.6 — see acf.go's package doc;
+// the full bit table now lives next to StateFlagFullyInstalled in
+// acf.go): bit 4 means "fully installed". Empirically verified against every real
 // appmanifest on the dev machine's c:\steam install (all currently show
 // StateFlags == 4). The update-required (6) and partial (2) fixtures are
 // synthetic, modeled on Valve's publicly documented StateFlags bit

@@ -1,7 +1,6 @@
 // Package acf is a Go port of the Python "executable specification"
-// (agent/vault_agent/acf.py, ADR-0005) for Valve's KeyValues text format
-// (VDF/ACF), used by the Steam client for two files vault-agent cares
-// about:
+// (ADR-0005) for Valve's KeyValues text format (VDF/ACF), used by the
+// Steam client for two files vault-agent cares about:
 //
 //   - steamapps/appmanifest_<appid>.acf — one installed app's metadata.
 //   - steamapps/libraryfolders.vdf — the list of library folders (drives)
@@ -11,13 +10,17 @@
 //
 // Every parsing decision here (escape handling, nesting cap, conditional
 // tags, BOM handling, the strict-uint grammar, duplicate-key/appid
-// tolerance) is pinned to match agent/vault_agent/acf.py — see that
-// file's docstrings and agent/README.md for the rationale. This package
-// does not re-derive those decisions; it reproduces them, with a small
-// number of KNOWN, DELIBERATE divergences documented at the point they
-// occur (parseStrictUint's integer-overflow behavior; isAllASCIIDigits'
-// stricter-than-str.isdigit() grammar) and summarized in
-// agent/README.md's "Known divergences from the Python spec" section.
+// tolerance) is pinned to match that Python reference implementation,
+// which lived at agent/vault_agent/acf.py until it was removed at the
+// Phase-2 close-out (WP 2.6, ADR-0005 addendum) — its docstrings are
+// still available in git history (the commit that removed it, and
+// everything before it) for anyone who wants the original rationale in
+// full; agent/README.md carries the parts of that rationale worth keeping
+// live. This package does not re-derive those decisions; it reproduces
+// them, with a small number of KNOWN, DELIBERATE divergences documented
+// at the point they occur (parseStrictUint's integer-overflow behavior;
+// isAllASCIIDigits' stricter-than-str.isdigit() grammar) and summarized
+// in agent/README.md's "Known divergences from the Python spec" section.
 package acf
 
 import (
@@ -29,9 +32,42 @@ import (
 // appmanifest — "fully installed". Other bits may be set alongside it
 // (e.g. an app mid-update still has this bit set: still installed and
 // playable, just stale), so callers must check with bitwise AND, never
-// equality. See agent/vault_agent/acf.py for the full documented
-// (SteamKit EAppState) bit table — only this bit was empirically verified
-// against a real Steam install; the rest is reproduced for reference only.
+// equality.
+//
+// Only this bit was empirically verified against a real Steam install
+// (all 15 currently installed apps on the dev machine's c:\steam report
+// StateFlags == 4 exactly — nothing mid-update or partially downloaded at
+// the time). The rest of the bitmask below is documented publicly
+// (SteamKit's EAppState enum, widely mirrored across community Steam
+// tooling such as steamctl/ArchiSteamFarm/lancache-manager) but was NOT
+// independently re-derived or verified against a real file here. It was
+// originally reproduced in the now-removed Python reference
+// implementation (agent/vault_agent/acf.py, ADR-0005 addendum — removed
+// at the Phase-2 close-out, WP 2.6; still in git history) and is
+// reproduced again here, in the Go port, for the same reason that
+// comment gave: so a future port does not have to re-research them:
+//
+//	1        Uninstalled
+//	2        UpdateRequired
+//	4        FullyInstalled
+//	8        Encrypted
+//	16       Locked
+//	32       FilesMissing
+//	64       AppRunning
+//	128      FilesCorrupt
+//	256      UpdateRunning
+//	512      UpdatePaused
+//	1024     UpdateStarted
+//	2048     Uninstalling
+//	4096     BackupRunning
+//	8192     Reconfiguring
+//	16384    Validating
+//	32768    AddingFiles
+//	65536    Preallocating
+//	131072   Downloading
+//	262144   Staging
+//	524288   Committing
+//	1048576  UpdateStopping
 const StateFlagFullyInstalled = 4
 
 // maxNestingDepth caps how deep _parse_object (parseObject) will recurse
@@ -51,9 +87,10 @@ const maxNestingDepth = 100
 // errors.Is/errors.As (e.g. errors.Is(err, fs.ErrNotExist) in WP 2.2's
 // reporter to tell "file vanished" apart from "file is corrupt").
 //
-// Mirrors vault_agent.acf.VdfParseError: callers that walk many files
-// (DiscoverInstalled) catch/inspect this single error type, log a
-// warning, and skip the offending file rather than crashing.
+// Mirrors the now-removed Python reference implementation's
+// vault_agent.acf.VdfParseError (see the package doc above): callers that
+// walk many files (DiscoverInstalled) catch/inspect this single error
+// type, log a warning, and skip the offending file rather than crashing.
 type ParseError struct {
 	Msg    string
 	Offset int

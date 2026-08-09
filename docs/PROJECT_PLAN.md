@@ -335,9 +335,14 @@ for users who expose the API differently.
       prefills are blocked by the local permission classifier — the
       run is operator-executed by design)*
 
-### Phase 2 — vault-agent (PC listener)
-- [ ] ACF/VDF parser (appmanifest + libraryfolders, multiple drives)
-- [ ] HTTP reporter with retry (tolerate VPN/network outages)
+### Phase 2 — vault-agent (PC listener) — COMPLETE 2026-08-09
+- [x] ACF/VDF parser (appmanifest + libraryfolders, multiple drives)
+      *(WP 2.1 Python reference with spec-parity pins, ported to Go in
+      WP 2.1b per ADR-0005; reference implementation removed at close-out
+      (WP 2.6), embedded EAppState bit table preserved in go/acf/acf.go)*
+- [x] HTTP reporter with retry (tolerate VPN/network outages)
+      *(WP 2.2: 46/46 validation parity, ctx-cancellable backoff, 429
+      retryable, no secret in flag defaults)*
 - [x] Optional hosts-file mode (opt-in, admin rights, clean uninstall path)
       *(WP 2.3: marker-block management with byte-exact preservation,
       fail-closed backup, measured Windows ACL write strategy, UTF-16/
@@ -347,14 +352,25 @@ for users who expose the API differently.
       double review. Real-Windows verification done 2026-08-06: hosts
       status on the live machine correctly reported the user's manual
       Phase-0 entry as a conflict without touching anything)*
-- [ ] Document Windows scheduled-task setup, optional installer script
-- [ ] Linux/SteamOS agent variant (Steam Deck / Steam Machine): library
+- [x] Document Windows scheduled-task setup, optional installer script
+      *(WP 2.6: per-user task via install-task.ps1/uninstall-task.ps1,
+      API key in an owner-only env file, never on the command line
+      (verified with a canary key against schtasks + task XML),
+      icacls-before-write ACL, idempotent re-install, 36-assertion
+      real-machine harness; Python reference implementation removed per
+      ADR-0005 addendum, fixtures kept, EAppState bit table preserved
+      in go/acf/acf.go)*
+- [x] Linux/SteamOS agent variant (Steam Deck / Steam Machine): library
       discovery under `~/.local/share/Steam`, systemd user service
       packaging, SteamOS read-only-rootfs-friendly install (home dir only)
       — see ADR-0002
-- [ ] vault-api: scheduler uses the installed list as the prefill set;
+      *(WP 2.5: OnCalendar=*:0/30 + Persistent=true (monotonic timers
+      proved a silent no-op for catch-up), umask-077-first secret env
+      files)*
+- [x] vault-api: scheduler uses the installed list as the prefill set;
       server-side diff of consecutive agent reports surfaces removed
       titles (status update / optional cleanup hint, see ADR-0002)
+      *(WP 2.4 report chains ordered by rowid + WP 3.5 window sweeps)*
 
 ### Phase 3 — Scheduler & Update Logic
 

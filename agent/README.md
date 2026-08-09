@@ -5,33 +5,29 @@ The PC listener for SteamVault. Deliberately dumb by design (see
 what's installed, no control logic on the device. All prefill/scheduling
 decisions live in vault-api.
 
-Status: work in progress. The ACF/VDF parser has been ported to Go
-(WP 2.1b, `go/`) and is judged against this Python package's test corpus —
-see "Go port (production)" below. The HTTP reporter and the `vault-agent`
-CLI now exist (WP 2.2, `go/report`, `go/client`, `go/agentconfig`,
-`go/cmd/vault-agent`) — see "vault-agent CLI (WP 2.2)" below. The optional
-hosts-file mode now exists too (WP 2.3, `go/hostsfile` +
-`go/cmd/vault-agent/hosts.go`) — see "Hosts-file mode (WP 2.3)" below. The
-Linux/SteamOS variant now exists too (WP 2.5, see ADR-0002: real-install
-library discovery beyond the OS-generic default, plus systemd user-service
-packaging under `packaging/systemd/`) — see "Linux/SteamOS variant
-(WP 2.5)" below. No Windows Scheduled Task installer yet (WP 2.6).
+Status: Phase 2 complete. The ACF/VDF parser (WP 2.1b, `go/acf`), the HTTP
+reporter and `vault-agent` CLI (WP 2.2, `go/report`, `go/client`,
+`go/agentconfig`, `go/cmd/vault-agent`), the optional hosts-file mode
+(WP 2.3, `go/hostsfile` + `go/cmd/vault-agent/hosts.go`), the Linux/SteamOS
+variant (WP 2.5, see ADR-0002: real-install library discovery plus systemd
+user-service packaging under `packaging/systemd/`), and the Windows
+Scheduled Task installer (WP 2.6, `packaging/windows/`) all exist — see
+their respective sections below.
 
-**Executable specification (ADR-0005):** vault-agent ships as a Go binary
-in production; this Python package and its test suite are the pinned
-reference the Go port (`go/acf`, WP 2.1b) was built and tested against.
-Every parsing decision below — especially the ones that are conventions
-rather than the one obviously correct answer (escape handling, nesting
-limits, conditional tags) — is deliberately spelled out and tested so the
-Go port matches it (with a small number of named exceptions — see "Known
-divergences from the Python spec" below) rather than re-deriving it. Per
-ADR-0005, this Python package is retained as the frozen spec baseline —
-it is no longer the code that ships, but it stays in the repo, unremoved,
-through the rest of Phase 2; removal happens at the **Phase-2 close-out
-package**, not automatically the moment WP 2.2 (reporter) lands.
-`tests/fixtures/` is permanent either way: it's the shared fixture corpus
-both this Python suite and the Go suite (`go/acf/*_test.go`) reference,
-and stays regardless of which implementation is currently shipping.
+**Executable specification (ADR-0005), now history:** vault-agent shipped
+its Phase-2 parser design phase as a small Python reference implementation
+(`vault_agent/acf.py` + `tests/test_*.py`) whose test corpus pinned every
+KeyValues/ACF/VDF parsing decision — including the ones that are
+conventions rather than the one obviously correct answer (escape handling,
+nesting limits, conditional tags) — before the Go port (`go/acf`, WP 2.1b)
+was built and tested against it. Per the ADR-0005 addendum, that Python
+package was removed at the Phase-2 close-out (WP 2.6): it is no longer in
+this tree, but its full source and test suite remain available in git
+history (see the commit that removed it, and everything before it) for
+anyone who wants to see the original reference. `tests/fixtures/` is
+**permanent** and was never Python-specific data — it's a synthetic
+fixture corpus (see "Fixture policy" below) that `go/acf/*_test.go`
+consumes directly and continues to consume unchanged.
 
 ## Go port (production)
 
@@ -74,15 +70,36 @@ agent/go/
 │   ├── paths.go                      # per-GOOS default path, elevation hint
 │   └── hostsfile_test.go              # fixture corpus: CRLF/LF, corruption, byte-exactness
 ├── cmd/
-│   ├── probe/main.go          # throwaway CLI: DiscoverInstalled against a real
-│   │                           # library_root, for manual real-machine validation —
-│   │                           # NOT the production reporter
 │   └── vault-agent/            # THE production CLI
 │       ├── main.go              # subcommand dispatch + `report` [--loop] (WP 2.2)
 │       ├── hosts.go              # `hosts apply|remove|status` (WP 2.3)
 │       ├── main_test.go           # exit codes, one-shot success/failure, API-key redaction
 │       └── hosts_test.go           # hosts CLI: exit codes, refusals, elevation hint
 ```
+
+(`cmd/probe` — a throwaway CLI used for manual real-machine validation during
+WP 2.1b/2.2/2.5, never the production reporter — was removed at the Phase-2
+close-out (WP 2.6) once it had served its purpose; the validation runs it
+produced are still cited below as historical evidence, and its source is
+still in git history if anyone wants to re-run that style of check.)
+
+Windows Scheduled Task installer scripts (WP 2.6) live outside `go/`
+entirely, next to the systemd packaging:
+
+```
+agent/packaging/windows/
+├── install-task.ps1          # registers the Scheduled Task (idempotent, -WhatIf)
+├── uninstall-task.ps1        # removes exactly what install created (idempotent, -WhatIf)
+├── run-vault-agent.ps1       # wrapper the Task Action runs: loads the secret
+│                               env file into process env vars, then execs
+│                               vault-agent.exe (Windows has no systemd
+│                               EnvironmentFile= equivalent)
+└── tests/
+    └── test-install-uninstall.ps1   # real-machine harness, run by hand (WP 2.6)
+```
+
+See "Windows Scheduled Task (WP 2.6)" below for the full install/uninstall
+story and the real-machine harness evidence.
 
 Sandbox verification scripts for hosts mode live in `agent/tests/sandbox/`
 (see "Hosts-file mode" below) — they are not `go test` and are run by hand.
@@ -125,20 +142,21 @@ CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -o /tmp/vault-agent-linux-amd64
 CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -o /tmp/vault-agent-linux-arm64      ./cmd/vault-agent
 ```
 
-All three build clean for both `cmd/probe` and `cmd/vault-agent` (verified
-during WP 2.1b and WP 2.2). **Verified static, not just assumed** (WP
-2.2): `file` reports the `linux/amd64` output as "statically linked" and
-`ldd` refuses it ("not a dynamic executable") only with `CGO_ENABLED=0`
-set - the same build without it links against `libc.so.6` per the
-paragraph above. Build output is never committed —
-`agent/go/*.exe`, `agent/go/probe`, `agent/go/vault-agent(.exe)` are
+All three build clean for `cmd/vault-agent` (and, at the time, the now-
+removed `cmd/probe` validation CLI — verified during WP 2.1b and WP 2.2).
+**Verified static, not just assumed** (WP 2.2): `file` reports the
+`linux/amd64` output as "statically linked" and `ldd` refuses it ("not a
+dynamic executable") only with `CGO_ENABLED=0` set - the same build
+without it links against `libc.so.6` per the paragraph above. Build output
+is never committed — `agent/go/*.exe`, `agent/go/vault-agent(.exe)` are
 gitignored.
 
 **Live integration check (WP 2.2):** the real vault-api (loopback,
 throwaway SQLite DB) was started and the built Windows `vault-agent.exe`
 was run against the real `C:\steam` library (read-only): first run —
 `200`, `first_report=true`, `received=15` (matching the same 15 apps
-`cmd/probe`/WP 2.1b found); second run — `added=[]`, `removed=[]`,
+`cmd/probe`/WP 2.1b found, back when that validation CLI still existed);
+second run — `added=[]`, `removed=[]`,
 `first_report=false`; a run with a deliberately wrong `--api-key` returned
 `401` in under 100ms (no retry storm — 4xx is never retried) with exit
 code 1. Server-side logs confirmed the matching
@@ -824,7 +842,7 @@ Flatpak):
 $ ls -la ~/.steam/steam
 lrwxrwxrwx 1 jan jan 28 ... /home/jan/.steam/steam -> /home/jan/.local/share/Steam
 
-$ go run ./cmd/probe $HOME/.local/share/Steam
+$ go run ./cmd/probe $HOME/.local/share/Steam   # cmd/probe existed at the time (WP 2.5); removed since, WP 2.6
 discovered 3 installed app(s) under /home/jan/.local/share/Steam:
   appid=1070560  installed=true  stateflags=4  size=222685392  name="Steam Linux Runtime 1.0 (scout)"
   appid=1391110  installed=true  stateflags=4  size=676189670  name="Steam Linux Runtime 2.0 (soldier)"
@@ -1178,31 +1196,323 @@ report.timer` file this round's own timer-enable check left under
 `~/.local/share/systemd/timers/` in the WSL2 home was deleted during
 cleanup, alongside everything the first E2E pass already cleaned up.
 
+## Windows Scheduled Task (WP 2.6)
+
+The Windows counterpart to "Linux/SteamOS variant (WP 2.5)" above: the OS
+times a one-shot `vault-agent report` (plan §7's "a Windows Scheduled Task
+provides the timing" — see "vault-agent CLI (WP 2.2)"'s "One-shot is the
+PRIMARY mode" note), matching the systemd timer's role exactly. Everything
+this creates is per-user; no admin elevation is used or required anywhere
+in it.
+
+### Why `-LogonType Interactive`, not S4U
+
+Two Scheduled Task logon types need no stored password: **S4U** (runs
+whether the user is logged on or not) and **Interactive** (runs only while
+the user has an active session). S4U looked like the better default —
+until it was tried on the real, non-admin Windows 11 account used to build
+this package:
+
+```
+PS> Register-ScheduledTask ... -Principal (New-ScheduledTaskPrincipal `
+      -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited) ...
+Register-ScheduledTask : Access is denied.
+```
+
+— a standard account without the "Log on as a batch job" user right cannot
+register an S4U task for itself, full stop. The identical registration
+with `-LogonType Interactive -RunLevel Limited` succeeded immediately and
+the task ran (`LastTaskResult=0`) with no elevation prompt, so that is what
+`install-task.ps1` uses. The trade-off is real and worth stating plainly:
+**the task will not run while the account is fully logged off** (locked is
+fine — locked still counts as a session; logged off does not). For "report
+what's installed on my gaming PC", that's an acceptable match: the machine
+is normally logged in whenever Steam itself is running to generate
+anything worth reporting.
+
+### Where the API key lives — never on the task's command line
+
+A Scheduled Task's action command line is not a secret store: any process
+that can enumerate the task (`schtasks /query /v`, Task Scheduler's own
+GUI, `Get-ScheduledTask`) can read it verbatim. That rules out an
+`-ApiKey` argument baked into the task's Action the same way a bare
+command-line flag was already rejected for `vault-agent` itself (see
+"Configuration: flags with an environment-variable fallback" above: "a
+flag value is visible in process listings / Task Manager").
+
+Windows Scheduled Tasks also have no equivalent of systemd's
+`EnvironmentFile=` — there is no built-in way to say "load these
+environment variables before running the action." `run-vault-agent.ps1`
+exists to fill exactly that gap: it is the thing the Task Action actually
+runs, and it does three things before ever touching vault-agent.exe:
+
+1. Read `KEY=VALUE` lines from `-EnvFile` (blank lines and `#` comments
+   skipped).
+2. `Set-Item Env:$key $value` for each one, so they become real process
+   environment variables — the same `VAULT_AGENT_SERVER_URL`/
+   `VAULT_AGENT_API_KEY`/etc. names `go/agentconfig` already reads.
+3. `& $AgentPath report`, forwarding its exit code.
+
+The Task Action's own command line therefore contains exactly three
+things: the path to `powershell.exe`, the path to the deployed
+`run-vault-agent.ps1`, and two **non-secret filesystem paths**
+(`-AgentPath`, `-EnvFile`) — never the key value itself. Verified directly
+in the real-machine harness run below (`Get-ScheduledTask`'s
+`.Actions[0].Arguments`, checked with a `-notlike "*<the real key
+value>*"` assertion, not just "looks right" by eye).
+
+### The secret env file's ACL: locked down BEFORE content is written
+
+Mirrors WP 2.5's systemd `EnvironmentFile=` secret-handling rule
+(docs/LEARNINGS.md, "systemd / packaging": *"Secret env files: umask 077
+BEFORE creating, not chmod 600 after (world-readable window)"*). Windows
+has no umask; `install-task.ps1`'s equivalent sequence is: create the file
+empty, lock its ACL down to the current user only, and only then write the
+real `VAULT_AGENT_API_KEY` content with `Set-Content` — never a window
+where a default/inherited ACL exposes a real secret, because the secret
+isn't in the file yet when the ACL changes.
+
+**How the lock-down is actually implemented, and why not the obvious way:**
+the first version of this script used the `Set-Acl` cmdlet (`Get-Acl` →
+`SetAccessRuleProtection` → `SetAccessRule` → `Set-Acl`), which is the
+textbook PowerShell pattern for this and which the sandbox scripts under
+`agent/tests/sandbox/` also lean on for read-only ACL *inspection*. It
+works — once. **Verified empirically in this package's own harness (the
+idempotent-reinstall step):** installing once succeeds; running
+`install-task.ps1` a *second* time against the same (already
+inheritance-disabled) file fails on that exact `Set-Acl` line with
+
+```
+Set-Acl : The process does not possess the required privilege to perform this operation.
+(SeSecurityPrivilege)
+```
+
+This is a real, reproducible .NET `FileSystemSecurity` quirk, not an
+environment fluke — isolated to a 6-line repro outside this package
+entirely: `Get-Acl` → modify → `Set-Acl` on a file whose ACL is *already*
+protected fails this way for a standard (non-admin) account every time;
+the identical sequence on a freshly-inherited ACL (nothing protected yet)
+succeeds. `install-task.ps1` therefore uses `icacls.exe` instead —
+`icacls <file> /inheritance:r /grant:r "<user>:(F)"` — which does not go
+through the same .NET code path and was re-verified idempotent (three
+repeated calls against the same file in a standalone repro, then the full
+install → re-install → uninstall cycle in the real harness) with identical
+results every time. Net effect either way: exactly one explicit ACE
+(current user, FullControl), inheritance disabled — the Windows analogue
+of Unix mode `600`.
+
+### Layout and what install creates
+
+```
+agent/packaging/windows/
+├── install-task.ps1
+├── uninstall-task.ps1
+├── run-vault-agent.ps1
+└── tests/test-install-uninstall.ps1
+```
+
+`install-task.ps1 -AgentPath <exe> -ServerUrl <url> -ApiKeyFile <path>
+[-ClientId ...] [-LibraryRoot ...] [-ConfigDir ...] [-TaskName ...]
+[-IntervalMinutes 30]` creates, under `-ConfigDir` (default
+`%LOCALAPPDATA%\VaultAgent`):
+
+| Path | Contents |
+|---|---|
+| `env.txt` | `VAULT_AGENT_SERVER_URL`/`VAULT_AGENT_API_KEY`/etc., owner-only ACL (see above) |
+| `run-vault-agent.ps1` | a deployed copy of the wrapper script, so the installed task does not depend on this repo checkout still existing at its original path |
+| `vault-agent.log` (created on first run) | appended stdout+stderr from every `report` invocation — Windows Scheduled Tasks have no built-in per-run log the way `journalctl --user -u ...` gives WP 2.5 for free |
+
+plus the Scheduled Task itself (`VaultAgentReport` by default): one
+`-Once` trigger with `-RepetitionInterval` = `-IntervalMinutes` (default
+30, matching `go/agentconfig.DefaultReportInterval` and the systemd
+timer's `OnCalendar=*:0/30`) and a 10-year `-RepetitionDuration` (Task
+Scheduler has no literal "forever," and `[TimeSpan]::MaxValue` itself is
+**out of range** and fails registration — `P99999999DT23H59M59S` is
+rejected outright; 10 years is comfortably "never needs manual renewal" in
+practice), `-LogonType Interactive -RunLevel Limited` (see above),
+`-StartWhenAvailable` (the closest Windows equivalent of the systemd
+timer's `Persistent=true`: a run missed while the machine was off/asleep
+fires as soon as the task becomes available again instead of waiting for
+the next on-schedule slot), and `-MultipleInstances IgnoreNew` (a slow
+report — e.g. mid-retry-backoff against an unreachable server, up to the
+~105s worst case documented in "Retry behavior" above — must not stack a
+second overlapping run at the next 30-minute mark).
+
+**Two secrets that are NOT secrets:** `-ApiKey` takes the key directly as
+a string argument, which — like typing any password into a terminal —
+lands in this PowerShell session's own command history. `-ApiKeyFile`
+(read once, trimmed, then only its resolved value is used) avoids that
+entirely and is the recommended form; the two are mutually exclusive and
+exactly one is required.
+
+### Idempotent re-install
+
+Re-running `install-task.ps1` with the same `-TaskName` **updates the
+existing task and env file in place** — `Register-ScheduledTask -Force`
+overwrites a same-named task rather than erroring or duplicating it, and
+the env file/icacls steps are unconditional (not "only if missing").
+Verified in the harness: install once, then re-install with a different
+`-ServerUrl`/`-ClientId`/`-IntervalMinutes` — exactly one task still
+exists afterward, and its trigger interval plus the env file's content
+both reflect the *new* values, not stale leftovers from the first install.
+
+### Uninstall — removes exactly what install created
+
+```
+uninstall-task.ps1 [-TaskName ...] [-ConfigDir ...]
+```
+
+Unregisters the task, then deletes only the three specific files
+`install-task.ps1` is documented above to write (`env.txt`,
+`run-vault-agent.ps1`, `vault-agent.log`) — never a blanket directory
+wipe, so anything else an operator put in `-ConfigDir` survives. The
+directory itself is removed only if that leaves it empty. `-AgentPath`
+(the binary) is never touched: it was never copied or owned by
+`install-task.ps1` in the first place, exactly like the Linux install
+never deletes a hand-placed `~/.local/bin/vault-agent`.
+
+**Refuses gracefully, not loudly, when already absent** — running
+`uninstall-task.ps1` against a clean state (no task installed, e.g. it was
+already removed, or install never completed) prints "nothing to do" /
+"already clean" and exits **0**, never throws. Verified in the harness by
+calling it twice in a row and asserting the second call neither throws nor
+returns a non-zero exit code.
+
+### Real-machine harness (`agent/packaging/windows/tests/`)
+
+Not `go test` — a PowerShell script run by hand, same convention as
+`agent/tests/sandbox`'s hosts-mode scripts. Needs a real
+`windows/amd64 vault-agent.exe` (cross-compiled per "Cross-compile
+matrix" above); it is never pointed at a real vault-api — the harness uses
+a closed local port (`http://127.0.0.1:1`) so the one HTTP attempt the
+installed task makes fails fast, and the harness only cares that the
+wiring reaches the point of actually invoking vault-agent, not that the
+report succeeds.
+
+```powershell
+agent\packaging\windows\tests\test-install-uninstall.ps1 -AgentExe <path to vault-agent.exe>
+```
+
+Runs entirely under a throwaway `TaskName`
+(`SteamVault-WP26-Harness-Test`) and `ConfigDir` (under `%TEMP%`) so it
+cannot collide with, or be mistaken for, a real install; cleans up on
+every exit path (including failure) via a `finally` block, and resets any
+ACL it touched before deleting (`icacls ... /reset`) so cleanup itself can
+never get stuck behind its own lock-down. No administrator rights needed —
+same `-LogonType Interactive` per-user registration the real installer
+uses.
+
+**What it checks, run for real on a non-admin Windows 11 account (see
+"Why `-LogonType Interactive`, not S4U" above for the S4U finding this run
+produced):**
+
+1. Syntax ([`scriptblock]::Create`) on all three `.ps1` files.
+1b. A usage error (missing `-AgentPath`) genuinely exits with code 2 —
+    checked via a real child `powershell.exe -File` process (`&`-invoking
+    `install-task.ps1` in-process would have made its own `exit 2`
+    terminate the harness itself, not just the called script). Pins the
+    S1 review fix below.
+2. `-WhatIf` on `install-task.ps1` registers no task and writes no file.
+3. A real install: the task exists with the expected trigger repetition
+   interval/duration, `LogonType=Interactive`, `StartWhenAvailable=true`;
+   the action's command line does **not** contain the API key or the
+   server URL (paths only); the env file exists with the right content;
+   the env file's ACL has inheritance disabled, no broad-group grant
+   (`Everyone`/`BUILTIN\Users`/`Authenticated Users`), and an explicit
+   rule for the current user; the wrapper script is deployed.
+4. `Start-ScheduledTask` actually runs it end to end: the log file gets a
+   `starting: ... report` line and a `finished: exit=...` line, and never
+   contains the raw API key.
+5. Re-install with different settings updates the *same* task (still
+   exactly one `Get-ScheduledTask` result) with the new trigger interval
+   and the new env file content.
+6. Uninstall removes the task and every file it owns.
+7. A second uninstall on the now-clean state doesn't throw and exits 0.
+
+All checks passed (`agent/packaging/windows/tests/test-install-uninstall.ps1`,
+36 assertions — counted directly from the harness's own PASS-line output,
+not estimated) in the run that produced this section, and the machine was
+confirmed clean afterward (`Get-ScheduledTask` for the throwaway name
+returns nothing, the throwaway `%TEMP%` config dir does not exist).
+
+**Found and fixed by this same harness run, not assumed correct up
+front:** the `Set-Acl`-vs-`icacls` finding above, a
+`[TimeSpan]::MaxValue`-is-out-of-range finding for the repetition
+duration (`New-ScheduledTaskTrigger` rejects it with a malformed-XML
+error naming the literal, out-of-range duration string it tried to
+serialize), and — caught in review rather than the first harness pass,
+then re-verified by the harness afterward — a
+`$ErrorActionPreference = "Stop"`-vs-usage-error-exit-code bug: an
+earlier version of `install-task.ps1` set that preference at the very top
+of the script, before any input validation. Under `"Stop"`, `Write-Error`
+is a TERMINATING error, so every one of the four validation failures
+(missing `-AgentPath`, both/neither of `-ApiKey`/`-ApiKeyFile`, a
+nonexistent `-ApiKeyFile`, `-IntervalMinutes` `< 1`) unwound the script
+before ever reaching its own documented `exit 2` line, and PowerShell
+reported exit code **1** (its generic uncaught-error code) for all four
+instead. Fixed by leaving `$ErrorActionPreference` at its default
+(`"Continue"`, under which `Write-Error` does not terminate the script)
+through the whole validation block, and setting it to `"Stop"` only
+afterward, for the mutating filesystem/Task-Scheduler operations that
+follow. Pinned by harness check 1b above (a real child-process invocation
+asserting the missing-`-AgentPath` case now exits 2) so this cannot
+regress silently. All three findings were caught by actually running the
+install twice / actually registering a trigger / actually checking a
+child process's exit code, not by reading the cmdlet reference and
+assuming the obvious call would work.
+
+### PowerShell 5.1 encoding note (all three scripts)
+
+All three scripts (`install-task.ps1`, `uninstall-task.ps1`,
+`run-vault-agent.ps1`) are plain ASCII on purpose, not merely by
+coincidence: an earlier draft used em dashes and curly quotes in comments
+and in a couple of live `Write-Host` strings, saved as UTF-8 **without a
+BOM**. `[scriptblock]::Create` on that draft's `uninstall-task.ps1` failed
+with a spurious "missing closing brace" — reading the same bytes back with
+an explicit `-Encoding UTF8` parsed cleanly, and `[System.IO.File]::
+ReadAllBytes` confirmed no BOM was present. Windows PowerShell 5.1 decodes
+a BOM-less script file under the process's default codepage, not UTF-8;
+the em dash's 3-byte UTF-8 sequence gets split into unrelated
+single-byte characters under that codepage, and — worse than a cosmetic
+mangling — running the file directly (`powershell.exe -File
+uninstall-task.ps1`) hit the identical parse failure, so this was never
+just a test-tooling artifact. Fix applied: every non-ASCII character was
+replaced with a plain-ASCII equivalent (` - ` for em dashes, `'`/`"` for
+curly quotes) rather than adding a BOM, since a BOM only helps whichever
+tool happens to read it correctly and the failure mode when it doesn't is
+exactly what was just observed.
+
 ## What's here
 
-`vault_agent/acf.py` — a small, dependency-free parser for Valve's
-KeyValues text format (VDF/ACF), used for:
+`go/acf` — a small, dependency-free parser for Valve's KeyValues text
+format (VDF/ACF), used for:
 
 - `steamapps/appmanifest_<appid>.acf` — one installed app's metadata
   (appid, name, StateFlags, SizeOnDisk).
 - `steamapps/libraryfolders.vdf` — the list of library folders (drives)
   Steam knows about.
 
-and `discover_installed(library_root)`, which walks every library listed
-in `libraryfolders.vdf` and returns the full list of installed apps.
+and `DiscoverInstalled(libraryRoot)` (`go/acf/discover.go`), which walks
+every library listed in `libraryfolders.vdf` and returns the full list of
+installed apps.
 
 The parser is a real tokenizer + recursive-descent parser (quoted keys/
 values with escaped quotes and backslashes, nested `{ }` blocks, unquoted
 bareword tokens, `//` line comments) — not regex line-picking. KeyValues
-is a small format, so this stays one small module, stdlib only (no
-third-party parser dependency — PROJECT_PLAN.md section 9).
+is a small format, so this stays a handful of small files, stdlib only (no
+third-party parser dependency — PROJECT_PLAN.md section 9). Every parsing
+decision below was originally pinned by a Python reference implementation
+built for exactly that purpose (ADR-0005) before being ported; that
+package is gone from this tree now (removed at the Phase-2 close-out, WP
+2.6) but is still in git history, and its behavior lives on unchanged
+here.
 
 ## StateFlags: what "installed" means
 
 `StateFlags` is a bitmask. Bit `4` means "fully installed". Other bits can
 be set alongside it — e.g. an app mid-update still has bit 4 set (it's
-still installed and playable, just stale) — so `InstalledApp.installed`
-checks `state_flags & 4`, not equality against a specific value.
+still installed and playable, just stale) — so `InstalledApp.Installed()`
+checks `StateFlags & 4`, not equality against a specific value.
 
 This was **empirically verified** against every real appmanifest file on
 a real Steam install (`c:\steam` on the dev machine): all 15 currently
@@ -1215,12 +1525,13 @@ see Fixture Policy below.
 
 The full documented bit table (SteamKit's `EAppState` enum, widely
 mirrored across community Steam tooling — only bit 4 was independently
-verified here) is reproduced next to `STATE_FLAG_FULLY_INSTALLED` in
-`vault_agent/acf.py` so the Go port doesn't have to re-research it.
+verified here) is reproduced next to `StateFlagFullyInstalled` in
+`go/acf/acf.go` (not `appmanifest.go`, where the constant is only
+*used*, not defined).
 
 `appid` and `StateFlags` are validated against a strict ASCII-digit
 grammar (see "Integer field grammar" below) — a value like `" 480 "` or
-`"notanumber"` raises rather than being silently coerced.
+`"notanumber"` is rejected rather than being silently coerced.
 
 ## libraryfolders.vdf: two formats
 
@@ -1234,49 +1545,37 @@ grammar (see "Integer field grammar" below) — a value like `" 480 "` or
   exists on the dev machine (this is a pre-2019 Steam client format); the
   test fixture is synthetic, modeled on the documented format.
 
-`discover_installed()` treats `library_root` (the argument you pass in —
-the Steam install directory containing `steamapps/libraryfolders.vdf`)
-as the source of truth for every library path, including the main one
-itself, matching how the real file lists it.
-
-## Windows library discovery (current scope)
-
-On Windows, `library_root` is the Steam install directory (commonly
-`C:\Program Files (x86)\Steam` or a custom path like `C:\Steam`). Nothing
-in `vault_agent/acf.py` hardcodes a Windows path or a `\` separator —
-every function takes `pathlib.Path` objects, so the same module will be
-reused unchanged by the Linux/SteamOS agent variant (WP 2.5, ADR-0002),
-which only needs to pass a different `library_root`
-(`~/.local/share/Steam`) — no parser changes required.
+`ParseLibraryFolders`/`DiscoverInstalled` treat `libraryRoot` (the
+argument you pass in — the Steam install directory containing
+`steamapps/libraryfolders.vdf`) as the source of truth for every library
+path, including the main one itself, matching how the real file lists it.
+Windows vs. Linux/SteamOS discovery differs only in which directory this
+argument defaults to when not given explicitly — see "Linux/SteamOS
+variant (WP 2.5)" above for the full probe order; nothing in `go/acf`
+itself is platform-specific.
 
 ## Integer field grammar
 
 `appid`, `StateFlags`, and `SizeOnDisk` are validated with a strict
-grammar (`_parse_strict_uint` in `vault_agent/acf.py`), deliberately
-narrower than Python's `int()`:
+grammar (`parseStrictUint` in `go/acf/strictuint.go`):
 
 **Accepted:** one or more ASCII digit characters (`0`-`9`), nothing else.
 Leading zeros are tolerated (`"004"` -> `4`).
 
-**Rejected** (all of these parse fine with plain `int()`, and are
-therefore a real Python-vs-Go divergence if left unguarded): surrounding
-whitespace (`" 4 "`), a leading `+`/`-` sign (`"+4"`), underscore
-digit-group separators (`"1_0"` -> `10`), non-ASCII Unicode digit
-characters (e.g. Arabic-Indic `"٤"` -> `4`). This mirrors Go's
-`strconv.Atoi` (base 10), which accepts none of those either — since this
-package is the executable specification for the Go port (ADR-0005), the
-two are designed to agree on the same input, with one named exception:
-digit strings too large for a 64-bit machine int, where Python's
-arbitrary-precision `int` still accepts and Go's port does not — see the
-Go port section's "Known divergences from the Python spec" above for the
-three concrete consequences.
+**Rejected:** surrounding whitespace (`" 4 "`), a leading `+`/`-` sign
+(`"+4"`), underscore digit-group separators (`"1_0"`), non-ASCII Unicode
+digit characters (e.g. Arabic-Indic `"٤"`). This mirrors Go's
+`strconv.Atoi` (base 10) — see the "Go port (production)" section's
+"Known divergences from the Python spec" above for the one deliberate
+exception (integer-overflow handling on very large digit strings) and
+what it means for `SizeOnDisk`/`StateFlags`/`appid` specifically.
 
-`appid` stays a `str` (it's an identifier, not a quantity), but is
+`appid` stays a `string` (it's an identifier, not a quantity), but is
 validated with the same grammar; a value that fails it makes the whole
-manifest raise `VdfParseError` (`discover_installed` then warns and skips
+manifest return a `*ParseError` (`DiscoverInstalled` then warns and skips
 that file, per the resilience contract below). `StateFlags` is likewise
-required and raises. `SizeOnDisk` is the one field that is tolerated —
-missing or ungrammatical, it becomes `None` rather than failing the whole
+required and errors. `SizeOnDisk` is the one field that is tolerated —
+missing or ungrammatical, it becomes `nil` rather than failing the whole
 record.
 
 This grammar mirrors `api/vault_api/deletion.py`'s `coerce_positive_id`
@@ -1294,12 +1593,12 @@ between `api/` and `agent/`.
   deliberate unknown escape — dropping it would silently turn that into
   a *different, wrong* library path with no error raised. Recognized
   escapes remain `\"`, `\\`, `\n`, `\t`, `\r`.
-- **Nesting depth is capped at 100 levels**, raising `VdfParseError`
+- **Nesting depth is capped at 100 levels**, returning a `*ParseError`
   beyond that rather than recursing further. Real appmanifest/
   libraryfolders files nest 3 levels deep at most; the cap exists so a
   corrupt or hostile file with thousands of nested `{` cannot escape
-  `discover_installed`'s single-exception-type contract with an uncaught
-  `RecursionError`.
+  `DiscoverInstalled`'s single-error-type contract with an uncaught
+  stack-overflow/recursion failure.
 - **Platform conditional tags** (`[$WIN32]`, `[$LINUX]`, `[!$WIN32]`,
   ...) immediately after a key's value are tolerated and stripped, not
   treated as the start of the next pair — real Valve KeyValues files use
@@ -1313,29 +1612,30 @@ between `api/` and `agent/`.
   (the common, real-world placement); a conditional between a key and its
   value is not handled (not observed in practice in the two file types
   this module parses).
-- **A leading UTF-8 BOM is stripped**, both when reading a file
-  (`encoding="utf-8-sig"`) and defensively inside `parse_vdf` itself for
-  a string handed in directly. Without this, the BOM character is
-  neither whitespace, a brace, nor a quote, so the unquoted-bareword
-  reader swallows it together with the following quoted key — corrupting
-  the very first token of the file.
+- **A leading UTF-8 BOM is stripped**, both when reading a file and
+  defensively inside the parser itself for a string handed in directly.
+  Without this, the BOM character is neither whitespace, a brace, nor a
+  quote, so the unquoted-bareword reader swallows it together with the
+  following quoted key — corrupting the very first token of the file.
 
 ## Resilience contract
 
-`discover_installed()` never crashes on bad local data. It logs a warning
-(Python's standard `logging` module, logger name `vault_agent.acf`) and
+`DiscoverInstalled` never crashes on bad local data. It returns a
+`Warning` alongside the result (see the "Go port (production)" section's
+"`Warning` slice instead of `logging.warning`" bullet above for why) and
 degrades instead:
 
 | Situation | Behavior |
 |---|---|
-| Missing/corrupt `libraryfolders.vdf` | Warn, fall back to treating `library_root` as the only library |
+| Missing/corrupt `libraryfolders.vdf` | Warn, fall back to treating `libraryRoot` as the only library |
 | Missing/corrupt `appmanifest_*.acf` (incl. non-grammatical `appid`/`StateFlags`) | Warn, skip that file |
 | Library path listed but missing on disk | Warn, skip that library |
 | Duplicate appid across libraries | Warn, first occurrence wins |
-| Duplicate key at the same KeyValues nesting level (incl. a duplicated numbered library index) | Last occurrence silently wins (no warning — this is dict-level parsing, not file discovery) |
-| Missing/non-grammatical `SizeOnDisk` | `size_on_disk` is `None`, record still returned |
-| Nesting deeper than 100 levels | Whole file treated as corrupt (`VdfParseError` -> warn + skip) |
+| Duplicate key at the same KeyValues nesting level (incl. a duplicated numbered library index) | Last occurrence silently wins (no warning — this is map-level parsing, not file discovery) |
+| Missing/non-grammatical `SizeOnDisk` | `SizeOnDisk` is `nil`, record still returned |
+| Nesting deeper than 100 levels | Whole file treated as corrupt (`*ParseError` -> warn + skip) |
 | Leading UTF-8 BOM | Stripped transparently, no warning |
+| Invalid UTF-8 in the file | `*ParseError` -> warn + skip (Go-only stricter-than-spec divergence, see above) |
 
 ## Fixture policy
 
@@ -1343,16 +1643,8 @@ Test fixtures under `agent/tests/fixtures/` are **synthetic** — modeled
 on the structure of real files (verified against `c:\steam` on the dev
 machine during development) but with fabricated app IDs, names, and
 sizes. No real personal library data (owned game list, real appids/
-sizes/build IDs) is committed to this repository.
-
-## Running the tests
-
-```powershell
-cd agent
-python -m venv .venv
-.venv\Scripts\pip install -r requirements-dev.txt
-.venv\Scripts\python -m pytest -q
-```
-
-Runtime code (`vault_agent/`) has zero third-party dependencies; the venv
-here is for running the test suite only.
+sizes/build IDs) is committed to this repository. This corpus is
+**permanent** (ADR-0005 addendum): it survived the Phase-2 close-out
+Python removal unchanged and is consumed directly by `go/acf/*_test.go` —
+see "Building and testing" in the "Go port (production)" section above
+for how to run the Go suite against it.

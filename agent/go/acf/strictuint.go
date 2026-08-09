@@ -10,8 +10,9 @@ import "strconv"
 //
 // Deliberately stricter than Go's strconv.Atoi would be if fed
 // untrimmed/liberal input, and pinned to match Python's int() rejections
-// documented on the executable specification (vault_agent.acf.
-// _parse_strict_uint): no surrounding whitespace (" 4 "), no leading
+// documented on the executable specification's _parse_strict_uint
+// (agent/vault_agent/acf.py, removed at the Phase-2 close-out, WP 2.6 —
+// see acf.go's package doc): no surrounding whitespace (" 4 "), no leading
 // +/- sign ("+4"/"-4"), no digit-group separators ("1_0"), no non-ASCII
 // Unicode digits (e.g. Arabic-Indic "٤"). strconv.Atoi itself already
 // rejects all of those (unlike Python's int()) EXCEPT a leading sign
