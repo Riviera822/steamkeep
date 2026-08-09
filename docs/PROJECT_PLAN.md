@@ -459,11 +459,16 @@ parallel/serial decisions, merge discipline, open user decisions):
 - [ ] Document APK build (no Play Store requirement; F-Droid as a long-term goal)
 
 ### Phase 5 — Community Release
-- [ ] README with architecture diagram, quickstart (compose up in 5 minutes),
+- [x] README with architecture diagram, quickstart (compose up in 5 minutes),
       and an explicit "works for guests" FAQ note: any Steam client behind
       the LAN DNS is served with zero setup — no account, agent, or app;
       store-on-miss means the first guest download fills the cache for
       everyone (ADR-0001)
+      *(WP 5.2: root README with Mermaid diagram, quickstart verified
+      command-by-command against deploy/, works-for-guests FAQ plus four
+      more ADR-backed entries; feature status stated against shipped code,
+      not ADR designs — license section says "planned Apache-2.0" until
+      the LICENSE file lands with the release)*
 - [ ] License: Apache-2.0 (permissive for maximum adoption, includes patent
       grant; AGPL deliberately rejected as it deters contributors and
       companies in the early phase)

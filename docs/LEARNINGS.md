@@ -207,3 +207,16 @@ These are not style preferences; each entry cost a review round to learn.
   (WP 2.1).
 - Verify empirically over believing docs or reviewers — several review
   claims were corrected by rigs (WP 1.1 301/302, WP 1.6 rmtree).
+
+## Docs / community release
+- Entry-point docs describe SHIPPED behavior, not ADR designs: an ADR
+  records a decision that may be unimplemented — grep the code for the
+  mechanism (and check PLAN checkboxes) before claiming it works
+  (WP 5.2 blocker: staleness FAQ described the unshipped manifest oracle
+  as the live mechanism).
+- Quote container-real paths in docs: the cache lives at
+  `/vault/cache/depot/...` (nginx `-p /vault`, `VAULT_CACHE_ROOT`), not
+  `/cache/...` (WP 5.2 blocker).
+- Never present a planned license as granted — a `## License: Apache-2.0`
+  heading without a LICENSE file reads as an effective grant that does not
+  exist; word it "planned" until the file lands (WP 5.2 blocker).
