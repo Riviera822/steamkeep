@@ -150,15 +150,13 @@ expected to surface through real use, not further mockup rounds.
   log excerpts.
 ### WP 4a.6 — Settings + onboarding + Steam identity (web/) — **branch-parallel after 4a.2**
 - Ports the 3-step onboarding, connection profiles, vault name.
-- **DECISION (user): Steam library in the browser.** The Steam Web API has
-  no CORS, so "the client fetches straight from Valve" (ADR-0004 shape for
-  the app) does not work from a web page. Options: (A) tiny opt-in
-  vault-api relay for GetOwnedGames only (key stays server-side, contradicts
-  the "never through the server" line and must amend ADR-0004), (B) appid
-  list without names/covers until the Android app links the identity,
-  (C) user-supplied Web API key stored in the browser and sent via the
-  relay. Do not build until decided — the package builds everything else
-  around a pluggable identity provider.
+- **DECIDED (user, 2026-08-09): option A with C's input UX** — vault-api
+  gains an opt-in relay for `GetOwnedGames`/`GetPlayerSummaries`; the Web
+  API key is entered in the web UI settings and stored server-side.
+  Boundaries in the ADR-0004 addendum (public-profile reads only, key
+  never logged/echoed, relay off until configured, Android keeps the
+  device-local path). NOTE: the relay endpoint itself is an api/-track
+  mini-package (serial against other api/ work); 4a.6 consumes it.
 ### WP 4a.7 — Notifications + bypass surfaces (web/) — **serial after 4a.3/4a.5 merge**
 - Bell + panel with navigate-to-target (round-6 semantics), bypass banner
   + clients sheet backed by the real `/v1/clients` (bypass_suspected from
@@ -208,10 +206,20 @@ OpenID in a Custom Tab; the PHONE fetches the library from Valve
 - **WP 5.3 — SECURITY.md + threat model + pre-release security review** —
   after code freeze of api/core; **[Fable] mandatory** (standing policy).
 - **WP 5.4 — CONTRIBUTING.md, issue templates, example configs** — parallel.
-- **WP 5.5 — Multi-arch images to ghcr.io** — **user decision required**
-  (org/name/visibility); outward-facing, never autonomous.
+- **WP 5.5 — Multi-arch images to ghcr.io** — **DECIDED (user,
+  2026-08-09): move to a GitHub organization.** Target naming:
+  `ghcr.io/steamvault/{core,api,dns}` (public). Prerequisite the USER
+  performs (account-level, never autonomous): create the org — name
+  availability decides the final slug — and move the repo into it
+  (GitHub auto-redirects the old URL). After the move: update the git
+  remote, README badges/links, compose image references; publishing
+  itself stays a with-the-user step.
 - **WP 5.6 — Announcement** (r/selfhosted, r/homelab, LanCache Discord;
-  complement-not-killer framing) — **with the user only**.
+  complement-not-killer framing) — **with the user only. DECIDED gate
+  (user, 2026-08-09): no announcement until the user has personally
+  tested the stack end-to-end WITH the Android app** — i.e. after the
+  Zeus rollout AND Phase 4b are usable; the post carries the user's own
+  real-world numbers.
 
 ---
 
@@ -239,11 +247,17 @@ after 3.10+3.11+3.12+3.13: Phase 3 COMPLETE
 merged first, and 4a.7 wants 3.11.
 ```
 
-## Open user decisions (blockers for specific packages only)
+## User decisions — all resolved 2026-08-09
 
-1. **4a.6**: Steam library access from the browser (options A/B/C above).
-2. **5.5**: ghcr.io organization/naming/visibility.
-3. **5.6**: announcement wording + timing.
-4. Post-v1 backlog (documented, undispatchted): embedded tailscale (tsnet),
-   iOS app, queue reordering, drag-to-reorder, server-side notification
-   cursor, per-depot grace windows.
+1. **4a.6** Steam library in the browser: **A with C's input UX** (opt-in
+   vault-api relay, key entered in the web UI, stored server-side —
+   ADR-0004 addendum).
+2. **5.5** ghcr/repo home: **move to a GitHub organization**
+   (`ghcr.io/steamvault/*`; org creation + repo move are user-performed
+   account actions).
+3. **5.6** announcement: **only after the user has personally tested
+   end-to-end with the Android app** (post-Zeus, post-4b).
+
+Post-v1 backlog (documented, undispatched): embedded tailscale (tsnet),
+iOS app, queue reordering, drag-to-reorder, server-side notification
+cursor, per-depot grace windows.
