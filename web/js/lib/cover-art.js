@@ -1,0 +1,63 @@
+/**
+ * Cover-art URL + deterministic fallback tile (WP 4a.3).
+ *
+ * Ports the mockup's capsule-art approach (docs/design/
+ * vault-app-mockup-NOTES.md, "Covers"): 2:3 portrait artwork, and when it
+ * can't be shown, a styled tile rather than a blank rectangle. The mockup
+ * used per-title hues from its fake seed data (`g.h1`/`g.h2`); the real app
+ * has real appids and no seed hues, so `fallbackHues`/`fallbackPattern`
+ * below derive the same two ingredients deterministically FROM the appid —
+ * same game always gets the same fallback look, no server round trip, no
+ * randomness to make headless-test assertions flaky.
+ *
+ * **CSP note (deliberate extension — see api/vault_api/webui.py and
+ * api/README.md's "Security headers" section for the paired change this WP
+ * makes there).** `STEAM_CDN_HOST` is the exact, single host added to
+ * `img-src`; this module is the ONLY place that constructs a URL against
+ * it, so the CSP's scope and this module's scope are the same one line.
+ * `library_600x900.jpg` is Valve's own portrait-capsule asset path — same
+ * 2:3 ratio the mockup's fake covers already used (NOTES.md: "costs nothing
+ * to swap in real Steam artwork later").
+ *
+ * Pure — no DOM, no fetch — so the URL shape and the fallback hashing are
+ * unit-tested headlessly (web/tests/cover-art.test.js); the actual `<img>`
+ * element + its onerror-swap-to-fallback wiring lives in
+ * components/game-card.js, which is DOM-only and not unit-tested the same
+ * way (mirrors the existing split between status-icon.js's pure glyph
+ * tables and its DOM builder).
+ */
+
+export const STEAM_CDN_HOST = "cdn.akamai.steamstatic.com";
+
+/** @param {number} appid */
+export function coverArtUrl(appid) {
+  return `https://${STEAM_CDN_HOST}/steam/apps/${appid}/library_600x900.jpg`;
+}
+
+/** Tiny deterministic string hash (FNV-1a), good enough for "pick a stable
+ * decorative value from an integer id" — not a security primitive. */
+function fnv1a(n) {
+  let h = 0x811c9dc5;
+  const str = String(n);
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+/** Two hues (0-359) for the fallback tile's gradient, mirroring the
+ * mockup's `--h1`/`--h2` custom properties. Always the same pair for the
+ * same appid. */
+export function fallbackHues(appid) {
+  const h = fnv1a(appid);
+  const h1 = h % 360;
+  const h2 = (h >>> 9) % 360;
+  return { h1, h2 };
+}
+
+/** Which of the mockup's six decorative overlay patterns (p0..p5,
+ * css/app.css) this appid's fallback tile uses. */
+export function fallbackPattern(appid) {
+  return fnv1a(appid * 2654435761) % 6;
+}

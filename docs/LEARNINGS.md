@@ -331,3 +331,12 @@ These are not style preferences; each entry cost a review round to learn.
   (done + Updated==0 + UpToDate>0), it survives cache deletion unlike
   last_prefill_at, and the UI wording must say "confirmed current at X",
   not "checked at X" (last_manifest_check mini-WP).
+- A documented mechanism with zero callers is the WP 4a.1 failure class in
+  module-header form: the card docstring described patch-in-place while
+  every path full-rendered and cardStructuralKey had no caller. Grep for
+  callers of any mechanism a header claims before believing it (WP 4a.3
+  blocker).
+- Proving "no animated node touched" is instrumentable headless: stub the
+  card, record every querySelector/mutation, and wire createElementNS to
+  THROW — a patch path that would rebuild an icon then fails loudly
+  instead of passing on trust (WP 4a.3 review technique).

@@ -57,13 +57,87 @@ node --test web/tests/backoff.test.js
   `CacheDeletionOut` response shape, ADR-0003 shared-depot protection
   (`DELETE /v1/cache/{appid}` skips a depot still cached by another game,
   frees it once every co-owner is uncached), 404/409 cases, all-or-nothing
-  `POST /v1/prefill` body validation, and that a cancelled job settles to
+  `POST /v1/prefill` body validation, that a cancelled job settles to
   `'cancelled'` and stays there rather than continuing to tick toward
-  `'done'`. This module imports only `errors.js` — no `window`, `document`
-  or `fetch` — so it runs in bare Node with no fake environment at all.
+  `'done'` (WP 4a.2), and (WP 4a.3) the `GET /v1/mapping` route added for
+  the Library view's bulk-delete confirm dialog. This module imports only
+  `errors.js` — no `window`, `document` or `fetch` — so it runs in bare
+  Node with no fake environment at all.
 
 `web/js/api.js` is the one module NOT covered here: exercising its real
 `request()` path meaningfully needs a `fetch`/`localStorage`-capable
 environment, and WP 4a.2's DoD is scoped to the differ and the backoff
 math. Its one pure export, `classifyHttpStatus`, is re-exported from
 `errors.js` and IS covered, by `errors.test.js`.
+
+### WP 4a.3 — Library view
+
+The view itself (`web/js/views/library.js`) and its DOM-building card
+component (`web/js/components/game-card.js`) are NOT unit-tested directly
+(same posture as `status-icon.js`'s DOM builder, WP 4a.1) — instead every
+piece of DECISION logic they lean on is pulled into a pure `web/js/lib/`
+module and tested headlessly here:
+
+- `game-status.test.js` — `web/js/lib/game-status.js`: `dispKind` (a live
+  job overrides cache state; the "cached requires visible bytes" invariant
+  for the `status: "done"`-with-`size_bytes: null` "last cached remnant"
+  case; `status: "error"` always shows as Failed), `statusAction` (which
+  states are actionable and what they offer, including the deliberate
+  "error is retryable" extension over the mockup), `findLiveJob`/
+  `indexLiveJobsByAppid` (GC jobs and queued jobs never drive a card),
+  `hasProtectedCacheContent` vs `hasVisibleCacheContent` (the two
+  DIFFERENT "has cache content" predicates — see that module's header —
+  and the remnant case where they disagree), and `isJobStateTransition`
+  (the round-7 "a growing `log_excerpt` on an otherwise-unchanged job must
+  never look like a transition" guard).
+- `library-filters.test.js` — `web/js/lib/library-filters.js`: search is a
+  case-insensitive substring match, search AND chips (a live job moves a
+  game out of "Not cached" and into "Downloading" at the same time),
+  `chipCounts` recomputing against the current query, and that there is no
+  "stale"/"Update ready" chip (no oracle data on `GET /v1/games` yet).
+- `bulk-plan.test.js` — `web/js/lib/bulk-plan.js`: busy/needsDownload/
+  current classification (a GC job never counts as "busy" for a download
+  decision; `error` joins `none` in "needs a download"), all three
+  `buildBulkDownloadPlan` outcomes (something to download and the skip
+  count; everything already cached with an explicit re-download secondary;
+  everything already busy), and (WP 4a.3 review fix, should-fix 1)
+  `classifyBulkDeleteEligibility`: has-cache-content, not "status is not
+  none" — an `error` game with ZERO visible bytes is excluded (it has no
+  depot mappings left; `DELETE /v1/cache/{appid}` would 404), an `error`
+  game WITH bytes (a half-deleted/partial run) is included, and a busy
+  game is excluded even if it has bytes.
+- `multiplan.test.js` — `web/js/lib/multiplan.js`: the round-6 mockup
+  scenario ported almost verbatim (deleting two of three co-owners of a
+  shared depot keeps it; adding the third to the SAME batch frees it — this
+  is the real **mutation target** for "dropping the set-dedupe": removing
+  the `others.filter(appid => !idSet.has(appid))` exclusion makes this
+  test fail), the last-cached-remnant rule (an idle, never-prefilled,
+  job-free co-owner does NOT protect a depot; an active job on an
+  otherwise-idle co-owner DOES), fail-closed on an unresolvable owner
+  appid, and a regression pin that a depot two selected games both list is
+  counted once in `occupiedBytes` (NOT a mutation-kill for the `if
+  (!depotsSeen.has(...))` line itself — see the comment on that line in
+  multiplan.js and on the test: the Map's own keying already prevents
+  double-counting regardless of that guard).
+- `cover-art.test.js` — `web/js/lib/cover-art.js`: the exact CDN host +
+  asset path (matches the CSP entry in `api/vault_api/webui.py` 1:1), and
+  that the fallback hue/pattern hash is deterministic (same appid -> same
+  look, every time — no flaky randomness) and stays in range.
+- `format.test.js` — `web/js/lib/format.js`: `formatBytesGB`'s
+  under/over-100-GB rounding and that it never fabricates a number for
+  null/zero/negative/non-finite input.
+- `render-plan.test.js` — `web/js/lib/render-plan.js` (WP 4a.3 review fix,
+  blocker B1): the pure games-tick patch-vs-rebuild decision. First poll,
+  and added/removed rows, always mean a full render (grid membership can
+  change). An updated row not currently on screen is skipped entirely. Two
+  named **mutation targets**, one each direction: a game whose structural
+  key CHANGED must land in `rebuild` (flip that branch and a card would
+  silently keep showing the wrong icon shape forever); a game whose
+  structural key is UNCHANGED (e.g. only `size_bytes` drifted while a
+  download runs) must land in `patch`, NOT `rebuild` — flip THAT branch
+  (treat any update as structural) and every games-poll tick would
+  recreate, and thereby restart the animation of, a running download's
+  status-icon node: the exact round-7 mockup bug, now on the games poll
+  instead of the jobs one. `views/library.js` is the DOM-side executor of
+  this plan (`applyGamesTick`) and is not unit-tested the same way — see
+  the "WP 4a.3 — Library view" section above.

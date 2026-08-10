@@ -368,6 +368,19 @@ export async function demoRequest(method, path, { body, params } = {}) {
     return gameDetail(game);
   }
 
+  // WP 4a.3: the full depot->app mapping table, mirroring
+  // `GET /v1/mapping` (api/README.md) exactly — one row per (depotid,
+  // appid) pair. Derived from the same `depots` arrays every other demo
+  // route already reads (see the makeGame() note above: this demo model
+  // keeps "mapping" and "on-disk size" in one list), so a demo bulk-delete
+  // confirm sees the same shared-depot ownership the rest of demo mode
+  // already assumes.
+  if (method === "GET" && path === "/v1/mapping") {
+    const rows = [];
+    for (const g of games) for (const d of g.depots) rows.push({ depotid: d.depotid, appid: g.appid });
+    return rows;
+  }
+
   if (method === "GET" && path === "/v1/jobs") {
     tickAllJobs();
     const limit = Number(params?.limit ?? 20);

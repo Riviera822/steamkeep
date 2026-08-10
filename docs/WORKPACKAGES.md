@@ -119,6 +119,15 @@ shows a paused job holding the worker slot; the WP 3.12 backend releases
 it — UI packages follow the BACKEND semantics. Remaining polish is
 expected to surface through real use, not further mockup rounds.
 
+Recorded divergence (WP 4a.3, 2026-08-10, orchestrator decision — user
+veto welcome): the library filter chips ship All / Cached / Not cached /
+Downloading / **Failed**, where the mockup has **Update ready** in the
+fifth slot. Rationale: `GET /v1/games` has no stale/update field yet
+(Phase-4 decision pending), while a persistent per-app `error` status is
+real shipped API surface the mockup never modeled — a failed prefill
+needs a findable home. When the stale field lands, Update ready returns
+and the chip set is re-decided against the mockup.
+
 ### WP 4a.1 — Static serving + app shell (api/ + web/) — **first, serial**
 - vault-api mounts `web/` (StaticFiles, SPA fallback, sane CSP/security
   headers, no-cache for index). Router auth must NOT cover static assets;

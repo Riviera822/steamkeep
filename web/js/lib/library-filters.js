@@ -1,0 +1,93 @@
+/**
+ * Library search + filter-chip logic (WP 4a.3).
+ *
+ * Ports the mockup's `matchQ`/`FILTERS`/`renderChips` (docs/design/
+ * vault-app-mockup.html, docs/design/vault-app-mockup-NOTES.md "Search"):
+ * search and chips are ANDed, chip counts always describe what the grid
+ * would show right now, case-insensitive substring match on the title. Pure
+ * — no DOM — so the AND semantics and the counts are directly unit-testable
+ * (web/tests/library-filters.test.js).
+ *
+ * Chip set DIFFERS from the mockup's, not merely "narrower": **`Failed`
+ * REPLACES `Update ready`** (it is not simply dropped and not simply
+ * added). The mockup's five chips are All/Cached/Not cached/Downloading/
+ * Update ready; this WP ships All/Cached/Not cached/Downloading/Failed.
+ * Two independent reasons meet here:
+ *   1. There is nothing to show `Update ready` FOR — the real
+ *      `GET /v1/games` has no stale/oracle field yet (game-status.js's
+ *      module header, Divergence 1; api/README.md explicitly defers this
+ *      to "a Phase-4 decision to make once the UI knows how it wants to
+ *      render it").
+ *   2. There IS something real to show instead — a persistent per-app
+ *      `status: "error"` is genuine, currently-shipping API surface
+ *      (apps.status stays `error` until a re-prefill succeeds,
+ *      api/README.md "Per-game deletion") that the mockup never modeled at
+ *      all (its own "error" only ever lived on a finished JOBS row, never
+ *      on a GAMES row — see game-status.js's `statusAction` docstring).
+ *      Leaving it with no chip and no filter would be a real, silent gap.
+ * This is a deliberate, orchestrator-confirmed decision (see
+ * docs/WORKPACKAGES.md's WP 4a.3 divergence record), not a placeholder —
+ * `Update ready` returns as a SIXTH chip, not a swapped-back one, on
+ * whatever WP first surfaces oracle staleness on `GET /v1/games`.
+ */
+
+import { dispKind, KIND } from "./game-status.js";
+
+/**
+ * @param {object} game GameSummary
+ * @param {string} query already-lowercased, already-trimmed
+ */
+export function matchesQuery(game, query) {
+  if (!query) return true;
+  return typeof game.name === "string" && game.name.toLowerCase().includes(query);
+}
+
+/** One filter chip: a stable key, its label, and a predicate over
+ * `(game, liveJob)` where `liveJob` is this game's entry from
+ * `indexLiveJobsByAppid` (undefined if none). */
+export const FILTER_DEFS = Object.freeze([
+  { key: "all", label: "All", predicate: () => true },
+  { key: "cached", label: "Cached", predicate: (g, job) => dispKind(g, job) === KIND.CACHED },
+  { key: "none", label: "Not cached", predicate: (g, job) => dispKind(g, job) === KIND.NONE },
+  {
+    key: "downloading",
+    label: "Downloading",
+    predicate: (g, job) => !!job, // findLiveJob already excludes queued/GC (game-status.js)
+  },
+  { key: "failed", label: "Failed", predicate: (g, job) => dispKind(g, job) === KIND.ERROR },
+]);
+
+const FILTER_BY_KEY = new Map(FILTER_DEFS.map((f) => [f.key, f]));
+
+export function normalizeQuery(rawQuery) {
+  return (rawQuery ?? "").trim().toLowerCase();
+}
+
+/**
+ * @param {object[]} games
+ * @param {{query: string, filterKey: string, liveJobsByAppid: Map<number, object>}} ctx
+ *   `query` is expected already-normalized (normalizeQuery).
+ * @returns {object[]} games matching BOTH the query and the active filter.
+ */
+export function visibleGames(games, { query, filterKey, liveJobsByAppid }) {
+  const filter = FILTER_BY_KEY.get(filterKey) || FILTER_BY_KEY.get("all");
+  return games.filter((g) => {
+    if (!matchesQuery(g, query)) return false;
+    return filter.predicate(g, liveJobsByAppid?.get(g.appid));
+  });
+}
+
+/**
+ * Counts for every chip, computed against the CURRENT query (mockup rule:
+ * "counts recompute against the current query, so a chip's number is
+ * always something the grid can actually produce").
+ * @returns {{key: string, label: string, count: number}[]}
+ */
+export function chipCounts(games, { query, liveJobsByAppid }) {
+  const inQuery = games.filter((g) => matchesQuery(g, query));
+  return FILTER_DEFS.map((f) => ({
+    key: f.key,
+    label: f.label,
+    count: inQuery.filter((g) => f.predicate(g, liveJobsByAppid?.get(g.appid))).length,
+  }));
+}

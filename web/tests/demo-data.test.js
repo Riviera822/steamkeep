@@ -149,3 +149,32 @@ test("DELETE /v1/jobs/{id} settles a running job to 'cancelled' and it stays can
     assert.equal(job.status, "cancelled", `expected still cancelled on poll ${i}`);
   }
 });
+
+// ---------------------------------------------------------------------
+// GET /v1/mapping (WP 4a.3) — the full depot->app table the Library
+// view's bulk-delete confirm dialog needs to compute multiplan.js's
+// set-aware arithmetic in demo mode too (web/js/api.js "mapping" wrapper).
+// ---------------------------------------------------------------------
+
+test("GET /v1/mapping returns one {depotid, appid} row per mapped depot, matching the shared seed data", async () => {
+  const rows = await demoRequest("GET", "/v1/mapping");
+  assert.ok(Array.isArray(rows));
+  for (const row of rows) {
+    assert.equal(typeof row.depotid, "number");
+    assert.equal(typeof row.appid, "number");
+  }
+  // Emberreach and Frostline Convoy both map SHARED_DEPOT (see the seed
+  // data comment at the top of this file) — the mapping table must show
+  // BOTH owner rows for it, the exact fact multiplan.js needs and
+  // `GET /v1/games/{appid}`'s boolean `shared` flag alone cannot supply.
+  const owners = rows.filter((r) => r.depotid === SHARED_DEPOT).map((r) => r.appid);
+  assert.deepEqual(owners.sort(), [EMBERREACH, FROSTLINE].sort());
+});
+
+test("GET /v1/mapping reflects a deletion: a freed depot's row disappears", async () => {
+  await demoRequest("DELETE", `/v1/cache/${EMBERREACH}`); // frees EXCLUSIVE_DEPOT only
+  const rows = await demoRequest("GET", "/v1/mapping");
+  assert.ok(!rows.some((r) => r.depotid === EXCLUSIVE_DEPOT));
+  // The still-protected shared depot's mapping survives for both games.
+  assert.equal(rows.filter((r) => r.depotid === SHARED_DEPOT).length, 2);
+});

@@ -74,11 +74,24 @@ _ASSET_CACHE_CONTROL = "public, max-age=300, must-revalidate"
 #: genuinely needs an inline style or script, it must extend this policy
 #: explicitly and say why in a comment, not add a blanket
 #: ``'unsafe-inline'``.
+#:
+#: **Deliberate extension (WP 4a.3): ``img-src`` additionally allows
+#: exactly one external host, ``cdn.akamai.steamstatic.com``.** The Library
+#: view (``web/js/lib/cover-art.js``) fetches real Steam capsule artwork
+#: (``https://cdn.akamai.steamstatic.com/steam/apps/{appid}/library_600x900.jpg``)
+#: by appid — the same 2:3 portrait asset the frozen design mockup's fake
+#: covers were already modeled on (docs/design/vault-app-mockup-NOTES.md,
+#: "Covers": "costs nothing to swap in real Steam artwork later"). This is
+#: the ONE host that serves that path; no wildcard (``*.steamstatic.com``)
+#: and no second CDN alias are added. A missing/blocked image (offline LAN,
+#: no route to the host — a real homelab deployment) degrades to a styled
+#: fallback tile in JS, never a broken layout — the CSP addition only ever
+#: WIDENS what CAN load, it never becomes a hard dependency.
 _CSP = (
     "default-src 'self'; "
     "script-src 'self'; "
     "style-src 'self'; "
-    "img-src 'self' data:; "
+    "img-src 'self' data: https://cdn.akamai.steamstatic.com; "
     "font-src 'self'; "
     "connect-src 'self'; "
     "base-uri 'none'; "

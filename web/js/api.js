@@ -150,14 +150,22 @@ export async function request(method, path, { body, params, signal } = {}) {
  * to diff-utils.js / notifications.js keyed the same way the server keys it.
  *
  * Deliberately NOT wrapped here (out of this WP's scope — no current
- * consumer needs them yet): /v1/mapping*, /v1/oracle*, /v1/schedule,
- * /v1/stats, /v1/cache/{appid}/gc. Add them with the WP that first needs
- * them rather than guessing their call shape now.
+ * consumer needs them yet): /v1/oracle*, /v1/schedule, /v1/stats,
+ * /v1/cache/{appid}/gc. Add them with the WP that first needs them rather
+ * than guessing their call shape now.
+ *
+ * `mapping` (WP 4a.3) IS wrapped here: the Library view's bulk-delete
+ * confirm dialog needs the full depot->app table to compute the set-aware
+ * multiPlan preview (web/js/lib/multiplan.js) — `GET /v1/games/{appid}`'s
+ * per-depot `shared: true/false` boolean names no owner ids, so it alone
+ * cannot answer "which OTHER apps map this depot". Called on demand (only
+ * when a bulk-delete confirm is opened), never on a poll loop.
  */
 export const api = {
   health: () => request("GET", "/v1/health"),
   games: () => request("GET", "/v1/games"),
   game: (appid) => request("GET", `/v1/games/${appid}`),
+  mapping: () => request("GET", "/v1/mapping"),
   jobs: (limit = 20) => request("GET", "/v1/jobs", { params: { limit } }),
   job: (id) => request("GET", `/v1/jobs/${id}`),
   prefill: (appids) => request("POST", "/v1/prefill", { body: { appids } }),

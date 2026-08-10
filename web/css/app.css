@@ -66,3 +66,286 @@
   font-size:10px; font-weight:600; letter-spacing:.3px;
 }
 .nav-btn[aria-current="page"]{ color:var(--accent); }
+
+/* ============================================================
+   Library view (WP 4a.3)
+   Ported from docs/design/vault-app-mockup.html (frozen round 7) — class
+   names below match the mockup 1:1 where the shell doesn't already own the
+   name (`.topbar` is the WP 4a.1 shell's brand bar, so the library's own
+   header uses `.lib-head`/`.lib-tools` instead of colliding with it).
+   ============================================================ */
+
+.lib-head{
+  display:flex; align-items:flex-end; justify-content:space-between; gap:10px;
+  margin-bottom:14px;
+}
+.lib-head h1{ margin:0 0 2px; }
+.lib-sub{
+  display:block; font-size:11px; font-weight:500; color:var(--dim-2); letter-spacing:.3px;
+}
+.lib-tools{ display:flex; gap:4px; flex-wrap:nowrap; flex:none; align-items:center; }
+.iconbtn{
+  width:32px; height:32px; border-radius:10px;
+  display:grid; place-items:center; color:var(--dim);
+  border:1px solid transparent; flex:none;
+}
+.iconbtn:hover{ background:var(--raised); color:var(--text); }
+.iconbtn.on{ background:var(--accent-glow); color:var(--accent); border-color:rgba(46,217,206,.3); }
+
+/* segmented layout switch */
+.segs{
+  display:flex; align-self:center; flex:none;
+  border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--surface);
+}
+.segs button{ width:28px; height:28px; display:grid; place-items:center; color:var(--dim-2); }
+.segs button + button{ border-left:1px solid var(--line); }
+.segs button:hover{ color:var(--text); }
+.segs button[aria-pressed="true"]{ background:var(--accent-glow); color:var(--accent); }
+
+/* ---------- search ---------- */
+.search{
+  display:flex; align-items:center; gap:9px; margin-bottom:9px;
+  padding:9px 11px; border-radius:var(--r-m);
+  background:var(--surface); border:1px solid var(--line);
+  transition:border-color .15s;
+}
+.search:focus-within{ border-color:var(--accent); }
+.search .mag{ color:var(--dim-2); display:grid; place-items:center; flex:none; }
+.search:focus-within .mag{ color:var(--accent); }
+.search input{
+  flex:1; min-width:0; background:none; border:0; outline:none;
+  font-family:var(--ui); font-size:13px; color:var(--text);
+}
+.search input::placeholder{ color:var(--dim-2); }
+.qx{ display:none; color:var(--dim-2); flex:none; }
+.qx:hover{ color:var(--text); }
+.search.filled .qx{ display:grid; place-items:center; }
+.noresult{ grid-column:1/-1; text-align:center; padding:30px 16px; }
+.noresult p{ margin:0 0 14px; font-size:12.5px; line-height:1.6; color:var(--dim-2); }
+.noresult b{ color:var(--text); }
+.empty{ text-align:center; padding:30px 16px; color:var(--dim); font-size:12.5px; }
+
+/* ---------- filter chips ---------- */
+.chips{
+  display:flex; gap:7px; margin-bottom:12px;
+  overflow-x:auto; scrollbar-width:none; padding-bottom:2px;
+}
+.chips::-webkit-scrollbar{ display:none; }
+.chip{
+  flex:none; padding:6px 10px; border-radius:999px;
+  border:1px solid var(--line); background:var(--surface);
+  font-size:11.5px; font-weight:500; color:var(--dim);
+  display:flex; align-items:center; gap:6px; white-space:nowrap;
+  transition:background .14s, color .14s, border-color .14s;
+}
+.chip .n{ font-family:var(--mono); font-size:10.5px; opacity:.65; font-variant-numeric:tabular-nums; }
+.chip:hover{ color:var(--text); border-color:var(--raised-2); }
+.chip[aria-pressed="true"]{
+  background:var(--accent-glow); border-color:rgba(46,217,206,.45); color:var(--accent);
+}
+.chip[aria-pressed="true"] .n{ opacity:.85; }
+
+/* ---------- capsule grid ---------- */
+.grid{ display:grid; grid-template-columns:repeat(2,1fr); gap:13px 12px; }
+.card{ position:relative; text-align:left; display:flex; flex-direction:column; gap:7px; }
+.cap{
+  position:relative; width:100%; aspect-ratio:2/3;
+  border-radius:var(--r-m); overflow:hidden;
+  background:
+    radial-gradient(120% 70% at 22% -6%, hsl(var(--h1) 62% 42%), transparent 62%),
+    linear-gradient(158deg, hsl(var(--h1) 46% 26%), hsl(var(--h2) 66% 8%));
+  box-shadow:0 3px 12px rgba(0,0,0,.4), inset 0 0 0 1px rgba(255,255,255,.06);
+  transition:transform .16s ease, box-shadow .16s ease;
+}
+.card:active .cap{ transform:scale(.972); }
+.cap .art{ position:absolute; inset:0; }
+.cap.p0 .art{ background:linear-gradient(112deg,transparent 38%, hsl(var(--h1) 90% 62% / .34) 39%, hsl(var(--h1) 90% 62% / .34) 46%, transparent 47%); }
+.cap.p1 .art{ background:radial-gradient(120% 62% at 50% 112%, hsl(var(--h2) 92% 58% / .5), transparent 62%); }
+.cap.p2 .art{ background:linear-gradient(180deg, transparent 52%, hsl(var(--h1) 85% 55% / .3) 52.6%, transparent 54%), radial-gradient(80% 40% at 50% 55%, hsl(var(--h2) 95% 62% / .35), transparent 70%); }
+.cap.p3 .art{ background:radial-gradient(90% 70% at 8% 6%, hsl(var(--h1) 95% 60% / .48), transparent 58%); }
+.cap.p4 .art{ background:repeating-linear-gradient(96deg, hsl(var(--h2) 80% 55% / .16) 0 3px, transparent 3px 13px); }
+.cap.p5 .art{ background:radial-gradient(circle at 50% 38%, transparent 24%, hsl(var(--h1) 88% 58% / .30) 25%, transparent 27%), radial-gradient(circle at 50% 38%, transparent 40%, hsl(var(--h2) 88% 60% / .26) 41%, transparent 43%); }
+/* real Steam artwork (cover-art.js), layered over the procedural fallback
+   above; removed from the DOM entirely on load failure (game-card.js),
+   leaving the fallback + name visible — never a broken-image glyph. */
+.cap img.cover{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+.cap .scrim{ position:absolute; inset:0; background:linear-gradient(180deg,rgba(4,8,11,.05) 40%, rgba(4,8,11,.72) 84%, rgba(4,8,11,.92)); }
+.cap .name{
+  position:absolute; left:9px; right:9px; bottom:8px; z-index:1;
+  font-family:var(--cond); font-weight:700; font-size:14.5px; line-height:1.06;
+  letter-spacing:.4px; text-transform:uppercase; color:#fff;
+  text-shadow:0 1px 5px rgba(0,0,0,.75); text-wrap:balance;
+}
+
+/* ---------- capsule status pill (round 6) ----------
+   One object on the cover carries BOTH facts the grid needs: the status
+   icon and the size (or nothing, honestly, while no live number exists —
+   see game-status.js's module header). */
+.cappill{
+  position:absolute; left:7px; top:7px; z-index:2;
+  display:inline-flex; align-items:center; gap:5px;
+  min-height:23px; padding:3px 8px 3px 3px; border-radius:999px;
+  background:rgba(6,11,14,.74);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.15), 0 1px 5px rgba(0,0,0,.45);
+  font-family:var(--mono); font-size:10.5px; font-weight:500; color:#EAF3F6;
+  font-variant-numeric:tabular-nums; line-height:1; letter-spacing:-.2px;
+  max-width:calc(100% - 14px);
+}
+@supports (backdrop-filter:blur(3px)){ .cappill{ backdrop-filter:blur(3px); } }
+.cappill .pv{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cappill .sic{ --sz:17px; }
+button.cappill{ cursor:pointer; transition:transform .12s ease, box-shadow .12s ease; }
+button.cappill:hover{ box-shadow:inset 0 0 0 1px rgba(255,255,255,.34), 0 2px 9px rgba(0,0,0,.5); }
+button.cappill:active{ transform:scale(.93); }
+.card:active .cap button.cappill{ transform:none; }
+
+.meta{ display:flex; align-items:center; gap:6px; font-size:11px; color:var(--dim); }
+.meta .size{ display:none; font-family:var(--mono); font-variant-numeric:tabular-nums; letter-spacing:-.2px; }
+.meta > .sic, .meta > .icnact{ display:none; }
+.meta .state{ display:block; font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:var(--dim-2); }
+.rowname{ display:none; }
+
+/* ---------- library layouts (2 cols / 3 cols / list) ---------- */
+.grid.cols3{ grid-template-columns:repeat(3,1fr); gap:11px 9px; }
+.grid.cols3 .cap{ border-radius:9px; }
+.grid.cols3 .cap .name{ left:6px; right:6px; bottom:6px; font-size:11px; letter-spacing:.25px; }
+.grid.cols3 .cappill{ left:5px; top:5px; min-height:20px; padding:2px 6px 2px 2px; gap:4px; font-size:9px; }
+.grid.cols3 .cappill .sic{ --sz:15px; }
+.grid.cols3 .card{ gap:5px; }
+.grid.cols3 .meta{ gap:5px; font-size:10px; }
+.grid.cols3 .meta .size{ font-size:10px; }
+.grid.cols3 .pick{ top:5px; right:5px; width:18px; height:18px; }
+
+.grid.list{ grid-template-columns:1fr; gap:7px; }
+.grid.list .card{
+  flex-direction:row; align-items:center; gap:10px; padding:6px 10px;
+  background:var(--surface); border:1px solid var(--line-soft); border-radius:var(--r-m);
+}
+.grid.list .card.picked{ border-color:rgba(46,217,206,.5); }
+.grid.list .cap{ width:30px; flex:none; border-radius:5px; }
+.grid.list .cap .name{ display:none; }
+.grid.list .cappill{ display:none; }
+.grid.list .rowname{
+  display:block; flex:1; min-width:0; font-size:13px; font-weight:600; letter-spacing:-.1px;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.grid.list .meta{ flex:none; gap:8px; }
+.grid.list .meta .size{ display:inline; margin-left:0; }
+.grid.list .meta > .sic, .grid.list .meta > .icnact{ display:grid; }
+.grid.list .meta .state{ display:inline; margin-left:0; }
+.grid.list .pick{ position:static; margin:0; flex:none; }
+.grid.list .card:active .cap{ transform:none; }
+.grid.list .card:active{ background:var(--raised); }
+
+.tx-cached{ color:var(--ok); } .tx-none{ color:var(--none); }
+.tx-running{ color:var(--run); } .tx-paused{ color:var(--run); } .tx-error{ color:var(--danger); }
+
+/* selection */
+.card .pick{
+  position:absolute; top:7px; right:7px;
+  width:21px; height:21px; border-radius:50%;
+  border:2px solid rgba(255,255,255,.75); background:rgba(6,11,14,.5);
+  display:none; place-items:center; color:var(--accent-ink);
+}
+body.selecting .card .pick{ display:grid; }
+.card.picked .cap{ box-shadow:0 0 0 2px var(--accent), 0 3px 12px rgba(0,0,0,.4); }
+.card.picked .pick{ background:var(--accent); border-color:var(--accent); }
+.card .pick svg{ opacity:0; }
+.card.picked .pick svg{ opacity:1; }
+
+/* ---------- bulk action bar ----------
+   `position:fixed` (not the mockup's phone-frame-relative `absolute`) —
+   this app has no phone-frame ancestor to anchor to. */
+.bulk{
+  position:fixed; left:12px; right:12px; bottom:78px; z-index:20;
+  max-width:928px; margin:0 auto;
+  display:flex; flex-direction:column; gap:8px;
+  padding:10px 10px 10px 14px; border-radius:var(--r-l);
+  background:rgba(23,37,47,.97);
+  border:1px solid var(--raised-2);
+  box-shadow:0 12px 28px -8px rgba(0,0,0,.7);
+  opacity:0; pointer-events:none; transform:translateY(22px);
+  transition:transform .22s cubic-bezier(.2,.8,.3,1), opacity .18s;
+}
+.bulk.up{ opacity:1; pointer-events:auto; transform:none; }
+.bulk .bulkhead{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.bulk .count{ font-size:12.5px; color:var(--dim); line-height:1.25; }
+.bulk .count b{ color:var(--text); font-family:var(--mono); }
+.bulk .count .hid{ display:block; font-size:10.5px; color:var(--dim-2); margin-top:1px; }
+.bulk .bulknote{ margin:0; font-size:11.5px; line-height:1.4; color:var(--dim-2); }
+.bulk .bulkbtns{ display:flex; gap:8px; flex-wrap:wrap; }
+.bulk .btn{ white-space:nowrap; }
+
+/* ---------- buttons ---------- */
+.btn{
+  display:inline-flex; align-items:center; justify-content:center; gap:7px;
+  padding:10px 15px; border-radius:11px;
+  font-size:13px; font-weight:600; letter-spacing:.15px;
+  border:1px solid var(--line); background:var(--raised); color:var(--text);
+  transition:filter .14s, background .14s;
+}
+.btn:hover{ filter:brightness(1.14); }
+.btn:disabled{ opacity:.45; cursor:not-allowed; filter:none; }
+.btn.primary{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+.btn.danger{ background:transparent; border-color:rgba(255,111,111,.45); color:var(--danger); }
+.btn.ghost{ background:transparent; }
+.btn.sm{ padding:7px 11px; font-size:12px; border-radius:9px; }
+
+/* ---------- bulk-delete confirm dialog ----------
+   `position:fixed`, viewport-centered (mockup: phone-frame-relative
+   `absolute` + a box-shadow spread standing in for a scrim; this app uses
+   a real backdrop element instead — see the dialog markup in library.js). */
+.dialog-backdrop{
+  position:fixed; inset:0; z-index:30; background:rgba(3,7,10,.62);
+  display:none; align-items:center; justify-content:center; padding:22px;
+}
+.dialog-backdrop.on{ display:flex; }
+.dialog{
+  width:100%; max-width:420px;
+  background:var(--raised); border:1px solid var(--line); border-radius:var(--r-l);
+  padding:20px 18px 16px;
+  box-shadow:0 24px 50px -12px rgba(0,0,0,.75);
+}
+.dialog h3{ margin:0 0 9px; font-size:16.5px; letter-spacing:-.2px; }
+.dialog p{ margin:0 0 10px; font-size:13px; line-height:1.5; color:var(--dim); }
+.dialog .row{ display:flex; gap:9px; justify-content:flex-end; }
+.dialog p b{ color:var(--text); font-weight:600; }
+.dialog p b.num{ font-family:var(--mono); font-weight:500; font-variant-numeric:tabular-nums; }
+
+.cflabel{
+  margin:0 0 6px; font-size:9.5px; font-weight:700; letter-spacing:.8px;
+  text-transform:uppercase; color:var(--dim-2);
+}
+.cflist{
+  list-style:none; margin:0 0 11px; padding:0;
+  display:flex; flex-direction:column; gap:5px;
+  max-height:196px; overflow-y:auto; scrollbar-width:none;
+}
+.cflist::-webkit-scrollbar{ display:none; }
+.cflist li{
+  display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 8px;
+  padding:7px 9px; border-radius:var(--r-s);
+  background:var(--surface); border-left:2px solid var(--line);
+}
+.cflist li.free{ border-left-color:rgba(255,111,111,.55); }
+.cflist .did{ font-family:var(--mono); font-size:11.5px; color:var(--text); font-variant-numeric:tabular-nums; }
+.cflist .mk{
+  font-size:8.5px; font-weight:700; letter-spacing:.6px; text-transform:uppercase;
+  border:1px solid currentColor; border-radius:4px; padding:1px 4px;
+}
+.cflist li.keep .mk{ color:var(--dim-2); }
+.cflist li.free .mk{ color:var(--danger); }
+.cflist .dsz{
+  margin-left:auto; font-family:var(--mono); font-size:11px; color:var(--dim);
+  font-variant-numeric:tabular-nums;
+}
+.cflist .why{ flex-basis:100%; font-size:11px; line-height:1.45; color:var(--dim-2); }
+.dialog .cftotal{
+  margin:0 0 14px; padding-top:9px; border-top:1px solid var(--line-soft);
+  font-size:12px; color:var(--dim);
+}
+.dialog .cftotal b{ color:var(--text); font-family:var(--mono); font-weight:500; font-variant-numeric:tabular-nums; }
+.dialog .cfsolo{ margin:0 0 14px; font-size:11.8px; line-height:1.45; color:var(--dim-2); }
+.dialog .cfloading{ margin:0 0 14px; font-size:12px; color:var(--dim-2); }
+
+.hint{ font-size:11.5px; line-height:1.5; color:var(--dim-2); margin:14px 0 0; text-align:center; }

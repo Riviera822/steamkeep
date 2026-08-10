@@ -3867,6 +3867,20 @@ loosening. If a later 4a.x package finds it genuinely needs an inline
 style or script, it must extend `_CSP` in `webui.py` explicitly and say
 why in a comment — never add a blanket `'unsafe-inline'`.
 
+**Deliberate extension (WP 4a.3): `img-src` also allows exactly one
+external host.** The Library view fetches real Steam capsule artwork by
+appid (`web/js/lib/cover-art.js`,
+`https://cdn.akamai.steamstatic.com/steam/apps/{appid}/library_600x900.jpg`
+— the same 2:3 portrait shape the frozen mockup's fake covers already
+used), so `img-src` is now `'self' data:
+https://cdn.akamai.steamstatic.com` — one named host, no wildcard, no
+second CDN alias. A blocked or missing image (offline LAN, no route to the
+host — a real homelab deployment) degrades to a styled fallback tile
+client-side; the CSP entry only widens what the browser is ALLOWED to
+load, it is never a hard dependency. Pinned by
+`tests/test_webui.py::test_csp_img_src_allows_self_data_and_exactly_the_steam_cdn_host`
+against the exact directive value, not a substring check.
+
 ### App shell contents (WP 4a.1 scope: scaffolding only)
 
 `web/index.html` + `web/js/app.js` wire up: a bottom nav with the mockup's

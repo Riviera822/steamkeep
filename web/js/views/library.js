@@ -1,19 +1,940 @@
 /**
- * Library view — scaffold only (WP 4a.1). Filled in by WP 4a.3 (grid,
- * search, filter chips, multi-select) and WP 4a.4 (detail sheet).
+ * Library view (WP 4a.3).
+ *
+ * Grid 2/3/list, search + filter chips (ANDed), the capsule pill
+ * (icon + size, actionable), multi-select with bulk download split
+ * semantics and bulk delete with the set-aware multiPlan arithmetic, and
+ * in-place progress patching per the round-7 mockup rule. Ports
+ * docs/design/vault-app-mockup.html's Library screen; see the module
+ * headers in js/lib/game-status.js, js/lib/bulk-plan.js and
+ * js/lib/multiplan.js for the specific, documented divergences from the
+ * mockup's fake data model (no "stale" status yet, no live progress
+ * percentage, multiPlan assembled from real per-call data instead of one
+ * in-memory array).
+ *
+ * Data flows exclusively through the WP 4a.2 store (store-singleton.js) —
+ * no parallel poll loop is created here. Detail-sheet / single-game delete
+ * (mockup's `openDetail`) is explicitly WP 4a.4's scope, serial after this
+ * one; `onOpen` below is deliberately a no-op for now rather than a
+ * fabricated placeholder screen.
+ *
+ * DOM is rebuilt from scratch on every real state change (search, chip,
+ * layout, selection, a `GET /v1/games` diff, or a job actually
+ * transitioning status) and left COMPLETELY untouched on a no-op poll tick
+ * (round-7 rule: never rebuild — and thereby restart the CSS status-icon
+ * animation of — a card whose displayed state hasn't changed). See the
+ * `store.subscribe("games", ...)` / `store.subscribe("jobs", ...)` calls
+ * near the bottom of this file for exactly what counts as a real change.
  */
-export function renderLibrary() {
+
+import { store } from "../store-singleton.js";
+import { api } from "../api.js";
+import { showToast } from "../components/toast.js";
+import { buildCard, cardStructuralKey, patchCardVolatile } from "../components/game-card.js";
+import { dispKind, indexLiveJobsByAppid, isJobStateTransition, KIND } from "../lib/game-status.js";
+import { chipCounts, normalizeQuery, visibleGames } from "../lib/library-filters.js";
+import {
+  classifyBulkSelection,
+  buildBulkDownloadPlan,
+  classifyBulkDeleteEligibility,
+} from "../lib/bulk-plan.js";
+import { buildMultiPlan } from "../lib/multiplan.js";
+import { planGamesUpdate } from "../lib/render-plan.js";
+import { formatBytesGB } from "../lib/format.js";
+import { onViewChange } from "../router.js";
+
+const LAYOUT_STORAGE_KEY = "steamvault.libraryLayout";
+const LAYOUT_CLASS = { grid2: "", grid3: "cols3", list: "list" };
+const LAYOUT_LABEL = { grid2: "Two columns", grid3: "Three columns", list: "List" };
+const ACTIVE_JOB_STATUSES = ["queued", "running", "paused"];
+
+function readStoredLayout() {
+  try {
+    const v = window.localStorage.getItem(LAYOUT_STORAGE_KEY);
+    return v && Object.prototype.hasOwnProperty.call(LAYOUT_CLASS, v) ? v : "grid2";
+  } catch {
+    return "grid2";
+  }
+}
+function writeStoredLayout(v) {
+  try {
+    window.localStorage.setItem(LAYOUT_STORAGE_KEY, v);
+  } catch {
+    // Same posture as api.js's localStorage helpers: a storage failure must
+    // never break the layout switch itself, just its persistence.
+  }
+}
+
+function errorText(err) {
+  if (err && typeof err.detail === "string" && err.detail) return err.detail;
+  return (err && err.message) || "Request failed";
+}
+
+function namesFor(appids, gamesByAppid) {
+  return appids.map((id) => gamesByAppid.get(id)?.name || `App ${id}`).join(", ");
+}
+
+// ---------------------------------------------------------------------
+// Module-level state. Persists across re-mounts (navigating away and back
+// to Library within the same session) — matches the mockup's single global
+// STATE object; only `selecting`/`picked` reset on navigating away (see
+// the onViewChange listener at the bottom), same as the mockup's
+// nav-dismisses-transient-surfaces rule.
+// ---------------------------------------------------------------------
+const state = {
+  games: store.snapshot("games") || [],
+  jobs: store.snapshot("jobs") || [],
+  query: "",
+  filterKey: "all",
+  layout: readStoredLayout(),
+  selecting: false,
+  picked: new Set(),
+  visibleAppids: new Set(),
+};
+
+let liveJobsByAppid = indexLiveJobsByAppid(state.jobs);
+
+/** The currently-mounted <section>, or null. `renderLibrary()` is called
+ * fresh on every navigation to /library (app.js replaces #view-root's
+ * children wholesale, no unmount hook) — store subscriptions below check
+ * `mounted()` before touching the DOM so a background tick while a
+ * DIFFERENT view is showing is a cheap no-op, not a stale-node crash. */
+let sectionEl = null;
+function mounted() {
+  return sectionEl !== null && sectionEl.isConnected;
+}
+
+/** DOM refs for the currently-built section, reassigned by buildSection().
+ * Bulk-bar/dialog target ids captured alongside for the click handlers
+ * that are wired ONCE per mount (buildSection runs once per render). */
+let els = null;
+let currentBulkPrimaryTargets = [];
+let currentBulkSecondaryTargets = [];
+let currentBulkDeleteIds = [];
+let pendingDeleteIds = null;
+
+// ---------------------------------------------------------------------
+// Selection mode
+// ---------------------------------------------------------------------
+
+function enterSelect(appid) {
+  state.selecting = true;
+  document.body.classList.add("selecting");
+  if (appid != null) state.picked.add(appid);
+  fullRender();
+}
+
+function exitSelect() {
+  state.selecting = false;
+  state.picked.clear();
+  document.body.classList.remove("selecting");
+  fullRender();
+}
+
+function onToggle(appid) {
+  if (state.picked.has(appid)) state.picked.delete(appid);
+  else state.picked.add(appid);
+  if (state.picked.size === 0) {
+    exitSelect();
+    return;
+  }
+  fullRender();
+}
+
+function onOpen(/* appid */) {
+  // Detail sheet ships in WP 4a.4 (serial after this one) — intentionally
+  // a no-op rather than a fabricated placeholder screen. See module header.
+}
+
+// ---------------------------------------------------------------------
+// Per-card actions (capsule pill / list-row icon)
+// ---------------------------------------------------------------------
+
+async function onAction(appid, actionType) {
+  try {
+    if (actionType === "download") {
+      await api.prefill([appid]);
+      showToast("Queued for download");
+    } else if (actionType === "pause") {
+      const job = liveJobsByAppid.get(appid);
+      if (!job) return;
+      await api.pauseJob(job.id);
+      showToast("Pause requested", { warn: true });
+    } else if (actionType === "resume") {
+      const job = liveJobsByAppid.get(appid);
+      if (!job) return;
+      await api.resumeJob(job.id);
+      showToast("Resuming — back in the queue");
+    }
+    store.refreshNow();
+  } catch (err) {
+    showToast(errorText(err), { warn: true });
+  }
+}
+
+// ---------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------
+
+function renderChips() {
+  const counts = chipCounts(state.games, { query: state.query, liveJobsByAppid });
+  els.chips.replaceChildren();
+  for (const c of counts) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chip";
+    btn.dataset.f = c.key;
+    btn.setAttribute("aria-pressed", String(state.filterKey === c.key));
+    btn.appendChild(document.createTextNode(c.label + " "));
+    const n = document.createElement("span");
+    n.className = "n";
+    n.textContent = String(c.count);
+    btn.appendChild(n);
+    els.chips.appendChild(btn);
+  }
+}
+
+function renderEmptyState() {
+  if (state.query) {
+    const wrap = document.createElement("div");
+    wrap.className = "noresult";
+    const p = document.createElement("p");
+    p.appendChild(document.createTextNode("No game in your library matches "));
+    const b = document.createElement("b");
+    b.textContent = `"${state.query}"`;
+    p.appendChild(b);
+    p.appendChild(
+      document.createTextNode(state.filterKey !== "all" ? " with this filter." : "."),
+    );
+    wrap.appendChild(p);
+    const clearBtn = document.createElement("button");
+    clearBtn.type = "button";
+    clearBtn.className = "btn sm";
+    clearBtn.textContent = "Clear search";
+    clearBtn.addEventListener("click", clearSearch);
+    wrap.appendChild(clearBtn);
+    return wrap;
+  }
+  const p = document.createElement("p");
+  p.className = "empty";
+  p.textContent = "Nothing here with this filter.";
+  return p;
+}
+
+function renderGrid() {
+  const list = visibleGames(state.games, {
+    query: state.query,
+    filterKey: state.filterKey,
+    liveJobsByAppid,
+  });
+  state.visibleAppids = new Set(list.map((g) => g.appid));
+  els.grid.className = ("grid " + (LAYOUT_CLASS[state.layout] || "")).trim();
+  els.grid.replaceChildren();
+
+  if (list.length === 0) {
+    els.grid.appendChild(renderEmptyState());
+    return;
+  }
+
+  for (const game of list) {
+    els.grid.appendChild(
+      buildCard(game, {
+        liveJob: liveJobsByAppid.get(game.appid),
+        picked: state.picked.has(game.appid),
+        selecting: state.selecting,
+        onOpen,
+        onLongPress: enterSelect,
+        onToggle,
+        onAction,
+      }),
+    );
+  }
+}
+
+function setButtonEnabled(btn, enabled, label) {
+  btn.disabled = !enabled;
+  btn.classList.toggle("primary", enabled);
+  btn.textContent = label;
+}
+
+function syncBulk() {
+  els.bulkBar.classList.toggle("up", state.selecting);
+  els.selectBtn.classList.toggle("on", state.selecting);
+  els.bulkCount.textContent = String(state.picked.size);
+  const hiddenCount = [...state.picked].filter((id) => !state.visibleAppids.has(id)).length;
+  els.bulkHidden.textContent = hiddenCount ? ` · ${hiddenCount} out of view` : "";
+
+  if (!state.selecting) {
+    currentBulkPrimaryTargets = [];
+    currentBulkSecondaryTargets = [];
+    currentBulkDeleteIds = [];
+    return;
+  }
+
+  const gamesByAppid = new Map(state.games.map((g) => [g.appid, g]));
+  const pickedGames = [...state.picked].map((id) => gamesByAppid.get(id)).filter(Boolean);
+
+  const classification = classifyBulkSelection(pickedGames, state.jobs);
+  const plan = buildBulkDownloadPlan(classification, pickedGames.length);
+
+  setButtonEnabled(els.bulkPrimary, plan.primaryEnabled, plan.primaryLabel);
+  currentBulkPrimaryTargets = plan.primaryTargets;
+  els.bulkNote.textContent = plan.note;
+
+  if (plan.secondaryLabel) {
+    els.bulkSecondary.style.display = "";
+    els.bulkSecondary.textContent = plan.secondaryLabel;
+    currentBulkSecondaryTargets = plan.secondaryTargets;
+  } else {
+    els.bulkSecondary.style.display = "none";
+    currentBulkSecondaryTargets = [];
+  }
+
+  // Bulk delete eligibility lives in bulk-plan.js (js/lib/bulk-plan.js's
+  // classifyBulkDeleteEligibility) — has-cache-content, not "status is not
+  // none" (an `error` app with zero visible bytes has no depot mappings
+  // left and would just 404; see that function's docstring).
+  const deletable = classifyBulkDeleteEligibility(pickedGames, state.jobs);
+  if (deletable.length) {
+    els.bulkDelete.style.display = "";
+    els.bulkDelete.textContent =
+      deletable.length < pickedGames.length
+        ? `Delete ${deletable.length} of ${pickedGames.length}`
+        : `Delete ${deletable.length === 1 ? "1 game" : deletable.length + " games"}`;
+    currentBulkDeleteIds = deletable.map((g) => g.appid);
+  } else {
+    els.bulkDelete.style.display = "none";
+    currentBulkDeleteIds = [];
+  }
+}
+
+function updateSubtitle() {
+  const cachedCount = state.games.filter(
+    (g) => dispKind(g, liveJobsByAppid.get(g.appid)) === KIND.CACHED,
+  ).length;
+  els.sub.textContent = `${state.games.length} owned · ${cachedCount} on the cache`;
+}
+
+function fullRender() {
+  if (!mounted()) return;
+  updateSubtitle();
+  renderChips();
+  renderGrid();
+  syncBulk();
+}
+
+// ---------------------------------------------------------------------
+// Search / chips / layout
+// ---------------------------------------------------------------------
+
+function applySearch(rawValue) {
+  state.query = normalizeQuery(rawValue);
+  els.searchWrap.classList.toggle("filled", els.searchInput.value.length > 0);
+  fullRender();
+}
+function clearSearch() {
+  els.searchInput.value = "";
+  applySearch("");
+  els.searchInput.focus();
+}
+
+function setLayout(value, announce) {
+  if (!Object.prototype.hasOwnProperty.call(LAYOUT_CLASS, value)) return;
+  state.layout = value;
+  writeStoredLayout(value);
+  for (const btn of els.layoutSegs.querySelectorAll("button[data-layout]")) {
+    btn.setAttribute("aria-pressed", String(btn.dataset.layout === value));
+  }
+  fullRender();
+  if (announce) showToast(`${LAYOUT_LABEL[value]} layout`);
+}
+
+// ---------------------------------------------------------------------
+// Bulk-delete confirm dialog (multiPlan)
+// ---------------------------------------------------------------------
+
+function renderDeletePlan(plan, ids, gamesByAppid) {
+  const freedText = formatBytesGB(plan.freedBytes) || "0 GB";
+  const occupiedText = formatBytesGB(plan.occupiedBytes) || "0 GB";
+
+  els.dText.replaceChildren();
+  if (ids.length > 1) {
+    els.dText.append(
+      "Deleting ",
+      strong(`${ids.length} games`),
+      " frees about ",
+      strong(freedText, "num"),
+      " of the ",
+      strong(occupiedText, "num"),
+      " they occupy.",
+    );
+  } else {
+    const name = gamesByAppid.get(ids[0])?.name || `App ${ids[0]}`;
+    els.dText.append(
+      "Deleting ",
+      strong(name),
+      " frees about ",
+      strong(freedText, "num"),
+      " of the ",
+      strong(occupiedText, "num"),
+      " it occupies.",
+    );
+  }
+
+  els.dNote.replaceChildren();
+  if (plan.sharedRows.length === 0) {
+    const p = document.createElement("p");
+    p.className = "cfsolo";
+    p.textContent = `No shared depots — the full ${occupiedText} is freed.`;
+    els.dNote.appendChild(p);
+    return;
+  }
+
+  const label = document.createElement("p");
+  label.className = "cflabel";
+  label.textContent = `${plan.sharedRows.length} shared depot${plan.sharedRows.length > 1 ? "s" : ""}`;
+  els.dNote.appendChild(label);
+
+  const ul = document.createElement("ul");
+  ul.className = "cflist";
+  for (const row of plan.sharedRows) {
+    const li = document.createElement("li");
+    li.className = row.free ? "free" : "keep";
+    const did = document.createElement("span");
+    did.className = "did";
+    did.textContent = String(row.depotid);
+    const mk = document.createElement("span");
+    mk.className = "mk";
+    mk.textContent = row.free ? "freed" : "kept";
+    const dsz = document.createElement("span");
+    dsz.className = "dsz";
+    dsz.textContent = formatBytesGB(row.sizeBytes) || "—";
+    const why = document.createElement("span");
+    why.className = "why";
+    if (row.free) {
+      why.textContent = row.others.length
+        ? `no cached co-owner — ${namesFor(row.others, gamesByAppid)} ${row.others.length > 1 ? "are" : "is"} not cached`
+        : "every game mapping this depot is in this selection";
+    } else {
+      why.textContent = `${namesFor(row.holderAppids, gamesByAppid)} still cached`;
+    }
+    li.append(did, mk, dsz, why);
+    ul.appendChild(li);
+  }
+  els.dNote.appendChild(ul);
+
+  const total = document.createElement("p");
+  total.className = "cftotal";
+  total.append(strong(freedText), " freed · ", strong(formatBytesGB(plan.keptBytes) || "0 GB"), " stays on disk");
+  els.dNote.appendChild(total);
+}
+
+function strong(text, extraClass) {
+  const b = document.createElement("b");
+  if (extraClass) b.className = extraClass;
+  b.textContent = text;
+  return b;
+}
+
+async function openDeleteConfirm(ids) {
+  pendingDeleteIds = ids;
+  const gamesByAppid = new Map(state.games.map((g) => [g.appid, g]));
+  els.dTitle.textContent =
+    ids.length > 1 ? `Delete ${ids.length} games from cache?` : "Delete from cache?";
+  els.dText.textContent = "Calculating what this would free…";
+  els.dNote.replaceChildren();
+  els.dYes.disabled = true;
+  els.dialogBackdrop.classList.add("on");
+
+  try {
+    const [details, mapping] = await Promise.all([
+      Promise.all(ids.map((id) => api.game(id))),
+      api.mapping(),
+    ]);
+    const activeJobAppids = new Set(
+      state.jobs.filter((j) => ACTIVE_JOB_STATUSES.includes(j.status)).map((j) => j.appid),
+    );
+    const plan = buildMultiPlan(ids, { details, mapping, gamesByAppid, activeJobAppids });
+    renderDeletePlan(plan, ids, gamesByAppid);
+    els.dYes.disabled = false;
+  } catch (err) {
+    els.dText.textContent = `Could not calculate the delete plan: ${errorText(err)}`;
+    els.dYes.disabled = true;
+  }
+}
+
+function closeDeleteConfirm() {
+  els.dialogBackdrop.classList.remove("on");
+  pendingDeleteIds = null;
+}
+
+async function confirmDelete() {
+  const ids = pendingDeleteIds;
+  if (!ids) return;
+  els.dYes.disabled = true;
+  els.dNo.disabled = true;
+  const results = await Promise.allSettled(ids.map((id) => api.deleteCache(id)));
+  els.dYes.disabled = false;
+  els.dNo.disabled = false;
+  closeDeleteConfirm();
+  exitSelect();
+  store.refreshNow();
+
+  // Report what the SERVER actually did, not this dialog's preview — the
+  // server re-checks every depot's co-owner state immediately before
+  // removing it (api/README.md "Two-stage decision"), so it is the
+  // authority, not multiplan.js's prediction (see that module's header).
+  let freedTotal = 0;
+  let failedCount = 0;
+  for (const r of results) {
+    if (r.status === "fulfilled") freedTotal += r.value?.total_bytes_freed || 0;
+    else failedCount += 1;
+  }
+  const freedText = formatBytesGB(freedTotal) || "0 GB";
+  showToast(
+    failedCount
+      ? `Freed ${freedText} · ${failedCount} delete${failedCount > 1 ? "s" : ""} failed`
+      : `Freed ${freedText}`,
+    { warn: !!failedCount },
+  );
+}
+
+// ---------------------------------------------------------------------
+// Static DOM construction (rebuilt fresh on every mount — see mounted())
+// ---------------------------------------------------------------------
+
+function segButton(layoutKey, title, svgMarkup) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.dataset.layout = layoutKey;
+  btn.title = title;
+  btn.setAttribute("aria-label", title);
+  btn.setAttribute("aria-pressed", String(state.layout === layoutKey));
+  // Static, non-interpolated decorative markup only (no user data ever
+  // flows through this helper) — same trust level as the literal SVGs
+  // already inline in index.html's nav.
+  btn.innerHTML = svgMarkup;
+  return btn;
+}
+
+function buildSection() {
+  document.body.classList.toggle("selecting", state.selecting);
+
   const section = document.createElement("section");
   section.className = "view view-library";
 
+  const head = document.createElement("div");
+  head.className = "lib-head";
+  const titles = document.createElement("div");
   const h1 = document.createElement("h1");
   h1.textContent = "Library";
+  const sub = document.createElement("span");
+  sub.className = "lib-sub";
+  titles.append(h1, sub);
 
-  const p = document.createElement("p");
-  p.className = "view-placeholder";
-  p.textContent =
-    "Your cached and cacheable games will appear here once the library view ships (WP 4a.3).";
+  const tools = document.createElement("div");
+  tools.className = "lib-tools";
 
-  section.append(h1, p);
+  const layoutSegs = document.createElement("div");
+  layoutSegs.className = "segs";
+  layoutSegs.setAttribute("role", "group");
+  layoutSegs.setAttribute("aria-label", "Library layout");
+  layoutSegs.append(
+    segButton(
+      "grid2",
+      "Two columns",
+      '<svg width="16" height="16" viewBox="0 0 18 18" fill="currentColor"><rect x="2" y="3" width="6" height="12" rx="1.5"/><rect x="10" y="3" width="6" height="12" rx="1.5"/></svg>',
+    ),
+    segButton(
+      "grid3",
+      "Three columns",
+      '<svg width="16" height="16" viewBox="0 0 18 18" fill="currentColor"><rect x="2" y="3" width="3.6" height="12" rx="1.2"/><rect x="7.2" y="3" width="3.6" height="12" rx="1.2"/><rect x="12.4" y="3" width="3.6" height="12" rx="1.2"/></svg>',
+    ),
+    segButton(
+      "list",
+      "List",
+      '<svg width="16" height="16" viewBox="0 0 18 18" fill="currentColor"><rect x="2" y="3.4" width="14" height="2.6" rx="1.3"/><rect x="2" y="7.7" width="14" height="2.6" rx="1.3"/><rect x="2" y="12" width="14" height="2.6" rx="1.3"/></svg>',
+    ),
+  );
+
+  const selectBtn = document.createElement("button");
+  selectBtn.type = "button";
+  selectBtn.className = "iconbtn";
+  selectBtn.title = "Select games";
+  selectBtn.setAttribute("aria-label", "Select games");
+  selectBtn.innerHTML =
+    '<svg width="19" height="19" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2.5" y="2.5" width="15" height="15" rx="3.5"/><path d="m6.4 10.2 2.4 2.5 4.8-5"/></svg>';
+
+  tools.append(layoutSegs, selectBtn);
+  head.append(titles, tools);
+
+  const searchWrap = document.createElement("div");
+  searchWrap.className = "search";
+  const mag = document.createElement("span");
+  mag.className = "mag";
+  mag.setAttribute("aria-hidden", "true");
+  mag.innerHTML =
+    '<svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="8.8" cy="8.8" r="5.6"/><path d="m13 13 4 4"/></svg>';
+  const searchInput = document.createElement("input");
+  searchInput.type = "text";
+  searchInput.id = "lib-q";
+  searchInput.inputMode = "search";
+  searchInput.placeholder = "Search your library";
+  searchInput.autocomplete = "off";
+  searchInput.spellcheck = false;
+  searchInput.setAttribute("aria-label", "Search library by title");
+  searchInput.value = state.query;
+  const qClear = document.createElement("button");
+  qClear.type = "button";
+  qClear.className = "qx";
+  qClear.setAttribute("aria-label", "Clear search");
+  qClear.innerHTML =
+    '<svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><path d="m5.5 5.5 9 9M14.5 5.5l-9 9"/></svg>';
+  searchWrap.append(mag, searchInput, qClear);
+  searchWrap.classList.toggle("filled", state.query.length > 0);
+
+  const chips = document.createElement("div");
+  chips.className = "chips";
+  chips.setAttribute("role", "group");
+  chips.setAttribute("aria-label", "Filter library");
+
+  const grid = document.createElement("div");
+  grid.className = "grid";
+
+  const hint = document.createElement("p");
+  hint.className = "hint";
+  hint.textContent = "Long-press (or right-click) a game to select several.";
+
+  // ---- bulk bar ----
+  const bulkBar = document.createElement("div");
+  bulkBar.className = "bulk";
+  const bulkHead = document.createElement("div");
+  bulkHead.className = "bulkhead";
+  const count = document.createElement("span");
+  count.className = "count";
+  const bulkCount = document.createElement("b");
+  bulkCount.textContent = "0";
+  const bulkHidden = document.createElement("span");
+  bulkHidden.className = "hid";
+  count.append(bulkCount, " selected", bulkHidden);
+  const bulkCancel = document.createElement("button");
+  bulkCancel.type = "button";
+  bulkCancel.className = "btn ghost sm";
+  bulkCancel.textContent = "Cancel";
+  bulkHead.append(count, bulkCancel);
+  const bulkNote = document.createElement("p");
+  bulkNote.className = "bulknote";
+  const bulkBtns = document.createElement("div");
+  bulkBtns.className = "bulkbtns";
+  const bulkDelete = document.createElement("button");
+  bulkDelete.type = "button";
+  bulkDelete.className = "btn danger sm";
+  bulkDelete.style.display = "none";
+  const bulkSecondary = document.createElement("button");
+  bulkSecondary.type = "button";
+  bulkSecondary.className = "btn ghost sm";
+  bulkSecondary.style.display = "none";
+  const bulkPrimary = document.createElement("button");
+  bulkPrimary.type = "button";
+  bulkPrimary.className = "btn primary sm";
+  bulkPrimary.textContent = "Download";
+  bulkBtns.append(bulkDelete, bulkSecondary, bulkPrimary);
+  bulkBar.append(bulkHead, bulkNote, bulkBtns);
+
+  // ---- confirm dialog ----
+  const dialogBackdrop = document.createElement("div");
+  dialogBackdrop.className = "dialog-backdrop";
+  const dialog = document.createElement("div");
+  dialog.className = "dialog";
+  dialog.setAttribute("role", "alertdialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-label", "Confirm deletion");
+  const dTitle = document.createElement("h3");
+  const dText = document.createElement("p");
+  const dNote = document.createElement("div");
+  const dRow = document.createElement("div");
+  dRow.className = "row";
+  const dNo = document.createElement("button");
+  dNo.type = "button";
+  dNo.className = "btn ghost sm";
+  dNo.textContent = "Keep";
+  const dYes = document.createElement("button");
+  dYes.type = "button";
+  dYes.className = "btn danger sm";
+  dYes.textContent = "Delete";
+  dRow.append(dNo, dYes);
+  dialog.append(dTitle, dText, dNote, dRow);
+  dialogBackdrop.appendChild(dialog);
+
+  section.append(head, searchWrap, chips, grid, hint, bulkBar, dialogBackdrop);
+
+  els = {
+    sub,
+    layoutSegs,
+    selectBtn,
+    searchWrap,
+    searchInput,
+    qClear,
+    chips,
+    grid,
+    bulkBar,
+    bulkCount,
+    bulkHidden,
+    bulkCancel,
+    bulkNote,
+    bulkDelete,
+    bulkSecondary,
+    bulkPrimary,
+    dialogBackdrop,
+    dTitle,
+    dText,
+    dNote,
+    dNo,
+    dYes,
+  };
+
+  // ---- static listeners (wired once per mount — see mounted()) ----
+  searchInput.addEventListener("input", (e) => applySearch(e.target.value));
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      clearSearch();
+    }
+  });
+  qClear.addEventListener("click", clearSearch);
+
+  chips.addEventListener("click", (e) => {
+    const btn = e.target.closest(".chip");
+    if (!btn) return;
+    state.filterKey = btn.dataset.f;
+    fullRender();
+  });
+
+  layoutSegs.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-layout]");
+    if (!btn) return;
+    setLayout(btn.dataset.layout, true);
+  });
+
+  selectBtn.addEventListener("click", () => {
+    if (state.selecting) exitSelect();
+    else enterSelect(null);
+  });
+  bulkCancel.addEventListener("click", exitSelect);
+
+  bulkPrimary.addEventListener("click", async () => {
+    if (!currentBulkPrimaryTargets.length) return;
+    const targets = currentBulkPrimaryTargets;
+    const skipped = state.picked.size - targets.length;
+    try {
+      await api.prefill(targets);
+      showToast(
+        `${targets.length} job${targets.length > 1 ? "s" : ""} queued` +
+          (skipped ? ` · ${skipped} already cached` : ""),
+      );
+      exitSelect();
+      store.refreshNow();
+    } catch (err) {
+      showToast(errorText(err), { warn: true });
+    }
+  });
+
+  bulkSecondary.addEventListener("click", async () => {
+    if (!currentBulkSecondaryTargets.length) return;
+    const targets = currentBulkSecondaryTargets;
+    try {
+      await api.prefill(targets);
+      showToast(`${targets.length} re-download${targets.length > 1 ? "s" : ""} queued`);
+      exitSelect();
+      store.refreshNow();
+    } catch (err) {
+      showToast(errorText(err), { warn: true });
+    }
+  });
+
+  bulkDelete.addEventListener("click", () => {
+    if (currentBulkDeleteIds.length) openDeleteConfirm(currentBulkDeleteIds);
+  });
+
+  dNo.addEventListener("click", closeDeleteConfirm);
+  dYes.addEventListener("click", confirmDelete);
+
+  return section;
+}
+
+// ---------------------------------------------------------------------
+// Games-tick patch/rebuild (WP 4a.3 review fix, blocker B1)
+//
+// The round-7 mockup rule ("rebuild DOM only when a card's STATE changes...
+// patch the volatile values in place... touch no animated node") is
+// binding for the GAMES poll too, not just the jobs one — the 15 s games
+// poll drifts `size_bytes` upward for a running download independently of
+// the jobs poll, and a naive "any updated row -> rebuild" would recreate
+// the animated status-icon `<svg>` subtree (restarting its CSS animation)
+// on every such tick. `js/lib/render-plan.js`'s `planGamesUpdate` is the
+// pure decision (structural key changed -> rebuild; unchanged -> patch);
+// everything below is the DOM-side execution of that decision.
+// ---------------------------------------------------------------------
+
+/** appid -> the `data-dk` currently painted on that appid's card, for
+ * every card ON SCREEN right now. Read fresh from the live grid each time
+ * (cheap — a handful of cards) rather than kept as separate bookkeeping
+ * state that could drift from what is actually painted. */
+function currentCardKeys() {
+  const map = new Map();
+  if (!els) return map;
+  for (const card of els.grid.querySelectorAll(".card[data-appid]")) {
+    map.set(Number(card.dataset.appid), card.dataset.dk);
+  }
+  return map;
+}
+
+function computeCardKey(game) {
+  return cardStructuralKey(game, liveJobsByAppid.get(game.appid));
+}
+
+/** Would `game` still be part of the currently visible (search + chip
+ * filtered) list? Used to bail a per-card rebuild out to a full render
+ * when a structural transition would also change GRID MEMBERSHIP (e.g.
+ * the active chip is "Failed" and this game just stopped being an error) —
+ * reuses the same tested predicate the initial render is built from
+ * (library-filters.js), so there is only one definition of "visible" in
+ * this file. */
+function stillMatchesCurrentView(game) {
+  return (
+    visibleGames([game], {
+      query: state.query,
+      filterKey: state.filterKey,
+      liveJobsByAppid,
+    }).length === 1
+  );
+}
+
+/** Rebuild exactly one card (a genuine structural transition) — every
+ * OTHER card on screen, including one that is actively animating, is left
+ * completely untouched. */
+function rebuildCard(appid) {
+  const game = state.games.find((g) => g.appid === appid);
+  const cardEl = els.grid.querySelector(`.card[data-appid="${appid}"]`);
+  if (!game || !cardEl) return;
+  const newCard = buildCard(game, {
+    liveJob: liveJobsByAppid.get(appid),
+    picked: state.picked.has(appid),
+    selecting: state.selecting,
+    onOpen,
+    onLongPress: enterSelect,
+    onToggle,
+    onAction,
+  });
+  cardEl.replaceWith(newCard);
+}
+
+/** Patch exactly one card's volatile text (no node created/removed/
+ * replaced — the status-icon subtree, and any animation running on it, is
+ * never touched). Only ever called for an appid `render-plan.js` has
+ * already established has an UNCHANGED structural key. */
+function patchCard(appid) {
+  const game = state.games.find((g) => g.appid === appid);
+  const cardEl = els.grid.querySelector(`.card[data-appid="${appid}"]`);
+  if (!game || !cardEl) return;
+  patchCardVolatile(cardEl, game, cardEl.dataset.dk);
+}
+
+/** One `GET /v1/games` tick: patch/rebuild exactly the cards that need it,
+ * or fall back to a full render when the plan says so or when a
+ * structural transition would also change which cards the current
+ * filter/search shows. */
+function applyGamesTick(diff) {
+  const plan = planGamesUpdate(diff, currentCardKeys(), computeCardKey);
+  if (plan.full) {
+    fullRender();
+    return;
+  }
+  for (const appid of plan.rebuild) {
+    const game = state.games.find((g) => g.appid === appid);
+    if (!game || !stillMatchesCurrentView(game)) {
+      // A structural change that also moves this card in or out of the
+      // active filter/chip view — grid MEMBERSHIP, not just this card's
+      // own content. Bail to a full render for the whole tick, same as
+      // the mockup's own structural-mismatch fallback
+      // (`patchGridProgress`'s `if (card.dataset.dk !== dispKind(...))
+      // renderGrid()`).
+      fullRender();
+      return;
+    }
+    rebuildCard(appid);
+  }
+  for (const appid of plan.patch) patchCard(appid);
+
+  if (plan.rebuild.length) {
+    // Only a REBUILT card can have changed `dispKind` (a patch-only update
+    // is, by definition, the same structural key), so the chip counts and
+    // "N on the cache" subtitle only need refreshing when something was
+    // rebuilt — cheap either way (chips carry no animation to protect) but
+    // no reason to touch them on a pure size-drift tick.
+    renderChips();
+    updateSubtitle();
+    syncBulk();
+  }
+}
+
+// ---------------------------------------------------------------------
+// Store subscriptions — set up ONCE at module load, never per mount (see
+// store-singleton.js's header for why: views are re-created on every
+// navigation with no unmount hook, so subscribing per-render would stack
+// duplicate listeners). Every callback is a safe no-op while a different
+// view is mounted.
+// ---------------------------------------------------------------------
+
+store.subscribe("games", ({ items, diff }) => {
+  if (!Array.isArray(items)) return; // {error} payload — nothing to render
+  state.games = items;
+  if (!mounted()) return;
+  applyGamesTick(diff);
+});
+
+store.subscribe("jobs", ({ items, diff }) => {
+  if (!Array.isArray(items)) return;
+  const prevLive = liveJobsByAppid;
+  const newLive = indexLiveJobsByAppid(items);
+  state.jobs = items;
+
+  let structuralChange = !diff || diff.isFirst;
+  if (!structuralChange) {
+    const appids = new Set([...prevLive.keys(), ...newLive.keys()]);
+    for (const appid of appids) {
+      if (isJobStateTransition(prevLive.get(appid), newLive.get(appid))) {
+        structuralChange = true;
+        break;
+      }
+    }
+  }
+  liveJobsByAppid = newLive;
+  // The bulk bar's busy/queued classification also depends on non-live
+  // (queued) jobs, so it is always kept in sync even when nothing
+  // structural happened to a card (cheap: only touches the bar, no cards).
+  if (mounted()) syncBulk();
+  if (structuralChange) fullRender();
+});
+
+onViewChange((view) => {
+  if (view === "library") return;
+  if (state.selecting) {
+    state.selecting = false;
+    state.picked.clear();
+    document.body.classList.remove("selecting");
+  }
+  // Release the detached DOM tree — app.js's replaceChildren() already
+  // detached it, but this module held its own reference in `sectionEl`
+  // (mounted()'s isConnected check would already report false, this just
+  // stops the tree from being reachable, and therefore keepable by the
+  // GC, through this module for no reason once we've navigated away).
+  sectionEl = null;
+});
+
+export function renderLibrary() {
+  const section = buildSection();
+  sectionEl = section;
+  fullRender();
   return section;
 }

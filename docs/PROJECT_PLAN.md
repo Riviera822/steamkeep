@@ -508,6 +508,16 @@ parallel/serial decisions, merge discipline, open user decisions):
       silent, cancelled silent, update_ready gated on cached bytes,
       bypass both directions); 60 headless Node tests; Opus
       FAIL→fix→PASS with 10-mutation battery)*
+      *(WP 4a.3 done 2026-08-10: library view — grid 2/3/list, ANDed
+      search+chips (Failed replaces Update ready until the stale field
+      exists — recorded divergence in WORKPACKAGES.md), capsule pills,
+      multi-select with mockup-faithful bulk-download split and set-aware
+      multiPlan bulk delete (fail-closed on unresolvable owners), real
+      Steam cover art behind an exact-value CSP img-src pin with offline
+      fallback tiles, and round-7 patch-in-place for games ticks
+      (render-plan.js; node-identity verified live, icon subtree
+      untouched by instrumented proof); 135 headless Node tests; Opus
+      FAIL→fix→PASS, 7/7 render-plan + 16-mutation battery killed)*
 - [ ] Steam identity via Sign in with Steam (ADR-0004); library fetch per
       the 2026-08-09 addendum (user decision A+C): opt-in server-side relay
       because the Steam Web API sends no CORS headers — Android keeps the
