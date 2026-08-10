@@ -34,6 +34,13 @@ export const STATUS_LABEL = {
   verify: "Verifying",
   error: "Failed",
   warn: "Warning",
+  // Added WP 4a.5 for the Downloads history list: a real, terminal job
+  // status (WP 3.12) the mockup never modeled as a distinct outcome — its
+  // JOBS fixture only ever had done/error. "Cancelled" is deliberately its
+  // own word/glyph/colour, not a re-skinned "Failed": stopping a job on
+  // purpose is not a failure (api/README.md "The status model" — job
+  // outcome honesty, docs/PROJECT_PLAN.md).
+  cancelled: "Cancelled",
 };
 
 /** Which glyph shape a given status kind uses. */
@@ -47,6 +54,7 @@ const KIND_GLYPH = {
   paused: "pause",
   error: "bang",
   warn: "bang",
+  cancelled: "stop",
 };
 
 function svgEl(tag, attrs) {
@@ -98,12 +106,21 @@ function buildPause() {
   ];
 }
 
+function buildStop() {
+  // A plain filled square — deliberately NOT the pause glyph (two bars):
+  // pause is resumable and keeps the mockup's shape; cancelled is terminal
+  // and needs its own silhouette so the two are never confusable at a
+  // glance (the whole point of the shape-first status-icon system).
+  return [svgEl("rect", { x: "7", y: "7", width: "10", height: "10", rx: "1.6" })];
+}
+
 const GLYPH_BUILDERS = {
   check: buildCheck,
   download: buildDownload,
   refresh: buildRefresh,
   bang: buildBang,
   pause: buildPause,
+  stop: buildStop,
 };
 
 /**
@@ -123,7 +140,7 @@ export function createStatusIcon(kind, { size = "md" } = {}) {
   wrap.className = "sic k-" + knownKind + (size === "sm" ? " sic-sm" : size === "lg" ? " sic-lg" : "");
 
   const svg = svgEl("svg", { viewBox: "0 0 24 24", "aria-hidden": "true" });
-  if (shape === "pause") {
+  if (shape === "pause" || shape === "stop") {
     svg.setAttribute("fill", "currentColor");
   } else {
     svg.setAttribute("fill", "none");

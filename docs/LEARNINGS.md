@@ -340,3 +340,14 @@ These are not style preferences; each entry cost a review round to learn.
   card, record every querySelector/mutation, and wire createElementNS to
   THROW — a patch path that would rebuild an icon then fails loudly
   instead of passing on trust (WP 4a.3 review technique).
+- A mounted()/isConnected gate on a freshly BUILT section no-ops the first
+  paint: render() runs synchronously before app.js attaches the node, so
+  isConnected is false at exactly that moment. Nulling sectionEl in the
+  view-change listener is the complete staleness signal on its own — and
+  with a per-card patch planner the bug stops self-healing (re-navigation
+  leaves an empty grid until real data changes) (WP 4a.5; twin bug in
+  library.js fixed separately).
+- Status-icon kinds follow the SHIPPED status set, not the mockup's: a
+  terminal 'cancelled' needs its own neutral glyph and sr word — reusing
+  the error glyph would misreport an operator action as a failure
+  (WP 4a.5, same class as the Failed-chip divergence).

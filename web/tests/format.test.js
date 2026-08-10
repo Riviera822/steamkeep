@@ -4,7 +4,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatBytesGB } from "../js/lib/format.js";
+import { formatBytesGB, formatTimestamp } from "../js/lib/format.js";
 
 test("formatBytesGB: under 100 GB gets one decimal place", () => {
   assert.equal(formatBytesGB(5_000_000_000), "4.7 GB");
@@ -24,4 +24,22 @@ test("formatBytesGB: non-finite input never fabricates a number", () => {
 });
 test("formatBytesGB: non-number input never fabricates a number", () => {
   assert.equal(formatBytesGB("5000000000"), null);
+});
+
+// formatTimestamp (WP 4a.5, Downloads history rows) — added WP 4a.5.
+test("formatTimestamp: null/undefined never fabricate a time", () => {
+  assert.equal(formatTimestamp(null), "—");
+  assert.equal(formatTimestamp(undefined), "—");
+});
+test("formatTimestamp: an unparseable string never fabricates a time", () => {
+  assert.equal(formatTimestamp("not a date"), "—");
+  assert.equal(formatTimestamp(""), "—");
+});
+test("formatTimestamp: a valid ISO timestamp renders the real date", () => {
+  // Deliberately not asserting the exact locale-formatted string (that
+  // varies with the test runner's locale/timezone) — just that a REAL
+  // value came through untouched, not the "nothing honest to print" dash.
+  const result = formatTimestamp("2026-06-15T12:00:00Z");
+  assert.notEqual(result, "—");
+  assert.ok(result.includes("2026"));
 });

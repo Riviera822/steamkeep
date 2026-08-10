@@ -89,6 +89,11 @@ a{ color:var(--accent); }
 .sic.k-verify  { background:var(--accent); }
 .sic.k-error   { background:var(--danger); }
 .sic.k-warn    { background:var(--stale); }
+/* Added WP 4a.5: a stopped-on-purpose job is neither a failure (--danger)
+   nor a success (--ok) — the muted, desaturated tone already used for
+   "not cached"/dim text reads as deliberately neutral, matching job
+   outcome honesty (docs/PROJECT_PLAN.md). */
+.sic.k-cancelled{ background:var(--dim-2); color:var(--text); }
 
 .sic-lg{ --sz:19px; }
 .sic-sm{ --sz:16px; }

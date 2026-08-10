@@ -128,6 +128,15 @@ real shipped API surface the mockup never modeled — a failed prefill
 needs a findable home. When the stale field lands, Update ready returns
 and the chip set is re-decided against the mockup.
 
+Recorded divergence (WP 4a.5, 2026-08-10, reviewer-endorsed, same class):
+a `cancelled` status-icon kind exists (distinct stop glyph, neutral
+colour, own screen-reader word) because `cancelled` is a real terminal
+job status (WP 3.12) the mockup never modeled; re-skinning it as Failed
+would misreport an operator action. Also recorded for the 4a.8 polish
+pass: job cards ship without the mockup's decorative mini cover
+thumbnail (no information lost; mockup itself hides all content inside
+`.thumb`).
+
 ### WP 4a.1 — Static serving + app shell (api/ + web/) — **first, serial**
 - vault-api mounts `web/` (StaticFiles, SPA fallback, sane CSP/security
   headers, no-cache for index). Router auth must NOT cover static assets;

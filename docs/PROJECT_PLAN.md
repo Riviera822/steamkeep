@@ -518,6 +518,15 @@ parallel/serial decisions, merge discipline, open user decisions):
       (render-plan.js; node-identity verified live, icon subtree
       untouched by instrumented proof); 135 headless Node tests; Opus
       FAIL→fix→PASS, 7/7 render-plan + 16-mutation battery killed)*
+      *(WP 4a.5 done 2026-08-10: downloads view — Active/Paused as
+      independent sections per the recorded slot-release divergence
+      (paused holds no slot, queue hint says so), FIFO queue with
+      positions, history newest-first with lazy-fetched cached log
+      excerpts, pause/resume/cancel non-optimistic with error-taxonomy
+      toasts, nav queue-pip with aria-label, new neutral 'cancelled'
+      icon kind (recorded divergence), jobs-tick patch-in-place
+      (stop_request drift patches, status change rebuilds); 173 headless
+      Node tests; Opus PASS, 12/12 mutation battery killed)*
 - [ ] Steam identity via Sign in with Steam (ADR-0004); library fetch per
       the 2026-08-09 addendum (user decision A+C): opt-in server-side relay
       because the Steam Web API sends no CORS headers — Android keeps the

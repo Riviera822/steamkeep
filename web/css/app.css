@@ -58,6 +58,7 @@
   padding:7px 6px calc(9px + env(safe-area-inset-bottom));
 }
 .nav-btn{
+  position:relative;
   display:flex; flex-direction:column; align-items:center; gap:3px;
   color:var(--dim-2);
   padding:6px 2px;
@@ -66,6 +67,17 @@
   font-size:10px; font-weight:600; letter-spacing:.3px;
 }
 .nav-btn[aria-current="page"]{ color:var(--accent); }
+
+/* Queue-count pip (WP 4a.5 — scaffolded as a bare nav item in WP 4a.1,
+   populated by views/downloads.js: it is the WP that owns the jobs data
+   the count is computed from). Ported from the mockup's `.nav .pip`. */
+.nav-pip{
+  position:absolute; top:1px; right:calc(50% - 20px);
+  min-width:15px; height:15px; padding:0 4px; border-radius:8px;
+  background:var(--run); color:#20180a; font-size:9.5px; font-weight:700;
+  display:none; place-items:center; font-family:var(--mono);
+}
+.nav-pip.on{ display:grid; }
 
 /* ============================================================
    Library view (WP 4a.3)
@@ -349,3 +361,77 @@ body.selecting .card .pick{ display:grid; }
 .dialog .cfloading{ margin:0 0 14px; font-size:12px; color:var(--dim-2); }
 
 .hint{ font-size:11.5px; line-height:1.5; color:var(--dim-2); margin:14px 0 0; text-align:center; }
+
+/* ============================================================
+   Downloads view (WP 4a.5)
+   Active job(s) actually holding the one worker slot, paused jobs shown
+   HONESTLY as not holding it (see js/lib/job-partition.js's module header
+   for the slot-release divergence from the mockup), the FIFO queue, and
+   history with lazily-fetched log excerpts. Class names follow the mockup
+   (.jobcard/.jobtop/.jobacts/.holdnote/.qrow/.hrow/.log/h4.sec) where the
+   shell doesn't already own the name, same convention as the Library
+   view's .lib-head/.lib-sub.
+   ============================================================ */
+.dl-head{ margin-bottom:2px; }
+.dl-head h1{ margin:0 0 2px; }
+.dl-sub{ display:block; font-size:11px; font-weight:500; color:var(--dim-2); letter-spacing:.3px; }
+
+h4.sec{
+  margin:18px 0 8px; font-size:10.5px; font-weight:700;
+  text-transform:uppercase; letter-spacing:1.1px; color:var(--dim-2);
+  display:flex; align-items:center; gap:8px;
+}
+h4.sec::after{ content:""; flex:1; height:1px; background:var(--line-soft); }
+h4.sec .n{ font-family:var(--mono); font-weight:400; letter-spacing:0; text-transform:none; }
+/* `h4.sec{ display:flex }` above has the same specificity as the UA
+   `[hidden]{ display:none }` rule and would otherwise win by cascade order
+   (this stylesheet loads after the UA sheet) — the Paused section's
+   `.hidden` toggle (views/downloads.js) needs this to actually disappear. */
+h4.sec[hidden]{ display:none; }
+
+.jobcard{
+  background:var(--surface); border:1px solid var(--line-soft);
+  border-radius:var(--r-m); padding:12px; margin-bottom:10px;
+}
+.jobcard.active{ border-color:rgba(237,197,95,.32); background:linear-gradient(180deg,rgba(237,197,95,.07),var(--surface)); }
+.jobcard.held{ border-color:var(--line); background:var(--surface); }
+.jobtop{ display:flex; gap:11px; align-items:flex-start; justify-content:space-between; }
+.jobtop .nm{ font-size:13.5px; font-weight:600; letter-spacing:-.1px; }
+.jobtop .sm{ font-size:11px; color:var(--dim-2); font-family:var(--mono); margin-top:2px; font-variant-numeric:tabular-nums; }
+.badge{ display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:600; flex:none; white-space:nowrap; }
+.jobacts{ display:flex; gap:8px; justify-content:flex-end; margin-top:11px; flex-wrap:wrap; }
+/* what pause/cancel actually cost the queue — stated, not hidden */
+.holdnote, .stopnote{
+  margin:10px 0 0; padding:7px 0 7px 9px; border-left:2px solid var(--line);
+  font-size:11px; line-height:1.5; color:var(--dim-2);
+}
+
+.qrow{
+  display:flex; align-items:center; gap:10px; padding:10px 11px;
+  background:var(--surface); border:1px solid var(--line-soft);
+  border-radius:var(--r-m); margin-bottom:7px;
+}
+.qrow .grip{ color:var(--dim-2); flex:none; display:grid; place-items:center; }
+.qrow .nm{ font-size:13px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.qrow .pos{ font-family:var(--mono); font-size:11px; color:var(--dim-2); flex:none; }
+
+.hrow{ border:1px solid var(--line-soft); background:var(--surface); border-radius:var(--r-m); margin-bottom:7px; overflow:hidden; }
+.hrow > button{
+  width:100%; display:flex; align-items:center; gap:10px; padding:11px 12px; text-align:left;
+}
+.hrow-info{ flex:1; min-width:0; }
+.hrow .nm{ display:block; font-size:13px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hrow .when{ font-size:10.5px; color:var(--dim-2); font-family:var(--mono); margin-top:2px; }
+.hrow .arrow{ margin-left:auto; color:var(--dim-2); transition:transform .18s; flex:none; }
+.hrow.open .arrow{ transform:rotate(90deg); }
+.log{
+  display:none; padding:0 12px 12px;
+  font-family:var(--mono); font-size:10.5px; line-height:1.65; color:var(--dim);
+  white-space:pre-wrap; word-break:break-word;
+}
+.hrow.open .log{ display:block; }
+.log p{ margin:0 0 6px; }
+.log .loading, .log .errmsg, .log .emptymsg{ color:var(--dim-2); font-style:italic; }
+.log .truncnote{ color:var(--dim-2); }
+
+.tx-cancelled{ color:var(--dim-2); }

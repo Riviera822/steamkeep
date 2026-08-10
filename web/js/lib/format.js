@@ -17,3 +17,18 @@ export function formatBytesGB(bytes) {
   const gb = bytes / 1_073_741_824;
   return (gb >= 100 ? gb.toFixed(0) : gb.toFixed(1)) + " GB";
 }
+
+/**
+ * An ISO-8601 timestamp (`jobs.created_at`/`started_at`/`finished_at`, ...)
+ * -> a locale-formatted string for display (WP 4a.5, Downloads history
+ * rows). `null`/`undefined`/unparseable input never fabricates a time —
+ * same "nothing honest to print" posture as {@link formatBytesGB}.
+ * @param {string | null | undefined} iso
+ * @returns {string} a display string, or "—" when there is nothing to show.
+ */
+export function formatTimestamp(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString();
+}

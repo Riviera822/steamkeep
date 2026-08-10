@@ -34,6 +34,11 @@
       <span class="nav-lb">Library</span>
     </button>
     <button type="button" class="nav-btn" data-view="downloads">
+      <!-- Queue-count pip: scaffolded here (WP 4a.1), populated by
+           web/js/views/downloads.js (WP 4a.5) — it is the WP that owns the
+           jobs data the count comes from. Hidden (no "on" class) until a
+           job is actually queued/running/paused. -->
+      <span class="nav-pip" id="nav-pip" aria-hidden="true">0</span>
       <span class="nav-ic" aria-hidden="true">
         <svg width="21" height="21" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M11 2.8v11.4"/><path d="m6.4 9.8 4.6 4.6 4.6-4.6"/><path d="M3.4 18.6h15.2"/></svg>
       </span>

@@ -141,3 +141,65 @@ module and tested headlessly here:
   instead of the jobs one. `views/library.js` is the DOM-side executor of
   this plan (`applyGamesTick`) and is not unit-tested the same way — see
   the "WP 4a.3 — Library view" section above.
+
+### WP 4a.5 — Downloads view
+
+Same posture as WP 4a.3: `web/js/views/downloads.js` (the DOM-building
+view) is not unit-tested directly — every piece of decision logic it leans
+on is pulled into a pure `web/js/lib/` module and tested here.
+
+- `job-partition.test.js` — `web/js/lib/job-partition.js`: `partitionJobs`
+  buckets a `GET /v1/jobs` snapshot by status regardless of input order,
+  treats a missing/non-array snapshot as empty, sorts `queued` FIFO by job
+  id (NOT the snapshot's own newest-first order) while `history` keeps
+  that newest-first order as-is. The load-bearing case is **the slot-release
+  divergence** (api/README.md "The worker slot — a paused job does NOT
+  hold it", recorded in docs/WORKPACKAGES.md's Phase 4a header): a paused
+  job for one app and a running job for a DIFFERENT app coexist in two
+  independent buckets, proving `running`/`paused` are not a single
+  mutually-exclusive "active slot" like the mockup's — this is the exact
+  presentation data the Downloads view's separate "Active"/"Paused"
+  sections are built on. Also covers `countPending` (the nav-pip count:
+  queued+running+paused, never done/error/cancelled), `queuePosition`,
+  `jobIconKind` (every real status, including the real `cancelled` the
+  mockup never modeled), and `jobStatusWord` (cancelled worded distinctly
+  from failed — job outcome honesty; GC jobs get GC-specific wording, never
+  the download vocabulary).
+- `downloads-render-plan.test.js` — `web/js/lib/downloads-render-plan.js`:
+  the pure jobs-tick patch-vs-rebuild decision for the Downloads view. First
+  poll and added/removed rows always mean a full render. Two named
+  **mutation targets**, one each direction: ANY `status` change anywhere in
+  the batch must force `full: true` (flip that branch and a job that just
+  transitioned section — e.g. running -> done — could sit in the wrong
+  section with stale action buttons indefinitely); a `stop_request`-only
+  change with the SAME `status` (the operator's pause/cancel request being
+  acknowledged, or cleared once the worker actually stops the job) must
+  land in `patchStopRequest`, NOT force `full` — flip THAT branch (treat
+  any update as structural) and every pause/cancel click would recreate the
+  running card's animated status-icon node the instant the server
+  acknowledged it: the round-7 mockup bug, reintroduced on the one live
+  field the real `JobSummary` actually has (no byte-level progress field
+  exists — see that module's header for why this narrows the round-7
+  concern versus the games poll). Also covers a mixed batch (one genuine
+  patch + one no-op update) and a batch where a status change on one job
+  and a stop_request-only change on another must still resolve to `full`
+  (the stricter branch wins).
+- `log-excerpt.test.js` — `web/js/lib/log-excerpt.js`: the lazy
+  `GET /v1/jobs/{id}` history-row excerpt display selection. Collapsed
+  always wins even over a completed fetch or an in-flight load (a
+  fast re-collapse must not leak stale content); loading; error (and error
+  taking priority over a STALE excerpt from a previous successful fetch);
+  empty for `null`/`undefined`/whitespace-only excerpt (the `undefined`
+  case is "never fetched", distinct from a job that genuinely produced no
+  output, but both display the same way); ready with normal multi-line and
+  single-line text; and the truncation-marker handling from api/README.md's
+  documented `log_excerpt` shape — detected and STRIPPED from the displayed
+  body (never leaks into the first line), only recognised as a literal
+  prefix (a log line merely containing the word "truncated" mid-file must
+  not false-positive), and blank lines immediately after a stripped marker
+  are not shown as spurious empty lines.
+- `format.test.js` gained `formatTimestamp` coverage (WP 4a.5): null/
+  undefined/unparseable input never fabricates a time (returns "—", same
+  posture as `formatBytesGB`); a valid ISO timestamp renders through
+  (asserted loosely — containing the year — since the exact locale-formatted
+  string is runtime-locale/timezone-dependent).
