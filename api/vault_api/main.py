@@ -32,9 +32,11 @@ from vault_api.routers import (
     oracle,
     schedule,
     stats,
+    steam,
 )
 from vault_api.scheduler import PrefillScheduler
 from vault_api.sizes import SizeCache
+from vault_api.steam_relay import RelayCache
 from vault_api.webhooks import WebhookNotifier, redact_url
 from vault_api.webui import install_security_headers, mount_web_ui
 from vault_api.worker import PrefillWorker
@@ -192,6 +194,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # TestClient() too, the same reasoning as app.state.settings above —
     # size-reporting endpoints don't need the worker running to be testable.
     app.state.size_cache = SizeCache(ttl_seconds=settings.size_cache_ttl_seconds)
+    # WP 4a.6r: same reasoning as size_cache above -- constructed
+    # unconditionally (cheap, no thread, no I/O) so it exists for a plain
+    # TestClient() too, and populated lazily on the first relay call.
+    app.state.steam_relay_cache = RelayCache()
     # WP 3.13: same reasoning as size_cache — constructed unconditionally so
     # it exists for a plain TestClient() too, but start() (called from the
     # lifespan below) is itself a no-op unless VAULT_WEBHOOK_URL is set.
@@ -219,6 +225,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # tell "this vault-api is too old to have an oracle" from "this operator
     # chose not to enable it" — which are different things to show a user.
     app.include_router(oracle.router)
+    # WP 4a.6r. Always mounted, even with no key configured: the relay routes
+    # answer 409 in that state rather than 404, so a web UI can tell "this
+    # vault-api is too old to have the relay" from "this operator hasn't set
+    # a key yet" -- same reasoning as the oracle router above.
+    app.include_router(steam.router)
     # WP 4a.1. Registered last, by convention (webui.mount_web_ui's own
     # docstring): every route it adds is an exact path or a narrow real
     # asset-subtree prefix (/, /index.html, the SPA view paths, /css, /js —

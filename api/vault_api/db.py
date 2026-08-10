@@ -107,7 +107,17 @@ import sqlite3
 #: NOT EXISTS`` and needs no ``ALTER`` step. (Renumbered from v10 in the merge
 #: with WP 3.9, which claimed v10 first on the public branch — harmless for
 #: the same reason as v10's own renumbering note above.)
-SCHEMA_VERSION = 11
+#: v12 (WP 4a.6r): added ``steam_relay_key`` -- the opt-in Steam Web API
+#: relay's own storage (ADR-0004 addendum, user decision A+C). Single row
+#: (same ``CHECK(id = 1)`` device as ``schedule_state``/``event_sweep_state``):
+#: one vault, one relay, one revocable read-scoped Web API key. Stored
+#: PLAINTEXT, the same trust posture ``VAULT_API_KEY`` and
+#: ``VAULT_WEBHOOK_URL``'s embedded Basic-Auth credentials already have in
+#: this database (api/README.md "Auth"): a single-operator homelab service
+#: where the operator who can reach this endpoint can already read
+#: ``vault.db`` directly. A brand-new table, so — like v6/v9/v10/v11's new
+#: tables — this needs no ``ALTER`` step.
+SCHEMA_VERSION = 12
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -452,6 +462,21 @@ CREATE TABLE IF NOT EXISTS oracle_branch_manifests (
 -- the appid-first primary key above does not serve that direction.
 CREATE INDEX IF NOT EXISTS idx_oracle_branch_manifests_depotid
     ON oracle_branch_manifests (depotid);
+
+-- WP 4a.6r / ADR-0004 addendum: opt-in Steam Web API relay (GetOwnedGames /
+-- GetPlayerSummaries) for the web UI, which cannot call the Steam Web API
+-- itself (no CORS headers on Valve's side). Exactly one row, forced by the
+-- CHECK on the primary key -- there is one relay key for the whole vault, not
+-- one per web-UI user. NEVER a password: this is a revocable, READ-SCOPED Web
+-- API key the operator generates on Valve's site and enters once in the web
+-- UI's settings (vault_api/steam_relay.py has the validator and the
+-- boundaries). Cleared by DELETE /v1/steam/key; GET /v1/steam/key never
+-- returns the value, only whether one is configured and its last 4 chars.
+CREATE TABLE IF NOT EXISTS steam_relay_key (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    api_key    TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 

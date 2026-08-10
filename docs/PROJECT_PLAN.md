@@ -494,8 +494,19 @@ parallel/serial decisions, merge discipline, open user decisions):
       documented known gap until the packaging WP)*
 - [ ] Same API surface as the app: library grid with badges + search,
       download-to-cache/delete flows, jobs view, settings incl. vault name
-- [ ] Steam identity via Sign in with Steam (ADR-0004); library fetched
-      browser-side, never proxied through vault-api
+- [ ] Steam identity via Sign in with Steam (ADR-0004); library fetch per
+      the 2026-08-09 addendum (user decision A+C): opt-in server-side relay
+      because the Steam Web API sends no CORS headers — Android keeps the
+      device-local path
+      *(WP 4a.6r done 2026-08-10: opt-in relay — GET/PUT/DELETE
+      /v1/steam/key (32-hex validated, masked key_last4, never echoed) +
+      /v1/steam/owned-games + /v1/steam/player-summaries, all authed;
+      schema v12 single-row key table; oracle-style outbound HTTP with
+      host/scheme/path pinned by string-literal tests against the captured
+      Request; strict steamid64 + upstream-shape validation; 256-entry TTL
+      cache keyed per (endpoint, steamid), cleared on key change; 92 relay
+      tests, 13-mutation review set killed; suite 1375 green; Opus
+      FAIL→fix→PASS. Web-UI consumption follows in WP 4a.6)*
 
 #### Phase 4b — Android App
 - [ ] Kotlin/Compose project, Steam Web API integration (library + covers)

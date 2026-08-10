@@ -304,3 +304,11 @@ These are not style preferences; each entry cost a review round to learn.
   navigation items or views the mockup lacks (Clients is a sheet, not a nav
   entry) — any divergence is a user decision, recorded like the paused-slot
   one (WP 4a.1 blocker).
+- Security-constant pins must assert STRING LITERALS, not the module's own
+  constants: a test comparing the built URL against STEAM_API_BASE stays
+  green when STEAM_API_BASE itself is mutated to attacker.example or http.
+  Capture the real outbound Request object and urlsplit it against literal
+  scheme/host/path (WP 4a.6r blocker).
+- An outbound-HTTP module's headline guarantee (host pin, HTTPS) needs its
+  own named mutation kill — 83 passing tests proved everything except where
+  the secret is actually sent (WP 4a.6r).

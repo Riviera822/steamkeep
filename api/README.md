@@ -221,7 +221,7 @@ an operator asks for *off*, so a non-empty value is an explicit request for a
 feature, and a typo in it must not quietly look like it worked. Once the
 oracle is running, every failure it can have is soft — see below.
 
-## Database schema (v11)
+## Database schema (v12)
 
 Created idempotently at startup by `vault_api/db.py::init_db` (safe to call
 on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
@@ -243,6 +243,7 @@ on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
 | `depot_miss_stats` | `depotid` (PK), `miss_count`, `mapped`, `first_seen`, `last_seen`   | **v9**, WP 3.11. Which depots are being MISSed, and whether a mapping existed at the last sighting. ADR-0008's "misses on unmapped depots are counted but trigger nothing" is what this table counts. Bounded to `event_sweep.MAX_DEPOT_MISS_ROWS` (500) least-recently-seen-first |
 | `miss_trigger_state` | `appid` (PK), `last_triggered_at`, `trigger_count`                | **v9**, WP 3.11. The miss trigger's per-app cooldown, persisted so a restart cannot become "re-trigger everything that misses next" |
 | `client_bypass_state` | `client_id` (PK), `bypass_suspected`, `updated_at`               | **v10**, WP 3.13. One row per client holding the LAST computed `bypass_suspected` verdict, so the cache-event sweep can fire `client.bypass_suspected`/`client.bypass_resolved` only on the TRANSITION (either direction), never on the steady state. Only populated when `VAULT_WEBHOOK_URL` is set and at least one of the two events is enabled — see "Webhooks" below |
+| `steam_relay_key` | `id` (PK, `CHECK (id = 1)`), `api_key`, `updated_at`               | **v12**, WP 4a.6r. Single-row: the opt-in Steam Web API relay's one revocable, read-scoped Web API key (ADR-0004 addendum), entered by the operator in the web UI and set via `PUT /v1/steam/key`. Never a password. See "Steam Web API relay" below |
 
 Indexes beyond the primary keys: `idx_depot_app_map_appid` on
 `depot_app_map(appid)` (plan §4's main lookup direction is appid → depots,
@@ -342,6 +343,14 @@ versions touched: the three `ALTER` steps are each guarded per column via
 `PRAGMA table_info`, so which file gets which column is decided by what the
 file actually has, not by where this table bump landed in the sequence.)
 
+**v11 → v12 (WP 4a.6r) needs no migration step at all.** `steam_relay_key` is
+a brand-new `CREATE TABLE IF NOT EXISTS` (the v6/v9/v10 situation, not the
+v4/v5/v8/v9 add-a-column one), so an older database simply gains one empty
+table, which reads as "no relay key configured" — exactly the state a fresh
+install is in before the operator ever opens the web UI's settings. Covered by
+`tests/test_db.py::test_init_db_upgrades_a_v11_database_to_v12_in_place` and
+`..._upgrade_to_v12_is_idempotent_if_called_twice`.
+
 **Ordering fix (WP 1.5 carry-over from the WP 1.4 review):** `init_db` now
 creates only the `schema_version` table, reads the stored version, and checks
 the downgrade guard *before* running the rest of `_DDL` — previously the full
@@ -427,7 +436,7 @@ appid both saw "no row" and both inserted; the loser got
 is now `INSERT OR IGNORE` plus a conditional name `UPDATE`, pinned by
 `tests/test_mapping.py::test_concurrent_upsert_of_the_same_new_appid_does_not_500`.
 
-## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4 + 3.5 + 3.8 + 3.9 + 3.11 + 3.12)
+## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4 + 3.5 + 3.8 + 3.9 + 3.11 + 3.12 + 4a.6r)
 
 All routes below require `X-Api-Key` (see "Auth"). Full API table:
 `docs/PROJECT_PLAN.md` §6; the games, mapping, prefill, jobs, cache, agent,
@@ -456,6 +465,11 @@ clients, schedule and stats rows are implemented so far.
 | DELETE | `/v1/oracle/{appid}`               | Forget everything the oracle said about one app (WP 3.9). `204` whether or not anything was stored — idempotent, and the way to withdraw the extra GC keep-set protection oracle rows grant |
 | GET    | `/v1/schedule`                     | Scheduler config + last-sweep bookkeeping: `{enabled, window, overnight, interval_minutes, client_stale_days, server_timezone, last_sweep_at, last_sweep_targets, last_sweep_enqueued, next_eligible_at}`. **Read-only** — there is deliberately no write endpoint, see "Scheduler" below |
 | GET    | `/v1/stats`                        | Cache-event sweep config + bookkeeping (WP 3.11): `{event_feed_enabled, sweep_interval_minutes, miss_trigger_enabled, miss_trigger_cooldown_minutes, miss_trigger_max_per_sweep, bypass_window_days, cursor_offset, first_sweep_at, last_sweep_at, last_rotated_at, lines_read_total, lines_skipped_total, last_lines, last_skipped, last_enqueued, last_dropped_by_cap, truncate_denied_count, last_truncate_denied_at, oversized_skips_total, last_oversized_at, top_unmapped_depots[]}`. **Read-only.** Three counters are alerts: `lines_skipped_total` climbing means a format disagreement, `truncate_denied_count` climbing means the log is growing unbounded, and any non-zero `oversized_skips_total` means bytes were discarded because something wrote a newline-free region longer than a read batch. See "Cache-event sweep" below |
+| GET    | `/v1/steam/key`                    | Opt-in Steam Web API relay (WP 4a.6r): key status only — `{configured, key_last4}`. `key_last4` is `null` when unconfigured; the full key is never returned |
+| PUT    | `/v1/steam/key`                    | Body `{"key": str}` — set (or replace) the relay's Web API key. `200` with the same shape `GET` returns; `422` unless `key` is exactly 32 hexadecimal characters |
+| DELETE | `/v1/steam/key`                    | Clear the configured key. `204` whether or not one was set |
+| GET    | `/v1/steam/owned-games`            | `?steamid=<SteamID64>` — relay `GetOwnedGames`. `200` with `{configured: true, game_count, games: [{appid, name, playtime_forever, img_icon_url}]}`; `409` if no key is configured; `422` for an unusable `steamid`; `502` for any upstream failure. See "Steam Web API relay" below |
+| GET    | `/v1/steam/player-summaries`       | `?steamid=<SteamID64>` — relay `GetPlayerSummaries`. `200` with `{configured: true, players: [{steamid, personaname, avatar, avatarmedium, avatarfull, personastate}]}`; same `409`/`422`/`502` shape as `owned-games`. See "Steam Web API relay" below |
 
 ## Prefill orchestration (WP 1.4, job outcome honesty WP 3.3)
 
@@ -3418,6 +3432,176 @@ project).
 - **No `deploy/` wiring** (outside `api/`; the feature is off by default, so a
   deployment that does not pass the variables is in the intended state).
 
+## Steam Web API relay (WP 4a.6r; ADR-0004 addendum, user decision A+C)
+
+**Off until a key is configured, and one of the few things in SteamVault that
+talks to anything outside your LAN.** Read the privacy note below before
+setting a key.
+
+### What it is for
+
+The Steam Web API sends no CORS headers, so the Phase-4a **web UI**, running
+in a browser, cannot call `GetOwnedGames`/`GetPlayerSummaries` directly the
+way the native Android app does with its own device-local key (ADR-0004
+decision 2, untouched by this work package). This relay is vault-api's
+narrow answer: it stores one revocable, **read-scoped** Steam Web API key —
+entered once by the operator in the web UI's settings — and relays exactly
+two calls on the caller's behalf:
+
+- `IPlayerService/GetOwnedGames/v1` — the library grid's game list;
+- `ISteamUser/GetPlayerSummaries/v2` — persona name and avatar.
+
+**Nothing else.** This is a hard boundary from the ADR-0004 addendum, not a
+default that happens to be narrow today: no endpoint that could act on the
+account (friends list writes, inventory trades, anything requiring a session
+rather than a Web API key) is in scope, and none is planned.
+
+### Setting it up
+
+1. Generate a Web API key at <https://steamcommunity.com/dev/apikey> (any
+   Steam account; a domain of `localhost` is accepted for personal use).
+2. `PUT /v1/steam/key` with `{"key": "<32 hex characters>"}` — normally done
+   from the web UI's settings screen, not by hand.
+3. `GET /v1/steam/key` confirms `{"configured": true, "key_last4": "...."}`.
+4. `DELETE /v1/steam/key` at any time to revoke it from vault-api's side
+   (independent of revoking the key itself on Valve's site, which an operator
+   should also do if the key was ever exposed).
+
+**The key is never a password.** Login for the web UI's own identity still
+happens on Valve's OpenID page (ADR-0004 decision 2's "Sign in with Steam"),
+completely separate from this key. Worst case of this key leaking: someone
+else can read this Steam account's *public* profile and game list — nothing
+they could not already see by visiting the profile in a browser, assuming its
+privacy settings are public. Worst case of the vault API key itself leaking
+is a much larger blast radius (job control, cache deletion) and is covered by
+the existing "Auth" section below; this key is deliberately a separate,
+narrower secret from that one.
+
+### The key is never echoed, logged, or leaked into an error
+
+- `GET`/`PUT /v1/steam/key` return `configured` and `key_last4` (the last 4
+  characters) **only** — never the value itself, in any response, ever.
+- Every upstream HTTP failure (unreachable, timeout, non-200, garbage body)
+  becomes an error message built **only from the endpoint path**
+  (`https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/`, no query
+  string) — the key and the `steamid` being looked up live exclusively in the
+  query string, which no function in `vault_api/steam_relay.py` ever formats
+  into a log line or an exception message. `tests/test_steam_relay.py` pins
+  this with a grep-style check across the JSON response body and captured log
+  output.
+- The stored value is re-validated on the way **out** of the database (same
+  reasoning as the manifest oracle's `gc_keepset_gids`): a hand-edited or
+  corrupted row is treated as "not configured" rather than sent to Valve.
+
+### `409` while unconfigured — a distinct, documented shape
+
+`GET /v1/steam/owned-games` and `GET /v1/steam/player-summaries` answer
+**`409 Conflict`** whenever no key is configured — never a `200` with an
+empty or guessed result. This is deliberately a status code rather than a
+`{"configured": false}` body shape used elsewhere in this API (the manifest
+oracle answers `200`/`enabled: false` because "never asked about this app" is
+a normal informational state): a relay call while unconfigured is a request
+this server genuinely cannot service, which `409` communicates unambiguously
+to a web UI checking `response.status`. `GET /v1/steam/key` is the one place
+`configured: false` appears in a normal `200` body — answering exactly that
+question is its whole job.
+
+### `steamid` is hostile input
+
+Every relay call takes `?steamid=<SteamID64>` as a **query string**, strictly
+validated (`vault_api.steam_relay.valid_steamid64`) before it goes anywhere
+near a URL: exactly 17 ASCII decimal digits, range-checked against the
+individual-account SteamID64 space (universe 1, type 1, instance 1, account
+number 0..2³²-1). Anything else — wrong length, non-ASCII look-alike digits,
+a numerically valid but out-of-range value — is a clean `422`, matching
+`docs/LEARNINGS.md`'s "Parsers" house rule that a value feeding a URL is never
+trusted just because it looks numeric.
+
+### Everything Valve returns is validated and whitelisted
+
+The response is attacker-shaped input by definition (a network call to a host
+this project does not run). `vault_api/steam_relay.py` applies the same
+discipline as the manifest oracle (`vault_api/oracle.py`):
+
+- the raw body is bounded (2 MiB) before it is decoded; `RecursionError` from
+  deeply nested JSON is caught **by name** and converted to the module's own
+  `SteamRelayError` (the same WP 2.1/3.9 finding: an exception outside a
+  parser's documented contract crashes the caller);
+- the number of games/players is capped (`MAX_GAMES`, `MAX_PLAYERS`), and a
+  hostile document degrades to "the rest were ignored" rather than a memory
+  blow-up or a crash;
+- **only the whitelisted fields the library grid needs ever cross into the
+  response** — `appid`, `name`, `playtime_forever`, `img_icon_url` for games;
+  `steamid`, `personaname`, `avatar`/`avatarmedium`/`avatarfull`,
+  `personastate` for players. Every other field Valve's API returns (visit
+  timestamps, community-stats flags, real names, location) is read by
+  nothing here and never reaches a client;
+- a returned `steamid` that does not match the one requested is dropped, not
+  trusted (the same corruption cross-check the oracle applies to `appid`);
+- an avatar URL that is not a bounded `http(s)://` string is dropped rather
+  than handed to a client's `<img src>`.
+
+A garbage or unreachable upstream answer is a clean `502` with a generic
+detail message — never a crash, never a partially-validated value reaching a
+client.
+
+### Rate-limit friendliness: a small in-memory cache
+
+`vault_api.steam_relay.RelayCache` holds the last validated answer per
+`(endpoint, steamid)` for 5 minutes (`DEFAULT_CACHE_TTL_SECONDS`) — enough to
+absorb a web UI re-rendering the library grid a few times in a short window
+without turning every render into a fresh Steam Web API call. Deliberately
+**not** an env-configurable setting (this work package adds no new `VAULT_*`
+variable) and **not** persisted — a restart empties it, which costs nothing
+but one extra upstream call on the next request. It stores already-whitelisted
+result objects, never raw upstream bytes, and the router checks "is a key
+configured" **before** consulting the cache — so clearing the key immediately
+reverts to `409` even if a cached answer from moments ago is still warm.
+
+### Privacy — the note to read before setting a key
+
+Every other component talks only to the LAN, to Steam's CDN through
+vault-core, or to Valve through SteamPrefill's own session. **With a relay key
+configured, library queries originate from the SERVER** — they leave the LAN
+toward Valve — not from the browser, mirroring the ADR-0004 addendum's own
+wording:
+
+- **What leaves the network:** the configured Web API key, and the SteamID64
+  being looked up, as query parameters over HTTPS to
+  `api.steampowered.com` — pinned as the only host this module will ever
+  contact (no operator-configurable URL, unlike the manifest oracle: there is
+  no "point it at your own mirror" story for a Valve-authenticated call), with
+  redirects refused so the request cannot be handed to a different host.
+- **What never leaves it:** the vault API key, any agent report, any cache
+  content, any LAN address, and — per ADR-0004 — Steam **credentials**; this
+  key is a revocable, read-scoped Web API key, never a password.
+- **Nothing is sent automatically.** A relay call happens only when the web
+  UI (or any authenticated client) calls `GET /v1/steam/owned-games` or
+  `GET /v1/steam/player-summaries`. There is no background polling, no
+  scheduler wiring, and no job-worker involvement.
+- **Turning it off is immediate:** `DELETE /v1/steam/key`, and the very next
+  relay call answers `409` — no waiting for a cache entry to expire.
+- A full accounting of every data path a self-hosted install exposes belongs
+  in `SECURITY.md` (planned, WP 5.3 — not yet written); this section is the
+  interim, authoritative source for this one feature.
+
+### What this work package deliberately did NOT do
+
+- **No new `VAULT_*` environment variable.** The key is runtime-set through
+  the endpoints above, per the ADR-0004 addendum's explicit design (entered
+  in the web UI, stored server-side) — unlike every other opt-in feature in
+  this file, there is nothing to add to `.env.example`.
+- **No per-user keys.** One relay key per vault, matching `steam_relay_key`'s
+  single-row schema — this mirrors `VAULT_API_KEY` itself, not a
+  multi-tenant credential store.
+- **No endpoints beyond the two named in the ADR addendum.** Friends lists,
+  inventories, achievements, and anything else the Steam Web API exposes are
+  out of scope; adding one is a new ADR decision, not an extension of this
+  module.
+- **No `web/` or `deploy/` wiring** — this work package is `api/`-only by
+  design (WP 4a.6 consumes this relay from the web UI in its own,
+  branch-parallel work package).
+
 ## Auth
 
 Every endpoint requires the header `X-Api-Key: <VAULT_API_KEY>`, checked
@@ -4338,3 +4522,48 @@ WP 3.8b additions (`tests/test_gc_execute.py` +14, `tests/test_config.py` +3):
   (`<` → `>`), the boundary (`<` → `<=`), the `N=0` bypass, the invalid-name
   route, the dry-run exclusions, `run_gc_job`'s `exclusions=` argument, the
   broken-cache-root protection, and `DEFAULT_GC_GRACE_DAYS` itself.
+
+WP 4a.6r additions (`tests/test_steam_relay.py`, plus two migration tests and
+one `EXPECTED_TABLES` entry in `tests/test_db.py`):
+
+- **The mutation pin the work package asked for by name**:
+  `test_relay_is_off_by_default_returns_409_not_success` — default-enabling
+  the relay (skipping or inverting the "is a key configured" check) makes
+  this test fail, on both relay routes.
+- **The key never appears in a response or a log line.** Grep-style checks:
+  `VALID_KEY not in resp.text` on the set/status/error-path responses, and
+  `VALID_KEY not in caplog.text` after a simulated upstream failure with a
+  key configured (`test_upstream_failure_never_leaks_the_key_into_logs`).
+  `test_http_fetch_error_messages_never_contain_the_key_or_query_string`
+  pins the same property one layer down, against a mocked `URLError`.
+- **Cache correctness under a key change**:
+  `test_clearing_the_key_immediately_reverts_to_409_even_with_a_warm_cache`
+  — a cached answer from before `DELETE /v1/steam/key` must never make an
+  unconfigured relay look configured; the router checks the key BEFORE the
+  cache. `test_repeated_requests_within_the_ttl_reuse_the_cache` and
+  `..._cache_independently` (for the two endpoints) pin the opposite
+  direction — the cache actually avoids a second upstream call.
+- **Validator edge cases**: `TestValidSteamWebApiKey`/`TestValidSteamId64`
+  parametrize the rejections `docs/LEARNINGS.md`'s "Parsers" section calls
+  out by name — surrounding whitespace, non-ASCII (Arabic-Indic) digit
+  look-alikes, `bool`, off-by-one length, one-below/one-above the SteamID64
+  individual-account range.
+- **Hostile-upstream parsing, mirroring `test_oracle.py`'s shape**: a
+  private-profile answer with no `games` key is a normal empty result, not
+  an error; a non-JSON body and 20 000-deep nested JSON are refused via
+  `SteamRelayError`, never a stack overflow; a game/player entry missing its
+  id, of the wrong type, or exceeding `MAX_GAMES`/`MAX_PLAYERS` degrades
+  with a bounded warning instead of discarding the whole answer; a
+  `steamid` in the response that does not match the one requested is
+  dropped, never trusted (the same corruption cross-check
+  `oracle._app_object` applies to `appid`); only the whitelisted fields
+  (`test_only_whitelisted_fields_survive_owned_games`) ever reach the
+  parsed result, however innocuous an extra field looks.
+- **Storage re-validates what it reads back**:
+  `test_a_hand_edited_invalid_key_is_treated_as_not_configured` — a
+  corrupted `steam_relay_key.api_key` value (the database is a file an
+  operator can edit) is treated as "not configured", never sent to Valve.
+- **Schema migration**: `test_init_db_upgrades_a_v11_database_to_v12_in_place`
+  and `..._upgrade_to_v12_is_idempotent_if_called_twice` mirror the v9→v10
+  oracle migration tests — a v11 file gains one empty `steam_relay_key`
+  table and existing rows in other tables survive untouched.

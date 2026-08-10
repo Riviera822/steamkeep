@@ -26,6 +26,8 @@ EXPECTED_TABLES = {
     "oracle_branch_manifests",
     # v11 (WP 3.13): the webhook feature's bypass-transition bookkeeping.
     "client_bypass_state",
+    # v12 (WP 4a.6r): the opt-in Steam Web API relay's own key storage.
+    "steam_relay_key",
 }
 
 
@@ -561,6 +563,72 @@ def test_init_db_upgrade_to_v10_is_idempotent_if_called_twice(tmp_path) -> None:
     assert len(versions) == 1
     assert versions[0]["version"] == SCHEMA_VERSION
     assert oracle_indexes == ["idx_oracle_branch_manifests_depotid"]
+
+
+def test_init_db_upgrades_a_v11_database_to_v12_in_place(tmp_path) -> None:
+    """v11 -> v12 (WP 4a.6r) adds one brand-new TABLE (``steam_relay_key``),
+    so — like v6/v9/v10's additions — plain ``CREATE ... IF NOT EXISTS`` is
+    the whole migration: no ALTER step. An upgraded database must come out
+    reading as "no relay key configured", the same state a fresh install with
+    no key set is in, and existing rows must be untouched.
+    """
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("INSERT INTO apps (appid, status) VALUES (440, 'done')")
+        conn.execute("DROP TABLE steam_relay_key")
+        conn.execute("UPDATE schema_version SET version = 11")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        (version,) = conn.execute("SELECT version FROM schema_version").fetchone()
+        tables = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        (key_rows,) = conn.execute("SELECT COUNT(*) FROM steam_relay_key").fetchone()
+        (appid,) = conn.execute("SELECT appid FROM apps").fetchone()
+    finally:
+        conn.close()
+
+    assert version == SCHEMA_VERSION
+    assert "steam_relay_key" in tables
+    assert key_rows == 0
+    assert appid == 440
+
+
+def test_init_db_upgrade_to_v12_is_idempotent_if_called_twice(tmp_path) -> None:
+    """Same guarantee the other bumps carry: running the upgrade again against
+    an already-upgraded file must not raise and must not duplicate anything."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("DROP TABLE steam_relay_key")
+        conn.execute("UPDATE schema_version SET version = 11")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+    init_db(db_path)  # must not raise
+
+    conn = get_connection(db_path)
+    try:
+        versions = conn.execute("SELECT version FROM schema_version").fetchall()
+    finally:
+        conn.close()
+
+    assert len(versions) == 1
+    assert versions[0]["version"] == SCHEMA_VERSION
 
 
 def test_init_db_upgrades_a_pre_v7_database_by_adding_gc_execute(tmp_path) -> None:

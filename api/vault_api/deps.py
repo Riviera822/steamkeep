@@ -47,6 +47,7 @@ from fastapi import Request
 from vault_api.config import Settings
 from vault_api.db import get_connection
 from vault_api.sizes import SizeCache
+from vault_api.steam_relay import RelayCache
 
 #: What routers receive: call it to get a context-managed connection.
 DbOpener = Callable[[], ContextManager[sqlite3.Connection]]
@@ -72,6 +73,16 @@ def get_size_cache(request: Request) -> SizeCache:
     reuse one disk scan instead of each doing their own.
     """
     return request.app.state.size_cache
+
+
+def get_steam_relay_cache(request: Request) -> RelayCache:
+    """FastAPI dependency returning the app-wide Steam relay ``RelayCache``
+    (WP 4a.6r). One instance per app, created in ``main.create_app`` and
+    stored on ``app.state`` — same pattern as ``get_size_cache`` above: a
+    single shared instance is the point, so repeated web-UI renders reuse one
+    Steam Web API call instead of each making its own.
+    """
+    return request.app.state.steam_relay_cache
 
 
 def get_settings(request: Request) -> Settings:
