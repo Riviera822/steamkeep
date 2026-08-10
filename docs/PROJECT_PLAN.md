@@ -468,8 +468,12 @@ parallel/serial decisions, merge discipline, open user decisions):
       `GET /v1/stats`. Rotation is best-effort — in the shipped containers
       vault-api may read the log but not truncate it, which is handled,
       counted and surfaced rather than fatal)*
-- [x] Optional generic webhook notifications (Discord/Slack/ntfy-compatible;
-      built as a generic webhook feature, not vendor-specific)
+- [x] Optional generic webhook notifications (built as a generic webhook
+      feature, not vendor-specific. NOTE: the original wording claimed
+      "Discord/Slack/ntfy-compatible" — that overstates what shipped.
+      Generic JSON receivers and n8n consume the envelope directly;
+      Discord requires `{"content": …}`/`embeds` and needs a relay until
+      the Phase 6 format adapters land)
       *(WP 3.13: five events — job.done/error/cancelled +
       client.bypass_suspected/resolved (transition-only, state tracked in
       both directions regardless of the delivery filter) — one generic
@@ -575,6 +579,52 @@ parallel/serial decisions, merge discipline, open user decisions):
       rather than a silently-broken `.env` example)*
 - [ ] Announcement: r/selfhosted, r/homelab, LanCache Discord (stay fair:
       frame as a complement/alternative, not a "LanCache killer")
+
+### Phase 6 — External Integrations (post-release, user decision 2026-08-10)
+
+Deliberately NOT a release blocker: WP 3.13 already ships working generic
+webhooks, and everything below is additive on top of them. Scheduled after
+the community release so no integration work delays it.
+
+Motivation: the WP 3.13 envelope is consumed happily by n8n and any generic
+JSON receiver, but the Phase 3 checkbox claiming "Discord/Slack/ntfy-
+compatible" overstates it — a Discord webhook accepts only `{"content": …}`
+or `embeds` and rejects our envelope with 400. Today Discord needs a relay
+in between. Phase 6 closes that gap and adds the events an automation
+platform actually wants to react to.
+
+- [ ] Multi-target delivery: `VAULT_WEBHOOK_TARGETS` — N receivers, each
+      with its own URL, event filter, format and headers, so n8n and Discord
+      can be fed at the same time (today: exactly one URL)
+- [ ] Vendor format adapters `generic|discord|slack` (user decision
+      2026-08-10: adapters in the backend, NOT a free-form body template —
+      Discord must work without a relay; the cost is that we maintain two
+      foreign formats). Includes honouring `Retry-After` on 429, which
+      Discord does send and the current 3-attempt/0.2-0.5 s backoff ignores
+- [ ] `app.updated` — the update notification. **No oracle dependency**
+      (user decision 2026-08-10, superseding the earlier "either source"
+      answer): the trigger is the existing non-forced scheduler sweep, which
+      per `docs/research/phase3-manifests.md` costs ~3 s and zero bytes for
+      an up-to-date app and is therefore already the manifest check. The
+      changed manifest ids come from WP 3.2 ingestion, the byte/`Updated`
+      counters from the WP 3.3 summary parser — so this is a notification
+      hook on machinery that already runs, not new detection.
+      The honest semantics are "the vault HAS this update" rather than
+      "an update is available"; for a homelab that is the more actionable
+      message. `VAULT_MANIFEST_ORACLE` (ADR-0006 tier 3) stays exactly what
+      it is — an opt-in pre-emptive badge — and never becomes a
+      precondition for notifications
+- [ ] Outbound auth beyond Basic-in-URL: custom headers (n8n commonly wants
+      a header token) + optional HMAC-SHA256 signature, plus a per-event
+      `event_id` so a receiver can deduplicate across retries
+- [ ] `POST /v1/webhooks/test` — fire a synthetic event at a target. Needed
+      by any settings UI (Phase 4) and turns webhook setup from guesswork
+      into one click
+- [ ] Integration docs: n8n in BOTH directions (receiving events; calling
+      `/v1/jobs` to trigger a prefill), Discord, ntfy
+- Explicitly rejected: persisting the delivery queue across restarts.
+      At-most-once is the right hardness for homelab notifications
+      (`webhooks.py` module docstring)
 
 ---
 
