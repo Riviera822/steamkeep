@@ -292,23 +292,95 @@ def _env_webhook_events(name: str = "VAULT_WEBHOOK_EVENTS") -> frozenset[str]:
     entries (a stray comma, ``"job.done,,job.error"``) are refused rather than
     skipped for the same reason.
     """
-    raw = os.environ.get(name, "").strip()
-    if not raw:
+    raw = os.environ.get(name, "")
+    try:
+        return parse_webhook_events(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} {exc}") from exc
+
+
+def parse_webhook_events(raw: str) -> frozenset[str]:
+    """Pure grammar half of :func:`_env_webhook_events` — see
+    ``parse_strict_int``'s note (ADR-0009 decision 4: shared with
+    ``PATCH /v1/settings``). Blank -> all five, same as the env default: an
+    operator (or a settings override) that names no events almost always
+    means "send everything".
+    """
+    text = raw.strip()
+    if not text:
         return frozenset(WEBHOOK_EVENTS_ALL)
-    tokens = [token.strip() for token in raw.split(",")]
+    tokens = [token.strip() for token in text.split(",")]
     if any(not token for token in tokens):
-        raise RuntimeError(
-            f"{name} must be a comma-separated list of event names with no "
+        raise ValueError(
+            "must be a comma-separated list of event names with no "
             f"empty entries (valid names: {', '.join(WEBHOOK_EVENTS_ALL)}). "
             f"Got {raw!r}."
         )
     unknown = sorted(set(tokens) - set(WEBHOOK_EVENTS_ALL))
     if unknown:
-        raise RuntimeError(
-            f"{name} contains unknown event name(s) {unknown!r}; valid names "
+        raise ValueError(
+            f"contains unknown event name(s) {unknown!r}; valid names "
             f"are {', '.join(WEBHOOK_EVENTS_ALL)}. Got {raw!r}."
         )
     return frozenset(tokens)
+
+
+def validate_webhook_url(raw: str) -> str:
+    """Scheme-only check for an operator-supplied webhook URL.
+
+    **Not used by** :meth:`Settings.from_env` **today.** WP 3.13 deliberately
+    treats ``VAULT_WEBHOOK_URL`` as trusted operator configuration and never
+    refuses to boot over it (see ``vault_api/webhooks.py``'s "SSRF / trust
+    posture" section): a malformed URL fails per-delivery, at WARNING, the
+    same as an unreachable receiver, and that design is preserved here
+    unchanged. This function exists ONLY for ``PATCH /v1/settings``
+    (ADR-0009 decision 4) — a documented, deliberate gap between "the exact
+    same grammars config.py applies at startup" the ADR calls for and what
+    WP 3.13 actually shipped, since no such startup grammar exists for this
+    field to reuse. A settings PATCH is a human typing a value into a form
+    RIGHT NOW; "what you just typed is not even a URL" is worth a ``422``
+    immediately, rather than a silent per-delivery WARNING hours later. Blank
+    means "disabled" (the same one-enable-switch convention every optional
+    URL/path setting in this module uses) and is accepted unconditionally.
+    """
+    text = raw.strip()
+    if not text:
+        return ""
+    scheme = urlsplit(text).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(
+            f"must be an http:// or https:// URL (got scheme {scheme!r}), or "
+            f"blank to disable webhooks. Got {raw!r}."
+        )
+    return text
+
+
+#: Accepted spellings for :func:`_env_bool`, case-insensitive.
+_BOOL_TRUE_VALUES = ("1", "true", "yes", "on")
+_BOOL_FALSE_VALUES = ("0", "false", "no", "off")
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Read a strict boolean env var. Blank/unset = ``default``.
+
+    Same house rule as every other enum-shaped setting in this module: a
+    typo must not silently mean the wrong thing, which matters more than
+    usual for ``VAULT_SETTINGS_READONLY`` — the flag that decides whether
+    the settings-write API is locked. Case- and whitespace-insensitive;
+    anything outside the two named word sets is refused loudly at startup.
+    """
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in _BOOL_TRUE_VALUES:
+        return True
+    if raw in _BOOL_FALSE_VALUES:
+        return False
+    raise RuntimeError(
+        f"{name} must be one of {', '.join(_BOOL_TRUE_VALUES)} (true) or "
+        f"{', '.join(_BOOL_FALSE_VALUES)} (false), case-insensitive, or blank "
+        f"for the default ({default!r}). Got {os.environ.get(name, '')!r}."
+    )
 
 
 def _default_steamprefill_cache_dir() -> str:
@@ -418,9 +490,40 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
     raw = os.environ.get(name, "")
     if not raw.strip():
         return default
+    try:
+        return parse_strict_int(raw, minimum=minimum)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} {exc}") from exc
+
+
+def parse_strict_int(raw: str, *, minimum: int = 1) -> int:
+    """Pure grammar half of :func:`_env_int` (ADR-0009 decision 4).
+
+    Everything above this function's docstring is the RATIONALE for the
+    grammar; this is the grammar itself, deliberately split out so
+    ``PATCH /v1/settings`` (``vault_api/settings_store.py``) can validate a
+    value with EXACTLY this rule instead of a reimplementation — "the
+    grammar functions live in one importable place ... no duplicated
+    parsing". Raises ``ValueError`` (not ``RuntimeError``): this function
+    knows no env var name to embed in a message, so every caller wraps it —
+    ``_env_int`` re-raises as ``RuntimeError`` for the startup path,
+    ``settings_store`` re-raises as ``SettingValidationError`` for the PATCH
+    path. ``raw`` must already be known non-blank (blank has a different
+    meaning — "unset" at startup, "invalid" at PATCH time — that only the
+    caller knows how to handle).
+    """
+    if minimum < 0:
+        # A programming error in a CALLER (every call site in this codebase
+        # passes a literal >= 0), not something ``raw`` can trigger — but a
+        # bare ``assert`` disappears under ``python -O``, which would turn a
+        # loud crash into a silently wrong floor check instead (reviewer nit
+        # N4). ``ValueError`` survives -O and every other caller here already
+        # catches ``ValueError`` from this function, so this stays inside the
+        # same exception contract rather than adding a new one.
+        raise ValueError("parse_strict_int cannot validate a negative minimum")
     if not (raw.isascii() and raw.isdigit()):
-        raise RuntimeError(
-            f"{name} must be a plain integer written in ASCII digits only — no "
+        raise ValueError(
+            "must be a plain integer written in ASCII digits only — no "
             "signs, spaces, underscores or thousands separators, and no "
             f"negative values (the smallest accepted value is {minimum}). "
             f"Got {raw!r}."
@@ -431,13 +534,28 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
         # Digits-only input can still be refused by CPython's
         # int_max_str_digits limit (4300 digits by default), so this stays a
         # guarded conversion rather than a bare int().
-        raise RuntimeError(f"{name} is not a usable integer: {raw!r} ({exc})") from exc
+        raise ValueError(f"is not a usable integer: {raw!r} ({exc})") from exc
     if value < minimum:
         # The default floor is the plain "positive integer" case; phrase it the
         # way it has always been phrased so existing messages don't change.
         limit = "> 0" if minimum == 1 else f">= {minimum}"
-        raise RuntimeError(f"{name} must be {limit}, got {value}")
+        raise ValueError(f"must be {limit}, got {value}")
     return value
+
+
+def parse_auto_gc(raw: str) -> str:
+    """Pure grammar half of :func:`_env_auto_gc` — see ``parse_strict_int``'s
+    note on why this is split out (ADR-0009 decision 4: shared with
+    ``PATCH /v1/settings``). Blank is NOT accepted here (unlike the env
+    wrapper, which treats blank as ``off``): a settings override that clears
+    to blank is meaningless — clearing an override is spelled ``null``, not
+    an empty string — so a blank value is simply not one of ``AUTO_GC_MODES``
+    and falls into the same error as any other unrecognised word.
+    """
+    text = raw.strip().lower()
+    if text not in AUTO_GC_MODES:
+        raise ValueError(f"must be one of {', '.join(AUTO_GC_MODES)}, got {raw!r}.")
+    return text
 
 
 def _env_auto_gc(name: str = "VAULT_AUTO_GC") -> str:
@@ -452,15 +570,13 @@ def _env_auto_gc(name: str = "VAULT_AUTO_GC") -> str:
     unambiguous), but a value that is not one of the three is refused with all
     three named.
     """
-    raw = os.environ.get(name, "").strip().lower()
-    if not raw:
+    raw = os.environ.get(name, "")
+    if not raw.strip():
         return DEFAULT_AUTO_GC
-    if raw not in AUTO_GC_MODES:
-        raise RuntimeError(
-            f"{name} must be one of {', '.join(AUTO_GC_MODES)}, got "
-            f"{os.environ.get(name, '')!r}."
-        )
-    return raw
+    try:
+        return parse_auto_gc(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} {exc}") from exc
 
 
 def _env_manifest_oracle(name: str = "VAULT_MANIFEST_ORACLE") -> str:
@@ -553,9 +669,20 @@ def _env_float(name: str, default: float) -> float:
     raw = os.environ.get(name, "")
     if not raw.strip():
         return default
+    try:
+        return parse_strict_float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} {exc}") from exc
+
+
+def parse_strict_float(raw: str) -> float:
+    """Pure grammar half of :func:`_env_float` — see ``parse_strict_int``'s
+    note (ADR-0009 decision 4: the exact same function backs both the
+    startup path and ``PATCH /v1/settings``'s validation).
+    """
     if not _is_plain_decimal(raw):
-        raise RuntimeError(
-            f"{name} must be a plain positive number written in ASCII digits "
+        raise ValueError(
+            "must be a plain positive number written in ASCII digits "
             "with at most one decimal point (e.g. '60' or '0.25') — no signs, "
             "spaces, underscores, exponents, and not 'nan' or 'inf'. "
             f"Got {raw!r}."
@@ -563,16 +690,14 @@ def _env_float(name: str, default: float) -> float:
     try:
         value = float(raw)
     except ValueError as exc:  # pragma: no cover - the grammar above precludes it
-        raise RuntimeError(f"{name} is not a usable number: {raw!r} ({exc})") from exc
+        raise ValueError(f"is not a usable number: {raw!r} ({exc})") from exc
     # A grammatically valid but absurdly long digit string (400 digits, say)
     # still overflows to `inf` in float() — the one way `inf` can survive the
     # literal check above, so it is refused here rather than assumed away.
     if not math.isfinite(value):
-        raise RuntimeError(
-            f"{name} is too large to represent as a number, got {raw!r}."
-        )
+        raise ValueError(f"is too large to represent as a number, got {raw!r}.")
     if value <= 0:
-        raise RuntimeError(f"{name} must be > 0, got {value}")
+        raise ValueError(f"must be > 0, got {value}")
     return value
 
 
@@ -678,6 +803,14 @@ class Settings:
     # of process cwd. A missing directory is not an error — see
     # `_default_web_dir` and `webui.mount_web_ui`.
     web_dir: str = field(default_factory=_default_web_dir)
+    # Settings-API work package (ADR-0009 decision 3): the operator hard-lock
+    # for PATCH /v1/settings. Env-only BY DEFINITION — a flag that disables
+    # the settings-write API could not itself be turned back on through that
+    # same API without defeating the point. False (read-write) is the
+    # default: a fresh install gets the writable settings API described in
+    # the README, and a GitOps/headless deployment opts into the pre-ADR-0009
+    # pure-env posture explicitly.
+    settings_readonly: bool = False
 
     @property
     def webhook_enabled(self) -> bool:
@@ -883,4 +1016,7 @@ class Settings:
             # not-yet-populated value only means "no UI to serve", never a
             # reason to refuse to boot.
             web_dir=os.environ.get("VAULT_WEB_DIR", "").strip() or _default_web_dir(),
+            # Settings-API work package. Env-only (see the field's own
+            # docstring); False (read-write) unless explicitly turned on.
+            settings_readonly=_env_bool("VAULT_SETTINGS_READONLY", False),
         )

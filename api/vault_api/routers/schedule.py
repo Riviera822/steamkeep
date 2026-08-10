@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
 from vault_api import scheduler as scheduler_module
+from vault_api import settings_store
 from vault_api.auth import require_api_key
 from vault_api.deps import DbOpener, db_opener
 
@@ -77,14 +78,24 @@ def get_schedule(
     request: Request,
     open_db: DbOpener = Depends(db_opener),
 ) -> ScheduleOut:
-    """Scheduler configuration plus last-sweep bookkeeping (WP 3.5)."""
+    """Scheduler configuration plus last-sweep bookkeeping (WP 3.5).
+
+    Reads the schedule window/interval/staleness bound through
+    ``settings_store.effective_settings`` (settings-API work package,
+    ADR-0009) rather than ``scheduler.settings`` directly, so a
+    ``PATCH /v1/settings`` override shows up here immediately — this
+    endpoint answers "what will the scheduler do", and after an override it
+    would otherwise describe a configuration the next tick has already
+    stopped using (see ``vault_api/scheduler.py``'s own tick-time resolution
+    of the identical override).
+    """
     scheduler = request.app.state.scheduler
-    settings = scheduler.settings
-    window = settings.schedule_window
     now = scheduler.now()
 
     with open_db() as conn:
         state = scheduler_module.read_state(conn)
+        settings = settings_store.effective_settings(conn, scheduler.settings)
+    window = settings.schedule_window
 
     return ScheduleOut(
         enabled=settings.scheduler_enabled,

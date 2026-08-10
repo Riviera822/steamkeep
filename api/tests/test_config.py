@@ -864,3 +864,89 @@ def test_vault_name_defaults_to_empty_and_is_stripped(
     monkeypatch.setenv("VAULT_NAME", "  homelab  ")
 
     assert Settings.from_env().vault_name == "homelab"
+
+
+# ==========================================================================
+# Settings-API work package (ADR-0009): VAULT_SETTINGS_READONLY
+# ==========================================================================
+
+
+def test_settings_readonly_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+
+    assert Settings.from_env().settings_readonly is False
+
+
+@pytest.mark.parametrize("truthy", ["1", "true", "True", "YES", "on", " on "])
+def test_settings_readonly_accepts_true_spellings(
+    monkeypatch: pytest.MonkeyPatch, truthy: str
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_SETTINGS_READONLY", truthy)
+
+    assert Settings.from_env().settings_readonly is True
+
+
+@pytest.mark.parametrize("falsy", ["0", "false", "False", "NO", "off", ""])
+def test_settings_readonly_accepts_false_spellings(
+    monkeypatch: pytest.MonkeyPatch, falsy: str
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_SETTINGS_READONLY", falsy)
+
+    assert Settings.from_env().settings_readonly is False
+
+
+@pytest.mark.parametrize("bad", ["yeah", "1.0", "enabled", "2"])
+def test_settings_readonly_rejects_anything_else(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_SETTINGS_READONLY", bad)
+
+    with pytest.raises(RuntimeError, match="VAULT_SETTINGS_READONLY"):
+        Settings.from_env()
+
+
+# ==========================================================================
+# Settings-API work package: validate_webhook_url (used only by
+# PATCH /v1/settings, NOT by Settings.from_env — see the function's own
+# docstring for why no startup grammar exists for this field to reuse).
+# ==========================================================================
+
+
+def test_validate_webhook_url_accepts_blank_as_disabled() -> None:
+    from vault_api.config import validate_webhook_url
+
+    assert validate_webhook_url("") == ""
+    assert validate_webhook_url("   ") == ""
+
+
+@pytest.mark.parametrize(
+    "good",
+    [
+        "http://example.invalid/hook",
+        "https://example.invalid/hook",
+        "https://user:pass@example.invalid:8443/hook?x=1",
+    ],
+)
+def test_validate_webhook_url_accepts_http_and_https(good: str) -> None:
+    from vault_api.config import validate_webhook_url
+
+    assert validate_webhook_url(good) == good
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not a url",
+        "ftp://example.invalid/hook",
+        "example.invalid/hook",
+        "file:///etc/passwd",
+    ],
+)
+def test_validate_webhook_url_rejects_non_http_schemes(bad: str) -> None:
+    from vault_api.config import validate_webhook_url
+
+    with pytest.raises(ValueError):
+        validate_webhook_url(bad)

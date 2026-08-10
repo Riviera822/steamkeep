@@ -31,6 +31,7 @@ from vault_api.routers import (
     mapping,
     oracle,
     schedule,
+    settings as settings_router,
     stats,
     steam,
 )
@@ -93,12 +94,24 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # WP 3.5: the second background thread. Started AFTER the worker (a sweep
     # is only useful if something is there to drain the queue) and stopped
-    # BEFORE it (stop producing jobs before stopping the consumer). Only
-    # started when a window is configured — an unset VAULT_SCHEDULE_WINDOW
-    # means "off", the safe default, and then no thread exists at all.
+    # BEFORE it (stop producing jobs before stopping the consumer).
+    #
+    # Settings-API work package (ADR-0009) fix, reviewer blocker B1: started
+    # UNCONDITIONALLY now, never gated on `scheduler.thread_needed` (the BOOT
+    # snapshot of "is a window or the event log configured"). Gating on that
+    # snapshot was correct before PATCH /v1/settings existed, but is now a
+    # bug: a stock deployment boots with no window and no event log, so the
+    # thread would never be created, and a later PATCH enabling
+    # schedule_window (`applies: "next_sweep"`, per api/README.md) would have
+    # nothing to tick it — GET /v1/schedule would report a real
+    # `next_eligible_at` that can never arrive. `_tick`'s own body already
+    # no-ops cheaply when both sweeps are disabled (`maybe_sweep`/
+    # `event_sweep.maybe_sweep` each gate internally on the settings they are
+    # actually handed), so the accepted cost is one extra daemon thread
+    # waking once a minute to do nothing — the same shape the job worker
+    # thread already has on an idle queue.
     scheduler: PrefillScheduler = app.state.scheduler
-    if scheduler.thread_needed:
-        scheduler.start()
+    scheduler.start()
     if scheduler.enabled:
         window = settings.schedule_window
         assert window is not None  # implied by scheduler_enabled
@@ -219,6 +232,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agent.router)
     app.include_router(clients.router)
     app.include_router(schedule.router)
+    # Settings-API work package (ADR-0009). Always mounted: GET/PATCH answer
+    # against whatever the environment configured even on a fresh install
+    # with no overrides yet, same reasoning as schedule.router above.
+    app.include_router(settings_router.router)
     app.include_router(stats.router)
     # WP 3.9. Always mounted, even with VAULT_MANIFEST_ORACLE unset: the routes
     # answer "enabled: false" rather than 404 in that case, so a client can

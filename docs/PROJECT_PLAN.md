@@ -621,12 +621,22 @@ setting is env-only (`VAULT_NAME`, `VAULT_SCHEDULE_*`, `VAULT_WEBHOOK_*`)
 and `GET /v1/schedule` is read-only; there is no settings write endpoint at
 all. A settings screen that can toggle anything therefore needs a new layer.
 
-- [ ] Settings table whose values override the env defaults, plus
+- [x] Settings table whose values override the env defaults, plus
       `GET`/`PATCH /v1/settings`. Needs an ADR: precedence rules (env vs DB
       — which wins, and how an operator forces a value back), validation
       reusing the same strict grammars `config.py` applies at startup
       (a bad value must fail at PATCH time, not hours later in the
       scheduler thread), and which settings stay deliberately env-only
+      *(settings-WP done 2026-08-10, ADR-0009: schema v13 settings table;
+      db>env>default via one accessor; PATCH all-or-nothing transaction,
+      null clears, startup grammars reused (webhook-URL scheme check is
+      the documented API-only exception), env-only allowlist,
+      VAULT_SETTINGS_READONLY 403 lock, webhook-URL userinfo redacted;
+      scheduler thread now starts unconditionally so schedule keys are
+      genuinely next_sweep (B1 pinned end-to-end through the real
+      lifespan); webhook keys honestly restart-required; suite 1461
+      green; Opus FAIL→fix→PASS, 13-mutation battery + A/B thread-cost
+      measurement)*
 - [ ] Phase 4a's settings screen builds on this rather than displaying
       read-only values with "set this env var" hints
 

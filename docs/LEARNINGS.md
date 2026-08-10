@@ -366,3 +366,13 @@ These are not style preferences; each entry cost a review round to learn.
 - Gradle wrapper distributions get distributionSha256Sum — the same
   integrity bar the repo already applies to Docker images and CI actions
   (WP 4b.1).
+- A background thread whose EXISTENCE is decided from the boot config
+  snapshot makes every runtime-settings claim for its keys false ("next
+  sweep" that never comes, /v1/schedule publishing a next_eligible_at
+  that cannot arrive). Start such threads unconditionally with a cheap
+  no-op tick — same shape as the worker thread; measured cost: noise
+  (settings-WP blocker).
+- The poll-based wait_for_job flake class has now hit TWO different
+  tests under full-suite load (test_cache_delete WP 3.6, test_worker
+  needs_force) — both pass isolated. Follow-up: scale wait deadlines
+  under load instead of re-diagnosing each flake (settings-WP review).

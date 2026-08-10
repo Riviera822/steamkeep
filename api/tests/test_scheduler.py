@@ -729,10 +729,24 @@ def test_a_scheduled_first_fill_still_runs_forced(tmp_path: Path) -> None:
     assert stub_prefill.read_argv(bindir) == ["prefill", "--force", "--no-ansi"]
 
 
-def test_the_scheduler_thread_does_not_start_when_no_window_is_configured(
+def test_the_scheduler_thread_starts_even_with_no_window_but_sweeps_nothing(
     tmp_path: Path,
 ) -> None:
-    """Disabled is the DEFAULT: no thread, no sweep, no jobs."""
+    """Disabled is the DEFAULT for SWEEPING, but the THREAD itself now always
+    exists (settings-API work package, ADR-0009, reviewer blocker B1).
+
+    Before that fix, ``main.py`` only started this thread when
+    ``scheduler.thread_needed`` was true at BOOT, so a stock deployment with
+    no window and no event log configured got no thread at all — and no
+    later ``PATCH /v1/settings`` enabling ``schedule_window`` (``applies:
+    "next_sweep"``) could ever have anything to tick it. ``main.py`` now
+    calls ``scheduler.start()`` unconditionally; this test pins the other
+    half of that fix, that an always-running thread over a disabled
+    scheduler still does the same amount of real work as before: none. See
+    ``tests/test_settings_api.py``'s
+    ``test_b1_scheduler_thread_exists_on_a_bare_boot_and_a_patched_window_sweeps``
+    for the end-to-end "and a PATCH afterwards actually sweeps" half.
+    """
     settings = make_settings(tmp_path, window=None)
     app = create_app(settings)
     app.state.scheduler = PrefillScheduler(
@@ -747,11 +761,14 @@ def test_the_scheduler_thread_does_not_start_when_no_window_is_configured(
 
     with TestClient(app) as client:
         assert app.state.scheduler.enabled is False
-        assert not any(
-            thread.name == "vault-prefill-scheduler" and thread.is_alive()
-            for thread in threading.enumerate()
+        wait_for(
+            lambda: any(
+                thread.name == "vault-prefill-scheduler" and thread.is_alive()
+                for thread in threading.enumerate()
+            )
         )
-        # Plenty of tick intervals' worth of wall clock — nothing is queued.
+        # Plenty of tick intervals' worth of wall clock — nothing is queued,
+        # even though the thread is very much alive and ticking.
         time.sleep(0.3)
         assert client.get("/v1/jobs", headers=AUTH).json() == []
         assert client.get("/v1/schedule", headers=AUTH).json()["last_sweep_at"] is None

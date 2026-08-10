@@ -221,7 +221,7 @@ an operator asks for *off*, so a non-empty value is an explicit request for a
 feature, and a typo in it must not quietly look like it worked. Once the
 oracle is running, every failure it can have is soft — see below.
 
-## Database schema (v12)
+## Database schema (v13)
 
 Created idempotently at startup by `vault_api/db.py::init_db` (safe to call
 on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
@@ -244,6 +244,7 @@ on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
 | `miss_trigger_state` | `appid` (PK), `last_triggered_at`, `trigger_count`                | **v9**, WP 3.11. The miss trigger's per-app cooldown, persisted so a restart cannot become "re-trigger everything that misses next" |
 | `client_bypass_state` | `client_id` (PK), `bypass_suspected`, `updated_at`               | **v10**, WP 3.13. One row per client holding the LAST computed `bypass_suspected` verdict, so the cache-event sweep can fire `client.bypass_suspected`/`client.bypass_resolved` only on the TRANSITION (either direction), never on the steady state. Only populated when `VAULT_WEBHOOK_URL` is set and at least one of the two events is enabled — see "Webhooks" below |
 | `steam_relay_key` | `id` (PK, `CHECK (id = 1)`), `api_key`, `updated_at`               | **v12**, WP 4a.6r. Single-row: the opt-in Steam Web API relay's one revocable, read-scoped Web API key (ADR-0004 addendum), entered by the operator in the web UI and set via `PUT /v1/steam/key`. Never a password. See "Steam Web API relay" below |
+| `settings` | `key` (PK), `value`, `updated_at` | **v13**, settings-API work package (ADR-0009). One row per OVERRIDDEN key only — a key with no row falls through to its env value or built-in default. `value` is TEXT in the same string grammar the corresponding `VAULT_*` env var uses. See "Persisted settings" below |
 
 Indexes beyond the primary keys: `idx_depot_app_map_appid` on
 `depot_app_map(appid)` (plan §4's main lookup direction is appid → depots,
@@ -436,7 +437,7 @@ appid both saw "no row" and both inserted; the loser got
 is now `INSERT OR IGNORE` plus a conditional name `UPDATE`, pinned by
 `tests/test_mapping.py::test_concurrent_upsert_of_the_same_new_appid_does_not_500`.
 
-## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4 + 3.5 + 3.8 + 3.9 + 3.11 + 3.12 + 4a.6r)
+## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4 + 3.5 + 3.8 + 3.9 + 3.11 + 3.12 + 4a.6r + settings-API/ADR-0009)
 
 All routes below require `X-Api-Key` (see "Auth"). Full API table:
 `docs/PROJECT_PLAN.md` §6; the games, mapping, prefill, jobs, cache, agent,
@@ -463,13 +464,15 @@ clients, schedule and stats rows are implemented so far.
 | GET    | `/v1/oracle/{appid}`               | Stored manifest-oracle view (WP 3.9): `{appid, enabled, checked_at, source, buildid, verdict, depots[]}`, each depot `{depotid, recorded_manifestid, oracle_manifestid, verdict, beta_branches[]}`. `verdict` is `current`/`stale`/`not_cached`/`unknown`. **No network, no `404`** — an app nobody asked about answers `checked_at: null`, and `enabled: false` when the oracle is off. `422` for `appid < 1` |
 | POST   | `/v1/oracle/{appid}/refresh`       | Ask the oracle now (WP 3.9). **This request leaves the LAN** when the oracle is enabled. Always `200`: `{appid, enabled, ok, error, checked_at, depot_count, branch_manifest_count, open_branches[], skipped_password_branches, warnings[]}` — an unreachable or garbage answer is `ok: false` with a reason, never a 5xx. `422` for `appid < 1` |
 | DELETE | `/v1/oracle/{appid}`               | Forget everything the oracle said about one app (WP 3.9). `204` whether or not anything was stored — idempotent, and the way to withdraw the extra GC keep-set protection oracle rows grant |
-| GET    | `/v1/schedule`                     | Scheduler config + last-sweep bookkeeping: `{enabled, window, overnight, interval_minutes, client_stale_days, server_timezone, last_sweep_at, last_sweep_targets, last_sweep_enqueued, next_eligible_at}`. **Read-only** — there is deliberately no write endpoint, see "Scheduler" below |
+| GET    | `/v1/schedule`                     | Scheduler config + last-sweep bookkeeping: `{enabled, window, overnight, interval_minutes, client_stale_days, server_timezone, last_sweep_at, last_sweep_targets, last_sweep_enqueued, next_eligible_at}`. **Read-only itself** — the window/interval/staleness values are now writable through `PATCH /v1/settings` (settings-API work package, ADR-0009; see "Persisted settings" below), this endpoint just reports the currently EFFECTIVE configuration, override included |
 | GET    | `/v1/stats`                        | Cache-event sweep config + bookkeeping (WP 3.11): `{event_feed_enabled, sweep_interval_minutes, miss_trigger_enabled, miss_trigger_cooldown_minutes, miss_trigger_max_per_sweep, bypass_window_days, cursor_offset, first_sweep_at, last_sweep_at, last_rotated_at, lines_read_total, lines_skipped_total, last_lines, last_skipped, last_enqueued, last_dropped_by_cap, truncate_denied_count, last_truncate_denied_at, oversized_skips_total, last_oversized_at, top_unmapped_depots[]}`. **Read-only.** Three counters are alerts: `lines_skipped_total` climbing means a format disagreement, `truncate_denied_count` climbing means the log is growing unbounded, and any non-zero `oversized_skips_total` means bytes were discarded because something wrote a newline-free region longer than a read batch. See "Cache-event sweep" below |
 | GET    | `/v1/steam/key`                    | Opt-in Steam Web API relay (WP 4a.6r): key status only — `{configured, key_last4}`. `key_last4` is `null` when unconfigured; the full key is never returned |
 | PUT    | `/v1/steam/key`                    | Body `{"key": str}` — set (or replace) the relay's Web API key. `200` with the same shape `GET` returns; `422` unless `key` is exactly 32 hexadecimal characters |
 | DELETE | `/v1/steam/key`                    | Clear the configured key. `204` whether or not one was set |
 | GET    | `/v1/steam/owned-games`            | `?steamid=<SteamID64>` — relay `GetOwnedGames`. `200` with `{configured: true, game_count, games: [{appid, name, playtime_forever, img_icon_url}]}`; `409` if no key is configured; `422` for an unusable `steamid`; `502` for any upstream failure. See "Steam Web API relay" below |
 | GET    | `/v1/steam/player-summaries`       | `?steamid=<SteamID64>` — relay `GetPlayerSummaries`. `200` with `{configured: true, players: [{steamid, personaname, avatar, avatarmedium, avatarfull, personastate}]}`; same `409`/`422`/`502` shape as `owned-games`. See "Steam Web API relay" below |
+| GET    | `/v1/settings`                     | Settings-API work package (ADR-0009): `{readonly, settings: [{key, effective, source, fallback, applies, env_only}, ...]}` — every overridable key plus informational env-only ones. `source` is `db`/`env`/`default`; `applies` is `immediately`/`next_sweep`/`restart-required`. See "Persisted settings" below |
+| PATCH  | `/v1/settings`                     | Partial update: `null` clears an override (revert to env/default), any other value sets it, validated with the SAME grammar `config.py` applies at startup. `200` with the same shape `GET` returns. `422` for an invalid value, an unknown key, or a recognised-but-environment-only key (distinct detail); `403` if `VAULT_SETTINGS_READONLY` is set. See "Persisted settings" below |
 
 ## Prefill orchestration (WP 1.4, job outcome honesty WP 3.3)
 
@@ -4597,3 +4600,164 @@ one `EXPECTED_TABLES` entry in `tests/test_db.py`):
   and `..._upgrade_to_v12_is_idempotent_if_called_twice` mirror the v9→v10
   oracle migration tests — a v11 file gains one empty `steam_relay_key`
   table and existing rows in other tables survive untouched.
+
+## Persisted settings (settings-API work package, ADR-0009)
+
+`vault_api/settings_store.py` plus `GET`/`PATCH /v1/settings`
+(`vault_api/routers/settings.py`) add a **write path** on top of a small,
+named set of settings that used to be env-only. `GET /v1/schedule`,
+`GET /v1/stats` and the webhook feature are all still read models over the
+same `Settings` object they always were — this endpoint is what can now
+change a subset of it at runtime.
+
+### Precedence: DB override > env value > built-in default
+
+`settings_store.effective_settings(conn, base)` is the ONE accessor that
+resolves this, called at CALL TIME (never cached beyond one request/tick):
+
+1. a row in the `settings` table (schema v13) for that key wins if present;
+2. otherwise the env var `Settings.from_env()` read at startup (`base`);
+3. otherwise the built-in default baked into `config.py`.
+
+Forcing a value back to the env/default is explicit and first-class:
+`PATCH` with `null` for a key **deletes** the override row outright — there
+is no tombstone, no "overridden to blank" state — so "does an override
+exist" is a plain row-presence check, not a `NULL` check.
+
+### Which keys are overridable, and when a change takes effect
+
+| Key | Env var | `applies` | Why |
+|---|---|---|---|
+| `vault_name` | `VAULT_NAME` | `restart-required` | Only read by `WebhookNotifier._build_body`, which holds a fixed `Settings` snapshot for the notifier's lifetime — see "The honest gap" below |
+| `schedule_window` | `VAULT_SCHEDULE_WINDOW` | `next_sweep` | `vault_api/scheduler.py`'s tick loop resolves `effective_settings` fresh every ~60s tick, using the connection the tick already opened |
+| `schedule_interval_minutes` | `VAULT_SCHEDULE_INTERVAL_MINUTES` | `next_sweep` | Same tick-loop resolution as `schedule_window` |
+| `schedule_client_stale_days` | `VAULT_SCHEDULE_CLIENT_STALE_DAYS` | `next_sweep` | Same tick-loop resolution |
+| `auto_gc` | `VAULT_AUTO_GC` | `immediately` | `worker.py`'s `_maybe_queue_auto_gc` resolves `effective_settings` using the connection the just-finished job is already on, so the very next completed prefill sees a changed value |
+| `webhook_url` | `VAULT_WEBHOOK_URL` | `restart-required` | See "The honest gap" below |
+| `webhook_events` | `VAULT_WEBHOOK_EVENTS` | `restart-required` | Same as `webhook_url` |
+
+**Blank is a valid override value for `schedule_window` and `webhook_url`**
+(mirroring `Settings.from_env`'s own handling of both): it means "disabled",
+which is what makes "force the scheduler or the webhook off via the API even
+though the env var still configures one" expressible at all, rather than a
+gap where only `null` (revert to env) is available and env itself cannot be
+overridden downward. Every other numeric/enum key requires an explicit,
+non-blank value — clearing those is spelled `null`, not an empty string.
+
+### The honest gap: `vault_name` / `webhook_url` / `webhook_events` are restart-required
+
+`WebhookNotifier` (`vault_api/webhooks.py`) is constructed once per process
+with a fixed `Settings` snapshot, and — more fundamentally —
+`WebhookNotifier.start()` only spawns its delivery thread if
+`settings.webhook_enabled` was true **at boot** (`vault_api/main.py`'s
+lifespan). A `PATCH` that turns the feature on from off cannot start a
+thread that already decided not to exist. Wiring live reload into that
+thread (a second long-lived connection, its own refresh cadence, its own
+tests) is real, scoped work, deliberately left as a follow-up rather than
+claimed here. `PATCH` still validates and persists these three keys — the
+override is real and `GET` reports it — but it takes a restart to actually
+change what gets delivered. This is a deliberate, documented choice for this
+work package, not an oversight: the alternative (silently claiming
+`applies: "immediately"` while nothing actually changed until a restart)
+was rejected as dishonest.
+
+### Env-only keys (`PATCH` refuses these by name, `422`, distinct detail)
+
+Bootstrap and security settings never become overridable (ADR-0009 decision
+5): `vault_api_key`, `db_path`, `cache_root`, `steamprefill_path`,
+`steamprefill_cache_dir`, `manifest_archive_dir`, `web_dir`,
+`settings_readonly` itself. All but `vault_api_key` also appear in
+`GET /v1/settings` as informational rows (`env_only: true`, `applies:
+"restart-required"`) so a settings screen can show "this exists but only the
+environment controls it" instead of silently omitting the key.
+**`vault_api_key` never appears in any `GET /v1/settings` response at all —
+not even redacted** — it is the authentication secret itself, a strictly
+higher bar than the webhook URL's userinfo.
+
+### Validation reuses the exact startup grammars — no duplicated parsing
+
+`PATCH` validates each value with the SAME function `config.py` applies to
+the corresponding env var at startup (ADR-0009 decision 4):
+`schedule_window` uses `schedule_window.parse_window`; `schedule_interval_minutes`/
+`schedule_client_stale_days` use `config.parse_strict_int` (ASCII-digits-only,
+`nan`/signs/underscores rejected — the WP 3.12 grammar); `auto_gc` uses
+`config.parse_auto_gc` (must be exactly `off`/`dry-run`/`execute`).
+`config._env_int`/`_env_float`/`_env_auto_gc`/`_env_webhook_events` were each
+split into a pure `parse_*` half (no env-var name, no `os.environ` access)
+plus a thin env-reading wrapper, specifically so both the startup path and
+this module call the identical function — a bad value cannot reach the
+`settings` table with a grammar even slightly looser than the one the
+scheduler/worker would apply hours later.
+
+**One documented exception: `webhook_url`.** WP 3.13 deliberately never
+validates `VAULT_WEBHOOK_URL` as a URL at startup — it is treated as trusted
+operator configuration, and a malformed value simply fails per-delivery at
+WARNING (see "Webhooks → SSRF / trust posture" above). No startup grammar
+therefore exists for `PATCH` to reuse. `config.validate_webhook_url` is a
+**new** function (scheme must be `http`/`https`, blank means disabled) that
+exists ONLY for this endpoint — a human typing a value into a form right now
+gets a `422` immediately for "that is not even a URL" rather than a silent
+warning hours later. `Settings.from_env()` is intentionally left unchanged;
+this is a deliberate, narrow addition, not a change to WP 3.13's shipped
+startup behavior.
+
+### `VAULT_SETTINGS_READONLY` — the operator hard-lock
+
+`VAULT_SETTINGS_READONLY=1` (env-only, by definition — a flag that disables
+the settings-write API cannot itself be re-enabled through that same API)
+makes `PATCH /v1/settings` answer `403` unconditionally, checked BEFORE the
+request body is even inspected — a locked-down/GitOps deployment gets the
+same answer regardless of what was sent. `GET /v1/settings` still works
+(`{"readonly": true, ...}`), and the documented escape hatch below still
+works, since it never goes through the API at all. Accepted spellings:
+`1`/`true`/`yes`/`on` (true), `0`/`false`/`no`/`off`/blank (false,
+case-insensitive) — anything else is refused at startup like every other
+enum-shaped setting in `config.py`.
+
+### Redaction
+
+`webhook_url` is redacted in every `GET`/`PATCH` response exactly like the
+WP 3.13 logging redaction (`webhooks.redact_url`): a userinfo-carrying URL
+renders as `https://***@host/path`. This applies to **both** the
+`effective` value AND the `fallback` value (what clearing the override
+would revert to) — an env-configured webhook URL with embedded credentials
+must not leak its secret through the fallback field just because no
+override is currently active. `PATCH` still accepts the full, un-redacted
+value in the request body (it has to, to store something useful); only
+responses redact.
+
+### The sqlite3 escape hatch
+
+Per ADR-0009 decision 3: if the settings table itself ends up in a state an
+operator wants to bypass the API entirely for (a stuck
+`VAULT_SETTINGS_READONLY=1` deployment with no other admin path, or simply
+cleaning up while debugging), stop vault-api and edit the database directly:
+
+    sqlite3 vault.db "DELETE FROM settings WHERE key = 'auto_gc';"
+    # or, to clear every override at once:
+    sqlite3 vault.db "DELETE FROM settings;"
+
+This is documented, not hidden: it is the same trust posture the rest of
+this database already has (api/README.md "Auth" — a single-operator
+homelab service where whoever can reach this file can already read
+`VAULT_API_KEY`/`VAULT_WEBHOOK_URL` out of it in plaintext). A row written
+this way is still re-validated on every read (`effective_settings`,
+`describe_settings`): a value that no longer passes the current grammar is
+logged and treated as absent rather than crashing a live request or the
+scheduler tick.
+
+### What this work package deliberately did NOT do
+
+- **No `deploy/` changes.** `VAULT_SETTINGS_READONLY` is documented in
+  `api/.env.example`; wiring it through `deploy/compose.yaml` is a
+  follow-up, same pattern as every other WP in this project that touches
+  `config.py`.
+- **No live reload for `vault_name`/`webhook_url`/`webhook_events`** — see
+  "The honest gap" above.
+- **No UI.** Phase 4a's settings screen is expected to build on this
+  endpoint instead of "set this env var" hints, but no web UI changes are
+  part of this work package.
+- **No sweep-mode flag yet.** ADR-0009's consequences section names the
+  Phase 4d "keep the cache current" sweep-mode switch as "one more
+  overridable key when it lands" — it does not exist yet, and neither
+  `OVERRIDABLE_SPECS` nor this section mention it ahead of that work.

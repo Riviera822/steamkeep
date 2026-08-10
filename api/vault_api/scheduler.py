@@ -96,7 +96,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from vault_api import agent_reports, event_sweep, jobs, webhooks
+from vault_api import agent_reports, event_sweep, jobs, settings_store, webhooks
 from vault_api.config import Settings
 from vault_api.db import get_connection
 
@@ -563,14 +563,22 @@ class PrefillScheduler:
 
     @property
     def thread_needed(self) -> bool:
-        """Should the lifespan actually start this thread?
+        """True when EITHER background job wanted ticks AT BOOT: the prefill
+        sweep (``VAULT_SCHEDULE_WINDOW``) or the cache-event sweep
+        (``VAULT_EVENT_LOG_PATH``, WP 3.11).
 
-        True when EITHER background job wants ticks: the prefill sweep
-        (``VAULT_SCHEDULE_WINDOW``) or the cache-event sweep
-        (``VAULT_EVENT_LOG_PATH``, WP 3.11). They are independently
-        configurable — running the event sweep with no prefill window is a
-        perfectly ordinary setup ("collect statistics, never download on a
-        schedule"), and so is the reverse.
+        **No longer what decides whether the lifespan starts the thread**
+        (settings-API work package, ADR-0009, reviewer blocker B1) — it once
+        did, but that made the thread's existence depend on the boot
+        snapshot of ``Settings``, so a stock deployment with neither
+        configured at boot could never run a sweep a later
+        ``PATCH /v1/settings`` enabled (``schedule_window`` is
+        ``applies: "next_sweep"``, which is a promise this class can only
+        keep if the thread already exists to tick on). ``main.py`` now calls
+        ``start()`` unconditionally; this property survives purely as a
+        boot-time diagnostic (used by ``vault_api/routers/schedule.py``-style
+        logging and by ``tests/test_event_sweep.py``'s wiring test), not as a
+        gate.
         """
         return self._settings.scheduler_enabled or self._settings.event_sweep_enabled
 
@@ -647,8 +655,33 @@ class PrefillScheduler:
         miss it discovers can enqueue work the prefill sweep would then see.
         """
         now = self._clock()
+
+        # Settings-API work package (ADR-0009 decision 6): resolve DB
+        # overrides > env > default ONCE per tick, using the connection this
+        # tick already opened, and hand the result to both sweeps below
+        # instead of self._settings directly. This is what makes a
+        # PATCH /v1/settings change to the schedule window/interval/
+        # staleness keys apply "next_sweep" (documented in
+        # vault_api/settings_store.py) rather than requiring a restart —
+        # every OTHER field on the returned Settings is identical to
+        # self._settings (effective_settings only swaps in overridden
+        # fields), so this changes nothing for event_sweep's own settings.
+        # Wrapped in its own try (this method's whole contract is "never
+        # raises" — a broken connection resolving overrides must not be a
+        # new way to violate that): falls back to self._settings, i.e. no
+        # override applied this tick, same as before this work package.
         try:
-            event_sweep.maybe_sweep(conn, self._settings, now, self._webhook_notifier)
+            effective = settings_store.effective_settings(conn, self._settings)
+        except Exception:
+            logger.exception(
+                "Could not resolve settings overrides for this tick; "
+                "proceeding with the env/default configuration (no override "
+                "applied) for one cycle."
+            )
+            effective = self._settings
+
+        try:
+            event_sweep.maybe_sweep(conn, effective, now, self._webhook_notifier)
         except Exception:
             logger.exception(
                 "Cache-event sweep failed (WP 3.11). The thread survives and "
@@ -661,7 +694,7 @@ class PrefillScheduler:
 
         try:
             maybe_sweep(
-                conn, self._settings, now, should_abort=self._stop.is_set
+                conn, effective, now, should_abort=self._stop.is_set
             )
         except Exception:
             logger.exception(

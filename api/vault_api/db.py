@@ -117,7 +117,18 @@ import sqlite3
 #: where the operator who can reach this endpoint can already read
 #: ``vault.db`` directly. A brand-new table, so — like v6/v9/v10/v11's new
 #: tables — this needs no ``ALTER`` step.
-SCHEMA_VERSION = 12
+#: v13 (settings-API work package, ADR-0009): added ``settings`` -- persisted
+#: overrides for a small, named set of env-backed settings (vault name,
+#: schedule window/cadence, webhook URL/event filter, auto-GC mode). One row
+#: per OVERRIDDEN key; a key with no row simply falls through to the env
+#: value or the built-in default (``vault_api/settings_store.py`` resolves
+#: the precedence). ``value`` is stored in the SAME string grammar the
+#: corresponding ``VAULT_*`` env var uses, validated with the identical
+#: parser ``config.py`` applies at startup, so one validation path covers
+#: both sources and a bad value can never reach this table. A brand-new
+#: table, so -- like v6/v9/v10/v11/v12's additions -- this needs no
+#: ``ALTER`` step.
+SCHEMA_VERSION = 13
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -475,6 +486,26 @@ CREATE INDEX IF NOT EXISTS idx_oracle_branch_manifests_depotid
 CREATE TABLE IF NOT EXISTS steam_relay_key (
     id         INTEGER PRIMARY KEY CHECK (id = 1),
     api_key    TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Settings-API work package (ADR-0009): persisted overrides for a small,
+-- named set of env-backed settings. One row per OVERRIDDEN key -- there is
+-- no row for a key that has never been PATCHed, and DELETE (a PATCH with
+-- `null`) removes the row entirely rather than storing a tombstone, which is
+-- what makes "revert to the env value or built-in default" a plain absence
+-- check instead of a NULL check. `value` is TEXT in the SAME string grammar
+-- the corresponding VAULT_* env var would use (e.g. "180", "09:00-17:00",
+-- "job.done,job.error") -- vault_api/settings_store.py validates a write
+-- with the identical parser vault_api/config.py applies to the env var at
+-- startup, so a value can never reach this table without already being
+-- something the rest of the app can consume. `updated_at` is an ordinary UTC
+-- 'YYYY-MM-DDTHH:MM:SSZ' timestamp, the same format every other timestamp
+-- column in this database uses -- an audit breadcrumb ("when was this last
+-- changed"), not something any read path branches on.
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 """

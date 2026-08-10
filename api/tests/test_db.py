@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from vault_api.db import SCHEMA_VERSION, get_connection, init_db
 
 EXPECTED_TABLES = {
@@ -28,6 +30,9 @@ EXPECTED_TABLES = {
     "client_bypass_state",
     # v12 (WP 4a.6r): the opt-in Steam Web API relay's own key storage.
     "steam_relay_key",
+    # v13 (settings-API work package, ADR-0009): persisted overrides for a
+    # small, named set of env-backed settings.
+    "settings",
 }
 
 
@@ -629,6 +634,96 @@ def test_init_db_upgrade_to_v12_is_idempotent_if_called_twice(tmp_path) -> None:
 
     assert len(versions) == 1
     assert versions[0]["version"] == SCHEMA_VERSION
+
+
+def test_init_db_upgrades_a_v12_database_to_v13_in_place(tmp_path) -> None:
+    """v12 -> v13 (settings-API work package, ADR-0009) adds one brand-new
+    TABLE (``settings``), so — like v6/v9/v10/v11/v12's additions — plain
+    ``CREATE ... IF NOT EXISTS`` is the whole migration: no ALTER step. An
+    upgraded database must come out with an EMPTY settings table (no
+    overrides — same state a fresh install with no PATCH ever sent is in)
+    and existing rows in other tables must be untouched.
+    """
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("INSERT INTO apps (appid, status) VALUES (440, 'done')")
+        conn.execute("DROP TABLE settings")
+        conn.execute("UPDATE schema_version SET version = 12")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        (version,) = conn.execute("SELECT version FROM schema_version").fetchone()
+        tables = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        (settings_rows,) = conn.execute("SELECT COUNT(*) FROM settings").fetchone()
+        (appid,) = conn.execute("SELECT appid FROM apps").fetchone()
+    finally:
+        conn.close()
+
+    assert version == SCHEMA_VERSION
+    assert "settings" in tables
+    assert settings_rows == 0
+    assert appid == 440
+
+
+def test_init_db_upgrade_to_v13_is_idempotent_if_called_twice(tmp_path) -> None:
+    """Same guarantee the other bumps carry: running the upgrade again against
+    an already-upgraded file must not raise and must not duplicate anything."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("DROP TABLE settings")
+        conn.execute("UPDATE schema_version SET version = 12")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+    init_db(db_path)  # must not raise
+
+    conn = get_connection(db_path)
+    try:
+        versions = conn.execute("SELECT version FROM schema_version").fetchall()
+    finally:
+        conn.close()
+
+    assert len(versions) == 1
+    assert versions[0]["version"] == SCHEMA_VERSION
+
+
+def test_settings_table_upserts_by_key(tmp_path) -> None:
+    """Basic shape check: ``key`` is the primary key, so a second write to the
+    same key replaces rather than duplicates (``settings_store.set_override``
+    relies on this via ``ON CONFLICT(key) DO UPDATE``)."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("auto_gc", "dry-run", "2026-08-10T00:00:00Z"),
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+                ("auto_gc", "execute", "2026-08-10T01:00:00Z"),
+            )
+    finally:
+        conn.close()
 
 
 def test_init_db_upgrades_a_pre_v7_database_by_adding_gc_execute(tmp_path) -> None:

@@ -49,7 +49,15 @@ import sqlite3
 import threading
 import traceback
 
-from vault_api import gc_execute, jobs, manifest_ingest, prefill, prefill_summary, webhooks
+from vault_api import (
+    gc_execute,
+    jobs,
+    manifest_ingest,
+    prefill,
+    prefill_summary,
+    settings_store,
+    webhooks,
+)
 from vault_api.config import Settings
 from vault_api.db import get_connection
 from vault_api.sizes import SizeCache
@@ -583,8 +591,32 @@ class PrefillWorker:
         Wrapped in its own ``try``: a prefill that genuinely succeeded must not
         be flipped to ``error`` because a follow-up job could not be queued
         (the same reasoning the manifest-ingestion call above is wrapped for).
+
+        Settings-API work package (ADR-0009 decision 6): resolves DB
+        override > env > default through ``settings_store.effective_settings``
+        using the connection this job is already running on, rather than
+        reading ``self._settings.auto_gc`` directly — that is what makes a
+        ``PATCH /v1/settings`` change to ``auto_gc`` apply "immediately"
+        (the very next job this worker finishes), not only after a restart.
+
+        The resolution itself is wrapped in its own ``try``, same reasoning
+        as the ``enqueue_gc`` call below: this whole method's contract is
+        "a follow-up job that cannot be queued is a log line, never a reason
+        to flip an already-successful prefill to 'error'", and a broken
+        connection must not violate that contract one statement earlier than
+        the existing guard. Falls back to ``self._settings`` (the env/default
+        snapshot with no override applied) on any failure.
         """
-        settings = self._settings
+        try:
+            settings = settings_store.effective_settings(conn, self._settings)
+        except Exception:
+            logger.exception(
+                "Auto-GC: could not resolve settings overrides for job %s "
+                "(appid %s); falling back to the env/default configuration "
+                "for this decision.",
+                job_id, appid,
+            )
+            settings = self._settings
         if not settings.auto_gc_enabled:
             return
         if not summary.parse_ok or summary.updated is None or summary.updated <= 0:
