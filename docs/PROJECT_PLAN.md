@@ -565,6 +565,19 @@ parallel/serial decisions, merge discipline, open user decisions):
       Opus PASS + should-fix round)*
 - [ ] Connectivity-profile abstraction (one API-client interface, three
       implementations: tsnet / system VPN / public domain)
+      *(WP 4b.2 done 2026-08-11: suspend OkHttp client for the full /v1
+      surface the app needs (no /v1/steam/* — ADR-0004 device-local
+      path), DTOs field-exact vs HEAD Pydantic incl. strict-Json fixture
+      pass + verbatim api-test anchor; six-kind error taxonomy with
+      literal cross-frontend pin; SystemVpn + PublicDomain profiles with
+      defence-in-depth against redirect key leaks — followRedirects AND
+      followSslRedirects false plus CleartextPolicyInterceptor at
+      application AND network level, each layer standalone-pinned after
+      the reviewer measured an https→http redirect forwarding X-Api-Key;
+      EncryptedSharedPreferences key storage; polling/backoff pure
+      functions in parity with the web store incl. the load-bearing
+      jitter floor; 124 JVM tests; Opus FAIL→fix→PASS→should-fix round;
+      tsnet stays a documented seam, post-v1)*
 - [ ] tsnet Go module + gomobile build (`.aar`), auth-key handling
 - [ ] Grid + badges + multi-select + trigger + polling
 - [ ] Delete flow with size display and confirmation; GC action per game

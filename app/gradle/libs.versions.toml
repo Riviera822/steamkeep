@@ -13,6 +13,26 @@
 ## - Compose BOM 2024.10.01 is contemporaneous with Kotlin 2.0.21/AGP 8.7.3
 ##   (chosen over a newer BOM to avoid pulling compileSdk/AGP features this
 ##   toolchain combination does not support).
+##
+## WP 4b.2 additions (API client + connectivity profiles):
+## - kotlinx-serialization-json 1.7.3 and kotlinx-coroutines-core 1.9.0 are
+##   both the latest patch contemporaneous with Kotlin 2.0.21 (K2 plugin
+##   model — same reasoning as the Compose compiler plugin above).
+## - OkHttp 4.12.0 is the current stable 4.x line (5.x was still
+##   pre-release as of this WP) — plain Java, no extra Kotlin coroutines
+##   adapter needed for the suspend wrapper this WP writes by hand.
+##   mockwebserver is pinned to the SAME version, test-only.
+## - okhttp-tls 4.12.0 (test-only, same version again) added for the
+##   Opus-review redirect-leak pin: VaultApiClientTest needs a real HTTPS
+##   MockWebServer (HeldCertificate/HandshakeCertificates) to construct a
+##   PublicDomainProfile pointed at it and prove an https->http redirect
+##   never reaches a second server.
+## - androidx.security:security-crypto 1.1.0-alpha06 is pinned over the
+##   older stable 1.0.0 specifically for the `MasterKey` builder API used
+##   in EncryptedCredentialStore.kt — 1.0.0's `MasterKeys` helper is
+##   deprecated in favour of it. No stable 1.1.0 GA exists yet; this is a
+##   documented exception to "stable only", not an oversight (there is no
+##   non-deprecated stable alternative for EncryptedSharedPreferences today).
 
 [versions]
 agp = "8.7.3"
@@ -22,6 +42,10 @@ coreKtx = "1.13.1"
 lifecycleRuntimeKtx = "2.8.7"
 activityCompose = "1.9.3"
 junit = "4.13.2"
+kotlinxSerializationJson = "1.7.3"
+kotlinxCoroutines = "1.9.0"
+okhttp = "4.12.0"
+securityCrypto = "1.1.0-alpha06"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -35,8 +59,16 @@ androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-toolin
 androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerializationJson" }
+kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
+kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "kotlinxCoroutines" }
+okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+okhttp-mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver", version.ref = "okhttp" }
+okhttp-tls = { group = "com.squareup.okhttp3", name = "okhttp-tls", version.ref = "okhttp" }
+androidx-security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "securityCrypto" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WP 4b.2 (API client + connectivity profiles).
+
+  This is a documented TRADEOFF, not an oversight: Android's Network
+  Security Config can only scope a cleartext exception by DOMAIN
+  (<domain-config> takes exact hostnames or leading-wildcard subdomains,
+  never an IP address/CIDR range). SystemVpnProfile's whole purpose is
+  reaching whatever LAN/Tailscale IP or hostname the user types into
+  settings at runtime (docs/WORKPACKAGES.md Phase 4b: "System-VPN profile
+  first") — that address is not knowable ahead of time, so it cannot be
+  named in a <domain-config> entry, and there is no IP-range equivalent to
+  fall back to.
+
+  The only way to let SystemVpnProfile speak plain HTTP to an arbitrary LAN
+  address at all is therefore this app-wide <base-config
+  cleartextTrafficPermitted="true">. The corresponding "only the LAN/VPN
+  profile may actually use it" restriction is NOT enforced here (this file
+  cannot express it) — it is enforced one layer up, in application code,
+  by two independent checks documented in
+  dev.steamvault.app.net.profile.PublicDomainProfile (throws at
+  CONSTRUCTION for an http:// base URL, before any request object exists)
+  and dev.steamvault.app.net.profile.CleartextPolicyInterceptor (a second,
+  OkHttp-level gate on every individual request, in case a caller ever
+  builds a request against a PublicDomainProfile without going through its
+  constructor guard — e.g. a redirect response pointing at an http://
+  Location). See ConnectivityProfileTest for both layers pinned by test,
+  including "PublicDomainProfile + http:// must throw before any socket
+  I/O".
+-->
+<network-security-config xmlns:tools="http://schemas.android.com/tools">
+    <!-- tools:ignore="InsecureBaseConfiguration" — AGP lint flags a blanket
+         cleartextTrafficPermitted base-config and suggests scoping it with
+         domain-config instead; the comment above explains why that is not
+         expressible for an arbitrary user-entered LAN/VPN address. Scoped
+         to this one attribute, not disabled project-wide, unlike the two
+         version-nag checks in app/build.gradle.kts. -->
+    <base-config
+        cleartextTrafficPermitted="true"
+        tools:ignore="InsecureBaseConfiguration" />
+</network-security-config>
