@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App is committed to a single dark theme on purpose (mockup NOTES.md
+         "Committed to dark, on purpose" — the app surface has no light
+         variant). This XML theme only covers the pre-Compose window chrome
+         (background/status bar) so launch never flashes light; all actual
+         UI theming is Compose (ui/theme/Theme.kt). -->
+    <style name="Theme.SteamVault" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/vault_bg</item>
+        <item name="android:statusBarColor">@color/vault_bg</item>
+        <item name="android:navigationBarColor">@color/vault_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

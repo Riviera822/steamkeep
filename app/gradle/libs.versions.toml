@@ -1,0 +1,42 @@
+## SteamVault Android app — version catalog (WP 4b.1).
+##
+## Repo rule (docs/LEARNINGS.md / CLAUDE.md): pinned versions only, no
+## dynamic ranges ("latest.release", "+") anywhere in the build. Every
+## entry below is a single, exact, released version.
+##
+## Compatibility notes:
+## - AGP 8.7.3 requires Gradle 8.9+ (bootstrap here is Gradle 8.10.2 — OK).
+## - Kotlin 2.0.21 is the last 2.0.x patch; the Compose compiler Gradle
+##   plugin version below is pinned to match it exactly (required — the
+##   Compose compiler plugin version must equal the Kotlin version it
+##   compiles with as of Kotlin 2.0's K2-based compiler plugin model).
+## - Compose BOM 2024.10.01 is contemporaneous with Kotlin 2.0.21/AGP 8.7.3
+##   (chosen over a newer BOM to avoid pulling compileSdk/AGP features this
+##   toolchain combination does not support).
+
+[versions]
+agp = "8.7.3"
+kotlin = "2.0.21"
+composeBom = "2024.10.01"
+coreKtx = "1.13.1"
+lifecycleRuntimeKtx = "2.8.7"
+activityCompose = "1.9.3"
+junit = "4.13.2"
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-foundation = { group = "androidx.compose.foundation", name = "foundation" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

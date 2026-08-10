@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- XML-theme mirror of the ground tone (theme.css var bg) so the window background
+         and status bar match the Compose theme before the first frame is
+         drawn (avoids a light flash on launch). The Compose token set in
+         ui/theme/Color.kt is the source of truth; this is kept in sync
+         with it by hand since there are only two consumers. -->
+    <color name="vault_bg">#0A1016</color>
+</resources>

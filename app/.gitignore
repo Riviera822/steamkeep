@@ -1,0 +1,32 @@
+# SteamVault Android app (app/) — WP 4b.1.
+# Scoped to this directory; does not affect the rest of the monorepo.
+
+# Local SDK path — machine-specific, NEVER committed (repo rule: secrets/
+# local machine config stay out of the repo; see app/README.md for how to
+# regenerate this file).
+local.properties
+
+# Gradle
+.gradle/
+build/
+*/build/
+gradle-app.setting
+
+# Gradle wrapper jar IS committed on purpose (WP brief: "gradle wrapper
+# (committed wrapper files; gradle-wrapper.jar is expected and fine)") — do
+# not add gradle/wrapper/gradle-wrapper.jar here.
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local dev signing / secrets (none exist yet — reserved for WP 4b.9
+# release-signing work; keep the pattern ready so a keystore never lands
+# here by accident).
+*.jks
+*.keystore
+keystore.properties

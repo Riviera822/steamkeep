@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Pre-Android-12 counterpart to data_extraction_rules.xml. allowBackup is
+  already "false" (which alone disables the legacy full-backup mechanism
+  entirely below API 31), but AGP lint's DataExtractionRules check still
+  wants fullBackupContent declared explicitly for completeness/clarity once
+  dataExtractionRules is present — same "nothing leaves the device" intent
+  as the other file, kept in sync with it.
+-->
+<full-backup-content>
+    <exclude domain="root" />
+</full-backup-content>

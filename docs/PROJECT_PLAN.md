@@ -543,6 +543,15 @@ parallel/serial decisions, merge discipline, open user decisions):
 
 #### Phase 4b — Android App
 - [ ] Kotlin/Compose project, Steam Web API integration (library + covers)
+      *(WP 4b.1 done 2026-08-10: self-contained app/ Gradle project —
+      pinned catalog (AGP 8.7.3, Kotlin 2.0.21, Compose BOM 2024.10.01,
+      SDK 35/min 26), checksum-pinned wrapper; dark theme byte-for-byte
+      from the mockup tokens; status-icon composable with all 10 kinds
+      incl. cancelled, reduced-motion via areAnimatorsEnabled +
+      ContentObserver; allowBackup=false + dataExtractionRules (future
+      API-key storage); 30 JVM tests incl. literal cross-frontend
+      wire-name contract; assembleDebug/test/lint green from cold build;
+      Opus PASS + should-fix round)*
 - [ ] Connectivity-profile abstraction (one API-client interface, three
       implementations: tsnet / system VPN / public domain)
 - [ ] tsnet Go module + gomobile build (`.aar`), auth-key handling

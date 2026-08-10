@@ -351,3 +351,18 @@ These are not style preferences; each entry cost a review round to learn.
   terminal 'cancelled' needs its own neutral glyph and sr word — reusing
   the error glyph would misreport an operator action as a failure
   (WP 4a.5, same class as the Failed-chip divergence).
+
+## Android (Phase 4b)
+- allowBackup="false" alone is insufficient on API 31+: AGP lint flags it,
+  and cloud backup / device-to-device transfer need explicit
+  dataExtractionRules + fullBackupContent excluding the app-data domain —
+  mandatory posture for an app that will store a vault-api key
+  (WP 4b.1).
+- Cross-frontend contracts (status-kind wire names, label words, theme
+  hexes) are pinned with LITERAL expected sets in tests, never derived
+  from the enum under test — a derived round-trip is circular and cannot
+  detect drift from the other frontend (WP 4b.1; same class as the
+  4a.6r constants-vs-literals rule).
+- Gradle wrapper distributions get distributionSha256Sum — the same
+  integrity bar the repo already applies to Docker images and CI actions
+  (WP 4b.1).

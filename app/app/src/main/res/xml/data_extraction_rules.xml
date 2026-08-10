@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ replacement for android:allowBackup for cloud backup AND
+  device-to-device transfer (allowBackup alone only covers cloud backup on
+  API 31+ — D2D transfer is a separate mechanism that needs its own
+  exclusion). Same reasoning as the manifest's allowBackup="false" comment:
+  a later WP (4b.2) stores a vault-api key in this app's private storage,
+  and it must never leave the device via any backup/transfer path.
+  Excluding the whole "root" domain means no app data of any kind is
+  eligible, on either path.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+    </device-transfer>
+</data-extraction-rules>
