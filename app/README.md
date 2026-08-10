@@ -628,3 +628,353 @@ attributes, summed: 124/0/0); `app/app/build/reports/lint-results-debug.txt`:
 - **No settings/profile picker UI** to choose between `SystemVpnProfile`
   and `PublicDomainProfile` or to write into `CredentialStore` — later
   onboarding/settings work (4b.7).
+
+## Steam identity — OpenID + GetOwnedGames on-device (WP 4b.3)
+
+Branch-parallel after 4b.2 per `docs/WORKPACKAGES.md`. Implements
+ADR-0004 decision 2 end to end on the Android side: "Sign in with Steam"
+resolves to a SteamID64 without this app ever seeing a password, and the
+user's own Steam Web API key (entered manually, never obtained via OpenID)
+drives an on-device `GetOwnedGames` call that never touches vault-api.
+
+```
+app/app/src/main/java/dev/steamvault/app/
+├── net/
+│   ├── steam/
+│   │   ├── SteamId64.kt                # SteamID64 validator (mirrors web/api)
+│   │   ├── SteamOpenIdLoginUrl.kt      # SteamOpenIdConfig + checkid_setup URL builder
+│   │   ├── SteamOpenIdCallback.kt      # callback parsing + signed-fields check (pure)
+│   │   ├── SteamOpenIdClient.kt        # check_authentication network call
+│   │   └── SteamWebApiClient.kt        # GetOwnedGames / GetPlayerSummaries + SteamWebApiError
+│   └── model/
+│       └── SteamWebApi.kt              # OwnedGame/SteamPersona + hostile-fixture parsers
+├── repo/
+│   └── SteamIdentityRepository.kt      # login state, sign-in/out, library count preview
+└── ui/identity/
+    └── IdentityScreen.kt               # sign-in / signed-in + sign-out + count preview
+```
+
+`storage/CredentialStore.kt` gained three fields (`steamId64`,
+`steamPersonaName`, `steamWebApiKey`) plus `clearSteamIdentity()` — a
+narrower sign-out than `clear()`, which stays reserved for "forget this
+vault entirely" (untouched by signing out of Steam).
+
+### OpenID login flow
+
+1. `MainActivity` builds the `checkid_setup` URL
+   (`SteamIdentityRepository.buildLoginUrl()` → `SteamOpenIdLoginUrl.build()`)
+   and opens it in an `androidx.browser` Custom Tab.
+2. Valve redirects the Custom Tab back to this app's own custom scheme
+   (`return_to`/`intent-filter` design below); `MainActivity.onNewIntent`
+   receives it and hands the raw callback URL to
+   `SteamIdentityRepository.completeLogin`.
+3. `SteamOpenIdCallback.parse` extracts the full `openid.*` parameter map
+   (shape checks only — this proves nothing about authenticity, since any
+   app can send SteamVault an `Intent` naming this scheme).
+4. `SteamOpenIdCallback.signedCoversClaimedId` checks that
+   `openid.signed` actually lists `claimed_id` — the OpenID 2.0
+   requirement that is easy to skip if a caller stops at a bare
+   `is_valid:true`.
+5. `SteamOpenIdClient.checkAuthentication` POSTs every extracted param
+   back to `https://steamcommunity.com/openid/login` with
+   `openid.mode=check_authentication` and requires a **strict, exact**
+   `is_valid:true` line in the response — this is the step that actually
+   proves the callback was not forged.
+6. `SteamOpenIdCallback.steamId64From` extracts and validates the
+   SteamID64 out of `openid.claimed_id` (`SteamId64.validate` — 17 ASCII
+   decimal digits, individual-account range). Only on success is anything
+   persisted (`CredentialStore.setSteamId64`).
+
+### `return_to`/intent-filter design (WP brief: "pick a scheme, document it")
+
+**Chose a custom `steamvault://` scheme, not an `https://` return_to.**
+SteamVault has no hosted web presence — `vault-api` lives on the user's
+LAN/VPN, never a public domain by default — so there is no HTTPS endpoint
+this app could register as a redirect target. A custom-scheme deep link is
+the standard native-app OpenID/OAuth pattern for exactly this situation.
+
+- `RETURN_TO = REALM = "steamvault://auth/openid-return"` (`realm` equals
+  `return_to` exactly — an explicitly permitted degenerate case of OpenID
+  2.0's realm-matching rules, since this app has no wildcard-subdomain
+  need).
+- `AndroidManifest.xml`'s `MainActivity` carries a second intent-filter:
+  `action=VIEW`, `category=DEFAULT,BROWSABLE`,
+  `data android:scheme="steamvault" android:host="auth" android:path="/openid-return"`,
+  plus `android:launchMode="singleTask"` so the redirect lands in
+  `onNewIntent` on the app's existing instance instead of spawning a
+  second one.
+- **Honest caveat, stated in `SteamOpenIdConfig`'s kdoc too:** this
+  environment cannot confirm empirically that Valve's login page accepts
+  and correctly redirects to a `steamvault://` URL rather than rejecting
+  or mangling it — that is squarely the "on-device only" item in the
+  verification list below. If it turns out Valve rejects the scheme, the
+  fix is narrow (swap the constants) and touches nothing downstream of
+  `SteamOpenIdCallback.parse`.
+
+### OpenID verification hardening
+
+Same OkHttp security posture WP 4b.2's `VaultApiClient` established
+(`docs/LEARNINGS.md` "Android (Phase 4b)"): `followSslRedirects(false)` +
+`followRedirects(false)` (no redirect is ever legitimate for a fixed,
+literal endpoint), HTTPS only, a bounded response read
+(`BufferedSource.request(n)`, not a single `read()` call — a single
+`read()` can return fewer bytes than available even when more remain, so
+only `request` actually bounds the FULL body), and a strict, exact
+`is_valid:true` line match (`isValidTrueStrict` — never a substring
+check, so a garbage document that happens to contain that text elsewhere
+is not accepted).
+
+**Signed-fields check, scope stated honestly (WP brief).**
+`signedCoversClaimedId` checks ONLY that `claimed_id` is a member of
+`openid.signed` — the one field this app actually trusts (the sole source
+of the persisted SteamID64). It deliberately does NOT also require
+`return_to`/`response_nonce`/`op_endpoint`/`identity` to be signed: this
+app never branches on those fields' values for anything
+security-relevant, unlike a fully general OpenID relying party.
+
+### Known residual: no request↔callback binding (replay), reviewer-flagged
+
+`buildLoginUrl()`/`SteamOpenIdConfig.RETURN_TO` carry no per-login `state`
+parameter, and `completeLogin` never checks the callback's
+`openid.return_to` against the specific URL THIS login attempt built, nor
+tracks `openid.response_nonce` to reject a repeat. Concretely: a
+malicious app already installed on the same device could capture a
+**genuine**, Valve-signed OpenID assertion for the ATTACKER's own Steam
+account (e.g. by triggering its own sign-in against this app's exact
+`return_to` scheme+host+path, since nothing here is per-attempt-unique)
+and replay it into SteamVault's intent-filter — `check_authentication`
+would legitimately return `is_valid:true` (it IS a genuine, unmodified
+Valve assertion, just not the one THIS app's button press initiated), and
+the app would flip its displayed identity to the attacker's account.
+
+**Blast radius, stated precisely:** this can only ever *replace which
+Steam account is shown as signed in* on the victim's device — it cannot
+forge a claim for an account the attacker does not themselves control,
+cannot touch vault-api (ADR-0004 decision 2's isolation holds regardless),
+and leaks no secret (there is no secret in this flow to leak). Calling
+`signOut()` fully recovers.
+
+**Mitigation, deferred rather than added here (scope discipline for this
+WP):** the standard OpenID/OAuth fix is a per-login random `state` value
+appended to `RETURN_TO`/checked on the way back in, which this WP does
+not add — flagged as a concrete candidate for WP 4b.7 (settings/onboarding,
+serial after 4b.3) or WP 4b.9 (release hardening pass), not silently
+deferred.
+
+### Steam Web API on-device (`SteamWebApiClient`)
+
+`GetOwnedGames` (`IPlayerService/GetOwnedGames/v1`, `include_appinfo=1`)
+and `GetPlayerSummaries` (`ISteamUser/GetPlayerSummaries/v2`, for the
+optional persona name), using the device-local key from
+`CredentialStore.getSteamWebApiKey()` — **never** vault-api's own key,
+and never sent to vault-api at all (ADR-0004 decision 2).
+`SteamKeyIsolationTest` is the grep-provable pin: it reads
+`VaultApiClient.kt`'s source text and asserts it never references
+`getSteamWebApiKey`, `SteamWebApiClient`, `SteamOpenIdClient`, or
+`SteamIdentityRepository`.
+
+Same security posture as above (host pinned to `api.steampowered.com`,
+HTTPS only, no redirects, bounded 2 MiB read). **Key redaction**
+(mirroring `api/vault_api/steam_relay.py`'s `_redacted_url` discipline,
+read at HEAD as the reference): every error path builds its
+`SteamWebApiError` message from a fixed literal plus, at most, an HTTP
+status code or an exception CLASS NAME — `e.message` from a caught
+`IOException` is never interpolated (some `IOException` subtypes can
+embed connection details), so the key — which lives only in the request
+query string — can never reach a log line or an exception message.
+`SteamWebApiClientTest`'s three `MUTATION PIN` tests plant a canary key
+and assert it is absent from the network-failure, non-2xx, and
+oversized-body exception messages (while separately confirming the key
+DID legitimately reach the wire, via the recorded request path — the pin
+is about the client-side message, not about whether Valve received the
+key).
+
+`net/model/SteamWebApi.kt`'s `parseOwnedGames`/`parsePlayerSummary`
+mirror `api/vault_api/steam_relay.py::parse_owned_games`'s tolerant shape:
+a malformed individual entry (wrong type, boolean masquerading as an
+int/appid, oversized string) is skipped, not fatal; a document with no
+usable `response` object raises `SteamWebApiError`; a `SerializationException`
+or `StackOverflowError` from a hostile/deeply-nested body is caught and
+converted rather than escaping as a raw exception type.
+
+### Data layer (`SteamIdentityRepository`)
+
+`SteamIdentityState(steamId64, personaName, hasWebApiKey)` is read fresh
+from `CredentialStore` on every call. `completeLogin` never throws — every
+failure (malformed callback, unsigned `claimed_id`, a rejected assertion,
+an invalid SteamID64) becomes `SteamLoginResult.Failure` with a fixed,
+secret-free reason string. `ownedGamesCountPreview()` returns a
+`Result<Int>` (game COUNT only — the brief's explicit boundary: "library
+fetch happens in 4b.4, expose the repository, render a count preview
+only"); `refreshPersonaName()` is best-effort and requires both a
+signed-in state and a configured key. `signOut()` calls
+`CredentialStore.clearSteamIdentity()` — pinned to clear exactly the three
+Steam fields and leave the vault connection (`apiKey`/`baseUrl`/`profileKind`)
+untouched.
+
+`SteamOpenIdVerifier`/`SteamLibraryFetcher` are the two seams
+`SteamIdentityRepositoryImpl` depends on (implemented by `SteamOpenIdClient`/
+`SteamWebApiClient` in production) — extracted purely so
+`SteamIdentityRepositoryTest` can fake the network entirely and exercise
+every branch (malformed callback / unsigned claimed_id / rejected
+assertion / invalid SteamID64 / missing key / fetcher failure) on the JVM.
+
+### UI (`ui/identity/IdentityScreen.kt`)
+
+Minimal, per the brief: a sign-in button when signed out; steamid +
+persona (or "not loaded yet") + a "check library size" button + sign-out
+when signed in. The library size is a COUNT only (a `pluralStringResource`
+sentence), never a rendered grid — the real library grid is WP 4b.4's job.
+`MainActivity` now shows this screen in place of WP 4b.1's debug gallery
+(`GalleryScreen.kt` still compiles and is still covered by its own tests,
+just no longer wired into `MainActivity`) — flagged as an expected
+reconciliation point for whichever later WP (4b.4/4b.5/4b.7, also
+branch-parallel and also wanting to wire a screen into this
+single-activity shell) introduces real navigation.
+
+### Versions pinned for this WP
+
+Added to `gradle/libs.versions.toml`:
+
+| Component | Version | Why |
+|---|---|---|
+| androidx.browser | 1.8.0 | current stable release; used only for `CustomTabsIntent` to launch Valve's login page. No other new runtime dependency — verification and the Steam Web API calls reuse the already-pinned OkHttp 4.12.0. |
+
+### Tests (WP 4b.3)
+
+94 new JVM unit tests (218 total with WP 4b.1/4b.2's 124), no
+Robolectric/emulator dependency:
+
+- `net/steam/SteamId64Test` (12) — literal boundary fixtures shared with
+  `web/tests/steamid.test.js`/`api/tests/test_steam_relay.py` (base/max/
+  real-shaped/length/sign-character/whitespace/non-ASCII-digit/zeros).
+- `net/steam/SteamOpenIdLoginUrlTest` (3) — the literal expected
+  `checkid_setup` URL (measured empirically: OkHttp's
+  `addQueryParameter` percent-encodes `:`/`/` inside a query value, which
+  this file's kdoc records as a "verify, don't assume" case per
+  `docs/LEARNINGS.md`), the mode-literal mutation pin, and a custom
+  return_to/realm case.
+- `net/steam/SteamOpenIdCallbackTest` (17) — parse (well-formed, stray
+  param ignored, no query string, `cancel` mode rejected, each required
+  field individually missing, base64 `=` padding preserved, malformed
+  percent-encoding, duplicate key), `signedCoversClaimedId` (present/
+  absent/empty/substring-trap), `steamId64From` (valid, wrong host, extra
+  path segment, invalid tail, empty tail).
+- `net/steam/SteamOpenIdClientTest` (12) — MockWebServer: `is_valid`
+  true/false/garbage/empty/non-2xx, an oversized body cut off before the
+  `is_valid:true` line, network failure, redirect refusal (reusing the
+  WP 4b.2 `TlsFixture` pattern), the mode-override-to-check_authentication
+  pin, the redirect-flags configuration pin (S1b), the host-pin literal
+  test, and `isValidTrueStrict`'s own mutation-pinned exact-match cases.
+- `net/steam/SteamWebApiClientTest` (9) — the host/path literal pin,
+  successful `GetOwnedGames`/`GetPlayerSummaries` round trips, an empty
+  library, and the three explicit key-redaction `MUTATION PIN` tests
+  (network failure / non-2xx / oversized body).
+- `net/model/SteamWebApiParsingTest` (22) — hostile fixtures: missing/
+  zero/negative/boolean/string appid, boolean/negative playtime, non-object
+  entries, `games` not a list, name/icon truncation, the `MAX_GAMES` bound,
+  no-usable-`response` / non-object / non-JSON documents, and
+  `parsePlayerSummary`'s steamid cross-check + persona truncation.
+- `repo/SteamIdentityRepositoryTest` (16) — the full `completeLogin`
+  branch set against fakes (success, malformed callback, unsigned
+  claimed_id, rejected assertion, invalid SteamID64), `ownedGamesCountPreview`/
+  `refreshPersonaName`'s missing-state paths, and `signOut`'s
+  scoped-clear pin.
+- `net/SteamKeyIsolationTest` (2) — the grep-provable structural pin.
+- `storage/InMemoryCredentialStoreTest` gained 1 more test
+  (`clearSteamIdentity` scoped-clear) on top of the existing four, updated
+  to also cover the three new fields.
+
+Mutation-verify targets named in the brief, each with an explicit test:
+**host pin** (`hostPin` tests in both new client test files, literal
+strings, never derived from the class's own constants), **is_valid strict
+parse** (`isValidTrueStrict`'s own test plus the MockWebServer `is_valid`
+variants), **steamid range** (`SteamId64Test`'s base/max/length mutation
+pins), **key-redaction** (`SteamWebApiClientTest`'s three canary-key
+tests).
+
+Verified command + output tail:
+
+```
+$ ./gradlew.bat test lintDebug assembleDebug
+...
+BUILD SUCCESSFUL in 12s
+74 actionable tasks: 33 executed, 41 up-to-date
+```
+
+218/0/0 across both `testDebugUnitTest` and `testReleaseUnitTest` (summed
+from the XML reports' `tests=`/`failures=`/`errors=` attributes);
+`app/app/build/reports/lint-results-debug.txt`: "No issues found."
+
+### What is verifiable only on-device (honest list for the user's device test)
+
+This environment has no emulator/device and cannot open a real browser —
+everything below is exercised via MockWebServer/fakes up to the network
+boundary, but the following need a real phone + real Steam account before
+they can be called confirmed:
+
+1. **Whether Valve's OpenID login page actually accepts and redirects to
+   the `steamvault://auth/openid-return` custom scheme at all** (the
+   "Honest caveat" above) — if Valve rejects or mangles it, sign-in will
+   visibly fail to return to the app.
+2. **Whether the Custom Tab correctly hands the redirect to
+   `MainActivity.onNewIntent`** (manifest intent-filter matching,
+   `launchMode="singleTask"` behaviour) — this is Android OS/Custom Tab
+   plumbing this environment cannot instantiate.
+3. **The real `check_authentication` round trip against the genuine
+   `steamcommunity.com`** — the MockWebServer tests prove the CLIENT's
+   logic against every shape of response, but never actually call Valve.
+4. **BLOCKED UNTIL WP 4b.7: the real `GetOwnedGames`/`GetPlayerSummaries`
+   calls against `api.steampowered.com` with a genuine Steam Web API key**
+   (both the library-count preview AND the persona-name half of
+   `refreshPersonaName`). `setWebApiKey()` exists only on the repository —
+   this WP deliberately adds no debug/dev input field for it (scope
+   discipline: a throwaway input widget is not the real onboarding UI and
+   would need its own review), so there is currently NO way to reach this
+   code path from the running app at all until WP 4b.7 lands the real
+   key-entry surface. **Do not report this as a bug when testing WP 4b.3
+   alone** — `IdentityScreen` will correctly show "Add your Steam Web API
+   key in Settings..." and stop there, because Settings does not exist
+   yet.
+5. **Visual/UX check of `IdentityScreen`** — Compose rendering, button
+   states, and string wording have not been seen on a real screen.
+6. **Watch for a malformed/rejected sign-in caused by a literal `+` in
+   `openid.sig`.** `SteamOpenIdCallback.parse` decodes every query value
+   with `java.net.URLDecoder.decode(_, "UTF-8")`, which follows
+   `application/x-www-form-urlencoded` semantics: an UNENCODED `+`
+   character decodes to a space. Base64 (the alphabet `openid.sig` is
+   drawn from) legitimately contains `+`. A spec-compliant redirect from
+   Valve percent-encodes it as `%2B` in the query string, which decodes
+   back to a literal `+` correctly — this is expected to be a non-issue in
+   practice — but if a real device test ever sees a sign-in fail for no
+   apparent reason, check whether the callback URL's `openid.sig` carried
+   a raw `+`: this fails CLOSED (a corrupted signature value simply makes
+   `check_authentication` return `is_valid:false`, never a security hole),
+   but it would look like an unexplained rejection rather than the
+   `+`-decoding cause. Not fixed here (no evidence Valve's actual redirect
+   needs it) — recorded as a debugging note for whoever sees the failure
+   first.
+
+### What WP 4b.3 deliberately did NOT do
+
+- **No library grid, no game list UI** — `ownedGamesCountPreview()`
+  exposes a COUNT only; the full grid is WP 4b.4.
+- **No settings UI for entering the Steam Web API key** —
+  `setWebApiKey()` exists on the repository; a real input screen is WP
+  4b.7 (onboarding/settings, serial after 4b.3 per
+  `docs/WORKPACKAGES.md`).
+- **No real navigation** — `IdentityScreen` replaces the WP 4b.1 debug
+  gallery as `MainActivity`'s one screen; multiple destinations arrive
+  with 4b.4/4b.5/4b.7's navigation work.
+- **No app-wide error-display convention** — review round S3 added ONE
+  line of state (`MainActivity.identityState.loginError` →
+  `IdentityScreen`'s inline `Text` in the error colour) so
+  `SteamLoginResult.Failure.reason` is at least visible when sign-in
+  fails, since that branch is exactly where the device-only verification
+  items above (1-3) would land if any of them go wrong on a real device.
+  A real Toast/Snackbar/inline-message CONVENTION for the whole app is
+  still left to whichever later WP establishes one, rather than guessed
+  at here.
+- **No WorkManager-driven persona/library refresh** — `refreshPersonaName`/
+  `ownedGamesCountPreview` are both manual, button-triggered calls; any
+  background refresh is WP 4b.8's polling work.

@@ -92,6 +92,9 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.androidx.security.crypto)
 
+    // WP 4b.3: Steam identity -- CustomTabsIntent for the OpenID login page.
+    implementation(libs.androidx.browser)
+
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)

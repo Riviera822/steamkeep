@@ -399,3 +399,14 @@ These are not style preferences; each entry cost a review round to learn.
   verified empirically). Verify a reviewer's assumed failure mechanism
   before writing the pin for it; pin the mechanism that actually kills
   the mutation (WP 4a.6 fix round).
+- Kotlin toLongOrNull honours Unicode Nd digits (Character.digit), so an
+  ASCII-digit walk in front of it is load-bearing against IN-RANGE
+  Arabic-Indic spellings — a below-range non-ASCII fixture tests the
+  range check, not the digit walk. Pin with the in-range non-ASCII
+  spelling (WP 4b.3 review; JS BigInt had the analogous 0x-hex case).
+- Custom-scheme OAuth/OpenID callbacks are unverifiable on EVERY Android
+  version (verified App Links are http/https-only). Injection is fully
+  mitigated by re-verifying assertions with the provider over a pinned
+  host; the residual is REPLAY of a genuine assertion (attacker's own
+  account) absent request<->callback binding — record it and plan a
+  per-login random state (WP 4b.3 review).

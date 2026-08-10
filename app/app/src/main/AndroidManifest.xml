@@ -29,10 +29,30 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:theme="@style/Theme.SteamVault">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- WP 4b.3: Steam OpenID login callback. dev.steamvault.app.net.steam.SteamOpenIdConfig's
+                 RETURN_TO/REALM constants must stay in sync with this
+                 scheme/host/path; see that object's kdoc for why a custom
+                 scheme (not an https:// return_to) was chosen.
+                 android:launchMode="singleTask" above so Valve's redirect
+                 delivers into MainActivity.onNewIntent on the app's
+                 EXISTING task/instance instead of spawning a second one
+                 (the standard pattern for a single-activity OAuth/OpenID
+                 callback). -->
+            <intent-filter android:label="@string/app_name">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="steamvault"
+                    android:host="auth"
+                    android:path="/openid-return" />
             </intent-filter>
         </activity>
     </application>

@@ -29,7 +29,34 @@ interface CredentialStore {
     fun getProfileKind(): String?
     fun setProfileKind(kind: String?)
 
-    /** Clears everything this store holds (e.g. "log out" / "forget this vault"). */
+    // ---- WP 4b.3: Steam identity -----------------------------------------
+    // Distinct from the vault-api key above: this is the SteamID64 an
+    // OpenID sign-in resolved to, an optional cached persona name, and the
+    // user's OWN Steam Web API key for on-device GetOwnedGames calls
+    // (ADR-0004 decision 2 -- never sent to vault-api, see
+    // `net/steam/SteamWebApiClient.kt`'s kdoc and `SteamKeyIsolationTest`).
+
+    /** The signed-in SteamID64 (17-digit decimal string), or `null` if never signed in. */
+    fun getSteamId64(): String?
+    fun setSteamId64(steamId64: String?)
+
+    /** Cached persona name from `GetPlayerSummaries` (WP brief: "optional"), or `null`. */
+    fun getSteamPersonaName(): String?
+    fun setSteamPersonaName(name: String?)
+
+    /** The user's own, device-local Steam Web API key, or `null` if not yet entered. */
+    fun getSteamWebApiKey(): String?
+    fun setSteamWebApiKey(key: String?)
+
+    /**
+     * Clears only the three Steam-identity values above (WP brief:
+     * "sign-out clears everything") -- leaves the vault-api connection
+     * (`apiKey`/`baseUrl`/`profileKind`) untouched, since signing out of
+     * Steam is not the same action as forgetting the configured vault.
+     */
+    fun clearSteamIdentity()
+
+    /** Clears everything this store holds (e.g. "forget this vault" entirely). */
     fun clear()
 }
 

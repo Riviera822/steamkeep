@@ -23,4 +23,29 @@
 
     <string name="reduced_motion_on">Reduced motion: ON (animations disabled)</string>
     <string name="reduced_motion_off">Reduced motion: OFF (animations enabled)</string>
+
+    <!-- Steam identity screen (WP 4b.3). Library grid rendering is WP 4b.4;
+         this screen only shows a game-count preview (WP brief boundary). -->
+    <string name="identity_title">Steam account</string>
+    <string name="identity_signed_out_hint">Sign in with your Steam account to link it to this device.</string>
+    <string name="identity_sign_in">Sign in with Steam</string>
+    <string name="identity_sign_out">Sign out</string>
+    <!-- Review round S3: SteamLoginResult.Failure.reason is always a
+         fixed, secret-free string (see its kdoc), so it is safe to embed
+         verbatim here. -->
+    <string name="identity_login_failed">Sign-in failed: %1$s</string>
+    <string name="identity_steamid_label">SteamID64: %1$s</string>
+    <string name="identity_persona_label">Signed in as %1$s</string>
+    <string name="identity_persona_unknown">Persona name not loaded yet</string>
+    <string name="identity_no_web_api_key">Add your Steam Web API key in Settings to load your library.</string>
+    <string name="identity_refresh_library_count">Check library size</string>
+    <string name="identity_library_count_unknown">Library size: not checked yet</string>
+    <string name="identity_library_count_error">Could not reach the Steam Web API — try again later.</string>
+    <!-- AGP lint's PluralsCandidate check (app/README.md's lintDebug gate,
+         warningsAsErrors) flags a bare "%1$d games" string; a plurals
+         resource is the correct fix rather than a suppression. -->
+    <plurals name="identity_library_count">
+        <item quantity="one">Library size: %1$d game</item>
+        <item quantity="other">Library size: %1$d games</item>
+    </plurals>
 </resources>

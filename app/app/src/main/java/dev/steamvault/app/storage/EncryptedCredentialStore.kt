@@ -8,6 +8,9 @@ private const val PREFS_FILE_NAME = "steamvault_secure_prefs"
 private const val PREF_KEY_API_KEY = "vault_api_key"
 private const val PREF_KEY_BASE_URL = "vault_base_url"
 private const val PREF_KEY_PROFILE_KIND = "vault_profile_kind"
+private const val PREF_KEY_STEAM_ID64 = "steam_id64"
+private const val PREF_KEY_STEAM_PERSONA_NAME = "steam_persona_name"
+private const val PREF_KEY_STEAM_WEB_API_KEY = "steam_web_api_key"
 
 /**
  * [CredentialStore] backed by [EncryptedSharedPreferences] (androidx
@@ -60,6 +63,23 @@ class EncryptedCredentialStore(context: Context) : CredentialStore {
 
     override fun getProfileKind(): String? = prefs.getString(PREF_KEY_PROFILE_KIND, null)
     override fun setProfileKind(kind: String?) = putOrRemove(PREF_KEY_PROFILE_KIND, kind)
+
+    override fun getSteamId64(): String? = prefs.getString(PREF_KEY_STEAM_ID64, null)
+    override fun setSteamId64(steamId64: String?) = putOrRemove(PREF_KEY_STEAM_ID64, steamId64)
+
+    override fun getSteamPersonaName(): String? = prefs.getString(PREF_KEY_STEAM_PERSONA_NAME, null)
+    override fun setSteamPersonaName(name: String?) = putOrRemove(PREF_KEY_STEAM_PERSONA_NAME, name)
+
+    override fun getSteamWebApiKey(): String? = prefs.getString(PREF_KEY_STEAM_WEB_API_KEY, null)
+    override fun setSteamWebApiKey(key: String?) = putOrRemove(PREF_KEY_STEAM_WEB_API_KEY, key)
+
+    override fun clearSteamIdentity() {
+        val editor = prefs.edit()
+        editor.remove(PREF_KEY_STEAM_ID64)
+        editor.remove(PREF_KEY_STEAM_PERSONA_NAME)
+        editor.remove(PREF_KEY_STEAM_WEB_API_KEY)
+        editor.apply()
+    }
 
     override fun clear() {
         prefs.edit().clear().apply()

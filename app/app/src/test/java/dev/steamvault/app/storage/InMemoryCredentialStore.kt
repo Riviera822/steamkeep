@@ -19,6 +19,21 @@ class InMemoryCredentialStore : CredentialStore {
     override fun getProfileKind(): String? = values[KEY_PROFILE_KIND]
     override fun setProfileKind(kind: String?) = set(KEY_PROFILE_KIND, kind)
 
+    override fun getSteamId64(): String? = values[KEY_STEAM_ID64]
+    override fun setSteamId64(steamId64: String?) = set(KEY_STEAM_ID64, steamId64)
+
+    override fun getSteamPersonaName(): String? = values[KEY_STEAM_PERSONA_NAME]
+    override fun setSteamPersonaName(name: String?) = set(KEY_STEAM_PERSONA_NAME, name)
+
+    override fun getSteamWebApiKey(): String? = values[KEY_STEAM_WEB_API_KEY]
+    override fun setSteamWebApiKey(key: String?) = set(KEY_STEAM_WEB_API_KEY, key)
+
+    override fun clearSteamIdentity() {
+        values.remove(KEY_STEAM_ID64)
+        values.remove(KEY_STEAM_PERSONA_NAME)
+        values.remove(KEY_STEAM_WEB_API_KEY)
+    }
+
     override fun clear() {
         values.clear()
     }
@@ -31,5 +46,8 @@ class InMemoryCredentialStore : CredentialStore {
         const val KEY_API_KEY = "apiKey"
         const val KEY_BASE_URL = "baseUrl"
         const val KEY_PROFILE_KIND = "profileKind"
+        const val KEY_STEAM_ID64 = "steamId64"
+        const val KEY_STEAM_PERSONA_NAME = "steamPersonaName"
+        const val KEY_STEAM_WEB_API_KEY = "steamWebApiKey"
     }
 }

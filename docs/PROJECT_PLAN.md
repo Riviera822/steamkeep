@@ -578,6 +578,18 @@ parallel/serial decisions, merge discipline, open user decisions):
       functions in parity with the web store incl. the load-bearing
       jitter floor; 124 JVM tests; Opus FAIL→fix→PASS→should-fix round;
       tsnet stays a documented seam, post-v1)*
+      *(WP 4b.3 done 2026-08-11: Steam OpenID login — checkid_setup via
+      Custom Tab with steamvault:// return scheme, assertions
+      re-verified via check_authentication against pinned
+      steamcommunity.com with redirects refused and strict is_valid
+      parsing, signed-fields gate before trust; SteamID64 validator with
+      in-range Arabic-Indic mutation pin; on-device GetOwnedGames/
+      GetPlayerSummaries with the user's own key (never sent to
+      vault-api — allowlist-pinned), key-redacted error paths;
+      documented replay residual (no state binding — candidate 4b.7/
+      4b.9) and honest device-test list incl. 4b.7-blocked items; 219
+      JVM tests; Opus PASS, 12/12 security mutations dead after fix
+      round)*
 - [ ] tsnet Go module + gomobile build (`.aar`), auth-key handling
 - [ ] Grid + badges + multi-select + trigger + polling
 - [ ] Delete flow with size display and confirmation; GC action per game
