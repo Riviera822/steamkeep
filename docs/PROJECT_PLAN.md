@@ -576,6 +576,46 @@ available at any reasonable cost, and would be the less useful half anyway.
   half (get pinged when the nightly sweep finds something), this is the
   active/pull half (ask right now)
 
+#### Phase 4d — Persisted settings + "keep the cache current" sweep mode
+
+Two coupled items (user decision 2026-08-10). The sweep mode is the feature;
+persisted settings are what makes it a switch in the UI rather than a
+Compose edit plus restart.
+
+**Settings persistence — Plan B (chosen over env-only).** Today EVERY
+setting is env-only (`VAULT_NAME`, `VAULT_SCHEDULE_*`, `VAULT_WEBHOOK_*`)
+and `GET /v1/schedule` is read-only; there is no settings write endpoint at
+all. A settings screen that can toggle anything therefore needs a new layer.
+
+- [ ] Settings table whose values override the env defaults, plus
+      `GET`/`PATCH /v1/settings`. Needs an ADR: precedence rules (env vs DB
+      — which wins, and how an operator forces a value back), validation
+      reusing the same strict grammars `config.py` applies at startup
+      (a bad value must fail at PATCH time, not hours later in the
+      scheduler thread), and which settings stay deliberately env-only
+- [ ] Phase 4a's settings screen builds on this rather than displaying
+      read-only values with "set this env var" hints
+
+**Sweep target set — installed PLUS cached (opt-in).** Today the nightly
+sweep targets only the union of *installed* lists from fresh agent reports
+(`scheduler.compute_targets`: "Intersected with nothing else", plan A8). A
+game that sits in the cache but is currently installed nowhere — or whose
+PC has been quiet longer than `VAULT_SCHEDULE_CLIENT_STALE_DAYS` — is never
+refreshed and silently rots.
+
+- [ ] New target-set mode adding every cached app to the sweep. Cheap by
+      construction: ~3 s and zero bytes per app that is already current
+      (see 4c), real traffic only for actual deltas
+- [ ] Opt-in, and off by default — it spends bandwidth on games nobody has
+      asked for, which must be the operator's explicit choice
+- [ ] The backend half (an env var + the widened target set) can land
+      independently of the settings layer; only the UI switch depends on it
+- [ ] **Pair with auto-GC** (still open in Phase 3): every kept-current game
+      adds fresh chunks while the old manifest's chunks become orphans. A
+      vault that keeps itself current without collecting garbage keeps
+      itself current straight into a full disk. These two ship together or
+      the growth must at least be surfaced
+
 ### Phase 5 — Community Release
 - [x] README with architecture diagram, quickstart (compose up in 5 minutes),
       and an explicit "works for guests" FAQ note: any Steam client behind
@@ -666,6 +706,27 @@ platform actually wants to react to.
       into one click
 - [ ] Integration docs: n8n in BOTH directions (receiving events; calling
       `/v1/jobs` to trigger a prefill), Discord, ntfy
+- [ ] Named, scoped API keys — the direct consequence of inviting external
+      systems in (user question 2026-08-10). Today there is exactly ONE
+      key: `auth.require_api_key` compares against `VAULT_API_KEY` for every
+      router, so the key an n8n flow needs in order to enqueue a prefill is
+      the same key that may `DELETE /v1/cache/{appid}`. Wanted: several
+      named keys (web UI, agent, Android app, n8n) with a coarse scope —
+      read / enqueue / destructive — each revocable on its own, so a leaked
+      automation token does not mean rotating every agent in the house.
+      Note this is about BLAST RADIUS, not about identity: it does not make
+      the vault multi-user
+- [ ] Payload scoping per target: a Discord channel is a room full of
+      people, and `client.bypass_*` payloads carry `client_id` plus every
+      IP address a device reported from, while job/update events reveal
+      which games the household owns. A `full|minimal` payload mode per
+      target (minimal drops device and address fields) is the cheap,
+      correct fix — authentication cannot solve a receiver-side visibility
+      problem
+- Open, deliberately deferred: PER-USER webhooks ("tell ME when MY games
+  update") require a real user identity, which only arrives with Phase 4a's
+  Sign in with Steam (ADR-0004). Until then a vault has one operator's view
+  and the webhook config belongs to that operator. Revisit after Phase 4a
 - Explicitly rejected: persisting the delivery queue across restarts.
       At-most-once is the right hardness for homelab notifications
       (`webhooks.py` module docstring)
