@@ -387,8 +387,10 @@ def test_up_to_date_summary_is_done_and_touches_last_manifest_check(
     """Up To Date>0 AND Updated==0 -- ADR-0006's "current as of <timestamp>"
     case: a genuine successful check that changed nothing on disk still
     earns 'done' (unlike the zero/zero case above) and additionally stamps
-    apps.last_manifest_check, which no HTTP response exposes yet -- checked
-    directly against the database."""
+    apps.last_manifest_check, surfaced on both GET /v1/games and
+    GET /v1/games/{appid} (WP 4c) -- checked both via HTTP and directly
+    against the database (the DB read pins the value the HTTP layer must
+    round-trip unchanged)."""
     executable = stub_prefill.make_stub(
         bindir,
         cache_root=str(cache_root),
@@ -409,6 +411,12 @@ def test_up_to_date_summary_is_done_and_touches_last_manifest_check(
         detail = client.get("/v1/games/440", headers=AUTH).json()
         assert detail["status"] == "done"
         assert detail["last_prefill_at"] is not None
+        assert detail["last_manifest_check"] is not None
+
+        summary_row = next(
+            g for g in client.get("/v1/games", headers=AUTH).json() if g["appid"] == 440
+        )
+        assert summary_row["last_manifest_check"] == detail["last_manifest_check"]
 
     conn = get_connection(settings.db_path)
     try:
@@ -418,6 +426,7 @@ def test_up_to_date_summary_is_done_and_touches_last_manifest_check(
     finally:
         conn.close()
     assert row["last_manifest_check"] is not None
+    assert row["last_manifest_check"] == detail["last_manifest_check"]
 
 
 def test_updated_case_does_not_touch_last_manifest_check(
@@ -425,7 +434,8 @@ def test_updated_case_does_not_touch_last_manifest_check(
 ) -> None:
     """Only the exact Up To Date>0/Updated==0 shape earns last_manifest_check
     -- a normal Updated>0 run must not set it (nothing confirmed "already
-    current" here, something actually changed)."""
+    current" here, something actually changed). Checked via HTTP (WP 4c
+    surfaced the field) and directly against the database."""
     executable = stub_prefill.make_stub(
         bindir,
         cache_root=str(cache_root),
@@ -438,6 +448,10 @@ def test_updated_case_does_not_touch_last_manifest_check(
     with TestClient(app) as client:
         (job_id,) = enqueue(client, 440)
         assert wait_for_job(client, job_id)["status"] == "done"
+
+        detail = client.get("/v1/games/440", headers=AUTH).json()
+        assert detail["last_prefill_at"] is not None
+        assert detail["last_manifest_check"] is None
 
     conn = get_connection(settings.db_path)
     try:

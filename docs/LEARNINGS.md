@@ -325,3 +325,9 @@ These are not style preferences; each entry cost a review round to learn.
   product's invariants (ADR-0003 shared-depot protection), not violate
   them, and a "shapes match the real API 1:1" claim is verified endpoint
   by endpoint against the Pydantic models at git HEAD (WP 4a.2 blocker).
+- Before exposing a DB column in the API, verify its actual WRITE matrix
+  in code — the plan claimed last_manifest_check was "written on every
+  run"; the shipped rule stamps it only on confirmed-current runs
+  (done + Updated==0 + UpToDate>0), it survives cache deletion unlike
+  last_prefill_at, and the UI wording must say "confirmed current at X",
+  not "checked at X" (last_manifest_check mini-WP).

@@ -69,6 +69,60 @@ def test_get_game_detail_exposes_needs_force(client: TestClient) -> None:
     assert body["needs_force"] is True
 
 
+# -- last_manifest_check (WP 4c: surfacing apps.last_manifest_check) --------
+#
+# Write-path semantics (worker.py, pinned end-to-end in test_worker.py) are
+# NOT this file's concern -- these tests only check that GameSummary/
+# GameDetail expose whatever is already in the apps row, with the same
+# null-when-never-set behavior last_prefill_at already has.
+
+
+def test_list_games_reports_null_last_manifest_check_for_a_never_checked_app(
+    client: TestClient,
+) -> None:
+    _seed_mapping(client, depotid=441, appid=440, app_name="Team Fortress 2")
+
+    game = client.get("/v1/games", headers=AUTH).json()[0]
+    assert game["last_manifest_check"] is None
+
+
+def test_get_game_detail_reports_null_last_manifest_check_for_a_never_checked_app(
+    client: TestClient,
+) -> None:
+    _seed_mapping(client, depotid=441, appid=440, app_name="Team Fortress 2")
+
+    body = client.get("/v1/games/440", headers=AUTH).json()
+    assert body["last_manifest_check"] is None
+
+
+def test_list_games_round_trips_the_exact_last_manifest_check_value(
+    client: TestClient, settings: Settings
+) -> None:
+    """Pin against timezone/format mangling: what is written to the DB
+    column is exactly what the API returns, byte for byte -- no re-parsing
+    through a datetime type that could normalize/shift it."""
+    _seed_mapping(client, depotid=441, appid=440, app_name="Team Fortress 2")
+    from vault_api.db import get_connection
+
+    # A deliberately odd-looking but well-formed stamp (not "now") so a bug
+    # that silently substituted the current time, or ran the value through
+    # something that re-normalizes/shifts it, would be caught.
+    stamp = "2026-08-06T13:37:05Z"
+    conn = get_connection(settings.db_path)
+    try:
+        conn.execute(
+            "UPDATE apps SET last_manifest_check = ? WHERE appid = 440", (stamp,)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    game = client.get("/v1/games", headers=AUTH).json()[0]
+    detail = client.get("/v1/games/440", headers=AUTH).json()
+    assert game["last_manifest_check"] == stamp
+    assert detail["last_manifest_check"] == stamp
+
+
 def test_get_game_without_key_is_rejected(client: TestClient) -> None:
     response = client.get("/v1/games/440")
     assert response.status_code == 401

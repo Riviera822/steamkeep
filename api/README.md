@@ -444,7 +444,7 @@ clients, schedule and stats rows are implemented so far.
 
 | Method | Endpoint                          | Purpose |
 |--------|-------------------------------------|---------|
-| GET    | `/v1/games`                        | All tracked apps: `appid`, `name`, `status`, `last_prefill_at`, `depot_count`, `size_bytes` (sum of the app's mapped depots' bytes on disk; `null` if unmapped or not yet cached — see "Per-game size calculation" below), `needs_force` (schema v5, WP 3.4 — whether the NEXT prefill will run with `--force`, see "needs_force" below) |
+| GET    | `/v1/games`                        | All tracked apps: `appid`, `name`, `status`, `last_prefill_at`, `last_manifest_check` (schema v4, WP 3.3; surfaced here WP 4c — the last run that CONFIRMED this app current, `null` until that exact outcome happens; **much narrower than "last time a job ran"**, see "Job outcome honesty" below; **and unlike `last_prefill_at`, survives `DELETE /v1/cache/{appid}`** — deletion nulls `last_prefill_at` but deliberately leaves this field, so a game with zero cached bytes can still show a past confirmation timestamp, see "Per-game deletion" below), `depot_count`, `size_bytes` (sum of the app's mapped depots' bytes on disk; `null` if unmapped or not yet cached — see "Per-game size calculation" below), `needs_force` (schema v5, WP 3.4 — whether the NEXT prefill will run with `--force`, see "needs_force" below) |
 | GET    | `/v1/games/{appid}`                | Detail for one app: same fields plus `depots` (list of `{depotid, shared, size_bytes}`); `404` for an unknown `appid` |
 | PUT    | `/v1/mapping/{depotid}`            | Body `{"appid": int, "app_name": str \| null}` — **additively** upsert one depot→app mapping fact (manual fallback, see below); `422` for `depotid <= 0`, `appid <= 0`, or an unrecognized body field |
 | GET    | `/v1/mapping`                      | Full depot→app mapping table: list of `{depotid, appid}` |
@@ -627,7 +627,9 @@ Prefilled 1 apps totaling 75.97 MiB in 16.5553
 ```
 
 — and the parsed `Updated`/`Up To Date` counters, not the exit code alone,
-decide the job's outcome:
+decide the job's outcome. `last_manifest_check`'s column here is what
+`GET /v1/games`/`GET /v1/games/{appid}` expose verbatim (WP 4c) — this table
+is the authoritative list of which outcomes set it:
 
 | Exit code | Summary parse | Updated / Up To Date | Job outcome | `apps.status` | `last_prefill_at` | `last_manifest_check` |
 |---|---|---|---|---|---|---|
@@ -1321,6 +1323,16 @@ now means "protected", see next bullet.)
   deleted, `needs_force` is set exactly as for any other deletion, see
   `test_delete_deletes_the_only_depot_when_it_is_an_all_shared_remnant` in
   `tests/test_cache_delete.py`.)
+- **`last_manifest_check` (WP 4c) is deliberately NOT cleared here**
+  (`deletion.reset_app_after_deletion`, schema v4) — the one place it diverges
+  from `last_prefill_at`. It is not a false claim even after the depots are
+  gone: the app genuinely WAS confirmed current as of that timestamp, and
+  what actually gates whether the *cache* is trusted after a deletion is
+  `needs_force`/`status`, both of which this same statement does update. The
+  visible consequence: `GET /v1/games`/`GET /v1/games/{appid}` can report a
+  non-`null` `last_manifest_check` for a game with `size_bytes: 0` right
+  after `DELETE /v1/cache/{appid}` — that is correct, not stale data left
+  behind by accident.
 - **The `SizeCache` is invalidated** right after the deletion
   (`sizes.SizeCache.invalidate()`, the hook WP 1.5 exported for exactly this),
   so `GET /v1/games` and `GET /v1/cache/summary` never serve pre-deletion sizes
@@ -4182,7 +4194,11 @@ WP 1.3 additions:
 - `test_games.py`: `GET /v1/games` happy path (empty list, depot count,
   `size_bytes: null`) and `GET /v1/games/{appid}` happy path (depot list,
   `shared` flagging across two apps sharing one depot, `404` for an unknown
-  appid), both with a 401-without-key check.
+  appid), both with a 401-without-key check. Plus (WP 4c) `last_manifest_check`
+  is `null` for a never-checked app in both shapes, and round-trips a value
+  written straight to the DB column byte-for-byte (no timezone/format
+  mangling); the write-path itself (which outcomes set it) is pinned in
+  `test_worker.py`, not here.
 - `test_concurrency.py` (B1 regression): ~30 concurrent mixed requests
   (games list/detail, mapping PUT) via `httpx.ASGITransport` +
   `asyncio.gather`, asserting every response is non-5xx — see the

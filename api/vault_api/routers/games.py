@@ -22,6 +22,29 @@ class GameSummary(BaseModel):
     name: str | None
     status: str
     last_prefill_at: str | None
+    # Timestamp of the last run that CONFIRMED this app current (schema v4,
+    # WP 3.3; surfaced here WP 4c). ADR-0006's tier-1 semantics are "current
+    # as of <timestamp>", which is only honest once the timestamp is
+    # visible. Same null-when-never / verbatim-string style as
+    # last_prefill_at (see ``jobs.TIMESTAMP_FORMAT``) -- but written on a
+    # MUCH narrower set of outcomes: only a run whose parsed summary was
+    # ``Updated == 0 AND Up To Date > 0`` sets it (api/README.md's "Job
+    # outcome honesty" table has the full outcome matrix). In particular an
+    # ordinary run that actually changed depots (``Updated > 0``), an
+    # unparseable summary, an unowned-app run, a failed/cancelled/paused
+    # run, and vault-api's own crash-recovery path (``recover_stale_jobs``)
+    # all leave it untouched -- so a game can be ``status: "done"`` with
+    # this field still null.
+    #
+    # One place the two fields DIVERGE: ``DELETE /v1/cache/{appid}``
+    # (``deletion.reset_app_after_deletion``) unconditionally nulls
+    # ``last_prefill_at`` on delete, but deliberately leaves
+    # ``last_manifest_check`` alone -- it is not a false claim (the app WAS
+    # confirmed current at that timestamp), and ``needs_force``/``status``
+    # are what actually gate whether the cache is trusted, not this field.
+    # So a game with zero cached bytes can still show a non-null
+    # ``last_manifest_check`` from before the deletion.
+    last_manifest_check: str | None
     depot_count: int
     # Per-app size (WP 1.5): sum of this app's mapped depots' bytes on disk,
     # from the cached scan (vault_api/sizes.py). Null if unmapped
@@ -54,6 +77,8 @@ class GameDetail(BaseModel):
     name: str | None
     status: str
     last_prefill_at: str | None
+    # See GameSummary.last_manifest_check.
+    last_manifest_check: str | None
     depots: list[DepotEntry]
     # See GameSummary.size_bytes.
     size_bytes: int | None = None
@@ -71,7 +96,8 @@ def list_games(
     with open_db() as conn:
         rows = conn.execute(
             """
-            SELECT a.appid, a.name, a.status, a.last_prefill_at, a.needs_force,
+            SELECT a.appid, a.name, a.status, a.last_prefill_at,
+                   a.last_manifest_check, a.needs_force,
                    COUNT(d.depotid) AS depot_count
             FROM apps a
             LEFT JOIN depot_app_map d ON d.appid = a.appid
@@ -95,6 +121,7 @@ def list_games(
             name=row["name"],
             status=row["status"],
             last_prefill_at=row["last_prefill_at"],
+            last_manifest_check=row["last_manifest_check"],
             depot_count=row["depot_count"],
             size_bytes=app_size_bytes(app_depotids.get(row["appid"], []), depot_bytes),
             needs_force=bool(row["needs_force"]),
@@ -118,8 +145,8 @@ def get_game(
     """
     with open_db() as conn:
         app_row = conn.execute(
-            "SELECT appid, name, status, last_prefill_at, needs_force FROM apps "
-            "WHERE appid = ?",
+            "SELECT appid, name, status, last_prefill_at, last_manifest_check, "
+            "needs_force FROM apps WHERE appid = ?",
             (appid,),
         ).fetchone()
         if app_row is None:
@@ -161,6 +188,7 @@ def get_game(
         name=app_row["name"],
         status=app_row["status"],
         last_prefill_at=app_row["last_prefill_at"],
+        last_manifest_check=app_row["last_manifest_check"],
         depots=depots,
         size_bytes=app_size_bytes([row["depotid"] for row in depot_rows], depot_bytes),
         needs_force=bool(app_row["needs_force"]),

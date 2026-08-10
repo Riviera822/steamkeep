@@ -550,12 +550,18 @@ available at any reasonable cost, and would be the less useful half anyway.
 
 - [ ] Trigger in both frontends: a library-header action over all cached
       games, plus the existing per-game and multi-select paths
-- [ ] Backend gap: `GET /v1/games` exposes `last_prefill_at` but NOT
-      `apps.last_manifest_check`, although the column exists and is written
-      on every run (`jobs.py`, WP 3.3). Surface it in `GameSummary`/
-      `GameDetail` so the UI can show "checked 3 h ago" per game — ADR-0006
-      tier 1 semantics are "current as of <timestamp>", which is only honest
-      if that timestamp is visible
+- [x] Backend gap: `GET /v1/games` exposes `last_prefill_at` but NOT
+      `apps.last_manifest_check`. Surface it in `GameSummary`/`GameDetail`
+      — ADR-0006 tier 1 semantics are "current as of <timestamp>", which is
+      only honest if that timestamp is visible. NOTE the shipped write rule
+      (WP 3.3, verified in this WP): the column is stamped ONLY by a run
+      that CONFIRMED the app already current (done + Updated==0 +
+      UpToDate>0) — not on every run, not on done-with-updates. The UI must
+      label it "confirmed current at X", never "checked at X", and the
+      value survives a cache deletion (unlike `last_prefill_at`)
+      *(mini-WP done 2026-08-10: field in both models, verbatim/null
+      semantics with byte-for-byte round-trip pin, README honesty-table
+      pointer; suite 1379 green; Opus PASS, 6/6 reviewer mutations killed)*
 - [ ] No new enqueue endpoint needed: `POST /v1/prefill` already takes a LIST
       of app ids and dedupes against `queued`/`running` jobs, so an impatient
       double-tap converges on one job. Open: whether a convenience route that
