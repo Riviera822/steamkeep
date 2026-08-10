@@ -115,6 +115,57 @@ these checks enabled would fail the build every time upstream ships a
 release regardless of whether upgrading here is safe — that is a human
 upgrade decision for a future work package, not something lint can resolve.
 
+## Conventions
+
+### String resources
+
+AGP lint's `HardcodedText` check only inspects XML layouts — a plain Kotlin
+string literal passed to a Compose `Text(...)` call is invisible to it (see
+`GalleryScreen.kt`'s `kind.wireName` for a pre-existing, deliberate example
+that always passed `lintDebug`). So this is a HUMAN rule, not a lint-enforced
+one — write it down here instead of re-deriving it per work package (WP 4b.4
+review fix, after 27 literals had to be triaged one at a time).
+
+**Default: static UI chrome belongs in `strings.xml`.** Screen titles,
+button labels, placeholder/empty-state copy, toast text, error-fallback
+text — anything a real user reads that isn't itself DATA (a game name, a
+computed byte count, a server error detail) — is a string resource,
+resolved via `stringResource`/`pluralStringResource` from a `@Composable`
+context. This is what every screen before WP 4b.4 already did
+(`IdentityScreen.kt`, `GalleryScreen.kt`) and what WP 4b.4's own toasts and
+placeholder text were moved to match (`LibraryController`'s toasts were
+originally inline Kotlin literals; see `ui/library/LibraryStrings.kt`).
+
+**When the string is only known outside composition** (e.g. inside a
+`scope.launch { }` block after a suspend network call returns — job counts,
+freed bytes, failure counts), a plain Kotlin class/object CANNOT call
+`stringResource` — it is `@Composable`-only. The fix is NOT to fall back to
+a literal: define a small interface (`LibraryStrings` is the pattern) with
+one method per message, implement it against `android.content.res.Resources`
+(which has plain, non-Composable `getString`/`getQuantityString` methods),
+and inject it into the plain-Kotlin class the same way `CredentialStore`/
+`LibraryPreferences` are injected — so the class stays off-device-testable
+against a fake implementation.
+
+**Narrow exception: a verbatim, diffable port of a web module's own
+literal.** `BulkPlan.kt`'s button labels/notes and `LibraryFilters.kt`'s
+chip labels stay Kotlin string literals, not resources — they are
+line-for-line ports of `web/js/lib/bulk-plan.js` / `library-filters.js`'s
+own hardcoded strings, and the entire point of porting them verbatim is
+that the correspondence can be read directly off two side-by-side literals;
+resource indirection would hide that diff. This exception applies ONLY
+when BOTH of the following hold, and each qualifying file's kdoc must say
+so explicitly:
+  1. the string's wording is "whatever the web source already decided", not
+     an independent Android UI copy decision;
+  2. a test pins the literal by STRING EQUALITY against a hand-transcribed
+     expected value (never derived from the constant under test — same
+     "literal-vs-literal" rule docs/LEARNINGS.md's Android section already
+     requires for wire-format/status-word cross-frontend contracts).
+A string that fails either test is static UI chrome and belongs in
+`strings.xml`, full stop — "it happens to also appear in a `web/js/lib/`
+file" is not by itself a reason to keep it out of resources.
+
 ## Versions pinned (`gradle/libs.versions.toml`)
 
 Repo rule (CLAUDE.md / `docs/LEARNINGS.md`): pinned versions only, no

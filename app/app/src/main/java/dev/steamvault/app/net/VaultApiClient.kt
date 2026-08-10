@@ -12,6 +12,7 @@ import dev.steamvault.app.net.model.HealthOut
 import dev.steamvault.app.net.model.JobControlOut
 import dev.steamvault.app.net.model.JobDetail
 import dev.steamvault.app.net.model.JobSummary
+import dev.steamvault.app.net.model.MappingEntry
 import dev.steamvault.app.net.model.PrefillJobRef
 import dev.steamvault.app.net.model.PrefillRequest
 import dev.steamvault.app.net.model.SettingsOut
@@ -68,10 +69,13 @@ private fun defaultOkHttpClient(): OkHttpClient = OkHttpClient.Builder()
  * (WP 4b.2 brief's explicit list): games incl. detail, jobs + control,
  * prefill, cache summary/delete, gc, clients, settings GET/PATCH, health.
  *
- * Deliberately NOT wrapped here: `/v1/mapping` (no current caller — same
- * "add it with the WP that needs it" rule web/js/api.js documents) and the
- * `/v1/steam/...` endpoints (the Steam Web API relay). The latter is
- * excluded on purpose, not by omission: ADR-0004 (api/README.md "Steam Web API relay")
+ * `/v1/mapping` is wrapped ([mapping]) as of WP 4b.4 — the bulk-delete
+ * confirm dialog needs the full depot->app table to compute
+ * [dev.steamvault.app.ui.library.logic.MultiPlan]'s set-aware arithmetic,
+ * the same "add it with the WP that needs it" rule web/js/api.js documents
+ * (that WP's own multiplan.js port needed the identical fetch). Deliberately
+ * NOT wrapped here: the `/v1/steam/...` endpoints (the Steam Web API relay).
+ * This is excluded on purpose, not by omission: ADR-0004 (api/README.md "Steam Web API relay")
  * keeps the Android app on its OWN device-local `GetOwnedGames` call
  * (WP 4b.3), the same way it always has — the relay exists because the
  * WEB UI has no CORS story for calling Valve directly, a constraint that
@@ -176,6 +180,11 @@ class VaultApiClient(
 
     suspend fun gc(appid: Int, execute: Boolean = false): GcJobRef =
         post("/v1/cache/$appid/gc", GcRequest(execute))
+
+    // ---- mapping ------------------------------------------------------
+
+    /** Full depot->app mapping table (WP 4b.4: bulk-delete plan input). */
+    suspend fun mapping(): List<MappingEntry> = get("/v1/mapping")
 
     // ---- clients ----------------------------------------------------------
 

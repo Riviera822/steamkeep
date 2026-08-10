@@ -1,0 +1,18 @@
+package dev.steamvault.app.storage
+
+import dev.steamvault.app.ui.library.logic.LibraryLayout
+
+/**
+ * In-memory [LibraryPreferences] fake for JVM tests (WP 4b.4), same shape
+ * as [InMemoryCredentialStore]: a plain field, no `SharedPreferences`
+ * involved, so anything depending on [LibraryPreferences] is testable on
+ * the JVM without a device.
+ */
+class InMemoryLibraryPreferences(initial: LibraryLayout = LibraryLayout.DEFAULT) : LibraryPreferences {
+    private var layout: LibraryLayout = initial
+
+    override fun getLayout(): LibraryLayout = layout
+    override fun setLayout(layout: LibraryLayout) {
+        this.layout = layout
+    }
+}

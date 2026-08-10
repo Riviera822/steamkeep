@@ -78,6 +78,7 @@ android {
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.foundation)
@@ -94,6 +95,11 @@ dependencies {
 
     // WP 4b.3: Steam identity -- CustomTabsIntent for the OpenID login page.
     implementation(libs.androidx.browser)
+
+    // WP 4b.4: Library view -- Steam CDN cover-art loading (see
+    // gradle/libs.versions.toml's WP 4b.4 comment for the Coil-vs-hand-rolled
+    // justification).
+    implementation(libs.coil.compose)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 

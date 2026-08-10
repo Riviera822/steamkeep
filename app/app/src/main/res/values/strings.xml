@@ -48,4 +48,74 @@
         <item quantity="one">Library size: %1$d game</item>
         <item quantity="other">Library size: %1$d games</item>
     </plurals>
+
+    <!-- Bottom nav (WP 4b.4): three destinations per the frozen mockup and
+         the WP 4a.1 decision (Clients is a sheet, not a nav item). -->
+    <string name="nav_library">Library</string>
+    <string name="nav_downloads">Downloads</string>
+    <string name="nav_settings">Settings</string>
+
+    <!-- Library screen (WP 4b.4). -->
+    <string name="library_title">Library</string>
+    <string name="library_search_hint">Search your library</string>
+    <string name="library_search_clear">Clear search</string>
+    <string name="library_select_mode">Select games</string>
+    <string name="library_select_mode_exit">Exit select mode</string>
+    <string name="library_layout_grid2">2-column grid</string>
+    <string name="library_layout_grid3">3-column grid</string>
+    <string name="library_layout_list">List</string>
+    <string name="library_empty_no_filter">Nothing here with this filter.</string>
+    <string name="library_empty_query">No game in your library matches \"%1$s\".</string>
+    <string name="library_empty_query_filtered">No game in your library matches \"%1$s\" with this filter.</string>
+    <string name="library_load_error">Could not reach vault-api: %1$s</string>
+    <string name="library_cover_fallback_description">No cover art available for %1$s</string>
+
+    <!-- Multi-select bulk bar. -->
+    <plurals name="library_bulk_selected_count">
+        <item quantity="one">%1$d selected</item>
+        <item quantity="other">%1$d selected</item>
+    </plurals>
+    <string name="library_bulk_cancel">Cancel</string>
+    <string name="library_bulk_delete">Delete %1$d</string>
+
+    <!-- Bulk-delete confirm dialog. -->
+    <plurals name="library_delete_title">
+        <item quantity="one">Delete %1$d game from cache?</item>
+        <item quantity="other">Delete %1$d games from cache?</item>
+    </plurals>
+    <string name="library_delete_calculating">Calculating what this would free…</string>
+    <string name="library_delete_error">Could not calculate the delete plan: %1$s</string>
+    <string name="library_delete_confirm">Delete</string>
+    <string name="library_delete_cancel">Cancel</string>
+    <string name="library_delete_freed_kept">%1$s freed · %2$s stays on disk</string>
+    <string name="library_delete_row_freed">freed</string>
+    <string name="library_delete_row_kept">kept</string>
+
+    <!-- Library toasts/error fallbacks (WP 4b.4 review fix, see
+         app/README.md's "String resources" conventions rule): this is
+         static UI chrome, not a verbatim port of a web module's own
+         literal, so it belongs in resources like everything else here,
+         resolved through LibraryController's LibraryStrings interface since
+         these are only known after a suspend network call returns, not at
+         composition time. -->
+    <string name="library_toast_queued_for_download">Queued for download</string>
+    <string name="library_toast_pause_requested">Pause requested</string>
+    <string name="library_toast_resuming">Resuming — back in the queue</string>
+    <string name="library_toast_action_failed">Action failed</string>
+    <string name="library_toast_delete_plan_error_fallback">Could not calculate the delete plan</string>
+    <plurals name="library_toast_jobs_queued">
+        <item quantity="one">%1$d job queued</item>
+        <item quantity="other">%1$d jobs queued</item>
+    </plurals>
+    <string name="library_toast_freed">Freed %1$s</string>
+    <plurals name="library_toast_freed_with_failures">
+        <item quantity="one">Freed %1$s · %2$d delete failed</item>
+        <item quantity="other">Freed %1$s · %2$d deletes failed</item>
+    </plurals>
+
+    <!-- Placeholders for WPs that have not shipped yet (WP 4b.4 review
+         fix: static UI chrome, moved out of MainActivity.kt literals). -->
+    <string name="downloads_placeholder">Downloads — coming in WP 4b.5</string>
+    <string name="not_connected_title">No vault-api connection configured yet.</string>
+    <string name="not_connected_body">Connection setup is coming in WP 4b.7 (Onboarding + settings).</string>
 </resources>

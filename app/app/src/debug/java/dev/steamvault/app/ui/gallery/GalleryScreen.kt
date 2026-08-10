@@ -31,6 +31,17 @@ import dev.steamvault.app.ui.status.StatusKind
  * navigation and the actual views (library/downloads/settings) arrive in
  * WPs 4b.4/4b.5/4b.7. This screen exists purely so the theme + status-icon
  * component can be seen rendered and manually verified.
+ *
+ * **Moved to `src/debug/` (WP 4b.4 review nit).** It has been unreachable
+ * from the UI since WP 4b.3 replaced it in `MainActivity`'s `setContent`
+ * (see that class's kdoc), but was still being compiled into the RELEASE
+ * variant despite being a debug-only artifact -- `src/debug/` is AGP's
+ * standard mechanism for exactly this ("compiled for debug builds only"),
+ * so it is now excluded from `release` by construction rather than by
+ * convention. No behavior change: still compiles, still covered by
+ * `StatusIconLogicTest`/`StatusIconCrossFrontendContractTest` (those test
+ * the pure logic/theme modules this screen renders, not this file itself,
+ * and live in `src/test/`, which already runs against the debug variant).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

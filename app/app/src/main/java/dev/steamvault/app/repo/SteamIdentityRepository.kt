@@ -1,5 +1,6 @@
 package dev.steamvault.app.repo
 
+import dev.steamvault.app.net.model.OwnedGame
 import dev.steamvault.app.net.steam.SteamOpenIdCallback
 import dev.steamvault.app.net.steam.SteamOpenIdClient
 import dev.steamvault.app.net.steam.SteamOpenIdVerifier
@@ -62,11 +63,25 @@ interface SteamIdentityRepository {
 
     /**
      * `GetOwnedGames`'s game count only — WP brief: "library fetch happens
-     * in 4b.4 — expose the repository, render a count preview only". The
-     * full [dev.steamvault.app.net.model.OwnedGame] list this pulls is
-     * intentionally not exposed by this interface yet.
+     * in 4b.4 — expose the repository, render a count preview only". Kept
+     * around for [dev.steamvault.app.ui.identity.IdentityScreen]'s existing
+     * "check library size" affordance; superseded for the actual library
+     * grid by [ownedGames] below (WP 4b.4), which this delegates to so the
+     * two never drift.
      */
     suspend fun ownedGamesCountPreview(): Result<Int>
+
+    /**
+     * The full owned-library list (WP 4b.4 brief: "Steam library (owned
+     * games) merge per the mockup's model"). `Result.failure` — never a
+     * thrown exception — when not signed in, no Web API key is configured,
+     * or the on-device `GetOwnedGames` call itself fails; the Library
+     * screen's merge logic (`ui/library/logic/LibraryMerge.kt`) treats
+     * absence of this data as "the vault-only view must be fully
+     * functional" (mockup-notes.md open question 5 / WP brief), not an
+     * error state.
+     */
+    suspend fun ownedGames(): Result<List<OwnedGame>>
 
     /** Clears everything Steam-identity-related (steamid, persona, Web API key) — WP brief: "sign-out clears everything". */
     fun signOut()
@@ -124,14 +139,17 @@ class SteamIdentityRepositoryImpl(
         return true
     }
 
-    override suspend fun ownedGamesCountPreview(): Result<Int> {
+    override suspend fun ownedGamesCountPreview(): Result<Int> =
+        ownedGames().map { it.size }
+
+    override suspend fun ownedGames(): Result<List<OwnedGame>> {
         val steamId64 = credentialStore.getSteamId64()
             ?: return Result.failure(IllegalStateException("not signed in with Steam"))
         if (credentialStore.getSteamWebApiKey().isNullOrBlank()) {
             return Result.failure(IllegalStateException("no Steam Web API key configured"))
         }
         return try {
-            Result.success(libraryFetcher.getOwnedGames(steamId64).size)
+            Result.success(libraryFetcher.getOwnedGames(steamId64))
         } catch (e: Exception) {
             Result.failure(e)
         }

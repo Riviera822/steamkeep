@@ -592,6 +592,19 @@ parallel/serial decisions, merge discipline, open user decisions):
       round)*
 - [ ] tsnet Go module + gomobile build (`.aar`), auth-key handling
 - [ ] Grid + badges + multi-select + trigger + polling
+      *(WP 4b.4 done 2026-08-11: library screen with grid 2/3/list +
+      persisted layout, ANDed search+chips (recorded chip set),
+      multi-select with bulk-download split and set-aware multiPlan bulk
+      delete — all four web logic modules ported semantics-exact
+      (reviewer: 12/12 mutations killed, zero cross-frontend drift);
+      3-item bottom nav per frozen mockup; Coil covers on a separate
+      OkHttp stack (API key cannot ride cover requests — by
+      construction, dependency noted); vault ⊎ Steam-owned merge with
+      honest synthesized rows (needs_force=false pinned); animation
+      preservation via stable GameCardModel equality + lazy keys;
+      "not connected" placeholder until 4b.7 lands the connection UI;
+      314 JVM tests; Opus PASS + should-fix round (string-resource
+      rule recorded in app/README))*
 - [ ] Delete flow with size display and confirmation; GC action per game
 - [ ] Bypass warnings surfaced in the UI
 - [ ] Document APK build (no Play Store requirement; F-Droid as a long-term goal)

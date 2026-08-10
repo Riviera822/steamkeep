@@ -193,6 +193,57 @@ class SteamIdentityRepositoryTest {
     }
 
     @Test
+    fun `ownedGames fails when not signed in`() = runTest {
+        val (repo, _, _) = repo()
+        assertTrue(repo.ownedGames().isFailure)
+    }
+
+    @Test
+    fun `ownedGames fails when signed in but no Web API key is configured`() = runTest {
+        val store = InMemoryCredentialStore().apply { setSteamId64(VALID_STEAM_ID) }
+        val (repo, _, _) = repo(store = store)
+        assertTrue(repo.ownedGames().isFailure)
+    }
+
+    @Test
+    fun `ownedGames returns the full list once signed in with a key configured`() = runTest {
+        val store = InMemoryCredentialStore().apply {
+            setSteamId64(VALID_STEAM_ID)
+            setSteamWebApiKey("0123456789ABCDEF0123456789ABCDEF")
+        }
+        val games = listOf(OwnedGame(440, "TF2", 1, ""), OwnedGame(570, "Dota 2", 2, ""))
+        val (repo, _, _) = repo(fetcher = FakeLibraryFetcher(games = games), store = store)
+
+        val result = repo.ownedGames()
+
+        assertEquals(games, result.getOrNull())
+    }
+
+    @Test
+    fun `ownedGames surfaces a fetcher failure as a Result failure, not an exception`() = runTest {
+        val store = InMemoryCredentialStore().apply {
+            setSteamId64(VALID_STEAM_ID)
+            setSteamWebApiKey("0123456789ABCDEF0123456789ABCDEF")
+        }
+        val fetcher = FakeLibraryFetcher(throwOnGames = RuntimeException("boom"))
+        val (repo, _, _) = repo(fetcher = fetcher, store = store)
+
+        assertTrue(repo.ownedGames().isFailure)
+    }
+
+    @Test
+    fun `ownedGamesCountPreview delegates to ownedGames -- the two can never drift`() = runTest {
+        val store = InMemoryCredentialStore().apply {
+            setSteamId64(VALID_STEAM_ID)
+            setSteamWebApiKey("0123456789ABCDEF0123456789ABCDEF")
+        }
+        val games = listOf(OwnedGame(440, "TF2", 1, ""), OwnedGame(570, "Dota 2", 2, ""))
+        val (repo, _, _) = repo(fetcher = FakeLibraryFetcher(games = games), store = store)
+
+        assertEquals(2, repo.ownedGamesCountPreview().getOrNull())
+    }
+
+    @Test
     fun `refreshPersonaName is false when not signed in`() = runTest {
         val (repo, _, _) = repo()
         assertFalse(repo.refreshPersonaName())

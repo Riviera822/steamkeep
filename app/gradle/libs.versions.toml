@@ -39,6 +39,27 @@
 ##   CustomTabsIntent to launch Valve's OpenID login page. No other new
 ##   runtime dependency — OpenID verification and the Steam Web API calls
 ##   reuse the already-pinned OkHttp 4.12.0.
+##
+## WP 4b.4 addition (Library view — cover art):
+## - io.coil-kt:coil-compose 2.7.0 (latest stable 2.x release; Coil 3.x
+##   requires a Kotlin Multiplatform-oriented rewrite and a newer Kotlin
+##   than the 2.0.21 pinned here) for Steam CDN cover-art loading. Chosen
+##   over a hand-rolled OkHttp+BitmapFactory loader (the brief's other
+##   option) because a correct hand-rolled version would have to reinvent
+##   request de-duplication, an LRU memory+disk cache, and Compose
+##   lifecycle-aware cancellation — Coil already solves all three, is the
+##   de-facto standard for this exact job, and (per its own POM) only
+##   requires OkHttp >= 3.12, so it resolves against the project's pinned
+##   OkHttp 4.12.0 rather than forcing a second copy in. Cover art is
+##   fetched from Valve's CDN directly (not through VaultApiClient's
+##   profile-scoped OkHttpClient/CleartextPolicyInterceptor), so Coil's own
+##   default HTTP stack is used, not the vault-api one.
+## - androidx.lifecycle:lifecycle-runtime-compose, pinned to the SAME
+##   2.8.7 already used by lifecycle-runtime-ktx (it was already resolving
+##   transitively at that exact version via other androidx artifacts;
+##   declared directly here rather than relied on implicitly, since
+##   `LibraryScreen.kt` imports its `LocalLifecycleOwner` directly -- the
+##   non-deprecated replacement for `androidx.compose.ui.platform.LocalLifecycleOwner`).
 
 [versions]
 agp = "8.7.3"
@@ -53,10 +74,12 @@ kotlinxCoroutines = "1.9.0"
 okhttp = "4.12.0"
 securityCrypto = "1.1.0-alpha06"
 androidxBrowser = "1.8.0"
+coil = "2.7.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
+androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycleRuntimeKtx" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 androidx-compose-foundation = { group = "androidx.compose.foundation", name = "foundation" }
@@ -74,6 +97,7 @@ okhttp-mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver",
 okhttp-tls = { group = "com.squareup.okhttp3", name = "okhttp-tls", version.ref = "okhttp" }
 androidx-security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "securityCrypto" }
 androidx-browser = { group = "androidx.browser", name = "browser", version.ref = "androidxBrowser" }
+coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
