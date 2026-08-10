@@ -36,6 +36,7 @@ from vault_api.routers import (
 from vault_api.scheduler import PrefillScheduler
 from vault_api.sizes import SizeCache
 from vault_api.webhooks import WebhookNotifier, redact_url
+from vault_api.webui import install_security_headers, mount_web_ui
 from vault_api.worker import PrefillWorker
 
 logger = logging.getLogger(__name__)
@@ -182,6 +183,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(
         title="vault-api", version="0.1.0", openapi_url=None, lifespan=_lifespan
     )
+    # WP 4a.1. Installed before any route exists: the middleware wraps
+    # every response regardless of registration order, but doing it first
+    # keeps this file's read order matching request-handling order.
+    install_security_headers(app)
     app.state.settings = settings
     # Created here (not inside the lifespan) so it exists for a plain
     # TestClient() too, the same reasoning as app.state.settings above —
@@ -214,4 +219,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # tell "this vault-api is too old to have an oracle" from "this operator
     # chose not to enable it" — which are different things to show a user.
     app.include_router(oracle.router)
+    # WP 4a.1. Registered last, by convention (webui.mount_web_ui's own
+    # docstring): every route it adds is an exact path or a narrow real
+    # asset-subtree prefix (/, /index.html, the SPA view paths, /css, /js —
+    # see the WP 4a.1 review fix in webui.py for why this is no longer a
+    # catch-all Mount("/")), so it cannot shadow a /v1/* route regardless of
+    # order; kept last anyway as a guard against a future collision, and
+    # tests/test_webui.py pins the order explicitly. A missing web/
+    # directory (the shipped Docker image today, see
+    # config._default_web_dir) is not an error: the API works standalone.
+    mount_web_ui(app, settings.web_dir)
     return app

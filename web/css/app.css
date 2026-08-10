@@ -1,0 +1,68 @@
+/* ============================================================
+   SteamVault web app — shell layout (WP 4a.1)
+   Nav, topbar and the view scaffolds. Theme tokens (css/theme.css) are
+   loaded first and own everything colour/motion-related; this file is
+   layout only.
+   ============================================================ */
+
+.app{
+  min-height:100vh;
+  display:flex;
+  flex-direction:column;
+}
+
+/* ---------- topbar ---------- */
+.topbar{
+  position:sticky; top:0; z-index:20;
+  display:flex; align-items:center; gap:10px;
+  padding:14px 16px;
+  background:var(--bg);
+  border-bottom:1px solid var(--line-soft);
+}
+.brand{
+  font-family:var(--cond);
+  text-transform:uppercase;
+  letter-spacing:.6px;
+  font-weight:700;
+  font-size:16px;
+}
+
+/* ---------- view area ---------- */
+.view-root{
+  flex:1 1 auto;
+  width:100%;
+  max-width:960px;
+  margin:0 auto;
+  padding:20px 16px 32px;
+}
+
+.view h1{
+  margin:0 0 6px;
+  font-size:19px;
+  font-weight:700;
+}
+.view-placeholder{
+  margin:0;
+  color:var(--dim);
+  font-size:13px;
+  line-height:1.5;
+}
+
+/* ---------- bottom nav ---------- */
+.nav{
+  position:sticky; bottom:0; z-index:20;
+  display:grid;
+  grid-template-columns:repeat(3, 1fr);
+  background:rgba(13,21,27,.96);
+  border-top:1px solid var(--line-soft);
+  padding:7px 6px calc(9px + env(safe-area-inset-bottom));
+}
+.nav-btn{
+  display:flex; flex-direction:column; align-items:center; gap:3px;
+  color:var(--dim-2);
+  padding:6px 2px;
+}
+.nav-btn .nav-lb{
+  font-size:10px; font-weight:600; letter-spacing:.3px;
+}
+.nav-btn[aria-current="page"]{ color:var(--accent); }

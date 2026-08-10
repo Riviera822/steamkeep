@@ -332,6 +332,32 @@ def _default_steamprefill_cache_dir() -> str:
     return os.path.join(os.path.expanduser("~"), ".cache", "SteamPrefill", "v1")
 
 
+def _default_web_dir() -> str:
+    """Default location of the built-in web UI's static files (WP 4a.1):
+    the ``web/`` directory at the repo root, computed relative to THIS
+    file's own location so it resolves correctly no matter what the
+    process's current working directory is (native dev may launch uvicorn
+    from ``api/`` or from the repo root; both must find the same ``web/``).
+
+    ``api/vault_api/config.py`` -> parent is ``api/vault_api``, its parent
+    is ``api/``, and ITS parent is the repo root in a native checkout
+    (``api/`` and ``web/`` are sibling top-level directories, plan
+    structure). In the shipped Docker image this resolves to a path that
+    does not exist: the Dockerfile only ``COPY``s ``vault_api/`` in, and
+    ``web/`` lives outside the ``api/`` build context entirely, so
+    packaging it is explicitly NOT this work package's scope (see
+    api/README.md "Web UI static serving"). ``create_app`` / ``webui.py``
+    treat a missing directory as "no UI to serve, API only" rather than a
+    startup failure — the same soft-degradation shape as every other
+    optional path setting in this module (``steamprefill_path``,
+    ``event_log_path``, ...).
+    """
+    vault_api_dir = os.path.dirname(os.path.abspath(__file__))  # .../api/vault_api
+    api_dir = os.path.dirname(vault_api_dir)  # .../api
+    repo_root = os.path.dirname(api_dir)  # repo root in a native checkout
+    return os.path.join(repo_root, "web")
+
+
 def _default_manifest_archive_dir(db_path: str) -> str:
     """Default archive location: a ``manifests`` sibling of the database file.
 
@@ -645,6 +671,13 @@ class Settings:
     manifest_oracle: str = MANIFEST_ORACLE_OFF
     manifest_oracle_url: str = DEFAULT_MANIFEST_ORACLE_URL
     manifest_oracle_timeout: float = DEFAULT_MANIFEST_ORACLE_TIMEOUT
+    # WP 4a.1. Directory the built-in web UI is served from. `default_factory`
+    # (not a class-body literal) for the same reason `steamprefill_cache_dir`
+    # uses one: it re-resolves against this file's own location at
+    # construction time, which is what makes the default correct regardless
+    # of process cwd. A missing directory is not an error — see
+    # `_default_web_dir` and `webui.mount_web_ui`.
+    web_dir: str = field(default_factory=_default_web_dir)
 
     @property
     def webhook_enabled(self) -> bool:
@@ -844,4 +877,10 @@ class Settings:
             manifest_oracle_timeout=_env_float(
                 "VAULT_MANIFEST_ORACLE_TIMEOUT", DEFAULT_MANIFEST_ORACLE_TIMEOUT
             ),
+            # WP 4a.1. Blank/unset = the computed repo-relative default (see
+            # `_default_web_dir`). Not validated as an existing path here —
+            # same reasoning as `steamprefill_cache_dir` above: a wrong or
+            # not-yet-populated value only means "no UI to serve", never a
+            # reason to refuse to boot.
+            web_dir=os.environ.get("VAULT_WEB_DIR", "").strip() or _default_web_dir(),
         )

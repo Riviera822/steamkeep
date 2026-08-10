@@ -484,6 +484,14 @@ parallel/serial decisions, merge discipline, open user decisions):
 - [ ] SPA sharing the mockup's design language; zero extra deploy
       complexity (vault-api serves it; works over Tailscale/LAN and on
       phone browsers immediately)
+      *(WP 4a.1 done 2026-08-10: vault-api serves `web/` via exact GET+HEAD
+      routes + /css,/js StaticFiles mounts — /v1 routing parity pinned
+      empirically against a pre-change baseline (trailing-slash 307s, 405s);
+      strict CSP with zero inline script/style in web/; app shell with
+      3-view nav per frozen mockup, status-icon component incl.
+      reduced-motion, toasts; traversal pinned incl. %2e%2e forms; suite
+      1281 green; Opus FAIL→fix→PASS. Docker packaging of web/ is a
+      documented known gap until the packaging WP)*
 - [ ] Same API surface as the app: library grid with badges + search,
       download-to-cache/delete flows, jobs view, settings incl. vault name
 - [ ] Steam identity via Sign in with Steam (ADR-0004); library fetched

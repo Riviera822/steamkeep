@@ -1,0 +1,154 @@
+/* ============================================================
+   SteamVault web app — theme tokens (WP 4a.1)
+   Ported from docs/design/vault-app-mockup.html (round 7, frozen design
+   source of truth) — see docs/design/vault-app-mockup-NOTES.md for the
+   rationale behind the palette, the status-icon system and the motion
+   rules. Committed to a single dark theme on purpose (design decision,
+   NOTES.md "Committed to dark, on purpose") — there is no light variant
+   of the app surface itself.
+   ============================================================ */
+
+:root{
+  --bg:#0A1016;
+  --surface:#111C24;
+  --raised:#17252F;
+  --raised-2:#1D303C;
+  --line:#24363F;
+  --line-soft:#1B2A33;
+  --text:#E4EFF3;
+  --dim:#8AA1AD;
+  --dim-2:#63798A;
+
+  --accent:#2ED9CE;
+  --accent-deep:#12A79F;
+  --accent-ink:#04211F;
+  --accent-glow:rgba(46,217,206,.16);
+
+  /* Status set — hues chosen for deuteranopia/protanopia separation
+     (mockup round 5): the three "coloured" states differ in LIGHTNESS as
+     well as hue, because red-green colour-blindness collapses them onto a
+     light-dark axis; grey ("none") is fully desaturated so it always
+     reads as neutral. Colour is only the THIRD cue here — the status-icon
+     glyph shape is first, the status word second (see the .sic rules
+     below and js/components/status-icon.js). */
+  --ok:#57DD8A;
+  --run:#F2CE5B;
+  --stale:#F07B2E;
+  --none:#8296A6;
+  --danger:#FF6F6F;
+
+  --ui: "Roboto","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",sans-serif;
+  --cond: "Roboto Condensed","Archivo Narrow","Arial Narrow","Roboto",system-ui,sans-serif;
+  --mono: "Roboto Mono","Cascadia Mono",ui-monospace,SFMono-Regular,Consolas,monospace;
+
+  --r-s:8px; --r-m:12px; --r-l:18px; --r-xl:26px;
+}
+
+*, *::before, *::after{ box-sizing:border-box; }
+
+html, body{
+  margin:0;
+  min-height:100vh;
+  background:var(--bg);
+  color:var(--text);
+  font-family:var(--ui);
+}
+
+button{ font:inherit; color:inherit; background:none; border:0; cursor:pointer; padding:0; }
+a{ color:var(--accent); }
+:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
+
+/* Screen-reader-only text: every status icon carries a spoken word even
+   where the visible layout only has room for the glyph (mockup rule,
+   NOTES.md "Status icons" — "every icon needs a screen-reader word"). */
+.sr-only{
+  position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+  overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;
+}
+
+/* ---------- status icons ----------
+   Shape is the primary, colour-blind-safe status channel: a filled circle
+   in the status hue carrying a pixel-centred glyph (mockup round 5). The
+   glyph disambiguates status even when the hue is unreadable (CVD) or the
+   element is small. Ink is a single dark tone — high contrast against
+   every one of the light status hues above. */
+.sic{
+  --sz:17px;
+  width:var(--sz); height:var(--sz); border-radius:50%;
+  display:grid; place-items:center; flex:none;
+  color:#08120F;
+  line-height:0;
+}
+.sic svg{ display:block; width:64%; height:64%; overflow:visible; }
+.sic.k-cached  { background:var(--ok); }
+.sic.k-none    { background:var(--none); }
+.sic.k-stale   { background:var(--stale); }
+.sic.k-paused  { background:var(--run); }
+.sic.k-running { background:var(--run); }
+.sic.k-updating{ background:var(--run); }
+.sic.k-verify  { background:var(--accent); }
+.sic.k-error   { background:var(--danger); }
+.sic.k-warn    { background:var(--stale); }
+
+.sic-lg{ --sz:19px; }
+.sic-sm{ --sz:16px; }
+
+/* Motion = "activity right now", never decoration (mockup round 5/6
+   addendum). Only the two ACTIVE states move, and only their inner group
+   (.dla / .rot) — never the whole badge — so a library at rest never
+   flickers. Paused is deliberately motionless: a frozen glyph IS the
+   signal. All GPU-cheap transforms only (translateY / rotate). */
+
+/* DOWNLOAD: only the arrow drifts; the arrow must never fade fully to
+   nothing (it doubles as the tap target — a status icon must never look
+   like an empty disc, mockup round 7). */
+@keyframes vault-dlslide{
+  0%   { transform:translateY(-1.6px); opacity:.35 }
+  30%  { opacity:1 }
+  70%  { opacity:1 }
+  100% { transform:translateY(1.8px);  opacity:.35 }
+}
+.sic.k-running .dla{ animation:vault-dlslide 2.6s ease-in-out infinite; }
+.sic.k-running .dlbase{ display:none; } /* no static line under an animated arrow */
+
+/* UPDATE / VERIFY: two opposing curved arrows turning as one full circle,
+   linear and seamless (180° rotational symmetry — mockup round 6). */
+@keyframes vault-turn{ from{ transform:rotate(0deg) } to{ transform:rotate(360deg) } }
+.sic.k-updating .rot,
+.sic.k-verify .rot{
+  transform-box:fill-box; transform-origin:center;
+  animation:vault-turn 2.2s linear infinite;
+}
+
+/* Every animation on the page is switched off under reduced-motion,
+   globally — not just on the status icons (WP 4a.1 brief: "motion incl.
+   reduced-motion" is a whole-app rule, matching the mockup's own
+   stylesheet-level block). */
+@media (prefers-reduced-motion: reduce){
+  *, *::before, *::after{
+    animation-duration:.001ms !important;
+    animation-iteration-count:1 !important;
+    transition-duration:.001ms !important;
+    scroll-behavior:auto !important;
+  }
+}
+
+/* ---------- toast ----------
+   Pinned near the bottom of the viewport, auto-dismissing (mockup round 7:
+   "sits where the bulk bar sits" — this WP has no bulk bar yet, so it
+   simply sits 16px above the bottom edge). */
+.toast{
+  position:fixed; left:50%; bottom:16px; z-index:100;
+  transform:translate(-50%, 20px);
+  min-width:220px; max-width:min(480px, calc(100vw - 32px));
+  background:var(--raised-2); border:1px solid var(--line);
+  border-radius:11px; padding:11px 13px; font-size:12.5px; color:var(--text);
+  box-shadow:0 12px 26px -10px rgba(0,0,0,.8);
+  opacity:0; pointer-events:none;
+  transition:transform .22s, opacity .18s;
+  display:flex; align-items:center; gap:9px;
+}
+.toast.on{ transform:translate(-50%, 0); opacity:1; }
+.toast-key{ width:3px; align-self:stretch; border-radius:2px; background:var(--accent); flex:none; }
+.toast.warn .toast-key{ background:var(--stale); }
+.toast-text{ flex:1 1 auto; }

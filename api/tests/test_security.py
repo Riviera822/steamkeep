@@ -2,11 +2,27 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from vault_api import webui
 from vault_api.auth import require_api_key
 from vault_api.config import Settings
 from vault_api.main import create_app
 
-PUBLIC_PATHS = {"/v1/health"}
+# WP 4a.1: the web UI's app-shell routes (`/`, `/index.html`, the three
+# scaffolded SPA views and their nested-path variants) are real FastAPI
+# `APIRoute`s — unlike the old catch-all `Mount("/")` this replaced, they DO
+# carry a `.dependant` and so ARE picked up by the route walk below. They
+# are intentionally public (WP 4a.1 brief: "Router auth must NOT cover
+# static assets; the app itself authenticates API calls with the key the
+# user enters") — listed here explicitly, generated from
+# `webui._SPA_ROUTES` rather than hand-duplicated, so this set can't drift
+# from the one that actually decides which paths are mounted.
+_WEBUI_PUBLIC_PATHS = {"/", "/index.html"} | {
+    path
+    for view in webui._SPA_ROUTES
+    for path in (f"/{view}", f"/{view}/{{rest:path}}")
+}
+
+PUBLIC_PATHS = {"/v1/health"} | _WEBUI_PUBLIC_PATHS
 
 
 def _route_has_auth_dependency(route) -> bool:

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SteamVault</title>
+<!--
+  WP 4a.1 — app shell scaffold. No-build vanilla SPA (ES modules, no
+  bundler — Phase 4a stack decision, docs/WORKPACKAGES.md): every script
+  below is loaded as-is, and the Content-Security-Policy vault-api sends
+  (see api/vault_api/webui.py) is self-only with no 'unsafe-inline' —
+  which is why there is no inline <script> or <style="..."> attribute
+  anywhere in this file. Theme tokens, the status-icon system and the
+  toast component are ported from docs/design/vault-app-mockup.html
+  (round 7, frozen design source of truth); see
+  docs/design/vault-app-mockup-NOTES.md for the rationale behind each.
+-->
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+<div id="app" class="app">
+  <header class="topbar">
+    <span class="brand">SteamVault</span>
+  </header>
+
+  <main id="view-root" class="view-root" aria-live="polite"></main>
+
+  <nav class="nav" aria-label="Primary">
+    <button type="button" class="nav-btn" data-view="library">
+      <span class="nav-ic" aria-hidden="true">
+        <svg width="21" height="21" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2.6" y="2.6" width="7" height="7" rx="1.8"/><rect x="12.4" y="2.6" width="7" height="7" rx="1.8"/><rect x="2.6" y="12.4" width="7" height="7" rx="1.8"/><rect x="12.4" y="12.4" width="7" height="7" rx="1.8"/></svg>
+      </span>
+      <span class="nav-lb">Library</span>
+    </button>
+    <button type="button" class="nav-btn" data-view="downloads">
+      <span class="nav-ic" aria-hidden="true">
+        <svg width="21" height="21" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M11 2.8v11.4"/><path d="m6.4 9.8 4.6 4.6 4.6-4.6"/><path d="M3.4 18.6h15.2"/></svg>
+      </span>
+      <span class="nav-lb">Downloads</span>
+    </button>
+    <button type="button" class="nav-btn" data-view="settings">
+      <span class="nav-ic" aria-hidden="true">
+        <svg width="21" height="21" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+          <circle cx="11" cy="11" r="5.9"/>
+          <circle cx="11" cy="11" r="2.5"/>
+          <path d="M11 5.1V2.9M11 19.1v-2.2M16.9 11h2.2M2.9 11h2.2"/>
+          <path d="m15.17 6.83 1.56-1.56M5.27 16.73l1.56-1.56M15.17 15.17l1.56 1.56M5.27 5.27l1.56 1.56"/>
+        </svg>
+      </span>
+      <span class="nav-lb">Settings</span>
+    </button>
+  </nav>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite">
+  <span class="toast-key" aria-hidden="true"></span>
+  <span id="toast-text" class="toast-text"></span>
+</div>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

@@ -36,6 +36,13 @@ staleness source and ADR-0007's beta-branch keep-set protection (decision B).
 It is **off by default** and is the only component that talks to anything
 outside the LAN; see "Manifest oracle" below, including the privacy note.
 Bypass detection and the miss trigger remain scope for later work packages.
+WP 4a.1 adds **static serving for the built-in web UI**
+(`vault_api/webui.py`) — vault-api now mounts the no-build vanilla SPA in
+`web/` (a new top-level sibling of `api/`) as static files, with a
+narrowly-scoped SPA fallback for the app's own client-side routes, sane
+security headers (CSP included) on every response, and a Cache-Control
+split (`index.html` always revalidates; other assets get a short TTL).
+See "Web UI static serving" below.
 
 ## Layout
 
@@ -69,6 +76,7 @@ api/
 │   │                     #   OFF by default; the one component that talks to
 │   │                     #   anything outside the LAN
 │   ├── validation.py     # shared request types (AppId) — one coercion rule
+│   ├── webui.py          # static serving + SPA fallback for web/ (WP 4a.1)
 │   └── routers/
 │       ├── health.py     # GET /v1/health — the ONE public router
 │       ├── games.py      # GET /v1/games, GET /v1/games/{appid}
@@ -3470,6 +3478,215 @@ existing solely so the test suite had an authenticated endpoint to exercise
 `/v1/games`, `/v1/games/{appid}`, `/v1/mapping/{depotid}` and `/v1/mapping`
 exist, the scaffold is gone (`routers/internal.py` deleted) and the test
 suite (`tests/test_auth.py`) exercises auth against `/v1/games` instead.
+
+## Web UI static serving (WP 4a.1)
+
+vault-api mounts a second thing besides the `/v1/*` API: the built-in web
+UI, a no-build vanilla ES-module SPA that lives in `web/` — a new
+top-level directory, sibling to `api/` (Phase 4a stack decision,
+`docs/WORKPACKAGES.md`: no bundler, ever, so `docker compose up` stays the
+whole deploy story and CI stays trivial). All of the logic lives in
+`vault_api/webui.py`; `main.create_app` calls `mount_web_ui(app,
+settings.web_dir)` as the very LAST step, after every `/v1/*` router is
+registered.
+
+### Where `web/` is found
+
+`Settings.web_dir` defaults to a path computed relative to
+`vault_api/config.py`'s own file location (`_default_web_dir`), which
+resolves to the real `web/` directory in a native checkout regardless of
+the process's current working directory. Override it with `VAULT_WEB_DIR`
+if you ever need to point at a different build of the UI.
+
+**Known gap, deliberately out of this work package's scope:** the shipped
+Docker image does NOT copy `web/` in. `api/Dockerfile`'s build context is
+`api/` (see `deploy/compose.yaml`: `context: ../api`), and `web/` lives
+outside that context entirely — copying it in would need both a
+`COPY web /app/web` line in the Dockerfile AND a build-context change in
+`deploy/compose.yaml` (`context: ..` with an explicit `dockerfile:
+api/Dockerfile`), which is shared, cross-service surface a single
+work package should not quietly rewrite. Until a follow-up package does
+that: `_default_web_dir()` resolves to a path that does not exist inside
+the container, and `mount_web_ui` treats that exactly like any other
+missing optional directory — it logs once at startup and vault-api serves
+the API only, same as today. Native dev (`uvicorn
+vault_api.main:create_app --factory`, run from anywhere in the repo) gets
+the real UI with zero configuration.
+
+### Auth boundary
+
+No `require_api_key` dependency is attached to any app-shell route or
+asset mount — the WP 4a.1 brief is explicit about this: the app shell and
+its assets need no key, since the SPA itself sends `X-Api-Key` on its own
+`/v1/*` calls once the user types one into Settings. Every `/v1/*` route
+keeps exactly the auth it already had; see "Auth" above and
+`tests/test_webui.py::test_v1_auth_is_unchanged_with_web_ui_mounted`.
+
+Because these are now real `APIRoute`s (not a `Mount`, which
+`tests/test_security.py`'s route walk already skipped), they DO show up in
+that walk and needed to be added to its `PUBLIC_PATHS` explicitly
+(`_WEBUI_PUBLIC_PATHS`, generated from `webui._SPA_ROUTES` — see
+`tests/test_security.py`) — otherwise that test would fail the moment this
+work package's routes exist, which is exactly what happened once during
+review and is now fixed by listing them as intentionally public rather
+than by weakening the walk.
+
+### Routing: exact routes for the app shell, real asset subtrees only — no catch-all
+
+**Review history worth keeping.** The first version of this section (and
+of `webui.py`) mounted the WHOLE `web_dir` at `"/"` with `StaticFiles` and
+used a global `StarletteHTTPException` handler to fall back to
+`index.html` for any unmatched `GET` 404. That is a catch-all: it
+intercepts every path with no other matching route, and it measurably
+changed `/v1/*` behaviour that has nothing to do with the web UI —
+confirmed empirically by diffing against the app with the mount removed
+entirely (`git stash` the whole work package, boot, `curl`, compare):
+
+| request | pre-WP-4a.1 (measured) | catch-all Mount (rejected) | current (this section) |
+|---|---|---|---|
+| `GET /v1/games/` (trailing slash) | `307` (Starlette `redirect_slashes`) | `404` | `307` |
+| `HEAD /v1/health` | `405` | `404` | `405` |
+| `POST /v1/does-not-exist` | `404` | `405` | `404` |
+| `GET /v1/does-not-exist` | `404` (JSON) | `404` (JSON) | `404` (JSON) |
+
+The `HEAD /v1/health` row is itself worth a note: FastAPI's `APIRoute`
+does **not** auto-add `HEAD` support to a `GET`-only route the way plain
+Starlette's own `Route` does (confirmed by reading both classes'
+`__init__` — Starlette's adds `"HEAD"` to `self.methods` whenever `"GET"`
+is present, FastAPI's `APIRoute.__init__` does not) — so `405` for
+`HEAD /v1/health` is not a bug to fix, it is the pre-existing, correct
+baseline this work package must not disturb.
+
+**The fix: stop being a catch-all.** `mount_web_ui` (`vault_api/webui.py`)
+registers:
+
+- Exact routes for `/` and `/index.html`, both handled by the same small
+  function that returns `FileResponse(index_path)`.
+- Exact routes for each of the three scaffolded views — `/library`,
+  `/downloads`, `/settings` (`_SPA_ROUTES`) — plus a `/{view}/{rest:path}`
+  route per view so a future nested path (e.g. a per-game deep link like
+  `/library/440`) is already covered; the client-side router owns
+  everything past the first segment.
+- `StaticFiles` mounted **only** on the two real asset subtrees, `/css`
+  and `/js` — never on `/web_dir`'s root, and never on `/`.
+
+Every route above is registered with `methods=["GET", "HEAD"]` explicitly
+(not relying on FastAPI's — absent — auto-HEAD behaviour).
+`starlette.responses.FileResponse` already special-cases `HEAD` itself at
+the ASGI layer (`send_header_only`): same status and headers as `GET`, no
+body. `tests/test_webui.py::test_head_on_app_shell_routes_matches_get`
+pins this for every app-shell route.
+
+**Consequence: a path that matches none of the above never reaches any
+code in this module at all.** Every `/v1/*` path (matched or not, right
+method or not, trailing slash or not), `/docs`/`/redoc`/`/openapi.json`
+(deliberately disabled, see "Auth" above), and any other unmapped path
+falls straight through to Starlette's own default routing — byte-for-byte
+what it does in a vault-api build with no web UI mounted. No custom
+exception handler exists any more; there was nothing left for one to do.
+
+**Why an allowlist of three literal view names, not "any non-`/v1/` GET
+404" or a wildcard mount:** both broader designs were tried and rejected.
+The wildcard `Mount("/")` produced the table above; a plain "any non-`/v1/`
+GET 404 → serve `index.html`" exception handler (the second design tried,
+before the routing rework) separately broke
+`tests/test_security.py::test_docs_and_openapi_are_disabled` — `/docs`,
+`/redoc` and `/openapi.json` are non-`/v1/` GET 404s too, and would have
+been silently upgraded from "disabled" to "200 HTML". The allowlist is
+exactly the three nav destinations the frozen round-7 mockup
+(`docs/design/vault-app-mockup.html`) actually has — **not four**: an
+earlier draft of this work package added a `clients` nav item/view, which
+review correctly flagged, since the mockup reaches the client list from
+the bypass banner as a sheet, not a nav destination (WP 4a.7's job). Two
+tests guard the sync between the server and the client router:
+`tests/test_webui.py::test_router_js_views_match_webui_spa_routes` parses
+`VIEWS` out of `web/js/router.js` and compares it to `webui._SPA_ROUTES`,
+and `tests/test_security.py`'s `_WEBUI_PUBLIC_PATHS` is generated from
+`_SPA_ROUTES` too — so a later 4a.x package adding a fourth view needs
+exactly one edit (`_SPA_ROUTES` in `webui.py`) plus the matching one in
+`router.js`, and both test files will catch a one-sided change immediately.
+
+**The `/v1/*` pin, stated exactly:** an unmapped `/v1/...` path returns
+the identical plain JSON 404 it always did — `{"detail": "Not Found"}` —
+never the HTML shell, and (see the table above) every other `/v1/*`
+status code (307, 401, 404, 405) is completely undisturbed by the web UI
+being mounted or not. `tests/test_webui.py` pins the whole table, both
+against the real `web/` directory and against a synthetic one, and against
+a build with `VAULT_WEB_DIR` pointed at a directory that does not exist.
+
+**Path traversal.** No custom guard was needed: a path outside the known
+exact routes and the `/css`/`/js` prefixes has no matching route at all,
+so no filesystem lookup happens for it (`/../api/vault_api/config.py`,
+`/.git/config`, ...). A traversal attempt that DOES fall under `/css` or
+`/js` (`/css/../../vault_api/config.py`, its `%2e%2e`-encoded form, ...)
+is caught by Starlette's own `StaticFiles.lookup_path`, which resolves the
+joined path and refuses anything whose realpath escapes the mounted
+directory (`os.path.commonpath` check) — battle-tested library code, nine
+variants pinned in `tests/test_webui.py::test_path_traversal_attempts_return_404`.
+
+### Cache-Control
+
+- `index.html` — always `Cache-Control: no-cache` (forces revalidation on
+  every load), set directly by the `_serve_index` handler and identical
+  whether reached via `/`, `/index.html`, or one of the three view routes
+  (`/library`, `/downloads`, `/settings`) and their nested-path variants.
+  A stale cached app shell after a deploy is the one caching mistake worth
+  actively avoiding.
+- Every other static asset (served from the `/css` and `/js` mounts, via
+  `_AssetStaticFiles.file_response`) — `Cache-Control: public, max-age=300,
+  must-revalidate`. Short and revalidate-friendly rather than long: this
+  is a no-build, no-bundler SPA (stack decision, see above), so a
+  `.js`/`.css` file has no content-hashed filename to bust a long cache
+  with after a deploy. A `.js`/`.css` file that legitimately hasn't
+  changed still costs a client one conditional-GET round trip every 5
+  minutes at most; one that DID change is never served stale for longer
+  than that window.
+
+### Security headers, including CSP
+
+`install_security_headers` attaches an `@app.middleware("http")` that adds
+the same headers to **every** response — API and UI alike, and
+unconditionally (even when no `web/` directory exists to serve):
+`Content-Security-Policy`, `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
+`Permissions-Policy` (camera/microphone/geolocation/payment all denied).
+
+**The CSP is self-only, with no `'unsafe-inline'` anywhere**
+(`default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'
+data:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action
+'self'; frame-ancestors 'none'; object-src 'none'`). This was possible
+without any carve-out because `web/`'s HTML, as shipped by this work
+package, uses **zero** inline `<script>` tags, `<style>` tags, or inline
+`style="..."` attributes — every visual rule lives in
+`web/css/theme.css` / `web/css/app.css`, and every dynamic value the app's
+own JS sets later (WP 4a.2+: progress bar widths, live percentages) will
+go through the CSSOM (`element.style.prop = value`), which CSP's
+`style-src` does **not** restrict — only literal inline markup is
+covered. This is worth stating explicitly because the frozen design mockup
+(`docs/design/vault-app-mockup.html`) DOES use inline `style="..."`
+attributes throughout (it predates this CSP and was never meant to ship
+as-is — see its own NOTES.md); `web/`'s HTML is a fresh implementation
+that intentionally avoids the pattern so the strict CSP above didn't need
+loosening. If a later 4a.x package finds it genuinely needs an inline
+style or script, it must extend `_CSP` in `webui.py` explicitly and say
+why in a comment — never add a blanket `'unsafe-inline'`.
+
+### App shell contents (WP 4a.1 scope: scaffolding only)
+
+`web/index.html` + `web/js/app.js` wire up: a bottom nav with the mockup's
+three destinations — Library / Downloads / Settings, matching
+`_SPA_ROUTES` above 1:1 (Clients is NOT a nav item; it is WP 4a.7's sheet,
+reached from the bypass banner in the frozen mockup, not the bottom nav —
+see the routing section above for the review round that corrected this), a
+History-API router (`web/js/router.js`) that swaps the active view on nav
+clicks and browser back/forward, three placeholder views
+(`web/js/views/{library,downloads,settings}.js`, each just a heading and a
+one-line "this ships in WP 4a.x" note), the status-icon component
+(`web/js/components/status-icon.js` — glyph set, colours, sizes and motion
+rules ported from `docs/design/vault-app-mockup.html` round 7, including
+the `prefers-reduced-motion` kill switch in `web/css/theme.css`), and a
+toast component (`web/js/components/toast.js`) with no callers yet. No API
+calls, no data fetching, no polling — that is WP 4a.2's scope entirely.
 
 ## Running natively (Windows dev, no Docker until WP 1.9)
 

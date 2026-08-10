@@ -285,3 +285,22 @@ These are not style preferences; each entry cost a review round to learn.
 - Never present a planned license as granted — a `## License: Apache-2.0`
   heading without a LICENSE file reads as an effective grant that does not
   exist; word it "planned" until the file lands (WP 5.2 blocker).
+
+## Web UI (Phase 4a)
+- A Starlette `Mount("/")` catch-all pre-empts the router's partial-match
+  bookkeeping app-wide: every trailing-slash 307 became a 404 and
+  HEAD-on-real-route 405s became 404s. Serve a SPA with exact GET+HEAD
+  routes plus narrow asset-subtree mounts (/css, /js) instead — then API
+  routing is untouched by construction (WP 4a.1 blocker).
+- Routing changes are verified by running the SAME request matrix against
+  a pristine pre-change baseline (git archive HEAD), with the feature both
+  enabled and disabled — README claims about "unchanged behavior" were
+  measurably false until the rig existed (WP 4a.1).
+- httpx/TestClient normalizes `../` client-side before sending: un-encoded
+  traversal tests assert on the wrong path. Real traversal pins need
+  %2e%2e-encoded forms or a raw ASGI scope with un-normalized raw_path
+  (WP 4a.1 review).
+- The frozen mockup is binding for UI surfaces: scaffolding must not add
+  navigation items or views the mockup lacks (Clients is a sheet, not a nav
+  entry) — any divergence is a user decision, recorded like the paused-slot
+  one (WP 4a.1 blocker).
