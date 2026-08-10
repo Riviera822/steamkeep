@@ -203,3 +203,70 @@ on is pulled into a pure `web/js/lib/` module and tested here.
   posture as `formatBytesGB`); a valid ISO timestamp renders through
   (asserted loosely — containing the year — since the exact locale-formatted
   string is runtime-locale/timezone-dependent).
+
+### WP 4a.6 — Settings + onboarding + Steam identity
+
+Same posture as WP 4a.3/4a.5: `web/js/views/settings.js` and
+`web/js/onboarding.js` (the DOM-building view/overlay) are not unit-tested
+directly — every piece of decision logic they lean on is pulled into a pure
+`web/js/lib/` module and tested here. Both modules also import `window`
+transitively (via `router.js`), same as every other view, so they cannot be
+`import()`-ed under bare Node either — this WP's live verification was done
+against a real `uvicorn` instance instead (see the coder's report).
+
+- `steamid.test.js` — `web/js/lib/steamid.js`'s `validSteamId64`: the exact
+  17-ASCII-digit, range-checked grammar mirrored from
+  `vault_api.steam_relay.valid_steamid64`, using `BigInt` because the
+  individual-account SteamID64 base (76561197960265728) already exceeds
+  `Number.MAX_SAFE_INTEGER` — a plain `Number()` range check would silently
+  round distinct 17-digit inputs onto the same handful of representable
+  doubles. Covers the base/max boundary (mutation target: off-by-one either
+  direction), wrong length, non-digit characters, and non-ASCII look-alike
+  digits (the same Python `str.isdigit()` trap `docs/LEARNINGS.md`'s
+  "Parsers" section already documents for other modules).
+- `steam-key-form.test.js` — `web/js/lib/steam-key-form.js`: `validSteamWebApiKey`
+  (exactly 32 hex characters, either case) and `submitSteamKey`'s orchestration
+  — the **load-bearing pin**: the typed key is cleared from the field
+  unconditionally in every outcome (validation failure, a rejected `PUT`, a
+  network error, success), proven with a plain `{value}`-shaped stand-in
+  object rather than a real `<input>` (ADR-0004 addendum: the key must never
+  be retained after a submit attempt), and that a thrown error's message
+  never contains the raw key.
+- `settings-diff.test.js` — `web/js/lib/settings-diff.js`'s `buildSettingsPatch`:
+  the **mutation-worthy pin** LEARNINGS asks for — a touched field whose
+  draft value equals the current effective value must be DROPPED, not sent
+  (removing that equality check makes every touched key appear regardless of
+  whether anything changed). Also covers: an untouched field never appears at
+  all; `reset` only sends `null` when a `db` override actually exists (a
+  reset against an env/default-sourced key is a no-op); blank is a REAL
+  override value for `schedule_window`/`webhook_url` (ADR-0009), never
+  silently coerced into a reset; `webhook_events` list/comma-string
+  equivalence (order- and whitespace-independent); env-only/unrecognised
+  keys dropped defensively.
+- `settings-presentation.test.js` — `web/js/lib/settings-presentation.js`:
+  `appliesText`/`sourceLabel` cover all three real values distinctly (and
+  fall back honestly, never silently, for an unrecognised one), `canReset`
+  (only a `db`-sourced, non-`env_only` entry offers a reset), and
+  `effectiveAsInputValue`'s three special cases — `null` becomes blank (the
+  `schedule_window`/`webhook_url` "disabled" state, never the string
+  `"null"`), a list (`webhook_events`) becomes a comma-joined string, and an
+  empty list becomes `""` rather than `"[]"` or a stray leading comma.
+- `onboarding-steps.test.js` — `web/js/lib/onboarding-steps.js`: the
+  **mutation-worthy pin** that step 1 cannot be left until the vault API key
+  has actually been verified (`canAdvance`/`nextStep` gated on `tested`,
+  unlike the mockup's mere form-completeness check — this fork's step 1
+  result is used for real, so advancing on an unverified guess would ship a
+  broken key into `localStorage`); step 2 (Steam identity) is unconditionally
+  optional; `prevStep`/`clampStep` bounds; `progressPercent` monotonicity;
+  and the other mutation pin, `shouldShowOnboarding` (only true with no
+  stored key AND no demo mode — either alone must suppress it).
+- `demo-data-settings.test.js` extends `demo-data.js`'s coverage (WP 4a.2's
+  fixture module) with the WP 4a.6 routes it gained: `GET`/`PATCH
+  /v1/settings` (db/env/default precedence, all-or-nothing validation, an
+  env-only key rejected by name distinct from "unknown key", the Pydantic
+  lax-mode boolean trap, `webhook_events` accepting a JSON array) and
+  `/v1/steam/*` (unconfigured -> `409`, a malformed key -> `422`, configured
+  -> `200` with the fixture library, turning the relay off is immediate,
+  `resetDemoData()` clears both). Reuses `lib/steamid.js`/
+  `lib/steam-key-form.js`'s validators rather than duplicating the grammar a
+  third time.

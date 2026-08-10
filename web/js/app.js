@@ -10,6 +10,7 @@ import { initToast } from "./components/toast.js";
 import { renderLibrary } from "./views/library.js";
 import { renderDownloads } from "./views/downloads.js";
 import { renderSettings } from "./views/settings.js";
+import { maybeShowOnboardingOnStartup } from "./onboarding.js";
 
 const RENDERERS = {
   library: renderLibrary,
@@ -41,3 +42,9 @@ for (const btn of navButtons) {
 onViewChange(renderView);
 initToast();
 renderView(currentView());
+// WP 4a.6: shows the 3-step onboarding overlay on top of whatever view just
+// rendered when no vault API key is stored yet and demo mode was not
+// already chosen (lib/onboarding-steps.js's shouldShowOnboarding). The
+// overlay covers the whole shell (css/app.css `.onb`) so which view sits
+// underneath does not matter.
+maybeShowOnboardingOnStartup();

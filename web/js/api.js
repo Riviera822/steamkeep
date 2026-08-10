@@ -13,6 +13,19 @@
  * here (this is a module file, loaded via <script type="module" src=...>),
  * and demo mode makes zero network requests — it is pure local data, not a
  * mock server.
+ *
+ * **No `serverUrl` setting (WP 4a.6 decision, recorded from the WP 4a.2
+ * nit).** Earlier drafts of this module stored a `serverUrl` alongside the
+ * API key, mirroring the mockup's Android-app "connection profile" concept
+ * (System VPN / public domain / a typed server URL). That never applied
+ * here: this page is served BY vault-api itself (WP 4a.1, `webui.py`), and
+ * the CSP that ships with it is same-origin-only (`connect-src 'self'`) —
+ * pointing `fetch()` at a different origin would be blocked by the browser
+ * regardless of what a settings screen let someone type. `getServerUrl`/
+ * `setServerUrl` and the `steamvault.serverUrl` storage key are deleted
+ * outright rather than left as dead code; every request below resolves
+ * against `window.location.origin`. Demo mode remains the one supported
+ * "no real server" path (NOTES open question 5), unrelated to this.
  */
 
 import { demoRequest } from "./demo-data.js";
@@ -21,7 +34,6 @@ import { ApiError, ERROR_KINDS, classifyHttpStatus } from "./errors.js";
 export { ApiError, ERROR_KINDS, classifyHttpStatus };
 
 const STORAGE_KEYS = Object.freeze({
-  serverUrl: "steamvault.serverUrl",
   apiKey: "steamvault.apiKey",
   demoMode: "steamvault.demoMode",
 });
@@ -46,19 +58,6 @@ function writeLocalStorage(key, value) {
   }
 }
 
-// Note: a non-same-origin serverUrl (pointing this page at a DIFFERENT
-// vault-api than the one that served it) is currently blocked by the CSP
-// WP 4a.1 ships (api/vault_api/webui.py, self-only `connect-src`) — by
-// design, not an oversight here. Whether/how to relax that is a 4a.6
-// decision (connection profiles, settings UI); left alone in this WP.
-export function getServerUrl() {
-  return readLocalStorage(STORAGE_KEYS.serverUrl, "");
-}
-
-export function setServerUrl(url) {
-  writeLocalStorage(STORAGE_KEYS.serverUrl, url);
-}
-
 export function getStoredApiKey() {
   return readLocalStorage(STORAGE_KEYS.apiKey, "");
 }
@@ -76,8 +75,7 @@ export function setDemoMode(on) {
 }
 
 function buildUrl(path, params) {
-  const base = getServerUrl().replace(/\/+$/, "");
-  const url = new URL(path, base ? base : window.location.origin);
+  const url = new URL(path, window.location.origin);
   if (params) {
     for (const [key, value] of Object.entries(params)) {
       if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
@@ -160,6 +158,13 @@ export async function request(method, path, { body, params, signal } = {}) {
  * per-depot `shared: true/false` boolean names no owner ids, so it alone
  * cannot answer "which OTHER apps map this depot". Called on demand (only
  * when a bulk-delete confirm is opened), never on a poll loop.
+ *
+ * `getSettings`/`patchSettings` and the `steam*` methods (WP 4a.6) back the
+ * Settings view and the onboarding flow — see api/README.md's "Persisted
+ * settings" and "Steam Web API relay" sections for the exact response
+ * shapes. `patchSettings` takes the body `web/js/lib/settings-diff.js`
+ * builds (only the keys that actually changed) and returns straight through
+ * to `PATCH /v1/settings`, which answers with the same shape `GET` does.
  */
 export const api = {
   health: () => request("GET", "/v1/health"),
@@ -175,4 +180,67 @@ export const api = {
   deleteCache: (appid) => request("DELETE", `/v1/cache/${appid}`),
   cacheSummary: () => request("GET", "/v1/cache/summary"),
   clients: () => request("GET", "/v1/clients"),
+  getSettings: () => request("GET", "/v1/settings"),
+  patchSettings: (body) => request("PATCH", "/v1/settings", { body }),
+  getSteamKey: () => request("GET", "/v1/steam/key"),
+  putSteamKey: (key) => request("PUT", "/v1/steam/key", { body: { key } }),
+  deleteSteamKey: () => request("DELETE", "/v1/steam/key"),
+  steamOwnedGames: (steamid) => request("GET", "/v1/steam/owned-games", { params: { steamid } }),
+  steamPlayerSummaries: (steamid) =>
+    request("GET", "/v1/steam/player-summaries", { params: { steamid } }),
 };
+
+/**
+ * Test a CANDIDATE vault API key before it is stored anywhere (onboarding
+ * step 1, and the Settings "reconnect" flow) — deliberately bypasses
+ * `getStoredApiKey()`/demo mode, the only place in this module that does.
+ *
+ * `GET /v1/health` is the one endpoint that answers with no auth at all
+ * (api/README.md "Auth"), so hitting it only proves the server is up, not
+ * that `key` is correct — a settings screen that called this "test
+ * connection" and stopped there would show a false-positive "200 OK" for a
+ * wrong key. This checks BOTH: reachability via `/v1/health`, then the key
+ * itself via one authenticated call (`GET /v1/settings`, chosen because
+ * both onboarding and the Settings view need its response anyway — no
+ * wasted request). A `401` from the second call is reported distinctly
+ * (`"That API key was rejected."`) rather than folded into the generic
+ * validation-kind message.
+ *
+ * @param {string} key
+ * @returns {Promise<{health: unknown, settings: unknown}>}
+ */
+export async function checkVaultApiKey(key) {
+  let healthResponse;
+  try {
+    healthResponse = await fetch(new URL("/v1/health", window.location.origin));
+  } catch (err) {
+    throw new ApiError(ERROR_KINDS.NETWORK, "Could not reach the server.", { cause: err });
+  }
+  if (!healthResponse.ok) {
+    throw new ApiError(
+      classifyHttpStatus(healthResponse.status),
+      `The server answered ${healthResponse.status} on /v1/health.`,
+      { status: healthResponse.status },
+    );
+  }
+  const health = await healthResponse.json().catch(() => ({}));
+
+  let settingsResponse;
+  try {
+    settingsResponse = await fetch(new URL("/v1/settings", window.location.origin), {
+      headers: { "X-Api-Key": key },
+    });
+  } catch (err) {
+    throw new ApiError(ERROR_KINDS.NETWORK, "Could not reach the server.", { cause: err });
+  }
+  if (!settingsResponse.ok) {
+    const kind = classifyHttpStatus(settingsResponse.status);
+    const message =
+      kind === ERROR_KINDS.AUTH
+        ? "That API key was rejected."
+        : `The server answered ${settingsResponse.status}.`;
+    throw new ApiError(kind, message, { status: settingsResponse.status });
+  }
+  const settings = await settingsResponse.json();
+  return { health, settings };
+}

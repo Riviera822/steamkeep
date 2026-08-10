@@ -460,6 +460,17 @@ parallel/serial decisions, merge discipline, open user decisions):
       with its own mutation set; Opus PASS ×3. Note: response shape modeled on
       api.steamcmd.net, not yet verified against the live service — mismatch
       degrades to oracle-off, documented in api/README)*
+      *(WP 4a.6 done 2026-08-11: web settings view over GET/PATCH
+      /v1/settings — per-key source/applies captions, only-changed-keys
+      PATCH bodies (mutation-pinned), per-field reset, readonly banner;
+      Steam identity per A+C — key entry/removal with masked last4,
+      typed key cleared from DOM on every path (pinned), SteamID64
+      validation with literal boundary fixtures incl. the BigInt
+      0x-hex kill, library preview with 409 setup guidance, ADR privacy
+      note; 3-step onboarding overlay with dialog semantics (focus trap
+      deferred to 4a.8, recorded); serverUrl setting removed (same-origin
+      by design); demo parity programmatically diffed against live
+      responses; 242 headless tests; Opus PASS + should-fix round)*
 - [x] Per-client hit statistics + bypass detection (`/v1/clients`)
       *(WP 3.11, ADR-0008: event sweep with a persisted byte-offset cursor,
       strict 9-field v1 parsing, miss-triggered prefill (cooldown + per-sweep

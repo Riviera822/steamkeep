@@ -435,3 +435,131 @@ h4.sec[hidden]{ display:none; }
 .log .truncnote{ color:var(--dim-2); }
 
 .tx-cancelled{ color:var(--dim-2); }
+
+/* ============================================================
+   Settings view + onboarding overlay (WP 4a.6)
+   Class names follow the mockup 1:1 (docs/design/vault-app-mockup.html,
+   frozen round 7) where the shell doesn't already own the name — ".field"/
+   ".inp"/".srow"/".opt"/".tag"/".toggle" are the mockup's own settings
+   vocabulary, ".onb*"/".steamrow"/".disclaim"/".bullets"/".summary" are its
+   onboarding vocabulary. Server-URL/connection-profile markup from the
+   mockup is deliberately NOT ported (same-origin by design — see
+   js/api.js's module header).
+   ============================================================ */
+
+.field{ margin-bottom:11px; }
+.field label{ display:block; font-size:10.5px; text-transform:uppercase; letter-spacing:.8px; color:var(--dim-2); margin-bottom:5px; font-weight:600; }
+.inp{
+  display:flex; align-items:center; gap:8px;
+  border:1px solid var(--line); background:var(--bg); border-radius:10px; padding:10px 11px;
+  font-family:var(--mono); font-size:12.5px; color:var(--text);
+}
+.inp:focus-within{ border-color:var(--accent); }
+.inp button{ color:var(--dim); flex:none; display:grid; place-items:center; }
+.inp button:hover{ color:var(--accent); }
+input.inp, .inp input{
+  font-family:var(--mono); font-size:12.5px; color:var(--text);
+  background:transparent; border:0; outline:none; width:100%; min-width:0; padding:0;
+}
+input.inp.txt{ background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px 11px; width:100%; }
+input.inp.txt:focus{ border-color:var(--accent); }
+input.inp.txt:disabled{ opacity:.55; }
+
+.srow{
+  display:flex; align-items:center; gap:11px; padding:12px;
+  border:1px solid var(--line-soft); background:var(--surface);
+  border-radius:var(--r-m); margin-bottom:8px;
+}
+.srow .ttl{ display:block; font-size:13.5px; font-weight:600; }
+.srow .desc{ display:block; font-size:11.5px; color:var(--dim-2); line-height:1.45; margin-top:3px; }
+.srow .grow{ flex:1; min-width:0; }
+.srow input[type="checkbox"]{ width:17px; height:17px; flex:none; accent-color:var(--accent); }
+
+.opt{
+  display:flex; gap:11px; align-items:flex-start; padding:12px;
+  border:1px solid var(--line-soft); background:var(--surface);
+  border-radius:var(--r-m); margin-bottom:8px; width:100%; text-align:left;
+}
+.opt[aria-checked="true"]{ border-color:rgba(46,217,206,.5); background:linear-gradient(180deg,var(--accent-glow),var(--surface)); }
+.tag{
+  font-size:9px; font-weight:700; letter-spacing:.6px; text-transform:uppercase;
+  padding:2px 6px; border-radius:5px;
+}
+.tag.def{ background:var(--accent-glow); color:var(--accent); }
+
+.toggle{
+  width:44px; height:25px; border-radius:999px; background:var(--line); flex:none;
+  position:relative; transition:background .18s;
+}
+.toggle::after{
+  content:""; position:absolute; top:3px; left:3px; width:19px; height:19px; border-radius:50%;
+  background:#8FA6B2; transition:transform .18s, background .18s;
+}
+.toggle[aria-checked="true"]{ background:rgba(46,217,206,.32); }
+.toggle[aria-checked="true"]::after{ transform:translateX(19px); background:var(--accent); }
+
+.okline{
+  display:none; align-items:center; gap:8px; margin-top:9px;
+  font-size:12px; color:var(--ok); font-family:var(--mono); font-variant-numeric:tabular-nums;
+}
+.okline.on{ display:flex; }
+.errline{ margin:8px 0 0; font-size:12px; line-height:1.5; color:var(--danger); }
+
+.foot-note{ font-size:11px; line-height:1.5; color:var(--dim-2); margin:6px 0 0; }
+.bullets{ margin:0; padding-left:16px; }
+.bullets li{ font-size:12px; line-height:1.55; color:var(--dim); margin-bottom:6px; }
+.bullets b{ color:var(--text); font-weight:600; }
+
+.view-settings h4.sec:first-of-type{ margin-top:2px; }
+
+/* ---------- onboarding overlay ---------- */
+.onb{
+  position:fixed; inset:0; z-index:50; background:var(--bg);
+  display:flex; flex-direction:column; padding:16px 20px calc(16px + env(safe-area-inset-bottom));
+  transition:opacity .3s, transform .3s;
+  max-width:960px; margin:0 auto;
+}
+.onb.gone{ opacity:0; transform:scale(1.04); pointer-events:none; }
+body.onboarding .nav{ display:none; }
+.onbhead{ display:flex; align-items:center; gap:11px; flex:none; }
+.mark{
+  width:40px; height:40px; border-radius:12px; display:grid; place-items:center; flex:none;
+  background:linear-gradient(150deg,rgba(46,217,206,.22),rgba(46,217,206,.05));
+  box-shadow:inset 0 0 0 1px rgba(46,217,206,.35); color:var(--accent);
+}
+.wordmark{ font-size:15px; font-weight:700; letter-spacing:-.2px; }
+.stepnum{ font-size:10.5px; letter-spacing:.7px; text-transform:uppercase; color:var(--dim-2); font-weight:600; margin-top:2px; }
+.track{ flex:none; height:3px; border-radius:2px; background:var(--line-soft); margin:13px 0 16px; overflow:hidden; }
+.track i{ display:block; height:100%; background:var(--accent); transition:width .3s ease; }
+
+.onb h2{ margin:0 0 6px; font-size:24px; letter-spacing:-.6px; text-wrap:balance; }
+.onb .lede{ margin:0 0 18px; font-size:12.8px; line-height:1.55; color:var(--dim); }
+.onb .rest{ flex:1; min-height:0; overflow-y:auto; scrollbar-width:none; }
+.onb .rest::-webkit-scrollbar{ display:none; }
+.ostep{ display:none; }
+.ostep.on{ display:block; }
+.onbfoot{ flex:none; padding-top:12px; }
+.onbnav{ display:flex; gap:10px; }
+.onbnav .btn{ flex:1; }
+.skiplink{
+  display:block; width:100%; text-align:center; margin-top:10px; padding:6px;
+  font-size:11.5px; color:var(--dim-2); text-decoration:underline; text-underline-offset:3px;
+}
+.skiplink:hover{ color:var(--accent); }
+
+.steamrow{
+  border:1px solid var(--line); background:var(--surface); border-radius:var(--r-m);
+  padding:13px; display:flex; gap:11px; align-items:center;
+}
+.disclaim{
+  margin-top:14px; padding:10px 12px; border-radius:var(--r-s);
+  border:1px solid var(--line-soft); background:var(--surface);
+  font-size:11px; line-height:1.55; color:var(--dim-2);
+}
+.summary{ display:flex; flex-direction:column; gap:1px; background:var(--line-soft); border-radius:var(--r-m); overflow:hidden; margin-top:14px; }
+.summary div{ display:flex; gap:10px; padding:11px 12px; background:var(--surface); font-size:12.5px; }
+.summary span:first-child{ color:var(--dim-2); width:110px; flex:none; }
+.summary span:last-child{
+  color:var(--text); font-family:var(--mono); font-size:11.5px;
+  min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}

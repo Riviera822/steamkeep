@@ -16,15 +16,25 @@
  * No network access of any kind (CSP compatibility, WP 4a.2 scope) — this
  * is local state, reset on every page load, not a mock HTTP server.
  *
- * Testability: this module imports only errors.js (no `window`, no
- * `document`, no `fetch`) — it is plain data plus plain functions and runs
- * in bare Node. `resetDemoData()` restores the module's mutable state to a
- * fresh copy of the seed data; tests call it between cases so scenarios
- * (e.g. "delete this game") don't leak into the next test (see
- * web/tests/demo-data.test.js).
+ * Testability: this module imports only errors.js and two other DOM-free
+ * `lib/` modules (no `window`, no `document`, no `fetch`) — it is plain
+ * data plus plain functions and runs in bare Node. `resetDemoData()`
+ * restores the module's mutable state to a fresh copy of the seed data;
+ * tests call it between cases so scenarios (e.g. "delete this game") don't
+ * leak into the next test (see web/tests/demo-data.test.js).
+ *
+ * WP 4a.6 extends this with `/v1/settings` (ADR-0009) and the Steam Web API
+ * relay (`/v1/steam/*`, ADR-0004 addendum) so the Settings view has
+ * something to render in demo mode instead of a bare 404 toast — see
+ * web/tests/demo-data-settings.test.js. Both reuse the same pure validators
+ * the real router/relay use client-side (`lib/steamid.js`,
+ * `lib/steam-key-form.js`) so a demo rejection and a real `422` agree on
+ * shape, without duplicating the grammar a third time.
  */
 
 import { ApiError, ERROR_KINDS } from "./errors.js";
+import { validSteamId64 } from "./lib/steamid.js";
+import { validSteamWebApiKey } from "./lib/steam-key-form.js";
 
 function isoAgo(msAgo) {
   return new Date(Date.now() - msAgo).toISOString();
@@ -204,6 +214,284 @@ export function resetDemoData() {
   jobs = buildJobs();
   clients = buildClients();
   nextJobId = 900002;
+  resetDemoSettings();
+  resetDemoSteamRelay();
+}
+
+// ---------------------------------------------------------------------
+// /v1/settings (WP 4a.6; ADR-0009) — a small in-memory mirror of
+// vault_api/settings_store.py's precedence rule (db override > env value >
+// built-in default), enough to exercise the Settings view's real code path
+// in demo mode. `env` below stands in for "what Settings.from_env() would
+// have produced" — fixed per key rather than reading real env vars (demo
+// mode has no process env of its own to read).
+// ---------------------------------------------------------------------
+
+const WEBHOOK_EVENTS_ALL = Object.freeze([
+  "job.done",
+  "job.error",
+  "job.cancelled",
+  "client.bypass_suspected",
+  "client.bypass_resolved",
+]);
+const AUTO_GC_MODES = Object.freeze(["off", "dry-run", "execute"]);
+
+// key -> {default, env}. `env` != `default` for vault_name/schedule_window
+// on purpose, so a fresh demo session shows a realistic mix of "default"
+// and "env" sourced rows, not everything defaulted.
+const SETTINGS_BASE = {
+  vault_name: { default: "", env: "steamvault-demo" },
+  schedule_window: { default: null, env: "22:00-06:00" },
+  schedule_interval_minutes: { default: 180, env: 180 },
+  schedule_client_stale_days: { default: 7, env: 7 },
+  auto_gc: { default: "off", env: "off" },
+  webhook_url: { default: "", env: "" },
+  webhook_events: { default: [...WEBHOOK_EVENTS_ALL], env: [...WEBHOOK_EVENTS_ALL] },
+};
+
+const SETTINGS_APPLIES = {
+  vault_name: "restart-required",
+  schedule_window: "next_sweep",
+  schedule_interval_minutes: "next_sweep",
+  schedule_client_stale_days: "next_sweep",
+  auto_gc: "immediately",
+  webhook_url: "restart-required",
+  webhook_events: "restart-required",
+};
+
+// Mirrors settings_store.ENV_ONLY_INFO_KEYS — informational-only rows a
+// settings screen shows as "this exists but only the environment controls
+// it" (api/README.md "Env-only keys"). `vault_api_key` is excluded here
+// too, same reasoning as the real endpoint: it never appears in ANY GET
+// response, not even redacted.
+const ENV_ONLY_DEMO = [
+  { key: "db_path", value: "/data/vault.db" },
+  { key: "cache_root", value: "/vault/cache" },
+  { key: "steamprefill_path", value: "/usr/local/bin/steamprefill" },
+  { key: "steamprefill_cache_dir", value: "/root/.local/share/SteamPrefill" },
+  { key: "manifest_archive_dir", value: "/vault/manifest-archive" },
+  { key: "web_dir", value: "/app/web" },
+  { key: "settings_readonly", value: false },
+];
+const ENV_ONLY_KEYS = new Set(["vault_api_key", ...ENV_ONLY_DEMO.map((e) => e.key)]);
+
+let settingsOverrides = {}; // key -> raw string, mirrors the `settings` table's TEXT column
+const settingsReadonly = false; // demo mode never ships VAULT_SETTINGS_READONLY
+
+function resetDemoSettings() {
+  settingsOverrides = {};
+}
+
+/** Raw PATCH-body value -> the typed value, or throw a 422 ApiError — the
+ * demo-mode mirror of each `SettingSpec.parse` in settings_store.py. Typed
+ * values are only used internally (to decide "did this change") and for
+ * the GET projection; PATCH itself stores the raw string, same as the real
+ * `settings` table. */
+function parseSettingValue(key, raw) {
+  if (key === "vault_name") return raw.trim();
+  if (key === "schedule_window") {
+    const text = raw.trim();
+    if (!text) return null;
+    if (!/^\d{2}:\d{2}-\d{2}:\d{2}$/.test(text)) {
+      throw validationError(`'${key}': expected 'HH:MM-HH:MM' (e.g. '22:00-06:00'), got ${JSON.stringify(raw)}.`);
+    }
+    return text;
+  }
+  if (key === "schedule_interval_minutes" || key === "schedule_client_stale_days") {
+    const text = raw.trim();
+    if (!/^[0-9]+$/.test(text) || Number(text) < 1) {
+      throw validationError(`'${key}' must be a positive whole number, got ${JSON.stringify(raw)}.`);
+    }
+    return Number(text);
+  }
+  if (key === "auto_gc") {
+    const text = raw.trim();
+    if (!AUTO_GC_MODES.includes(text)) {
+      throw validationError(`'${key}' must be one of ${AUTO_GC_MODES.join(", ")}, got ${JSON.stringify(raw)}.`);
+    }
+    return text;
+  }
+  if (key === "webhook_url") {
+    const text = raw.trim();
+    if (text && !/^https?:\/\//i.test(text)) {
+      throw validationError(`'${key}' must be a http(s) URL or blank to disable, got ${JSON.stringify(raw)}.`);
+    }
+    return text;
+  }
+  if (key === "webhook_events") {
+    const text = raw.trim();
+    if (!text) return [...WEBHOOK_EVENTS_ALL];
+    const tokens = text.split(",").map((t) => t.trim());
+    if (tokens.some((t) => !t)) {
+      throw validationError(`'${key}' must be a comma-separated list with no empty entries.`);
+    }
+    const unknown = tokens.filter((t) => !WEBHOOK_EVENTS_ALL.includes(t));
+    if (unknown.length) {
+      throw validationError(`'${key}' contains unknown event name(s): ${unknown.join(", ")}.`);
+    }
+    return [...new Set(tokens)];
+  }
+  throw validationError(`unrecognised setting key ${JSON.stringify(key)}`); // unreachable: callers only pass known keys
+}
+
+/** One entry's `effective`/`source`/`fallback`, mirroring
+ * settings_store.describe_settings's precedence exactly (db > env > default). */
+function describeDemoSettings() {
+  const infos = [];
+  for (const key of Object.keys(SETTINGS_BASE)) {
+    const base = SETTINGS_BASE[key];
+    const raw = settingsOverrides[key];
+    let effective;
+    let source;
+    if (raw !== undefined) {
+      effective = parseSettingValue(key, raw);
+      source = "db";
+    } else {
+      effective = base.env;
+      source = JSON.stringify(base.env) === JSON.stringify(base.default) ? "default" : "env";
+    }
+    infos.push({
+      key,
+      effective,
+      source,
+      fallback: base.env,
+      applies: SETTINGS_APPLIES[key],
+      env_only: false,
+    });
+  }
+  for (const entry of ENV_ONLY_DEMO) {
+    infos.push({
+      key: entry.key,
+      effective: entry.value,
+      source: "default",
+      fallback: entry.value,
+      applies: "restart-required",
+      env_only: true,
+    });
+  }
+  return infos;
+}
+
+/** One `PATCH` body value -> the raw string `parseSettingValue` expects, or
+ * throw a 422 — mirrors routers/settings.py's `_coerce_patch_value`
+ * (booleans rejected explicitly, `webhook_events` accepts a list). */
+function coercePatchValue(key, value) {
+  if (typeof value === "boolean") {
+    throw validationError(`'${key}' must be a string, not a boolean.`);
+  }
+  if (typeof value === "string") return value;
+  if (typeof value === "number") return String(value);
+  if (Array.isArray(value) && key === "webhook_events") {
+    if (!value.every((v) => typeof v === "string")) {
+      throw validationError(`'${key}': every list item must be a string event name.`);
+    }
+    return value.join(",");
+  }
+  throw validationError(`'${key}' must be a string, or null to clear the override.`);
+}
+
+function handleGetSettings() {
+  return { readonly: settingsReadonly, settings: describeDemoSettings() };
+}
+
+function handlePatchSettings(body) {
+  if (settingsReadonly) {
+    throw new ApiError(ERROR_KINDS.VALIDATION, "The settings API is read-only.", { status: 403 });
+  }
+  const toSet = [];
+  const toClear = [];
+  for (const [key, value] of Object.entries(body || {})) {
+    if (ENV_ONLY_KEYS.has(key)) {
+      throw validationError(`'${key}' is environment-only and cannot be changed via the API.`);
+    }
+    if (!(key in SETTINGS_BASE)) {
+      throw validationError(`'${key}' is not a recognised setting.`);
+    }
+    if (value === null) {
+      toClear.push(key);
+      continue;
+    }
+    const raw = coercePatchValue(key, value);
+    parseSettingValue(key, raw); // validate only, same "validate everything first" order
+    toSet.push([key, raw]);
+  }
+  // Everything validated above before anything is written (ADR-0009: a bad
+  // value in a multi-key PATCH must persist nothing).
+  for (const [key, raw] of toSet) settingsOverrides[key] = raw;
+  for (const key of toClear) delete settingsOverrides[key];
+  return handleGetSettings();
+}
+
+// ---------------------------------------------------------------------
+// /v1/steam/* — the opt-in Steam Web API relay (WP 4a.6r; ADR-0004
+// addendum). Demo mode never actually calls Valve; it validates the same
+// shapes the real relay does (via the shared `lib/` validators) and answers
+// from a small fixture library once a syntactically valid key is "set".
+// ---------------------------------------------------------------------
+
+let steamKeyConfigured = false;
+let steamKeyLast4 = null;
+
+function resetDemoSteamRelay() {
+  steamKeyConfigured = false;
+  steamKeyLast4 = null;
+}
+
+// Fictional owned-games fixture (LEARNINGS "Testing discipline": synthetic,
+// never real Steam data) — deliberately a DIFFERENT list from the cache
+// library's demo games above: this is what "the Steam Web API says this
+// account owns", which in real life is almost always a much bigger,
+// unrelated set from what happens to be cached.
+const DEMO_OWNED_GAMES = [
+  { appid: 2010010, name: "Aurora Cascade", playtime_forever: 4312, img_icon_url: "" },
+  { appid: 2010040, name: "Emberreach", playtime_forever: 118, img_icon_url: "" },
+  { appid: 3300100, name: "Sable Undertow", playtime_forever: 972, img_icon_url: "" },
+  { appid: 3300200, name: "Halcyon Foundry", playtime_forever: 26, img_icon_url: "" },
+  { appid: 3300300, name: "Quietbrook", playtime_forever: 0, img_icon_url: "" },
+];
+
+function demoPlayerSummary(steamid) {
+  return {
+    steamid,
+    personaname: "vaultkeeper_demo",
+    avatar: "https://avatars.steamstatic.com/demo_small.jpg",
+    avatarmedium: "https://avatars.steamstatic.com/demo_medium.jpg",
+    avatarfull: "https://avatars.steamstatic.com/demo_full.jpg",
+    personastate: 1,
+  };
+}
+
+function handleGetSteamKey() {
+  return { configured: steamKeyConfigured, key_last4: steamKeyLast4 };
+}
+
+function handlePutSteamKey(body) {
+  const key = body && body.key;
+  if (!validSteamWebApiKey(key)) {
+    throw validationError("'key' must be exactly 32 hexadecimal characters.");
+  }
+  steamKeyConfigured = true;
+  steamKeyLast4 = key.slice(-4).toUpperCase();
+  return handleGetSteamKey();
+}
+
+function handleDeleteSteamKey() {
+  resetDemoSteamRelay();
+  return null; // real endpoint answers 204 No Content
+}
+
+function requireSteamConfigured() {
+  if (!steamKeyConfigured) {
+    throw conflict("The Steam Web API relay is not configured. Set a key first (PUT /v1/steam/key).");
+  }
+}
+
+function requireValidSteamId(raw) {
+  const steamid = validSteamId64(typeof raw === "string" ? raw : String(raw ?? ""));
+  if (!steamid) {
+    throw validationError(`'${raw}' is not a valid SteamID64.`);
+  }
+  return steamid;
 }
 
 // ---------------------------------------------------------------------
@@ -641,6 +929,33 @@ export async function demoRequest(method, path, { body, params } = {}) {
 
   if (method === "GET" && path === "/v1/clients") {
     return clients.map((c) => ({ ...c }));
+  }
+
+  if (method === "GET" && path === "/v1/settings") {
+    return handleGetSettings();
+  }
+  if (method === "PATCH" && path === "/v1/settings") {
+    return handlePatchSettings(body);
+  }
+
+  if (method === "GET" && path === "/v1/steam/key") {
+    return handleGetSteamKey();
+  }
+  if (method === "PUT" && path === "/v1/steam/key") {
+    return handlePutSteamKey(body);
+  }
+  if (method === "DELETE" && path === "/v1/steam/key") {
+    return handleDeleteSteamKey();
+  }
+  if (method === "GET" && path === "/v1/steam/owned-games") {
+    requireSteamConfigured();
+    requireValidSteamId(params?.steamid);
+    return { configured: true, game_count: DEMO_OWNED_GAMES.length, games: DEMO_OWNED_GAMES.map((g) => ({ ...g })) };
+  }
+  if (method === "GET" && path === "/v1/steam/player-summaries") {
+    requireSteamConfigured();
+    const steamid = requireValidSteamId(params?.steamid);
+    return { configured: true, players: [demoPlayerSummary(steamid)] };
   }
 
   throw new ApiError(ERROR_KINDS.NOT_FOUND, `Demo mode has no route for ${method} ${path}`, {

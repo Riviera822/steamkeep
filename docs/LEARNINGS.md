@@ -376,3 +376,26 @@ These are not style preferences; each entry cost a review round to learn.
   tests under full-suite load (test_cache_delete WP 3.6, test_worker
   needs_force) — both pass isolated. Follow-up: scale wait deadlines
   under load instead of re-diagnosing each flake (settings-WP review).
+- OkHttp application interceptors run ONCE PER CALL, never per redirect
+  hop — a cleartext gate registered only via addInterceptor cannot see an
+  https→http downgrade, OkHttp forwards custom auth headers (X-Api-Key)
+  across host changes (it strips only Authorization-class headers), and
+  followSslRedirects defaults to TRUE. TLS-mandatory profiles need
+  followSslRedirects(false) PLUS a network-interceptor gate, pinned by a
+  two-server redirect test asserting the canary key never reaches hop 2
+  (WP 4b.2 blocker, measured on pinned OkHttp 4.12.0).
+- Redundant defence layers cannot be pinned by one end-to-end test: each
+  layer alone survives mutation because the other covers it. Pin each
+  layer standalone (isolated-component test + configuration assertion)
+  in addition to the conjunction (WP 4b.2 review).
+- followSslRedirects(false) only blocks SCHEME-CHANGING redirects; a
+  same-scheme cross-host 302 still forwards custom auth headers. A
+  client with no legitimate redirects sets followRedirects(false) too
+  (WP 4b.2 review).
+- BigInt("0x...") accepts hex-prefixed strings — a 17-char "0x1100001
+  00000000" equals STEAM_ID64_BASE, so an ASCII-digit guard in front of
+  BigInt is load-bearing against HEX, not whitespace (whitespace always
+  sacrifices a digit position and can never reach the 17-digit base —
+  verified empirically). Verify a reviewer's assumed failure mechanism
+  before writing the pin for it; pin the mechanism that actually kills
+  the mutation (WP 4a.6 fix round).
