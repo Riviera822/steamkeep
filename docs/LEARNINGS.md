@@ -312,3 +312,16 @@ These are not style preferences; each entry cost a review round to learn.
 - An outbound-HTTP module's headline guarantee (host pin, HTTPS) needs its
   own named mutation kill — 83 passing tests proved everything except where
   the secret is actually sent (WP 4a.6r).
+- An async poll tick without an in-flight guard forks the loop: while the
+  fetch awaits, the stored timer id is already dead, so any nudge
+  (visibilitychange, manual refresh) clears nothing and starts a second
+  self-re-arming chain — compounding poll rate and duplicating every
+  diffed notification. Coalesce nudges into a pendingRefresh flag plus a
+  generation token; a ~40-line bare-Node harness (fake document object
+  injected before import, gated fake fetcher) tests this glue headlessly —
+  "timer glue can't be tested without a browser" was false (WP 4a.2
+  blocker).
+- Demo-mode fixtures are a shipped surface: they must demonstrate the
+  product's invariants (ADR-0003 shared-depot protection), not violate
+  them, and a "shapes match the real API 1:1" claim is verified endpoint
+  by endpoint against the Pydantic models at git HEAD (WP 4a.2 blocker).

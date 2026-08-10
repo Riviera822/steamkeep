@@ -494,6 +494,16 @@ parallel/serial decisions, merge discipline, open user decisions):
       documented known gap until the packaging WP)*
 - [ ] Same API surface as the app: library grid with badges + search,
       download-to-cache/delete flows, jobs view, settings incl. vault name
+      *(WP 4a.2 done 2026-08-10: fetch wrapper with X-Api-Key + six-kind
+      error taxonomy + demo mode (fixtures 1:1 with the real Pydantic
+      shapes incl. ADR-0003 shared-depot semantics in demo deletes);
+      polling store with jobs-fast/games-clients-slow cadence, backoff
+      with load-bearing jitter floor, hidden-tab full park, nudge
+      coalescing + generation token (fork-free under nudge storms, pinned
+      headless); pure notification differ per mockup NOTES (first poll
+      silent, cancelled silent, update_ready gated on cached bytes,
+      bypass both directions); 60 headless Node tests; Opus
+      FAIL→fix→PASS with 10-mutation battery)*
 - [ ] Steam identity via Sign in with Steam (ADR-0004); library fetch per
       the 2026-08-09 addendum (user decision A+C): opt-in server-side relay
       because the Steam Web API sends no CORS headers — Android keeps the
