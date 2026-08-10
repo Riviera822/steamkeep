@@ -532,6 +532,50 @@ parallel/serial decisions, merge discipline, open user decisions):
 - [ ] Bypass warnings surfaced in the UI
 - [ ] Document APK build (no Play Store requirement; F-Droid as a long-term goal)
 
+#### Phase 4c — Manual update check (both frontends, user decision 2026-08-10)
+
+A user-triggered "check my cached games for updates now", so the vault can be
+told from outside the LAN (from work, over Tailscale) to pull whatever is new
+— the point is arriving home to a game that is already playable, not merely
+knowing that an update exists.
+
+**The check IS the fill.** SteamPrefill v3.7.1 has no `--dry-run` (verified
+against `prefill --help`), and it does not need one: a non-forced run costs
+~3 s and zero bytes for an up-to-date app, and downloads only the changed
+chunks when stale (`docs/research/phase3-manifests.md`). So one action
+answers the question and resolves it. Consequence for the UI: the affordance
+must be worded honestly (`Check & update`, not `Check`) — pressing it can
+consume real bandwidth. A check that only reports without filling is not
+available at any reasonable cost, and would be the less useful half anyway.
+
+- [ ] Trigger in both frontends: a library-header action over all cached
+      games, plus the existing per-game and multi-select paths
+- [ ] Backend gap: `GET /v1/games` exposes `last_prefill_at` but NOT
+      `apps.last_manifest_check`, although the column exists and is written
+      on every run (`jobs.py`, WP 3.3). Surface it in `GameSummary`/
+      `GameDetail` so the UI can show "checked 3 h ago" per game — ADR-0006
+      tier 1 semantics are "current as of <timestamp>", which is only honest
+      if that timestamp is visible
+- [ ] No new enqueue endpoint needed: `POST /v1/prefill` already takes a LIST
+      of app ids and dedupes against `queued`/`running` jobs, so an impatient
+      double-tap converges on one job. Open: whether a convenience route that
+      selects "all cached apps" server-side is worth it, or the frontend
+      simply posts the ids it already has
+- [ ] Mockup divergence to resolve in design: `doRefresh()`
+      (`vault-app-mockup-NOTES.md`) only reloads what vault-api already
+      knows. The update check asks Steam and must NOT be silently folded into
+      pull-to-refresh — a gesture that can start downloads is a trap
+- [ ] Guardrails: a user-initiated check deliberately bypasses the WP 3.11
+      miss-trigger cooldown (the user pressed the button), but stays bounded
+      by worker slots and job dedupe. A 50-game library is ~2.5 min of
+      serial Steam logins, so progress belongs in the Jobs view rather than
+      behind a spinner
+- Remote use ("check from work") needs no extra work: 4a is served over
+  Tailscale/LAN by design, 4b has the connectivity-profile abstraction
+- Complements Phase 6's `app.updated` webhook: that is the passive/push
+  half (get pinged when the nightly sweep finds something), this is the
+  active/pull half (ask right now)
+
 ### Phase 5 — Community Release
 - [x] README with architecture diagram, quickstart (compose up in 5 minutes),
       and an explicit "works for guests" FAQ note: any Steam client behind
