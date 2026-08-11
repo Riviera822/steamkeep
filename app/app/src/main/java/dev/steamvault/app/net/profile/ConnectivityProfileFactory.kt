@@ -14,16 +14,15 @@ import dev.steamvault.app.storage.ProfileKind
  * which the Library/Downloads screens render as an explicit
  * not-connected state rather than crash or silently retry a broken client.
  *
- * **Gap this documents for the reviewer/orchestrator.** No onboarding/
- * settings UI writing `baseUrl`/`profileKind`/`apiKey` into [CredentialStore]
- * exists yet -- that is WP 4b.7 ("Onboarding + settings"), a
- * branch-parallel sibling of this WP, not a prerequisite of it. Until 4b.7
- * ships, [CredentialStore] is unconfigured on every real install and this
- * factory always returns `null`; the Library/Downloads screens' "not
- * connected" placeholder (see `MainActivity`) is therefore the ONLY
- * reachable state today, and manual testing of [dev.steamvault.app.ui.library.LibraryScreen]
- * against a real vault-api needs `adb shell` / a debug hook to seed
- * [CredentialStore] until 4b.7 lands.
+ * **Gap closed by WP 4b.7.** Before that WP, no onboarding/settings UI wrote
+ * `baseUrl`/`profileKind`/`apiKey` into [CredentialStore] at all -- this
+ * factory always returned `null`, and the Library/Downloads screens' "not
+ * connected" placeholder (see `MainActivity`) was the ONLY reachable state.
+ * `dev.steamvault.app.ui.onboarding.OnboardingController.finish` is the
+ * write path that now populates all three fields, and `MainActivity`
+ * rebuilds its `VaultApiClient` (via this function) every time the
+ * connection changes -- onboarding finishing, or Settings' Disconnect
+ * clearing it again.
  */
 fun buildConnectivityProfile(store: CredentialStore): ConnectivityProfile? {
     val baseUrl = store.getBaseUrl()?.takeIf { it.isNotBlank() } ?: return null

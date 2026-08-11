@@ -1,8 +1,11 @@
 package dev.steamvault.app.repo
 
 import dev.steamvault.app.net.model.OwnedGame
+import dev.steamvault.app.net.steam.PendingLoginState
+import dev.steamvault.app.net.steam.SteamLoginState
 import dev.steamvault.app.net.steam.SteamOpenIdCallback
 import dev.steamvault.app.net.steam.SteamOpenIdClient
+import dev.steamvault.app.net.steam.SteamOpenIdConfig
 import dev.steamvault.app.net.steam.SteamOpenIdVerifier
 import dev.steamvault.app.net.steam.SteamWebApiClient
 import dev.steamvault.app.net.steam.SteamLibraryFetcher
@@ -93,6 +96,16 @@ class SteamIdentityRepositoryImpl(
     private val libraryFetcher: SteamLibraryFetcher = SteamWebApiClient(
         apiKeyProvider = { credentialStore.getSteamWebApiKey().orEmpty() },
     ),
+    /** WP 4b.7 replay-residual fix -- see [PendingLoginState]'s kdoc. Held
+     * per-repository-instance (repository lifetime == app process lifetime,
+     * same as [MainActivity]'s `by lazy` wiring), not persisted: a login
+     * attempt that outlives the process (a killed-and-restarted app while
+     * the Custom Tab is open) simply fails closed on the way back in,
+     * rather than being silently exempt from the state check. */
+    private val pendingLoginState: PendingLoginState = PendingLoginState(),
+    /** Overridable ONLY for deterministic tests -- the production default
+     * is [SteamLoginState.generate]'s real `SecureRandom` path. */
+    private val stateGenerator: () -> String = { SteamLoginState.generate() },
 ) : SteamIdentityRepository {
 
     override fun state(): SteamIdentityState = SteamIdentityState(
@@ -101,11 +114,31 @@ class SteamIdentityRepositoryImpl(
         hasWebApiKey = !credentialStore.getSteamWebApiKey().isNullOrBlank(),
     )
 
-    override fun buildLoginUrl(): String = openIdVerifier.buildLoginUrl()
+    override fun buildLoginUrl(): String {
+        // WP 4b.7 replay-residual fix: a fresh, single-use random state per
+        // login attempt, embedded in return_to and checked BEFORE the
+        // network round trip in completeLogin below -- see
+        // SteamLoginState.kt's module kdoc for the attack this closes.
+        val state = stateGenerator()
+        pendingLoginState.start(state)
+        val returnTo = "${SteamOpenIdConfig.RETURN_TO}?state=$state"
+        return openIdVerifier.buildLoginUrl(returnTo = returnTo, realm = SteamOpenIdConfig.REALM)
+    }
 
     override suspend fun completeLogin(rawCallbackUrl: String): SteamLoginResult {
         val params = SteamOpenIdCallback.parse(rawCallbackUrl)
             ?: return SteamLoginResult.Failure("The Steam sign-in response was malformed or incomplete.")
+
+        // WP 4b.7 replay-residual fix: checked BEFORE signedCoversClaimedId
+        // and BEFORE the check_authentication network call (brief:
+        // "callback with missing/wrong state rejected BEFORE
+        // check_authentication"). consume() is single-use -- a second call
+        // with the exact same (valid) callback fails here the second time,
+        // since the pending state was already cleared by the first.
+        val callbackState = SteamOpenIdCallback.stateFromReturnTo(params.getValue("openid.return_to"))
+        if (!pendingLoginState.consume(callbackState)) {
+            return SteamLoginResult.Failure("This sign-in link has expired or was already used — please sign in again.")
+        }
 
         if (!SteamOpenIdCallback.signedCoversClaimedId(params.getValue("openid.signed"))) {
             return SteamLoginResult.Failure("Steam's response did not sign the account identifier — rejected.")

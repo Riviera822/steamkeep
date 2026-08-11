@@ -630,6 +630,18 @@ parallel/serial decisions, merge discipline, open user decisions):
       fix round also repaired a dead "Check again" button via a
       controller reset path; 407 JVM tests; Opus PASS + should-fix
       round)*
+      *(WP 4b.7 done 2026-08-11: 3-step onboarding (profile choice,
+      base-URL+key with a REAL two-step connection check — health for
+      reachability, authed /v1/settings for key validity; optional
+      Steam step closes the setWebApiKey UI gap); settings screen over
+      GET/PATCH /v1/settings with the web's diff/presentation semantics
+      (only-changed-keys pinned, honest applies wording, readonly
+      banner with device-local Steam section correctly ungated);
+      disconnect wipes store + reopens first-run with no stale polls;
+      AND the recorded 4b.3 replay residual is CLOSED — per-login
+      192-bit CSPRNG state in return_to, single-use consume before any
+      network call, mutation-pinned in all directions; 492 JVM tests;
+      Opus PASS 8/8 mutations + nit round)*
 - [ ] Bypass warnings surfaced in the UI
 - [ ] Document APK build (no Play Store requirement; F-Droid as a long-term goal)
 

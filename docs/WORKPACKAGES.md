@@ -226,7 +226,11 @@ OpenID in a Custom Tab; the PHONE fetches the library from Valve
 - **WP 4b.8** Notifications (polling via WorkManager, respecting Doze) —
   serial after 4b.5.
 - **WP 4b.9** Release build + signing docs, APK distribution (no Play
-  Store requirement; F-Droid long-term) — last.
+  Store requirement; F-Droid long-term) — last. Carry-over items from
+  reviews: move the unreferenced GalleryScreen (4b.1) and IdentityScreen
+  (4b.3, superseded by SettingsScreen in 4b.7) to src/debug/ keeping
+  their tests; re-check the security-crypto 1.1.0-alpha pin for a GA
+  release; the OpenID state parameter landed in 4b.7 (residual closed).
 
 ---
 

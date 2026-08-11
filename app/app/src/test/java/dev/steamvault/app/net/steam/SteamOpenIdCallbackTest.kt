@@ -146,4 +146,49 @@ class SteamOpenIdCallbackTest {
     fun `rejects an empty tail`() {
         assertNull(SteamOpenIdCallback.steamId64From("https://steamcommunity.com/openid/id/"))
     }
+
+    // ---- stateFromReturnTo (WP 4b.7 replay-residual fix) -------------------
+
+    @Test
+    fun `extracts the state parameter from a return_to query string`() {
+        assertEquals(
+            "abc123",
+            SteamOpenIdCallback.stateFromReturnTo("${SteamOpenIdConfig.RETURN_TO}?state=abc123"),
+        )
+    }
+
+    @Test
+    fun `returns null when return_to has no query string at all`() {
+        assertNull(SteamOpenIdCallback.stateFromReturnTo(SteamOpenIdConfig.RETURN_TO))
+    }
+
+    @Test
+    fun `returns null when return_to has a query string but no state key`() {
+        assertNull(SteamOpenIdCallback.stateFromReturnTo("${SteamOpenIdConfig.RETURN_TO}?other=1"))
+    }
+
+    @Test
+    fun `finds state alongside other query parameters, in either position`() {
+        assertEquals(
+            "xyz",
+            SteamOpenIdCallback.stateFromReturnTo("${SteamOpenIdConfig.RETURN_TO}?other=1&state=xyz"),
+        )
+        assertEquals(
+            "xyz",
+            SteamOpenIdCallback.stateFromReturnTo("${SteamOpenIdConfig.RETURN_TO}?state=xyz&other=1"),
+        )
+    }
+
+    @Test
+    fun `decodes a percent-encoded state value`() {
+        assertEquals(
+            "a+b/c",
+            SteamOpenIdCallback.stateFromReturnTo("${SteamOpenIdConfig.RETURN_TO}?state=" + enc("a+b/c")),
+        )
+    }
+
+    @Test
+    fun `returns null for a trailing question mark with no query content`() {
+        assertNull(SteamOpenIdCallback.stateFromReturnTo("${SteamOpenIdConfig.RETURN_TO}?"))
+    }
 }

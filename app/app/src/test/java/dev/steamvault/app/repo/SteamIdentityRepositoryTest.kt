@@ -16,18 +16,28 @@ import org.junit.Test
 
 private const val VALID_STEAM_ID = "76561198042117903"
 
+/** Matches the fixed `stateGenerator` every test's [repo] helper injects
+ * (WP 4b.7 replay-residual fix) -- deterministic so [callbackUrl]'s default
+ * echoes back the SAME state a preceding `repo.buildLoginUrl()` call
+ * started, without either side reading the other's internals. */
+private const val TEST_STATE = "test-state-1"
+
 private fun callbackUrl(
     steamId: String = VALID_STEAM_ID,
     signed: String = "signed,claimed_id,identity,return_to",
     mode: String = "id_res",
+    /** `null` omits `state` from `return_to` entirely (simulates a
+     * pre-4b.7 callback, or a provider that dropped the query string). */
+    state: String? = TEST_STATE,
 ): String {
     fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
     val claimedId = "https://steamcommunity.com/openid/id/$steamId"
+    val returnTo = if (state != null) "${SteamOpenIdConfig.RETURN_TO}?state=$state" else SteamOpenIdConfig.RETURN_TO
     return "${SteamOpenIdConfig.RETURN_TO}?" +
         "openid.mode=$mode" +
         "&openid.claimed_id=" + enc(claimedId) +
         "&openid.identity=" + enc(claimedId) +
-        "&openid.return_to=" + enc(SteamOpenIdConfig.RETURN_TO) +
+        "&openid.return_to=" + enc(returnTo) +
         "&openid.signed=" + enc(signed) +
         "&openid.sig=" + enc("Zm9vYmFy")
 }
@@ -67,8 +77,12 @@ class SteamIdentityRepositoryTest {
         verifier: FakeOpenIdVerifier = FakeOpenIdVerifier(),
         fetcher: FakeLibraryFetcher = FakeLibraryFetcher(),
         store: InMemoryCredentialStore = InMemoryCredentialStore(),
+        // WP 4b.7: fixed, not the real SecureRandom generator, so tests can
+        // predict what callbackUrl() must echo back without either side
+        // reading the other's internals.
+        stateGenerator: () -> String = { TEST_STATE },
     ): Triple<SteamIdentityRepository, FakeOpenIdVerifier, FakeLibraryFetcher> =
-        Triple(SteamIdentityRepositoryImpl(store, verifier, fetcher), verifier, fetcher)
+        Triple(SteamIdentityRepositoryImpl(store, verifier, fetcher, stateGenerator = stateGenerator), verifier, fetcher)
 
     @Test
     fun `initial state is signed out with no persona and no key`() {
@@ -90,6 +104,7 @@ class SteamIdentityRepositoryTest {
     fun `completeLogin succeeds end to end and persists the SteamID64`() = runTest {
         val (repo, verifier, _) = repo()
 
+        repo.buildLoginUrl()
         val result = repo.completeLogin(callbackUrl())
 
         assertTrue(result is SteamLoginResult.Success)
@@ -114,6 +129,7 @@ class SteamIdentityRepositoryTest {
     fun `MUTATION PIN -- completeLogin fails when signed does not cover claimed_id, without calling the verifier`() = runTest {
         val (repo, verifier, _) = repo()
 
+        repo.buildLoginUrl()
         val result = repo.completeLogin(callbackUrl(signed = "signed,identity,return_to"))
 
         assertTrue(result is SteamLoginResult.Failure)
@@ -125,6 +141,7 @@ class SteamIdentityRepositoryTest {
     fun `completeLogin fails when check_authentication rejects the assertion, and nothing is persisted`() = runTest {
         val (repo, verifier, _) = repo(verifier = FakeOpenIdVerifier(checkAuthResult = false))
 
+        repo.buildLoginUrl()
         val result = repo.completeLogin(callbackUrl())
 
         assertTrue(result is SteamLoginResult.Failure)
@@ -136,6 +153,7 @@ class SteamIdentityRepositoryTest {
     fun `completeLogin fails for a claimed_id that is not a valid SteamID64, even after a passing check_authentication`() = runTest {
         val (repo, _, _) = repo()
 
+        repo.buildLoginUrl()
         val result = repo.completeLogin(callbackUrl(steamId = "00000000000000000"))
 
         assertTrue(result is SteamLoginResult.Failure)
@@ -277,6 +295,7 @@ class SteamIdentityRepositoryTest {
             setProfileKind(ProfileKind.SYSTEM_VPN)
         }
         val (repo, _, _) = repo(store = store)
+        repo.buildLoginUrl()
         repo.completeLogin(callbackUrl())
         repo.setWebApiKey("0123456789ABCDEF0123456789ABCDEF")
         assertTrue(repo.state().isSignedIn)
@@ -290,5 +309,73 @@ class SteamIdentityRepositoryTest {
         assertEquals("vault-key", store.getApiKey())
         assertEquals("http://192.168.1.50:8080", store.getBaseUrl())
         assertEquals(ProfileKind.SYSTEM_VPN, store.getProfileKind())
+    }
+
+    // ---- WP 4b.7: replay-residual fix (per-login state parameter) --------
+
+    @Test
+    fun `completeLogin fails when no login was ever started, without calling the verifier`() = runTest {
+        val (repo, verifier, _) = repo() // no buildLoginUrl() call -- nothing pending
+
+        val result = repo.completeLogin(callbackUrl())
+
+        assertTrue(result is SteamLoginResult.Failure)
+        assertEquals(0, verifier.callCount)
+        assertNull(repo.state().steamId64)
+    }
+
+    @Test
+    fun `completeLogin fails when return_to carries no state at all, without calling the verifier`() = runTest {
+        val (repo, verifier, _) = repo()
+
+        repo.buildLoginUrl()
+        val result = repo.completeLogin(callbackUrl(state = null))
+
+        assertTrue(result is SteamLoginResult.Failure)
+        assertEquals(0, verifier.callCount)
+        assertNull(repo.state().steamId64)
+    }
+
+    @Test
+    fun `completeLogin fails when the callback state does not match the pending one, without calling the verifier`() = runTest {
+        val (repo, verifier, _) = repo()
+
+        repo.buildLoginUrl()
+        val result = repo.completeLogin(callbackUrl(state = "attacker-supplied-state"))
+
+        assertTrue(result is SteamLoginResult.Failure)
+        assertEquals(0, verifier.callCount)
+        assertNull(repo.state().steamId64)
+    }
+
+    @Test
+    fun `MUTATION PIN -- a consumed state cannot be replayed`() = runTest {
+        val (repo, verifier, _) = repo()
+
+        repo.buildLoginUrl()
+        val first = repo.completeLogin(callbackUrl())
+        assertTrue(first is SteamLoginResult.Success)
+        assertEquals(1, verifier.callCount)
+
+        // Same exact callback URL, replayed a second time -- the state it
+        // carries was already consumed by the first completeLogin() call,
+        // so this must fail WITHOUT reaching check_authentication again.
+        val replay = repo.completeLogin(callbackUrl())
+        assertTrue(replay is SteamLoginResult.Failure)
+        assertEquals(1, verifier.callCount) // unchanged -- the verifier was never called again
+    }
+
+    @Test
+    fun `each buildLoginUrl call invalidates the previous attempt's pending state`() = runTest {
+        var call = 0
+        val (repo, verifier, _) = repo(stateGenerator = { "state-${call++}" })
+
+        repo.buildLoginUrl() // pending = state-0
+        repo.buildLoginUrl() // pending = state-1, state-0 is no longer valid
+
+        val result = repo.completeLogin(callbackUrl(state = "state-0"))
+
+        assertTrue(result is SteamLoginResult.Failure)
+        assertEquals(0, verifier.callCount)
     }
 }

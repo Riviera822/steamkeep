@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <string name="app_name">SteamVault</string>
 
     <!-- Debug status-icon gallery screen (WP 4b.1's visible artifact).
@@ -113,10 +113,139 @@
         <item quantity="other">Freed %1$s · %2$d deletes failed</item>
     </plurals>
 
-    <!-- Placeholders for WPs that have not shipped yet (WP 4b.4 review
-         fix: static UI chrome, moved out of MainActivity.kt literals). -->
-    <string name="not_connected_title">No vault-api connection configured yet.</string>
-    <string name="not_connected_body">Connection setup is coming in WP 4b.7 (Onboarding + settings).</string>
+    <!-- Shown only in the narrow window between a connection being cleared
+         (Settings' Disconnect) and the onboarding gate re-showing —
+         WP 4b.7 closed the "coming in WP 4b.7" gap this string used to name. -->
+    <string name="not_connected_title">No vault-api connection configured.</string>
+    <string name="not_connected_body">Reconnect from Settings, or restart the app to run onboarding again.</string>
+
+    <!-- Onboarding (WP 4b.7). 3-step flow per the mockup; step 1's fields
+         (connectivity profile, base URL, API key) differ from the web
+         port's step 1 on purpose — see ui/onboarding/logic/OnboardingSteps.kt's
+         kdoc. -->
+    <string name="onboarding_step1_title">Step 1 of 3 · Connect</string>
+    <string name="onboarding_step2_title">Step 2 of 3 · Steam identity</string>
+    <string name="onboarding_step3_title">Step 3 of 3 · Ready</string>
+    <string name="onboarding_step1_lede">Enter how this device reaches your vault-api, and the API key it accepts.</string>
+    <string name="onboarding_step2_lede">Optional — sign in with Steam and add a Web API key to see your library with names and cover art. You can set this up later under Settings instead.</string>
+    <string name="onboarding_done_lede">You\'re all set.</string>
+
+    <string name="onboarding_profile_system_vpn">System VPN / LAN</string>
+    <string name="onboarding_profile_public_domain">Public domain (HTTPS)</string>
+    <string name="onboarding_profile_hint_system_vpn">The OS routes this directly (LAN or a VPN/Tailscale interface) — plain HTTP is accepted since there is no public certificate for a private address.</string>
+    <string name="onboarding_profile_hint_public_domain">Reached over the open internet — HTTPS only, no exceptions.</string>
+    <string name="onboarding_base_url_label">Vault base URL</string>
+    <string name="onboarding_base_url_placeholder_vpn">e.g. http://192.168.1.50:8080</string>
+    <string name="onboarding_base_url_placeholder_public">e.g. https://vault.example.org</string>
+    <string name="onboarding_api_key_label">Vault API key</string>
+    <string name="onboarding_test_connection">Test connection</string>
+    <string name="onboarding_testing">Testing…</string>
+    <string name="onboarding_connect_hint">The key is stored on this device only. It is sent as the X-Api-Key header on every request to this same server.</string>
+    <string name="onboarding_connection_ok">Connected — vault-api is reachable and the key was accepted.</string>
+    <string name="onboarding_error_invalid_url">Enter a valid vault base URL first.</string>
+    <string name="onboarding_error_enter_key_first">Enter the vault API key first.</string>
+    <!-- Mirrors web/js/api.js::checkVaultApiKey's wording — see
+         net/connection/ConnectionCheck.kt's kdoc for the shared reasoning. -->
+    <string name="onboarding_error_unreachable">Could not reach the server. Check the base URL and your network.</string>
+    <string name="onboarding_error_key_rejected">That vault API key was rejected.</string>
+    <string name="onboarding_error_unexpected_status">The server answered unexpectedly (%1$d).</string>
+
+    <string name="onboarding_continue">Continue</string>
+    <string name="onboarding_back">Back</string>
+    <string name="onboarding_finish">Go to library</string>
+    <string name="onboarding_cancel">Cancel</string>
+
+    <string name="onboarding_steam_key_label">Web API key (32 hex characters)</string>
+    <string name="onboarding_steam_key_placeholder">from steamcommunity.com/dev/apikey</string>
+    <string name="onboarding_steam_key_save">Save key</string>
+    <string name="onboarding_steam_key_configured">Web API key configured</string>
+    <string name="onboarding_steam_key_not_configured">No Web API key configured yet</string>
+    <string name="onboarding_steam_key_invalid_format">Enter exactly 32 hexadecimal characters (0–9, a–f).</string>
+    <string name="onboarding_steam_key_save_failed">Could not save the key: %1$s</string>
+
+    <string name="onboarding_summary_connection">Connection: %1$s</string>
+    <string name="onboarding_summary_connection_verified">verified</string>
+    <string name="onboarding_summary_steam">Steam identity: %1$s</string>
+    <string name="onboarding_summary_steam_configured">configured</string>
+    <string name="onboarding_summary_steam_not_linked">not linked</string>
+
+    <!-- Settings (WP 4b.7). Vault/Schedule/Webhook mirror GET/PATCH
+         /v1/settings (ADR-0009), ported from web/js/views/settings.js's
+         wording — see ui/settings/logic/SettingsDiff.kt / SettingsPresentation.kt
+         for the pure logic these captions are driven by. -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_loading">Loading settings…</string>
+    <string name="settings_load_error">Could not load settings: %1$s</string>
+    <string name="settings_readonly_banner">This vault-api is running with VAULT_SETTINGS_READONLY set — values below are shown for reference and cannot be changed here.</string>
+
+    <string name="settings_section_vault">Vault</string>
+    <string name="settings_section_schedule">Schedule</string>
+    <string name="settings_section_webhook">Webhook</string>
+    <string name="settings_section_connection">Connection</string>
+    <string name="settings_section_steam">Steam identity</string>
+
+    <string name="settings_vault_name_label">Vault name</string>
+    <string name="settings_vault_name_placeholder">e.g. vault-01</string>
+
+    <string name="settings_schedule_window_label">Sweep window</string>
+    <!-- tools:ignore="TypographyDashes": "22:00-06:00" is the LITERAL
+         schedule_window wire syntax (api/README.md's schedule_window.parse_window
+         grammar) — a real hyphen the user must type verbatim, not prose
+         lint's typographic-dash heuristic should "fix" into an en dash. -->
+    <string name="settings_schedule_window_placeholder" tools:ignore="TypographyDashes">22:00-06:00, blank to disable</string>
+    <string name="settings_schedule_window_hint" tools:ignore="TypographyDashes">Overnight windows are allowed (e.g. 22:00-06:00). Blank disables scheduled sweeps.</string>
+    <string name="settings_schedule_interval_label">Sweep interval (minutes)</string>
+    <string name="settings_schedule_stale_days_label">Client staleness (days)</string>
+    <string name="settings_auto_gc_label">Auto-GC after a prefill</string>
+    <string name="settings_auto_gc_off">Off</string>
+    <string name="settings_auto_gc_dry_run">Dry run</string>
+    <string name="settings_auto_gc_execute">Execute</string>
+
+    <string name="settings_webhook_url_label">Webhook URL</string>
+    <string name="settings_webhook_url_placeholder">https://… , blank to disable</string>
+    <string name="settings_webhook_url_hint">Restart-required: vault-api only starts the delivery thread at boot if a webhook was already configured then.</string>
+    <string name="settings_webhook_events_label">Events sent</string>
+    <string name="settings_webhook_event_job_done">Job finished</string>
+    <string name="settings_webhook_event_job_error">Job failed</string>
+    <string name="settings_webhook_event_job_cancelled">Job cancelled</string>
+    <string name="settings_webhook_event_bypass_suspected">Cache bypass suspected</string>
+    <string name="settings_webhook_event_bypass_resolved">Cache bypass resolved</string>
+
+    <string name="settings_reset">Reset</string>
+    <string name="settings_save_changes">Save changes</string>
+    <string name="settings_discard_changes">Discard changes</string>
+    <string name="settings_save_error">Could not save: %1$s</string>
+    <string name="settings_toast_saved">Settings saved.</string>
+    <string name="settings_toast_save_failed_fallback">Could not save settings</string>
+
+    <!-- Source/applies captions (ui/settings/logic/SettingsPresentation.kt). -->
+    <string name="settings_source_db">Overridden here</string>
+    <string name="settings_source_env">From the environment</string>
+    <string name="settings_source_default">Default value</string>
+    <string name="settings_source_unknown">Unknown source</string>
+    <string name="settings_applies_immediately">Takes effect immediately.</string>
+    <string name="settings_applies_next_sweep">Takes effect at the next scheduled sweep.</string>
+    <string name="settings_applies_restart_required">Takes effect after vault-api restarts.</string>
+    <string name="settings_applies_unspecified">Takes effect at an unspecified time.</string>
+    <string name="settings_caption">%1$s · %2$s</string>
+
+    <string name="settings_connection_current">Connected to %1$s (%2$s)</string>
+    <string name="settings_reconnect_title">Reconnect / switch vault</string>
+    <string name="settings_reconnect_desc">Run the connection flow again to change the vault API key, base URL, or connectivity profile.</string>
+    <string name="settings_reconnect_button">Start</string>
+    <string name="settings_disconnect_title">Disconnect</string>
+    <string name="settings_disconnect_desc">Forget this vault\'s connection and Steam identity on this device.</string>
+    <string name="settings_disconnect_button">Disconnect</string>
+    <string name="settings_disconnect_confirm_title">Disconnect this vault?</string>
+    <string name="settings_disconnect_confirm_body">This clears the stored connection and Steam identity on this device. You will need to run onboarding again to reconnect.</string>
+    <string name="settings_disconnect_confirm_confirm">Disconnect</string>
+    <string name="settings_disconnect_confirm_cancel">Cancel</string>
+
+    <string name="settings_steam_key_masked">Configured (hidden)</string>
+    <string name="settings_steam_key_not_set">Not configured</string>
+    <string name="settings_steam_key_remove">Remove key</string>
+    <string name="settings_toast_webapikey_saved">Steam Web API key saved.</string>
+    <string name="settings_toast_webapikey_removed">Steam Web API key removed.</string>
 
     <!-- Nav pip (WP 4b.5): contentDescription overrides the plain "Downloads"
          accessible name whenever the pip is showing (mirrors

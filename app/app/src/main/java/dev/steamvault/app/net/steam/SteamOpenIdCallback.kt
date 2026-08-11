@@ -96,6 +96,37 @@ object SteamOpenIdCallback {
     }
 
     /**
+     * Extracts the `state` query parameter from an `openid.return_to` value
+     * (WP 4b.7 replay-residual fix -- see [SteamLoginState]/[PendingLoginState]).
+     * `return_to` is itself a full URL string (this app's own
+     * `steamvault://auth/openid-return?state=...`), so this is a small,
+     * independent query-string parse over THAT value, not over the outer
+     * callback URL [parse] already handled -- Valve's OpenID assertion
+     * echoes `return_to` back verbatim as one of the signed `openid.*`
+     * fields, so whatever this app embedded in it at login time survives
+     * the round trip unmodified for a genuine, unmodified assertion.
+     *
+     * Returns `null` if [returnTo] has no query string at all, or no
+     * `state` parameter in it -- both treated identically by
+     * [PendingLoginState.consume] (a `null` actual can never match a
+     * pending state, since a pending state is only ever set to a non-null,
+     * freshly generated value).
+     */
+    fun stateFromReturnTo(returnTo: String): String? {
+        val queryStart = returnTo.indexOf('?')
+        if (queryStart < 0 || queryStart == returnTo.length - 1) return null
+        val query = returnTo.substring(queryStart + 1)
+        for (pair in query.split('&')) {
+            if (pair.isEmpty()) continue
+            val eq = pair.indexOf('=')
+            if (eq < 0) continue
+            val name = decode(pair.substring(0, eq)) ?: continue
+            if (name == "state") return decode(pair.substring(eq + 1))
+        }
+        return null
+    }
+
+    /**
      * OpenID 2.0's actual security requirement on top of a bare
      * `is_valid:true`: `openid.signed` is a comma-separated list naming
      * exactly which fields Valve's signature covers, and a field NOT in

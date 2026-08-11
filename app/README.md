@@ -783,34 +783,60 @@ of the persisted SteamID64). It deliberately does NOT also require
 app never branches on those fields' values for anything
 security-relevant, unlike a fully general OpenID relying party.
 
-### Known residual: no request↔callback binding (replay), reviewer-flagged
+### Residual FIXED by WP 4b.7: request↔callback binding (replay)
 
-`buildLoginUrl()`/`SteamOpenIdConfig.RETURN_TO` carry no per-login `state`
-parameter, and `completeLogin` never checks the callback's
-`openid.return_to` against the specific URL THIS login attempt built, nor
-tracks `openid.response_nonce` to reject a repeat. Concretely: a
-malicious app already installed on the same device could capture a
-**genuine**, Valve-signed OpenID assertion for the ATTACKER's own Steam
-account (e.g. by triggering its own sign-in against this app's exact
-`return_to` scheme+host+path, since nothing here is per-attempt-unique)
-and replay it into SteamVault's intent-filter — `check_authentication`
-would legitimately return `is_valid:true` (it IS a genuine, unmodified
-Valve assertion, just not the one THIS app's button press initiated), and
-the app would flip its displayed identity to the attacker's account.
+**Original finding (WP 4b.3 review), kept for the record.**
+`buildLoginUrl()`/`SteamOpenIdConfig.RETURN_TO` carried no per-login `state`
+parameter, and `completeLogin` never checked the callback's
+`openid.return_to` against the specific URL THIS login attempt built.
+Concretely: a malicious app already installed on the same device could
+capture a **genuine**, Valve-signed OpenID assertion for the ATTACKER's own
+Steam account (e.g. by triggering its own sign-in against this app's exact
+`return_to` scheme+host+path, since nothing was per-attempt-unique) and
+replay it into SteamVault's intent-filter — `check_authentication` would
+legitimately return `is_valid:true` (it IS a genuine, unmodified Valve
+assertion, just not the one THIS app's button press initiated), and the app
+would flip its displayed identity to the attacker's account.
 
-**Blast radius, stated precisely:** this can only ever *replace which
-Steam account is shown as signed in* on the victim's device — it cannot
-forge a claim for an account the attacker does not themselves control,
-cannot touch vault-api (ADR-0004 decision 2's isolation holds regardless),
-and leaks no secret (there is no secret in this flow to leak). Calling
-`signOut()` fully recovers.
+**Blast radius, stated precisely (unchanged by the fix, for context):** this
+could only ever *replace which Steam account is shown as signed in* on the
+victim's device — it could not forge a claim for an account the attacker
+does not themselves control, could not touch vault-api (ADR-0004 decision
+2's isolation holds regardless), and leaked no secret (there is no secret in
+this flow to leak). Calling `signOut()` fully recovered.
 
-**Mitigation, deferred rather than added here (scope discipline for this
-WP):** the standard OpenID/OAuth fix is a per-login random `state` value
-appended to `RETURN_TO`/checked on the way back in, which this WP does
-not add — flagged as a concrete candidate for WP 4b.7 (settings/onboarding,
-serial after 4b.3) or WP 4b.9 (release hardening pass), not silently
-deferred.
+**The fix (WP 4b.7).** `net/steam/SteamLoginState.kt` adds a CSPRNG-backed,
+per-login random `state` token (`SteamLoginState.generate`, 192 bits,
+URL-safe base64) and a single-use holder (`PendingLoginState`).
+`SteamIdentityRepositoryImpl.buildLoginUrl()` generates one fresh `state`
+per call, records it as "pending" BEFORE building the URL, and embeds it in
+`openid.return_to` (`"$RETURN_TO?state=$state"`). `completeLogin` extracts
+the `state` back out of the callback's echoed `openid.return_to`
+(`SteamOpenIdCallback.stateFromReturnTo`) and calls
+`PendingLoginState.consume(callbackState)` — which ALWAYS clears the
+pending value, matched or not — **before** `signedCoversClaimedId` and
+before the `check_authentication` network call, so a missing/wrong/replayed
+state is rejected without ever reaching Valve. `consume()`'s single-use
+semantics is what actually closes the residual: even a byte-for-byte replay
+of the exact same, previously-successful callback URL now fails, because
+the state it carries was already consumed by the first `completeLogin`
+call. Pinned by `SteamLoginStateTest` (CSPRNG output shape, single-use in
+both the matched and mismatched case), `SteamOpenIdCallbackTest`
+(`stateFromReturnTo` parsing), and `SteamIdentityRepositoryTest`'s "a
+consumed state cannot be replayed" mutation pin.
+
+**A deliberate trade, worth stating plainly: single-use also means a junk
+callback burns the pending attempt.** Because `consume()` clears the
+pending state on EVERY call regardless of match (that is what makes replay
+impossible), any deep link hitting `steamvault://auth/openid-return` while a
+login is pending — a malicious probe, a stray duplicate Intent, a genuinely
+malformed redirect — consumes the one legitimate attempt along with it; the
+user simply has to tap "Sign in with Steam" again. This is known, accepted
+behaviour (fail closed, cheap to retry, no security cost), not a bug —
+`MainActivity.handleIntent` deliberately routes even an unroutable callback
+through `identityRepository.completeLogin` for exactly this reason (review
+fix N2), rather than leaving a stale pending value that a LATER attacker
+window could still target.
 
 ### Steam Web API on-device (`SteamWebApiClient`)
 
@@ -975,18 +1001,18 @@ they can be called confirmed:
 3. **The real `check_authentication` round trip against the genuine
    `steamcommunity.com`** — the MockWebServer tests prove the CLIENT's
    logic against every shape of response, but never actually call Valve.
-4. **BLOCKED UNTIL WP 4b.7: the real `GetOwnedGames`/`GetPlayerSummaries`
-   calls against `api.steampowered.com` with a genuine Steam Web API key**
-   (both the library-count preview AND the persona-name half of
-   `refreshPersonaName`). `setWebApiKey()` exists only on the repository —
-   this WP deliberately adds no debug/dev input field for it (scope
-   discipline: a throwaway input widget is not the real onboarding UI and
-   would need its own review), so there is currently NO way to reach this
-   code path from the running app at all until WP 4b.7 lands the real
-   key-entry surface. **Do not report this as a bug when testing WP 4b.3
-   alone** — `IdentityScreen` will correctly show "Add your Steam Web API
-   key in Settings..." and stop there, because Settings does not exist
-   yet.
+4. **Reachable as of WP 4b.7, still needs a real device: the real
+   `GetOwnedGames`/`GetPlayerSummaries` calls against
+   `api.steampowered.com` with a genuine Steam Web API key** (both the
+   library-count preview AND the persona-name half of
+   `refreshPersonaName`). `setWebApiKey()` now has two real UI paths —
+   onboarding step 2 (`ui/onboarding/OnboardingScreen.kt`) and Settings'
+   Steam identity section (`ui/settings/SettingsScreen.kt`), both going
+   through `net/steam/SteamWebApiKeyInput.kt::submitWebApiKey` — closing
+   the "no way to reach this code path from the running app at all" gap
+   this item originally described. What remains device-only is the actual
+   network round trip against Valve's real API with a real key, same as
+   items 1-3 above.
 5. **Visual/UX check of `IdentityScreen`** — Compose rendering, button
    states, and string wording have not been seen on a real screen.
 6. **Watch for a malformed/rejected sign-in caused by a literal `+` in
@@ -1134,3 +1160,234 @@ nothing to protect by deleting further); the sheet reports it as `ORPHANED`
 `ui/detail/logic/DepotPresentation.kt`'s kdoc and `DepotPresentationTest`'s
 "shared, no other holder, THIS app also does not hold it" case for the exact
 condition (`row.free && !thisAppIsHolder`).
+
+## Onboarding + settings (WP 4b.7)
+
+Branch-parallel after 4b.3 per `docs/WORKPACKAGES.md` Phase 4b — dispatched
+after every other 4b.x package, so it is the first WP with everything else
+(4b.1-4b.6) already in place to write against. Closes the two gaps every
+earlier WP's README section flagged as "not this WP": nothing wrote a
+vault-api connection into `CredentialStore` (`net/profile/
+ConnectivityProfileFactory.kt`'s "Gap this documents" note), and
+`setWebApiKey()` had no UI path at all (WP 4b.3's own bullet list).
+
+```
+app/app/src/main/java/dev/steamvault/app/
+├── net/
+│   ├── connection/
+│   │   └── ConnectionCheck.kt          # two-step "test connection" state machine
+│   └── steam/
+│       ├── SteamLoginState.kt          # per-login random state (replay-residual fix)
+│       └── SteamWebApiKeyInput.kt      # 32-hex validator + the field-clearing pin
+├── ui/
+│   ├── onboarding/
+│   │   ├── logic/OnboardingSteps.kt    # pure 3-step gating machine
+│   │   ├── OnboardingController.kt
+│   │   ├── OnboardingStrings.kt
+│   │   └── OnboardingScreen.kt
+│   └── settings/
+│       ├── logic/SettingsDiff.kt        # PATCH-body-from-drafts port
+│       ├── logic/SettingsPresentation.kt
+│       ├── SettingsController.kt
+│       ├── SettingsStrings.kt
+│       └── SettingsScreen.kt
+└── MainActivity.kt                      # onboarding gate + reconnect/disconnect wiring
+```
+
+### Onboarding (`ui/onboarding/`)
+
+Three steps, same shape the frozen mockup and the web port (`web/js/
+onboarding.js`, WP 4a.6) both use, but step 1's FIELDS differ on purpose —
+`ui/onboarding/logic/OnboardingSteps.kt`'s kdoc explains why the web port's
+"no server-URL field, the page is already served by vault-api" shortcut
+does not apply to a native app that has never talked to any server yet:
+
+1. **Connect** — connectivity profile choice (`SystemVpnProfile` /
+   `PublicDomainProfile`, WP 4b.2), base URL, vault API key, and a REAL
+   connection check before `Continue` unlocks
+   (`OnboardingSteps.canAdvanceOnboardingStep`: step 1 requires
+   `tested == true`, exactly like the web port's step 1 gate).
+2. **Steam identity (optional)** — the existing WP 4b.3 OpenID sign-in flow,
+   plus the Steam Web API key entry this WP adds a UI for. Skippable:
+   `canAdvanceOnboardingStep` never blocks on this step, matching the
+   mockup's "Continue without one — you can sign in later under Settings".
+3. **Done** — a summary (connection verified / Steam identity linked or
+   not), then `finish()` persists the connection and the caller
+   (`MainActivity`) rebuilds its `VaultApiClient`.
+
+**The connection check (`net/connection/ConnectionCheck.kt`) mirrors
+`web/js/api.js::checkVaultApiKey`'s two-step reasoning verbatim: `GET
+/v1/health` never validates a key** (api/README.md "Auth" — this app
+attaches `X-Api-Key` to every request including health, same choice
+`web/js/api.js`'s client makes, but the SERVER never checks it there), so a
+successful health call only proves reachability. Only the second,
+authenticated call (`GET /v1/settings`, chosen for the same reason the web
+port picks it — onboarding needs the response anyway) actually proves the
+key. `checkVaultConnection` takes two suspend LAMBDAS rather than a
+concrete `VaultApiClient` specifically so `ConnectionCheckTest` can pin the
+step ORDERING (the settings lambda must never run if health already failed)
+and the failure classification (`classifyConnectionFailure`) without any
+MockWebServer/network stack at all — a `401` is only ever labelled
+`KeyRejected` on the SETTINGS step, never on HEALTH (which has no auth
+check to fail against a real server).
+
+**Full-screen swap, not a modal overlay.** `web/js/onboarding.js` renders
+onboarding as a `role="dialog"` overlay above the app shell; this app swaps
+it in as `MainActivity`'s entire `setContent` body instead — the same plain
+state-based screen-switching choice `ui/nav/Destination.kt`'s kdoc already
+committed to for the three main destinations, extended to one more
+top-level state rather than introducing a second, heavier overlay mechanism
+for one screen. `OnboardingMode.RECONNECT` (Settings' "Reconnect / switch
+vault") gets a "Cancel" action that bails out with the existing connection
+untouched — `OnboardingController.canCancelWithoutFinishing`, the same
+"nothing to fall back to on first run" distinction `web/js/onboarding.js`'s
+`mode` makes with its Escape-only-in-reconnect handling.
+
+### Settings (`ui/settings/`)
+
+Replaces the bare `ui.identity.IdentityScreen` that used to be the entire
+`Destination.SETTINGS` content (`IdentityScreen.kt` itself is untouched and
+still compiles — same "kept but unreachable from the UI" treatment WP
+4b.3/4b.4 gave `ui.gallery.GalleryScreen`). Three independent surfaces, same
+split `web/js/views/settings.js` (WP 4a.6) documents:
+
+- **Vault / Schedule / Webhook** — one form over `GET`/`PATCH /v1/settings`
+  (ADR-0009), ported field-for-field from the web view. `ui/settings/logic/
+  SettingsDiff.kt::buildSettingsPatchDraft` is the `settings-diff.js` port:
+  a `drafts` map populated ONLY by fields the user actually touches (never
+  pre-seeded from the loaded snapshot) is diffed against the last `GET`
+  response, so a no-op edit (types the same value back) is dropped and the
+  PATCH body contains ONLY genuinely changed keys — pinned by
+  `SettingsDiffTest`'s named mutation case, same "removing the
+  `valueChanged` guard must kill a named test" discipline the web port's
+  own test file documents. `ui/settings/logic/SettingsPresentation.kt`
+  ports `settings-presentation.js`'s `source`/`applies` captions as pure
+  enums (`SettingsSource`/`SettingsApplies`) resolved to `strings.xml` text
+  at the `SettingsScreen.kt` call site, honouring app/README.md's "String
+  resources" convention rather than hardcoding the wording in Kotlin.
+  `VAULT_SETTINGS_READONLY` disables the whole form (readonly banner,
+  every field `enabled = false`, no Save/Discard bar) but the Steam
+  identity section below stays fully usable — same reasoning
+  `web/js/views/settings.js` documents (Steam identity is a separate
+  endpoint, unaffected by the settings-API lock). A `422` from `PATCH`
+  (api/README.md: "one bad value... fails the request... with a DISTINCT
+  detail") is surfaced verbatim via `saveError` — vault_api's detail string
+  already names the offending key, so no client-side field-mapping is
+  needed to make the error legible.
+- **Steam identity** — the existing WP 4b.3 sign-in/out state plus Web API
+  key management this WP adds: a MASKED status line (`settings_steam_key_
+  masked`/`_not_set` — WP brief: "only whether set, never the value") and
+  a Remove action (`removeWebApiKey`, clears the key without ever reading
+  it back).
+- **Connection** — `SettingsController.connectionSummary()` reads
+  `CredentialStore` directly and shows the base URL + profile kind, NEVER
+  the API key (WP brief boundary, mirrored in the `ConnectionSummary` data
+  class itself — it has no key field to leak by accident). "Reconnect /
+  switch vault" opens onboarding in `RECONNECT` mode; "Disconnect" (behind
+  an `AlertDialog` confirm) calls `CredentialStore.clear()` — the WHOLE
+  store, deliberately broader than `clearSteamIdentity()`, matching that
+  interface's own documented "forget this vault entirely" contract for
+  exactly this action.
+
+### `setWebApiKey` UI gap, closed (`net/steam/SteamWebApiKeyInput.kt`)
+
+`submitWebApiKey` is a direct, Compose-free port of `web/js/lib/
+steam-key-form.js::submitSteamKey`'s two guarantees: `validSteamWebApiKey`
+mirrors the exact "32 hexadecimal characters" grammar
+(`vault_api.steam_relay.valid_steam_web_api_key`), and the returned
+`WebApiKeySubmitResult.nextFieldValue` is **`""` on every path** — a
+rejected format, a `persist` that throws, or success alike — the same
+unconditional-clear guarantee the web port's `field.value = ""` `finally`
+block gives, pulled into a pure function specifically so it is mechanically
+provable rather than "the code looks right"
+(docs/LEARNINGS.md "Testing discipline"). `SteamWebApiKeyInputTest` pins
+all three paths by name (`MUTATION PIN` cases). Both `OnboardingController
+.submitWebApiKeyEntry()` and `SettingsController.submitWebApiKeyEntry()`
+call this same function against their own `mutableStateOf` field —
+`OnboardingControllerTest`'s own `MUTATION PIN` cases additionally exercise
+the real Compose-state field end to end (not just the pure function), per
+the WP brief's explicit ask to pin the clearing "in a controller test".
+
+### Replay-residual fix (`net/steam/SteamLoginState.kt`)
+
+See the "Residual FIXED by WP 4b.7" section above (in the WP 4b.3 write-up)
+for the full before/after — summary: a CSPRNG per-login `state` token is
+embedded in `openid.return_to`, checked via a single-use `PendingLoginState
+.consume()` BEFORE `signedCoversClaimedId`/`check_authentication` run, so a
+missing, wrong, OR previously-used state is rejected without any network
+call. `SteamIdentityRepositoryTest`'s "a consumed state cannot be replayed"
+case is the mutation pin the WP brief asked for.
+
+### Tests (WP 4b.7)
+
+85 new JVM unit tests (492 total with the prior WPs' 407), no
+Robolectric/emulator dependency:
+
+- `ui/onboarding/logic/OnboardingStepsTest` — progress percent, the step-1
+  gating direction (both ways), Back/Continue boundary no-ops,
+  `shouldShowOnboarding`'s mutation pin.
+- `net/connection/ConnectionCheckTest` — `classifyConnectionFailure`'s
+  three outcomes incl. the HEALTH-step-401-is-never-KeyRejected mutation
+  pin, and `checkVaultConnection`'s step ordering/short-circuit (settings
+  never called after a health failure).
+- `ui/settings/logic/SettingsDiffTest` / `SettingsPresentationTest` — the
+  no-op-edit-is-dropped mutation pin, the env_only/non-db-reset guards,
+  the `webhook_events` list-vs-comma-text equivalence (no dedup, matching
+  the web port exactly), and the applies/source/effective-text pure
+  mappings.
+- `net/steam/SteamLoginStateTest` — CSPRNG output shape (length, alphabet,
+  no collisions in two calls), and `PendingLoginState.consume`'s single-use
+  semantics in every direction (match, mismatch, nothing pending, null
+  actual, consumed-then-replayed).
+- `net/steam/SteamOpenIdCallbackTest` (extended) — `stateFromReturnTo`
+  parsing (present, absent, alongside other params, percent-encoded,
+  trailing bare `?`).
+- `repo/SteamIdentityRepositoryTest` (extended) — every existing
+  `completeLogin` test now seeds a pending state via `buildLoginUrl()`
+  first (the state check is now the first gate); new cases cover no
+  pending state, no state in the callback, a mismatched state, and the
+  named "a consumed state cannot be replayed" mutation pin.
+- `net/steam/SteamWebApiKeyInputTest` — the 32-hex validator's boundaries,
+  and `submitWebApiKey`'s clearing guarantee on all three paths.
+- `ui/onboarding/OnboardingControllerTest` — step navigation delegation,
+  `start()`'s field-seeding from `CredentialStore`, Steam login delegation,
+  the web-API-key clearing pin exercised through the real Compose state
+  field, and `finish()`'s exact persisted-fields pin (connection only,
+  nothing Steam-related).
+
+Verified command + output tail:
+
+```
+$ ./gradlew.bat test lintDebug assembleDebug
+...
+BUILD SUCCESSFUL in 1m 2s
+74 actionable tasks: 22 executed, 52 up-to-date
+```
+
+492/0/0 across both `testDebugUnitTest` and `testReleaseUnitTest` (summed
+from the XML reports' `tests=`/`failures=`/`errors=` attributes);
+`app/app/build/reports/lint-results-debug.txt`: "No issues found."
+`app/app/build/outputs/apk/debug/app-debug.apk` produced.
+
+### What WP 4b.7 deliberately did NOT do
+
+- **No instrumented test of the onboarding/settings screens** — no
+  emulator/device available, unchanged constraint from every earlier 4b.x
+  WP; `OnboardingController`/`SettingsController` are Compose-free-enough
+  to unit test their orchestration logic (see above), but the actual
+  Compose rendering, focus order, and field behaviour have not been seen
+  on a real screen.
+- **No real "About" section, no app version display** — not asked for by
+  the WP brief; `web/js/views/settings.js`'s About block (Valve trademark
+  notice) has no Android counterpart yet.
+- **`tsnet` connectivity profile picker** — still post-v1
+  (`docs/WORKPACKAGES.md`), unaffected by this WP; the onboarding profile
+  choice only ever offers `SystemVpnProfile`/`PublicDomainProfile`.
+- **No live re-validation of an already-configured connection** —
+  Settings' Connection section trusts whatever is in `CredentialStore`
+  without re-testing it; a connection that has gone stale (revoked key,
+  changed IP) surfaces as a `VaultApiError` the next time Library/Downloads
+  actually poll, not proactively on the Settings screen.
+- **No WorkManager interaction** — onboarding/settings are foreground-only
+  screens; WP 4b.8's background polling is unaffected by (and does not
+  affect) anything in this WP.

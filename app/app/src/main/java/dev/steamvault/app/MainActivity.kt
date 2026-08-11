@@ -31,7 +31,6 @@ import dev.steamvault.app.net.profile.buildConnectivityProfile
 import dev.steamvault.app.net.steam.SteamOpenIdConfig
 import dev.steamvault.app.repo.SteamIdentityRepository
 import dev.steamvault.app.repo.SteamIdentityRepositoryImpl
-import dev.steamvault.app.repo.SteamLoginResult
 import dev.steamvault.app.repo.VaultCacheRepository
 import dev.steamvault.app.repo.VaultGamesRepository
 import dev.steamvault.app.repo.VaultJobsRepository
@@ -40,42 +39,44 @@ import dev.steamvault.app.storage.EncryptedCredentialStore
 import dev.steamvault.app.storage.SharedPreferencesLibraryPreferences
 import dev.steamvault.app.ui.downloads.DownloadsScreen
 import dev.steamvault.app.ui.downloads.logic.countPending
-import dev.steamvault.app.ui.identity.IdentityScreen
 import dev.steamvault.app.ui.library.LibraryScreen
 import dev.steamvault.app.ui.nav.BottomNavBar
 import dev.steamvault.app.ui.nav.Destination
+import dev.steamvault.app.ui.onboarding.AndroidOnboardingStrings
+import dev.steamvault.app.ui.onboarding.OnboardingController
+import dev.steamvault.app.ui.onboarding.OnboardingMode
+import dev.steamvault.app.ui.onboarding.OnboardingScreen
+import dev.steamvault.app.ui.settings.AndroidSettingsStrings
+import dev.steamvault.app.ui.settings.SettingsController
+import dev.steamvault.app.ui.settings.SettingsScreen
 import dev.steamvault.app.ui.theme.SteamVaultTheme
 import kotlinx.coroutines.launch
 
 /**
- * Single-activity app shell. As of WP 4b.4, navigation between the app's
- * three top-level destinations is REAL (see `ui/nav/Destination.kt` for the
- * plain-state-switcher justification) -- this is the reconciliation the WP
- * 4b.3 kdoc (previously here) flagged as needed.
+ * Single-activity app shell. As of WP 4b.7, [vaultApiClientState] and
+ * [showOnboarding] are the two pieces of state that decide what the whole
+ * app shows: onboarding (this WP's [OnboardingScreen]) when there is no
+ * working vault-api connection, the normal three-destination shell
+ * otherwise -- see `ui/onboarding/logic/OnboardingSteps.kt::shouldShowOnboarding`
+ * for the underlying pure rule this mirrors.
  *
- * **Reconciliation of the WP 4b.3 interim state.** [IdentityScreen] moves
- * under the Settings destination: it is not yet the full "Onboarding +
- * settings" screen WP 4b.7 will build (vault connection profile, layout
- * preference, etc. all still need a home there), so Settings today shows
- * exactly what it showed before this WP -- the Steam identity block --
- * inside the new bottom-nav shell rather than as the activity's only
- * content. `dev.steamvault.app.ui.gallery.GalleryScreen` (WP 4b.1's debug
- * status-icon gallery, now under `src/debug/` -- WP 4b.4 review nit, see
- * its own kdoc) still compiles for debug builds and remains unreachable
- * from the UI, exactly as it already was after WP 4b.3 replaced it in
- * `setContent` -- this WP does not regress or restore its reachability
- * either way.
+ * **The WP 4b.4/4b.7 gap this WP closes.** Before this WP, no screen wrote
+ * a vault-api base URL/API key/connectivity-profile kind into
+ * [dev.steamvault.app.storage.CredentialStore] at all -- [vaultApiClientState]
+ * was permanently `null` on every real install, and
+ * `net/profile/ConnectivityProfileFactory.kt`'s `buildConnectivityProfile`
+ * kdoc documented this as
+ * "WP 4b.7's job, not a prerequisite of this one". [OnboardingScreen] /
+ * [OnboardingController] are that missing write path; [refreshVaultApiClient]
+ * is what makes the rest of the app shell notice a connection appeared (or
+ * disappeared -- Settings' Disconnect).
  *
- * **Gap this WP inherits, not introduces (see
- * `net/profile/ConnectivityProfileFactory.kt`'s kdoc for the full
- * explanation).** No screen writes a vault-api base URL / API key /
- * connectivity-profile kind into [dev.steamvault.app.storage.CredentialStore]
- * yet -- that is WP 4b.7's job, a branch-parallel sibling of this one, not
- * a prerequisite. [vaultApiClient] is therefore `null` on every real
- * install today, and Library/Downloads render an explicit
- * [NotConnectedPlaceholder] instead of attempting a doomed network call.
- * Settings (today: just [IdentityScreen]) has no dependency on the vault-api
- * connection and is fully usable regardless.
+ * **Full-screen swap, not a modal overlay -- see [OnboardingScreen]'s own
+ * kdoc** for why this differs from `web/js/onboarding.js`'s dialog-overlay
+ * approach: this codebase already committed to a plain state-based screen
+ * switcher (`ui/nav/Destination.kt`'s kdoc), and onboarding is simply one
+ * more top-level state alongside the three [Destination]s, gating them
+ * entirely rather than floating above them.
  */
 class MainActivity : ComponentActivity() {
 
@@ -85,15 +86,28 @@ class MainActivity : ComponentActivity() {
     }
     private val libraryPreferences by lazy { SharedPreferencesLibraryPreferences(applicationContext) }
 
-    /** `null` until a vault-api connection has been configured (WP 4b.7) --
-     * see this class's kdoc. */
-    private val vaultApiClient: VaultApiClient? by lazy {
-        val profile = buildConnectivityProfile(credentialStore) ?: return@lazy null
-        val apiKey = credentialStore.getApiKey()?.takeIf { it.isNotBlank() } ?: return@lazy null
-        VaultApiClient(profile, apiKeyProvider = { apiKey })
+    /** Long-lived for the whole app process (same category as
+     * [identityRepository]/[credentialStore]) -- `onNewIntent` needs a
+     * stable reference to route a Steam OpenID callback into while
+     * onboarding is the active screen. */
+    private val onboardingController: OnboardingController by lazy {
+        OnboardingController(credentialStore, identityRepository, AndroidOnboardingStrings(resources))
     }
 
-    private var identityState by mutableStateOf(SteamIdentityScreenState())
+    /** `null` until a vault-api connection has been configured -- see this
+     * class's kdoc. Rebuilt by [refreshVaultApiClient] whenever the
+     * connection changes (onboarding finishes, Settings disconnects). */
+    private var vaultApiClientState by mutableStateOf<VaultApiClient?>(null)
+
+    /** Rebuilt alongside [vaultApiClientState] so it always reflects the
+     * SAME client (and can be reached directly from `onNewIntent` -- unlike
+     * `LibraryDestinationContent`'s repositories, this one needs a stable
+     * identity outside Compose's `remember`, for the same reason
+     * [onboardingController] does). */
+    private var settingsControllerState by mutableStateOf<SettingsController?>(null)
+
+    private var showOnboarding by mutableStateOf(false)
+    private var onboardingMode by mutableStateOf(OnboardingMode.FIRST_RUN)
 
     /** Latest `GET /v1/jobs` snapshot from WHICHEVER screen is currently
      * polling jobs (Library or Downloads -- both now report through
@@ -104,48 +118,47 @@ class MainActivity : ComponentActivity() {
      * **Honest scope limitation (WP 4b.5).** This is NOT a background poll
      * -- it is only ever updated while a jobs-polling screen is on screen,
      * same foreground-only constraint every poll loop in this app has
-     * before WP 4b.8's WorkManager wiring lands. Concretely: the pip goes
-     * stale (does not update) while Settings is showing, and resets to
-     * whatever the newly-shown screen's first poll tick reports the moment
-     * the user switches back to Library or Downloads. A fully
-     * background-independent pip needs WP 4b.8, deliberately not this WP. */
+     * before WP 4b.8's WorkManager wiring lands. */
     private var pendingJobsSnapshot by mutableStateOf<List<JobSummary>>(emptyList())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        identityState = identityState.copy(identity = identityRepository.state())
+        refreshVaultApiClient()
+        if (vaultApiClientState == null) openOnboarding(OnboardingMode.FIRST_RUN)
         handleIntent(intent)
 
         setContent {
             SteamVaultTheme {
-                var destination by remember { mutableStateOf(Destination.LIBRARY) }
-                val pendingJobsCount = countPending(pendingJobsSnapshot)
+                if (showOnboarding) {
+                    OnboardingScreen(
+                        controller = onboardingController,
+                        onFinished = {
+                            refreshVaultApiClient()
+                            showOnboarding = false
+                        },
+                        onCancelled = { showOnboarding = false },
+                        onLaunchSteamLogin = { url -> launchSteamLogin(url) },
+                    )
+                } else {
+                    var destination by remember { mutableStateOf(Destination.LIBRARY) }
+                    val pendingJobsCount = countPending(pendingJobsSnapshot)
 
-                Scaffold(
-                    bottomBar = {
-                        BottomNavBar(
-                            current = destination,
-                            pendingJobsCount = pendingJobsCount,
-                            onSelect = { destination = it },
-                        )
-                    },
-                ) { innerPadding ->
-                    Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
-                        when (destination) {
-                            Destination.LIBRARY -> LibraryDestinationContent()
-                            Destination.DOWNLOADS -> DownloadsDestinationContent()
-                            Destination.SETTINGS -> IdentityScreen(
-                                state = identityState.identity,
-                                ownedGamesCountPreview = identityState.ownedGamesCountPreview,
-                                loginError = identityState.loginError,
-                                onSignInClick = { launchSteamLogin() },
-                                onSignOutClick = {
-                                    identityRepository.signOut()
-                                    identityState = SteamIdentityScreenState(identity = identityRepository.state())
-                                },
-                                onRefreshLibraryCountClick = { refreshLibraryCountPreview() },
+                    Scaffold(
+                        bottomBar = {
+                            BottomNavBar(
+                                current = destination,
+                                pendingJobsCount = pendingJobsCount,
+                                onSelect = { destination = it },
                             )
+                        },
+                    ) { innerPadding ->
+                        Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+                            when (destination) {
+                                Destination.LIBRARY -> LibraryDestinationContent()
+                                Destination.DOWNLOADS -> DownloadsDestinationContent()
+                                Destination.SETTINGS -> SettingsDestinationContent()
+                            }
                         }
                     }
                 }
@@ -153,9 +166,45 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Recomputes [vaultApiClientState]/[settingsControllerState] from
+     * whatever is currently in [credentialStore] -- call after anything
+     * that writes the connection ([OnboardingController.finish] via
+     * `onFinished`, [SettingsController.disconnect] via `onDisconnected`). */
+    private fun refreshVaultApiClient() {
+        val profile = buildConnectivityProfile(credentialStore)
+        val hasApiKey = !credentialStore.getApiKey().isNullOrBlank()
+        val client = if (profile != null && hasApiKey) {
+            // Review fix (N4): read the store FRESH inside the lambda, not a
+            // captured local -- VaultApiClient's own kdoc promises
+            // apiKeyProvider is "read fresh on every call... so a key change
+            // in CredentialStore takes effect on the very next request
+            // without rebuilding this client"; capturing a snapshot string
+            // here would have silently broken that promise for this app's
+            // only caller.
+            VaultApiClient(profile, apiKeyProvider = { credentialStore.getApiKey().orEmpty() })
+        } else {
+            null
+        }
+        vaultApiClientState = client
+        settingsControllerState = client?.let {
+            SettingsController(it, credentialStore, identityRepository, AndroidSettingsStrings(resources))
+        }
+        // Review fix (N3): a stale pip count from the connection that just
+        // disappeared (Settings' Disconnect) must not linger on the bottom
+        // nav once Library/Downloads are unreachable -- there is no poll
+        // left running to correct it on its own.
+        pendingJobsSnapshot = emptyList()
+    }
+
+    private fun openOnboarding(mode: OnboardingMode) {
+        onboardingController.start(mode)
+        onboardingMode = mode
+        showOnboarding = true
+    }
+
     @Composable
     private fun LibraryDestinationContent() {
-        val client = vaultApiClient
+        val client = vaultApiClientState
         if (client == null) {
             NotConnectedPlaceholder()
             return
@@ -174,7 +223,7 @@ class MainActivity : ComponentActivity() {
     /** WP 4b.5's screen (Downloads + job control). */
     @Composable
     private fun DownloadsDestinationContent() {
-        val client = vaultApiClient
+        val client = vaultApiClientState
         if (client == null) {
             NotConnectedPlaceholder()
             return
@@ -186,61 +235,74 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    /** WP 4b.7's screen -- replaces the previous bare
+     * `ui.identity.IdentityScreen` placeholder (still compiles,
+     * unreferenced -- same "kept but unreachable" treatment WP 4b.3/4b.4
+     * gave `ui.gallery.GalleryScreen`). */
+    @Composable
+    private fun SettingsDestinationContent() {
+        val controller = settingsControllerState
+        if (controller == null) {
+            NotConnectedPlaceholder()
+            return
+        }
+        SettingsScreen(
+            controller = controller,
+            onSignInSteamClick = { launchSteamLogin(controller.buildSteamLoginUrl()) },
+            onReconnectClick = { openOnboarding(OnboardingMode.RECONNECT) },
+            onDisconnected = {
+                refreshVaultApiClient()
+                openOnboarding(OnboardingMode.FIRST_RUN)
+            },
+        )
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         handleIntent(intent)
     }
 
-    /** Only acts on a redirect matching this app's own OpenID return_to -- see [SteamOpenIdConfig]. */
+    /** Only acts on a redirect matching this app's own OpenID return_to --
+     * see [SteamOpenIdConfig]. Routes to whichever controller currently
+     * owns the visible Steam sign-in flow -- see this class's kdoc and
+     * [settingsControllerState]'s. */
     private fun handleIntent(intent: Intent?) {
         val data = intent?.dataString ?: return
         if (!data.startsWith(SteamOpenIdConfig.RETURN_TO)) return
 
         lifecycleScope.launch {
-            when (val result = identityRepository.completeLogin(data)) {
-                is SteamLoginResult.Success -> {
-                    identityState = SteamIdentityScreenState(identity = identityRepository.state())
-                }
-                is SteamLoginResult.Failure -> {
-                    // Review round S3: this branch is exactly where the
-                    // device test's un-testable-here steps 1-3 (Valve's
-                    // return_to acceptance, the Custom Tab -> onNewIntent
-                    // handoff, the real check_authentication round trip)
-                    // will land if any of them go wrong -- a silent branch
-                    // here left the user with no signal at all. `reason` is
-                    // always a fixed, secret-free string by
-                    // SteamLoginResult.Failure's own contract, so showing
-                    // it verbatim is safe; this is intentionally ONE line
-                    // of state, not a new app-wide error-display
-                    // convention (there isn't one yet -- that is a later
-                    // WP's call).
-                    identityState = identityState.copy(
-                        identity = identityRepository.state(),
-                        loginError = result.reason,
-                    )
+            val settings = settingsControllerState
+            when {
+                showOnboarding -> onboardingController.completeSteamLogin(data)
+                settings != null -> settings.completeSteamLogin(data)
+                else -> {
+                    // Review fix (N2): neither screen is currently active to
+                    // route this into (e.g. the connection was disconnected
+                    // between launching the Custom Tab and the redirect
+                    // arriving) -- still consume the pending login state
+                    // directly through the repository, ignoring the result,
+                    // so a dropped/unroutable callback cannot leave
+                    // PendingLoginState holding a value forever. This is
+                    // what makes "single-use" literally true regardless of
+                    // which screen happens to be showing when the redirect
+                    // lands, not just when a controller is listening.
+                    identityRepository.completeLogin(data)
                 }
             }
         }
     }
 
-    private fun launchSteamLogin() {
-        // Clear any stale error from a previous attempt before starting a new one.
-        identityState = identityState.copy(loginError = null)
-        val url = identityRepository.buildLoginUrl()
+    private fun launchSteamLogin(url: String) {
         CustomTabsIntent.Builder().build().launchUrl(this, Uri.parse(url))
-    }
-
-    private fun refreshLibraryCountPreview() {
-        lifecycleScope.launch {
-            val preview = identityRepository.ownedGamesCountPreview()
-            identityState = identityState.copy(ownedGamesCountPreview = preview)
-        }
     }
 }
 
-/** Shown for Library/Downloads until a vault-api connection is configured
- * (WP 4b.7 gap -- see [MainActivity]'s kdoc). */
+/** Shown for Library/Downloads/Settings if, somehow, the connection
+ * disappears out from under a still-composed screen (e.g. a stale
+ * recomposition mid-disconnect) -- normally unreachable in practice since
+ * [dev.steamvault.app.ui.nav.Destination] is a plain state switch and
+ * disconnecting always routes through [MainActivity.openOnboarding]. */
 @Composable
 private fun NotConnectedPlaceholder() {
     Column(
@@ -259,10 +321,3 @@ private fun NotConnectedPlaceholder() {
         )
     }
 }
-
-private data class SteamIdentityScreenState(
-    val identity: dev.steamvault.app.repo.SteamIdentityState =
-        dev.steamvault.app.repo.SteamIdentityState(steamId64 = null, personaName = null, hasWebApiKey = false),
-    val ownedGamesCountPreview: Result<Int>? = null,
-    val loginError: String? = null,
-)
