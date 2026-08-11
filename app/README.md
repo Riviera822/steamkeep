@@ -1391,3 +1391,278 @@ from the XML reports' `tests=`/`failures=`/`errors=` attributes);
 - **No WorkManager interaction** — onboarding/settings are foreground-only
   screens; WP 4b.8's background polling is unaffected by (and does not
   affect) anything in this WP.
+
+## Notifications via WorkManager (WP 4b.8)
+
+Serial after 4b.5 per `docs/WORKPACKAGES.md` Phase 4b. Closes the gap every
+earlier WP's README section flagged ("WorkManager wiring... is WP 4b.8, not
+this WP" — WP 4b.2's "Polling primitives" section, restated in 4b.5/4b.7):
+a background poll that derives the same notification events
+`docs/design/vault-app-mockup-NOTES.md`'s bell panel documents
+(finished/failed downloads, update-ready games, cache-bypass warnings),
+independent of whether the app is open.
+
+```
+app/app/src/main/java/dev/steamvault/app/
+├── VaultApplication.kt                  # process-wide onCreate: channels + scheduling
+├── MainActivity.kt                      # notification-tap routing (extended)
+└── notifications/
+    ├── NotificationEvent.kt             # the 5-event taxonomy (sealed class)
+    ├── DiffByKey.kt                     # generic keyed-list differ (web diff-utils.js port)
+    ├── NotificationSnapshot.kt          # the persisted compact snapshot shape + mappers
+    ├── NotificationDiffer.kt            # the pure differ (web notifications.js port)
+    ├── NotificationSnapshotStore.kt     # SharedPreferences persistence (interface + impl)
+    ├── NotificationPollLogic.kt         # pure evaluate() — the worker's testable core
+    ├── NotificationRouting.kt           # event -> channel/destination/id mapping
+    ├── NotificationChannels.kt          # NotificationChannel creation
+    ├── NotificationStrings.kt           # title/body text (Resources-backed interface)
+    ├── NotificationPoster.kt            # posts the Android notification (foreground gate, permission check)
+    ├── NotificationPollWorker.kt        # the CoroutineWorker (thin glue)
+    └── NotificationScheduler.kt         # PeriodicWorkRequest enqueue
+```
+
+### The differ port (`NotificationDiffer.kt`, `DiffByKey.kt`)
+
+Line-for-line port of `web/js/notifications.js` + `web/js/diff-utils.js`
+onto a Kotlin `sealed class NotificationEvent` (`JobFinished`/`JobFailed`/
+`UpdateReady`/`BypassSuspected`/`BypassResolved` — `BypassResolved` kept
+per `docs/LEARNINGS.md`'s transition-detector rule, same reasoning the web
+module's own kdoc gives). `DiffByKey.kt` mirrors `diffByKey` exactly except
+it compares with Kotlin data-class `equals()` instead of the web module's
+`JSON.stringify` stand-in — same added/updated/removed/unchanged/`isFirst`
+buckets either way. Both invariants the DoD calls out by name are pinned:
+the first poll (`isFirst`) never fires, and a no-op poll produces zero
+events.
+
+**One deliberate improvement over the web port**, per this WP's brief
+("the Android improvement from 4b.5 (unknown statuses) applies where
+relevant"): a job whose PREVIOUS status is neither a known active status
+nor a known terminal one (a value this client has never seen) is now
+treated as "was active" rather than "was not active" when deciding whether
+a transition to `done`/`error` is real news — the web differ's
+`JOB_ACTIVE_STATUSES.has(prev.status)` check would silently swallow that
+transition instead. Same fail-toward-reporting-real-information posture
+`ui/downloads/logic/JobPartition.kt`'s WP 4b.5 divergence already
+established for the Downloads screen; see `NotificationDiffer.kt`'s kdoc
+for the full reasoning and why `diffGames`/`diffClients` needed no
+analogous change (both already compare against a single known value by
+equality, which is fail-safe by construction).
+
+### Compact snapshot, not the raw API response (`NotificationSnapshot.kt`)
+
+The differ only ever reads four job fields, four game fields and two
+client fields — the persisted `NotificationSnapshot` carries exactly
+those, not the full `net/model/` response shapes (byte counters, source
+addresses, timestamps the differ never looks at). Smaller on-disk payload
+for a multi-hundred-game library, and it makes "did the differ see a real
+change" and "did the persisted snapshot change" the same question by
+construction. Plain (non-encrypted) `SharedPreferences`
+(`SharedPreferencesNotificationSnapshotStore`) — nothing here is a secret,
+same reasoning `storage/LibraryPreferences.kt` documents for the layout
+preference; it deliberately does NOT go through `CredentialStore`/
+`EncryptedCredentialStore`, whose one narrow guarantee is scoped to the
+vault-api key alone. A corrupted/incompatible-schema stored value decodes
+to `null` (treated as "never saved") rather than crashing the worker.
+
+### Idempotency: notify, THEN persist (`NotificationPollLogic.kt`, `NotificationPollWorker.kt`)
+
+`NotificationPollWorker.doWork()` fetches once, calls the pure
+`NotificationPollLogic.evaluate(prevSnapshot, jobs, games, clients)`, posts
+the resulting events, and ONLY THEN persists the new snapshot — in that
+order, never reversed. A crash between fetch and persist re-derives the
+identical event set on the next run (a possible harmless re-post of the
+same notification — `NotificationRouting.notificationId` is a stable hash
+of the event's own key, so a repost UPDATES the existing system
+notification rather than stacking a duplicate); a crash strictly after
+persist produces zero events on the next run (nothing looks new anymore).
+The rejected alternative (persist-before-notify) would let a crash between
+persist and notify silently DROP the event forever — a strictly worse
+failure mode. `NotificationPollLogicTest` pins both crash windows against
+an `InMemoryNotificationSnapshotStore` fake, without touching Android or
+WorkManager at all.
+
+Fail-soft rules mirror the WP brief exactly: no vault-api connection
+configured, or no API key stored → `Result.success()` silently, nothing to
+poll. The fetch call throwing `VaultApiError` (network down, auth failure,
+server error, unparsable body) → `Result.success()` WITHOUT persisting, so
+the next successful run still diffs against a valid baseline instead of a
+partial one.
+
+### Foreground suppression (`NotificationPoster.kt`, `NotificationPollWorker.kt`)
+
+Simplest honest rule per the brief ("a process-lifecycle check is
+enough"): `ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast
+(Lifecycle.State.STARTED)` gates whether `AndroidNotificationPoster.post`
+actually calls `NotificationManagerCompat.notify` — while foreground, the
+call is a no-op. The worker still runs its full fetch + diff + PERSIST
+cycle regardless of foreground state, so the snapshot always advances;
+without that, returning to the background would replay every event that
+happened while the user was already looking at the live Library/Downloads
+polling loops (`polling/PollingIntervals.kt`).
+
+### WorkManager scheduling and Doze (`NotificationScheduler.kt`, `VaultApplication.kt`)
+
+A single `PeriodicWorkRequest` at `PeriodicWorkRequest.MIN_PERIODIC_
+INTERVAL_MILLIS` (15 minutes — WorkManager's documented floor), constrained
+to `NetworkType.CONNECTED`, enqueued with `ExistingPeriodicWorkPolicy.KEEP`
+from the new `VaultApplication.onCreate` (this app had no custom
+`Application` class before this WP) so re-launching the app never resets
+WorkManager's internal next-run clock. **Deliberately no exact alarms, no
+foreground service, no battery-optimization-exemption prompt** — all three
+would fight Android's Doze/App Standby power model instead of living
+inside it (the last one in particular would ask the user for a permission
+most apps should not need). This means the REAL interval while the phone
+sits idle is "15 minutes, or considerably longer under deep Doze, with
+runs batched into maintenance windows" — accepted for v1 per
+`docs/design/vault-app-mockup-NOTES.md` ("Notifications are a poll, not a
+push") and the WP brief's own wording ("polling via WorkManager, respecting
+Doze"); a user who wants faster feedback still has the foreground screens'
+own 2–20 s polling.
+
+### Notification channels, permission, routing (`NotificationChannels.kt`, `NotificationPoster.kt`, `NotificationRouting.kt`, `SettingsScreen.kt`)
+
+Three channels (`downloads`/`updates`/`bypass`, `bypass` at
+`IMPORTANCE_HIGH`) so the user can silence any one class independently.
+`POST_NOTIFICATIONS` (API 33+, declared in `AndroidManifest.xml`) is
+requested from the new Settings → Notifications section
+(`SettingsScreen.kt`'s `NotificationsSection`, wired through
+`MainActivity.requestNotificationPermission` and a class-level
+`registerForActivityResult` launcher) — denying it leaves the worker
+running exactly as before, just without a visible notification
+(`AndroidNotificationPoster` re-checks the live grant on every post, no
+separate reactive state needed). Tapping a notification opens
+`MainActivity` with `NotificationRouting.EXTRA_DESTINATION` set to a
+`Destination.name` string; `MainActivity.destination` was hoisted out of a
+`remember { }` local into a class-level `mutableStateOf` specifically so
+`handleNotificationTap` (called from both `onCreate`'s and
+`onNewIntent`'s `handleIntent`) can change it from outside composition.
+Routing: job events → `Destination.DOWNLOADS`, bypass events →
+`Destination.SETTINGS` (this app has no dedicated clients sheet yet,
+unlike `web/js/views/clients.js` — an honest simplification, not a
+missing feature this WP was asked to add), `update_ready` →
+`Destination.LIBRARY` (the brief names no destination for it explicitly;
+a per-game deep link like the mockup's bell panel offers does not exist as
+an addressable destination in this app yet). All three mappings are
+literal-pinned in `NotificationRoutingTest`, never derived from the enums
+under test.
+
+**Recorded routing gap (review round, N3) — `bypass_suspected`/
+`bypass_resolved` land on `Destination.SETTINGS`, not a clients surface
+(same "recorded, not silently kept" treatment the depot-sharing `ORPHANED`
+divergence above and `ui/downloads/logic/JobPartition.kt`'s WP 4b.5
+divergence get).** Settings does not actually show per-client bypass
+detail today — tapping the notification lands the user one screen away
+from the client list `web/js/views/clients.js` gives the web frontend, not
+on it. This is accepted as this WP's honest ceiling, not fixed here: **a
+clients surface is the real fix**, and belongs to whichever future WP
+gives this app a `GET /v1/clients`-backed screen (Settings is the nearest
+existing destination only because no such screen exists yet).
+
+### Versions pinned for this WP
+
+Added to the existing `gradle/libs.versions.toml` table:
+
+| Component | Version | Why |
+|---|---|---|
+| androidx.work:work-runtime-ktx | 2.9.1 | latest stable 2.9.x release; 2.10.x's floor needs a newer AGP than this project's pinned 8.7.3 |
+| androidx.lifecycle:lifecycle-process | 2.8.7 | same version already pinned for lifecycle-runtime-ktx/-compose; provides `ProcessLifecycleOwner` |
+
+No `androidx.work:work-testing` dependency: it needs Robolectric or an
+instrumented device to drive `TestListenableWorkerBuilder`, neither of
+which exists in this environment — see "What WP 4b.8 deliberately did NOT
+do" below.
+
+### Tests (WP 4b.8)
+
+42 new JVM unit tests (534 total with the prior WPs' 492), no
+Robolectric/emulator dependency:
+
+- `notifications/DiffByKeyTest` — the generic differ's bucket semantics
+  (`isFirst` on `null` vs. empty prev, unchanged vs. updated, removed).
+- `notifications/NotificationDifferTest` — the full web-test-file port:
+  first-poll silence (all three domains + the combined helper), no-change
+  silence, `job_finished`/`job_failed` (incl. the added-vs-updated and
+  aged-out-of-the-window cases), cancelled-is-silent, `update_ready`'s
+  zero-bytes/null-bytes/already-stale/non-stale-transition gates,
+  `bypass_suspected`/`bypass_resolved` both directions plus the
+  steady-state no-op, the combined-helper ordering, and the two Android-
+  improvement cases (unrecognized previous status → `done`/`error` still
+  fires).
+- `notifications/NotificationSnapshotSerializationTest` — the
+  serialize/deserialize round trip (populated, all-empty, and
+  null-vs-empty-string field cases), plus the corrupted-JSON-is-treated-
+  as-never-saved case via `InMemoryNotificationSnapshotStore`.
+- `notifications/NotificationPollLogicTest` — the idempotency decision pin
+  (crash-before-persist re-derives the same event; crash-strictly-after-
+  persist derives zero) against the in-memory fake store, end to end
+  through `NotificationPollLogic.evaluate`.
+- `notifications/NotificationRoutingTest` — every event type's
+  channel/destination mapping, `EXTRA_DESTINATION`'s literal string, and
+  `notificationId`'s stability/distinctness.
+
+Verified command + output tail:
+
+```
+$ ./gradlew.bat test lintDebug assembleDebug
+...
+BUILD SUCCESSFUL in 30s
+74 actionable tasks: 26 executed, 48 up-to-date
+```
+
+534/0/0 in both `testDebugUnitTest` and `testReleaseUnitTest` (verified via
+the XML reports' `tests=`/`failures=`/`errors=` attributes, each variant
+summed independently — both run the identical suite);
+`app/app/build/reports/lint-results-debug.txt`: one pre-existing-pattern
+`PluralsCandidate` false positive on `notif_job_failed_body` (`%1$d` is an
+app id, not a count — same class of justified suppression as
+`settings_schedule_window_placeholder`'s `TypographyDashes` ignore),
+suppressed with a documented `tools:ignore`; otherwise clean.
+`app/app/build/outputs/apk/debug/app-debug.apk` produced.
+
+### What WP 4b.8 deliberately did NOT do — the honest device-test list
+
+No emulator/device is available in this environment (unchanged constraint
+from every earlier 4b.x WP). Everything above the Android-framework
+boundary is unit-tested; everything below it is real, uncovered
+device-territory that a future on-device pass must verify:
+
+- **Does WorkManager actually invoke `NotificationPollWorker` on the
+  declared ~15-minute cadence**, and does it visibly batch/defer under a
+  real Doze session the way this WP's README section above claims it will.
+- **Does `EncryptedCredentialStore`/Android Keystore actually work from a
+  background process** (no Activity, no foreground UI thread) the same way
+  it works from `MainActivity` — `NotificationPollWorker` is the first
+  caller of `EncryptedCredentialStore` that isn't Activity-driven.
+- **Does `NotificationManagerCompat.notify` actually show a heads-up/tray
+  notification** with the right channel, title, body, and does tapping it
+  actually launch `MainActivity` and land on the right `Destination` via
+  `onNewIntent`.
+- **Does the `POST_NOTIFICATIONS` permission prompt actually appear on a
+  real API 33+ device** when Settings → "Enable notifications" is tapped,
+  and does denying it leave the worker's fetch/diff/persist cycle running
+  with only the visible notification suppressed.
+- **Does the foreground-suppression rule actually feel right in practice**
+  — `ProcessLifecycleOwner`'s STARTED threshold is a coarse process-wide
+  signal (any part of the app in the foreground suppresses ALL
+  notification classes), not a per-screen one; the brief calls this
+  sufficient, but it has not been felt on a real device.
+- **No `androidx.work:work-testing` / Robolectric** — `TestListenableWorkerBuilder`
+  needs one of the two, neither available here; `NotificationPollLogic`
+  (the pure decision core) carries the equivalent test weight on the plain
+  JVM instead, per this WP's brief ("extract decisions so the untestable
+  shell is thin").
+- **No live re-check of the notification permission's grant state on the
+  Settings screen** — `NotificationsSection` always shows the same
+  "Enable notifications" button regardless of current grant, rather than a
+  reactive granted/denied indicator (would need a lifecycle-resume
+  observer to refresh after the user returns from the system dialog;
+  out of scope for this WP's "keep it simple" instruction).
+- **No per-game deep link for `update_ready`** — routes to the Library
+  destination generally, not to the specific game's detail sheet the way
+  the mockup's bell panel does; no "focus this appid" extra exists on the
+  Library screen yet.
+- **Reused the WP 4b.1 launcher's monochrome vector
+  (`ic_launcher_monochrome.xml`) as the notification small icon** rather
+  than commissioning a dedicated glyph — it is already a pure white-on-
+  transparent silhouette, exactly the shape a status-bar icon needs;
+  revisit in the WP 4b.9 release-art pass if a dedicated asset is wanted.

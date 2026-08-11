@@ -101,6 +101,11 @@ dependencies {
     // justification).
     implementation(libs.coil.compose)
 
+    // WP 4b.8: notifications via WorkManager -- see gradle/libs.versions.toml's
+    // WP 4b.8 comment for both pins' justification.
+    implementation(libs.androidx.work.runtime.ktx)
+    implementation(libs.androidx.lifecycle.process)
+
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)

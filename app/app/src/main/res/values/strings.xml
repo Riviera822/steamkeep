@@ -183,6 +183,7 @@
     <string name="settings_section_webhook">Webhook</string>
     <string name="settings_section_connection">Connection</string>
     <string name="settings_section_steam">Steam identity</string>
+    <string name="settings_section_notifications">Notifications</string>
 
     <string name="settings_vault_name_label">Vault name</string>
     <string name="settings_vault_name_placeholder">e.g. vault-01</string>
@@ -246,6 +247,43 @@
     <string name="settings_steam_key_remove">Remove key</string>
     <string name="settings_toast_webapikey_saved">Steam Web API key saved.</string>
     <string name="settings_toast_webapikey_removed">Steam Web API key removed.</string>
+
+    <!-- Notifications section (WP 4b.8) — see SettingsScreen.kt's
+         NotificationsSection kdoc for why this is a single always-shown
+         button rather than a live granted/denied indicator. -->
+    <string name="settings_notifications_desc">SteamVault checks for finished downloads, updates and cache-bypass warnings in the background, roughly every 15 minutes. Enable notifications so it can tell you.</string>
+    <string name="settings_notifications_enable_button">Enable notifications</string>
+
+    <!-- Notification channels (NotificationChannels.kt) — one per event
+         class (WP 4b.8 brief), so the user can silence any one of them
+         independently from Android's own per-app notification settings. -->
+    <string name="notif_channel_downloads_name">Downloads</string>
+    <string name="notif_channel_downloads_desc">Finished and failed downloads</string>
+    <string name="notif_channel_updates_name">Updates</string>
+    <string name="notif_channel_updates_desc">Games with an update ready to download</string>
+    <string name="notif_channel_bypass_name">Cache bypass warnings</string>
+    <string name="notif_channel_bypass_desc">A client appears to be bypassing the cache</string>
+
+    <!-- Notification text (NotificationStrings.kt). Wording mirrors the
+         mockup's bell-panel vocabulary (mockup-notes.md round 5/6: "Cached",
+         "Update ready", "Warnings", "Failures") and this app's own
+         status-word table (ui/downloads/logic/JobPartition.kt's
+         PREFILL_WORD) rather than inventing new phrasing. -->
+    <string name="notif_job_finished_title">Download finished</string>
+    <string name="notif_job_finished_body">App %1$d is now cached.</string>
+    <string name="notif_job_failed_title">Download failed</string>
+    <!-- tools:ignore="PluralsCandidate": %1$d is an app id (an identifier,
+         never a count) — lint's heuristic fires on the trailing word
+         "failed", but there is no quantity here to pluralize, unlike the
+         genuine plural candidates elsewhere in this file
+         (identity_library_count et al., see their own comment). -->
+    <string name="notif_job_failed_body" tools:ignore="PluralsCandidate">The download for app %1$d failed — check Downloads for details.</string>
+    <string name="notif_update_ready_title">Update ready</string>
+    <string name="notif_update_ready_body">%1$s has an update ready to download.</string>
+    <string name="notif_bypass_suspected_title">Cache bypass suspected</string>
+    <string name="notif_bypass_suspected_body">Client %1$s may be bypassing the cache.</string>
+    <string name="notif_bypass_resolved_title">Cache bypass resolved</string>
+    <string name="notif_bypass_resolved_body">Client %1$s is using the cache again.</string>
 
     <!-- Nav pip (WP 4b.5): contentDescription overrides the plain "Downloads"
          accessible name whenever the pip is showing (mirrors

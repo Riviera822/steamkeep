@@ -653,6 +653,19 @@ parallel/serial decisions, merge discipline, open user decisions):
       network call, mutation-pinned in all directions; 492 JVM tests;
       Opus PASS 8/8 mutations + nit round)*
 - [ ] Bypass warnings surfaced in the UI
+      *(WP 4b.8 done 2026-08-11: background notifications via
+      WorkManager — 15-min constrained PeriodicWorkRequest with UPDATE
+      policy, Doze respected by design (no exact alarms/foreground
+      service); pure differ port of the web notifications semantics
+      (first-poll silent, cancelled silent, update_ready gated on
+      cached bytes, bypass both directions, the 4b.5 unknown-status
+      improvement); notify-then-persist idempotency with stable
+      per-event IDs + setOnlyAlertOnce; compact non-secret snapshot in
+      plain prefs with shared decodeSnapshotOrNull fail-soft (pinned on
+      the PRODUCTION path); foreground suppression gates posting only;
+      catch-all worker with CancellationException rethrow; recorded
+      routing gap bypass→Settings until a clients surface exists; 534
+      JVM tests; Opus PASS 8/9 mutations + fix round)*
 - [ ] Document APK build (no Play Store requirement; F-Droid as a long-term goal)
 
 #### Phase 4c — Manual update check (both frontends, user decision 2026-08-10)

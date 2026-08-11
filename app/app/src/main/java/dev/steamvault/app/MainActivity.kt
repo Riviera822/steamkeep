@@ -2,10 +2,12 @@ package dev.steamvault.app
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,6 +31,7 @@ import dev.steamvault.app.net.VaultApiClient
 import dev.steamvault.app.net.model.JobSummary
 import dev.steamvault.app.net.profile.buildConnectivityProfile
 import dev.steamvault.app.net.steam.SteamOpenIdConfig
+import dev.steamvault.app.notifications.NotificationRouting
 import dev.steamvault.app.repo.SteamIdentityRepository
 import dev.steamvault.app.repo.SteamIdentityRepositoryImpl
 import dev.steamvault.app.repo.VaultCacheRepository
@@ -109,6 +112,37 @@ class MainActivity : ComponentActivity() {
     private var showOnboarding by mutableStateOf(false)
     private var onboardingMode by mutableStateOf(OnboardingMode.FIRST_RUN)
 
+    /** Hoisted out of the `setContent` composable (WP 4b.8) so a
+     * notification tap (routed through [handleIntent]) can change it from
+     * outside composition -- previously a plain `remember { mutableStateOf(...) }`
+     * local to the composable lambda, unreachable from anywhere else.
+     *
+     * N2: this hoist is scoped to exactly that -- it does NOT add
+     * configuration-change/process-death state restoration (no
+     * `rememberSaveable`-equivalent, no `SavedStateHandle`). A plain
+     * instance field is just as gone as the old `remember { }` local was
+     * the moment this `Activity` instance itself is recreated (rotation
+     * without a matching `android:configChanges`, or true process death) --
+     * both before and after this change, [destination] resets to
+     * [Destination.LIBRARY] across either event. Neither a regression nor
+     * an improvement over the prior behaviour, just a change of WHERE the
+     * same short-lived state lives. */
+    private var destination by mutableStateOf(Destination.LIBRARY)
+
+    /** WP 4b.8: POST_NOTIFICATIONS is a runtime permission on API 33+
+     * (`AndroidManifest.xml`). Must be registered here, not lazily inside a
+     * click handler -- `registerForActivityResult` requires the launcher to
+     * exist before the Activity reaches STARTED, same rule every other
+     * `ActivityResultContract` registration in Android follows. The result
+     * itself needs no handling beyond letting the system remember the
+     * grant/denial: [dev.steamvault.app.notifications.AndroidNotificationPoster]
+     * re-checks the live permission state on every post, so nothing here
+     * needs to react to grant vs. denial explicitly (WP brief: "gracefully
+     * degrade if denied -- the worker still runs, just no visible
+     * notifications"). */
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     /** Latest `GET /v1/jobs` snapshot from WHICHEVER screen is currently
      * polling jobs (Library or Downloads -- both now report through
      * `onJobsSnapshot`, see `LibraryScreen.kt`/`DownloadsScreen.kt`'s own
@@ -141,7 +175,6 @@ class MainActivity : ComponentActivity() {
                         onLaunchSteamLogin = { url -> launchSteamLogin(url) },
                     )
                 } else {
-                    var destination by remember { mutableStateOf(Destination.LIBRARY) }
                     val pendingJobsCount = countPending(pendingJobsSnapshot)
 
                     Scaffold(
@@ -254,6 +287,7 @@ class MainActivity : ComponentActivity() {
                 refreshVaultApiClient()
                 openOnboarding(OnboardingMode.FIRST_RUN)
             },
+            onRequestNotificationPermission = { requestNotificationPermission() },
         )
     }
 
@@ -263,11 +297,16 @@ class MainActivity : ComponentActivity() {
         handleIntent(intent)
     }
 
-    /** Only acts on a redirect matching this app's own OpenID return_to --
-     * see [SteamOpenIdConfig]. Routes to whichever controller currently
-     * owns the visible Steam sign-in flow -- see this class's kdoc and
-     * [settingsControllerState]'s. */
+    /** Dispatches an incoming [Intent] to whichever of this Activity's two
+     * intent-driven entry points it matches (WP 4b.8 added the second):
+     * a Steam OpenID redirect (data URI, see below) or a notification tap
+     * (a plain extra, see [handleNotificationTap]). Neither carries the
+     * other's payload, so the two checks are independent -- a notification
+     * Intent has no `dataString` at all and falls through the first check
+     * immediately. */
     private fun handleIntent(intent: Intent?) {
+        handleNotificationTap(intent)
+
         val data = intent?.dataString ?: return
         if (!data.startsWith(SteamOpenIdConfig.RETURN_TO)) return
 
@@ -295,6 +334,40 @@ class MainActivity : ComponentActivity() {
 
     private fun launchSteamLogin(url: String) {
         CustomTabsIntent.Builder().build().launchUrl(this, Uri.parse(url))
+    }
+
+    /**
+     * WP 4b.8: a tap on a notification posted by
+     * [dev.steamvault.app.notifications.AndroidNotificationPoster] carries
+     * [NotificationRouting.EXTRA_DESTINATION] (a [Destination.name] string,
+     * see that object's kdoc). Ignored while onboarding is showing --
+     * there is no bottom nav to switch yet, and onboarding's own completion
+     * flow already lands on [Destination.LIBRARY] via [refreshVaultApiClient].
+     * An unrecognized/missing extra value is a silent no-op (`enumValueOf`
+     * throwing is caught defensively -- this Intent could in principle be
+     * replayed by anything targeting this exported... no, this activity is
+     * `exported="true"` only for its two intent-filters, but a stale
+     * `PendingIntent` from a previous app version's differently-named enum
+     * constant is a real, if unlikely, forward-compat edge case worth not
+     * crashing on).
+     */
+    private fun handleNotificationTap(intent: Intent?) {
+        val destinationName = intent?.getStringExtra(NotificationRouting.EXTRA_DESTINATION) ?: return
+        if (showOnboarding) return
+        destination = try {
+            Destination.valueOf(destinationName)
+        } catch (_: IllegalArgumentException) {
+            return
+        }
+    }
+
+    /** Launched from [dev.steamvault.app.ui.settings.SettingsScreen]'s
+     * Notifications section. No-op below API 33 -- see
+     * [notificationPermissionLauncher]'s kdoc. */
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33) {
+            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 }
 

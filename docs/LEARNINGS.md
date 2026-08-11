@@ -410,3 +410,14 @@ These are not style preferences; each entry cost a review round to learn.
   host; the residual is REPLAY of a genuine assertion (attacker's own
   account) absent request<->callback binding — record it and plan a
   per-login random state (WP 4b.3 review).
+- Third instance of the pinned-the-fake pattern (4b.2, 4b.3, 4b.8): a
+  test fake that RE-IMPLEMENTS production logic (its own JSON decode +
+  catch) proves nothing about the shipped path. Extract the logic into
+  one shared function called by both production and fake — then the
+  existing test pins the real code (WP 4b.8 review).
+- WorkManager ExistingPeriodicWorkPolicy.KEEP freezes the schedule spec
+  at whatever the FIRST app version enqueued, for the life of the app
+  data — interval/constraint changes never reach existing installs.
+  UPDATE (2.8+) applies changed specs without resetting the period; the
+  common KEEP-vs-REPLACE dichotomy is false on modern WorkManager
+  (WP 4b.8 review).

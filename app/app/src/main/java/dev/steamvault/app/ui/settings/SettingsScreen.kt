@@ -59,6 +59,7 @@ fun SettingsScreen(
     onSignInSteamClick: () -> Unit,
     onReconnectClick: () -> Unit,
     onDisconnected: () -> Unit,
+    onRequestNotificationPermission: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     LaunchedEffect(controller) { controller.load() }
@@ -85,8 +86,42 @@ fun SettingsScreen(
             HorizontalDivider()
             SteamIdentitySection(controller, onSignInSteamClick)
             HorizontalDivider()
+            NotificationsSection(onRequestNotificationPermission)
+            HorizontalDivider()
             ConnectionSection(controller, onReconnectClick, onDisconnected)
         }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Notifications section (WP 4b.8)
+// ---------------------------------------------------------------------
+
+/**
+ * The one piece of UI this WP adds to Settings: an explicit way to trigger
+ * the POST_NOTIFICATIONS runtime prompt on API 33+ (brief: "request from
+ * Settings screen context"). Deliberately minimal -- a button plus context,
+ * always shown regardless of current grant state or SDK level (checking the
+ * live permission state here would need a `LocalLifecycleOwner` resume
+ * observer to refresh after the user returns from the system permission
+ * dialog or app-info screen; out of scope for this WP's "keep it simple"
+ * instruction, and harmless to omit -- tapping an already-granted
+ * permission's request re-shows nothing on Android, and below API 33 the
+ * tap is a documented no-op, per `MainActivity`'s own
+ * `requestNotificationPermission` kdoc).
+ * The background poll itself needs no permission at all and keeps running
+ * either way (`NotificationPollWorker`'s kdoc).
+ */
+@Composable
+private fun NotificationsSection(onRequestNotificationPermission: () -> Unit) {
+    Text(stringResource(R.string.settings_section_notifications), style = MaterialTheme.typography.titleMedium)
+    Text(
+        stringResource(R.string.settings_notifications_desc),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.bodySmall,
+    )
+    OutlinedButton(onClick = onRequestNotificationPermission) {
+        Text(stringResource(R.string.settings_notifications_enable_button))
     }
 }
 

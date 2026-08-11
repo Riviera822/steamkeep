@@ -5,6 +5,15 @@
     <!-- WP 4b.2: the API client talks to vault-api over HTTP(S). -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- WP 4b.8: runtime-requested on API 33+ (Settings screen, see
+         SettingsScreen.kt's Notifications section); below API 33 this
+         permission does not gate anything and notify() just works subject
+         to the user's Settings toggle. NotificationPollWorker still runs
+         (and still updates the persisted snapshot) if this is denied — only
+         the visible notification is skipped, per AndroidNotificationPoster's
+         kdoc. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- allowBackup is deliberately false: a later WP (4b.2) stores a
          vault-api key in this app's private storage. Auto Backup
          (android:allowBackup="true", the default) would ship that key to
@@ -16,6 +25,7 @@
          backup on API 31+, not device-to-device transfer, which needs its
          own exclusion (res/xml/data_extraction_rules.xml). -->
     <application
+        android:name=".VaultApplication"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"

@@ -60,6 +60,26 @@
 ##   declared directly here rather than relied on implicitly, since
 ##   `LibraryScreen.kt` imports its `LocalLifecycleOwner` directly -- the
 ##   non-deprecated replacement for `androidx.compose.ui.platform.LocalLifecycleOwner`).
+##
+## WP 4b.8 additions (notifications via WorkManager):
+## - androidx.work:work-runtime-ktx 2.9.1 is the latest stable 2.9.x
+##   release (2.10.x's floor requires a newer AGP/compileSdk combination
+##   than this project's pinned AGP 8.7.3 bootstrap) -- provides
+##   `CoroutineWorker`/`PeriodicWorkRequestBuilder`/`WorkManager`, the
+##   WorkManager APIs the brief specifically asks for (pinned
+##   PeriodicWorkRequest at the 15-minute floor, NETWORK_CONNECTED
+##   constraint). No `androidx.work:work-testing` dependency was added: it
+##   requires Robolectric or an instrumented device to drive
+##   `TestListenableWorkerBuilder`, neither of which exists in this
+##   environment (app/README.md's "No instrumented tests") -- see
+##   `NotificationPollWorker.kt`'s kdoc for the honest device-test list this
+##   leaves, and `NotificationPollLogic.kt` for the pure decision core that
+##   IS unit-tested instead.
+## - androidx.lifecycle:lifecycle-process, pinned to the SAME 2.8.7 already
+##   used for lifecycle-runtime-ktx/-compose above -- provides
+##   `ProcessLifecycleOwner`, the "process-lifecycle check" the WP 4b.8
+##   brief names as sufficient for the foreground-notification-suppression
+##   rule (`NotificationPollWorker.kt`).
 
 [versions]
 agp = "8.7.3"
@@ -75,6 +95,8 @@ okhttp = "4.12.0"
 securityCrypto = "1.1.0-alpha06"
 androidxBrowser = "1.8.0"
 coil = "2.7.0"
+workRuntime = "2.9.1"
+lifecycleProcess = "2.8.7"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -98,6 +120,8 @@ okhttp-tls = { group = "com.squareup.okhttp3", name = "okhttp-tls", version.ref 
 androidx-security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "securityCrypto" }
 androidx-browser = { group = "androidx.browser", name = "browser", version.ref = "androidxBrowser" }
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
+androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "workRuntime" }
+androidx-lifecycle-process = { group = "androidx.lifecycle", name = "lifecycle-process", version.ref = "lifecycleProcess" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
