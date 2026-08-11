@@ -14,9 +14,10 @@
  *
  * Data flows exclusively through the WP 4a.2 store (store-singleton.js) —
  * no parallel poll loop is created here. Detail-sheet / single-game delete
- * (mockup's `openDetail`) is explicitly WP 4a.4's scope, serial after this
- * one; `onOpen` below is deliberately a no-op for now rather than a
- * fabricated placeholder screen.
+ * (mockup's `openDetail`) is WP 4a.4's scope: `onOpen` below opens
+ * `components/game-detail-sheet.js`'s sheet, this file's one and only
+ * reach into that module (this WP finally owns library.js — see WP 4a.4's
+ * brief).
  *
  * DOM is rebuilt from scratch on every real state change (search, chip,
  * layout, selection, a `GET /v1/games` diff, or a job actually
@@ -42,6 +43,7 @@ import { buildMultiPlan } from "../lib/multiplan.js";
 import { planGamesUpdate } from "../lib/render-plan.js";
 import { formatBytesGB } from "../lib/format.js";
 import { onViewChange } from "../router.js";
+import { openDetail } from "../components/game-detail-sheet.js";
 
 const LAYOUT_STORAGE_KEY = "steamvault.libraryLayout";
 const LAYOUT_CLASS = { grid2: "", grid3: "cols3", list: "list" };
@@ -94,14 +96,31 @@ const state = {
 
 let liveJobsByAppid = indexLiveJobsByAppid(state.jobs);
 
-/** The currently-mounted <section>, or null. `renderLibrary()` is called
- * fresh on every navigation to /library (app.js replaces #view-root's
- * children wholesale, no unmount hook) — store subscriptions below check
- * `mounted()` before touching the DOM so a background tick while a
- * DIFFERENT view is showing is a cheap no-op, not a stale-node crash. */
+/** The currently-mounted <section>, or null. Store-subscription callbacks
+ * check this before touching the DOM so a background tick while a
+ * DIFFERENT view is showing (or after this one was navigated away from) is
+ * a cheap no-op — the `onViewChange` listener near the bottom of this file
+ * is what nulls `sectionEl` out the instant the user leaves Library, which
+ * is the ONLY staleness signal this needs.
+ *
+ * Deliberately NOT also checking `sectionEl.isConnected` (fixed here —
+ * WP 4a.4, tracked fix from WP 4a.5's twin bug in downloads.js, never
+ * landed for this file): `renderLibrary()` builds the section, assigns it
+ * to `sectionEl`, and calls `fullRender()` synchronously, all BEFORE
+ * `app.js`'s `viewRoot.replaceChildren(render())` has attached it to the
+ * document — so at that exact moment `isConnected` is still `false` even
+ * though this genuinely is the current, about-to-be-shown section. Gating
+ * on `isConnected` made the very first paint of every navigation to this
+ * view silently no-op, and — since the WP 4a.3 per-card planner turned
+ * store ticks into patch/rebuild decisions gated on `mounted()` — the bug
+ * stopped self-healing: re-navigating to Library on an idle vault (no games
+ * or jobs tick ever arriving to trigger a fallback full render) left the
+ * grid empty until something else forced a `fullRender()`. See
+ * `views/downloads.js`'s identical fix/rationale (WP 4a.5) for the sibling
+ * bug found and corrected there but never ported here. */
 let sectionEl = null;
 function mounted() {
-  return sectionEl !== null && sectionEl.isConnected;
+  return sectionEl !== null;
 }
 
 /** DOM refs for the currently-built section, reassigned by buildSection().
@@ -141,9 +160,9 @@ function onToggle(appid) {
   fullRender();
 }
 
-function onOpen(/* appid */) {
-  // Detail sheet ships in WP 4a.4 (serial after this one) — intentionally
-  // a no-op rather than a fabricated placeholder screen. See module header.
+function onOpen(appid) {
+  const game = state.games.find((g) => g.appid === appid);
+  openDetail(appid, game?.name);
 }
 
 // ---------------------------------------------------------------------

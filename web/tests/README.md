@@ -270,3 +270,64 @@ against a real `uvicorn` instance instead (see the coder's report).
   `resetDemoData()` clears both). Reuses `lib/steamid.js`/
   `lib/steam-key-form.js`'s validators rather than duplicating the grammar a
   third time.
+
+### WP 4a.4 — Detail sheet + delete flows
+
+Same posture as every prior view: `web/js/components/game-detail-sheet.js`
+(the DOM-building sheet) is not unit-tested directly (see
+`components/sheet-dialog.js`'s header for the general reasoning) — every
+piece of decision logic it leans on is pulled into a pure `web/js/lib/`
+module, ported from the reviewed Android sibling's `ui/detail/logic/`
+package (WP 4b.6) onto plain tagged objects instead of Kotlin sealed
+classes, and tested here.
+
+- `depot-presentation.test.js` — `web/js/lib/depot-presentation.js`: the
+  four-state sharing tag (EXCLUSIVE/PROTECTED/SOLE_HOLDER/**ORPHANED** — the
+  recorded WP 4b.6 divergence this WP adopts, docs/WORKPACKAGES.md's Phase
+  4a header), each state's independence from `thisAppIsHolder` where
+  irrelevant, and co-owner name resolution (`gamesByAppid` lookup, "App
+  {appid}" fallback, `cached` mirroring `holderAppids` membership).
+- `detail-job.test.js` — `web/js/lib/detail-job.js`: `findTrackedJob` is
+  deliberately BROADER than `lib/game-status.js`'s `findLiveJob` (includes
+  `queued`, excludes GC jobs — pause/resume/download are prefill-only
+  concepts) and `detailJobActions`'s exact queued/running/paused ->
+  action-set table from api/README.md's "Job control".
+- `detail-wording.test.js` — `web/js/lib/detail-wording.js`:
+  `confirmedCurrentWording`'s three cases, incl. the post-deletion shape
+  (`last_manifest_check` survives, `last_prefill_at` does not) rendering as
+  `CONFIRMED_BEFORE_CACHE_CLEARED` rather than a bare, contradiction-reading
+  timestamp.
+- `gc-log-summary.test.js` — `web/js/lib/gc-log-summary.js`: fixtures are
+  the EXACT log text api/README.md quotes for a dry run and an executed run
+  (same fixtures the Android sibling's `GcLogSummaryTest.kt` pins) —
+  null/blank/no-totals-line input, dry-run `would_delete`/`held_back`
+  scoped to the TOTALS line (not an earlier per-depot `held_back` with the
+  same key name), the `\b`-guarded `bytes_freed` vs. the `dedupe_`/`total_`
+  prefixed lookalikes regardless of key order.
+- `gc-flow.test.js` — `web/js/lib/gc-flow.js`: the state machine's one
+  guarantee (GC EXECUTE is never sent without an explicit confirm after a
+  dry run) as a full parametrised pin — `confirm_execute`/`request_execute`
+  rejected from every state except their one accepting predecessor — plus
+  the full dry-run-then-execute path, cancellation mid-poll (Cancelled, not
+  Error), a stale poll result for a different job id being ignored in BOTH
+  polling states, and `start_dry_run`'s Idle/ExecuteDone/Error/Cancelled ->
+  accepted, everything mid-flight -> rejected table.
+- `detail-render-plan.test.js` — `web/js/lib/detail-render-plan.js`: the
+  round-7 patch-vs-rebuild structural key for the sheet (WP brief: "must
+  not rebuild animated nodes on poll ticks"). Two named mutation targets —
+  a `dispKind` change and a depot's sharing TAG changing (a co-owner's cache
+  state moved) must each change the key — plus a `trackedJobStatus`
+  change, and the documented fact that a size-only tick is simply not part
+  of the key's inputs at all (the caller never feeds bytes into it).
+- `demo-data-gc.test.js` extends `demo-data.js`'s coverage with this WP's
+  additions: `last_manifest_check` now appears on `GET /v1/games` AND
+  `GET /v1/games/{appid}` (it was missing entirely before this WP, a real
+  gap since the field has existed on the real API since the WP 4c mini-WP);
+  `POST /v1/cache/{appid}/gc` — dry run default, `{execute:true}`, 404s
+  (unknown app / no depot mappings), 422s (unrecognised field / non-boolean
+  `execute` — no lax-mode coercion), the documented absence of a `409` for
+  an active prefill job (GC serializes on the worker in the real API, so
+  there is nothing to guard against), dry-run/execute mode-scoped dedupe,
+  and a completed job's `log_excerpt` being REAL `GC totals (...)` text
+  `lib/gc-log-summary.js` parses correctly end to end (not a fixture string
+  tailored to the parser).

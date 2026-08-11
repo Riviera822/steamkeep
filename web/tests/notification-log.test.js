@@ -152,8 +152,12 @@ test("navigationTargetFor: job_finished and job_failed both go to Downloads, car
   });
 });
 
-test("navigationTargetFor: update_ready goes to the Library", () => {
-  assert.deepEqual(navigationTargetFor({ type: "update_ready", appid: 42 }), { kind: "library" });
+test("navigationTargetFor: update_ready opens the detail sheet, carrying appid/name (WP 4a.4 target upgrade)", () => {
+  assert.deepEqual(navigationTargetFor({ type: "update_ready", appid: 42, name: "Nebula Drift" }), {
+    kind: "detail",
+    appid: 42,
+    name: "Nebula Drift",
+  });
 });
 
 test("navigationTargetFor: bypass_suspected and bypass_resolved both open the clients sheet", () => {

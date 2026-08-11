@@ -306,9 +306,14 @@ body.selecting .card .pick{ display:grid; }
 /* ---------- bulk-delete confirm dialog ----------
    `position:fixed`, viewport-centered (mockup: phone-frame-relative
    `absolute` + a box-shadow spread standing in for a scrim; this app uses
-   a real backdrop element instead — see the dialog markup in library.js). */
+   a real backdrop element instead — see the dialog markup in library.js).
+   z-index 45, ABOVE .sheet-backdrop's 40 (WP 4a.4 finding: the detail
+   sheet's delete/GC-execute confirm dialogs reuse this class and must
+   render on top of the open sheet behind them, not underneath it — a
+   lower z-index here made both confirms genuinely unopenable through the
+   sheet, found live rather than by inspection). */
 .dialog-backdrop{
-  position:fixed; inset:0; z-index:30; background:rgba(3,7,10,.62);
+  position:fixed; inset:0; z-index:45; background:rgba(3,7,10,.62);
   display:none; align-items:center; justify-content:center; padding:22px;
 }
 .dialog-backdrop.on{ display:flex; }
@@ -655,3 +660,57 @@ body.onboarding .nav{ display:none; }
 .jobcard .hint{ text-align:left; margin:9px 0 0; }
 .tx-stale{ color:var(--stale); }
 .tx-warn{ color:var(--stale); }
+
+/* ============================================================
+   Game detail sheet (WP 4a.4)
+   Reuses the WP 4a.7 .sheet-backdrop/.sheet scaffold (sheet-dialog.js) and
+   views/library.js's own .dialog-backdrop/.dialog/.cflist/.cflabel/.cftotal/
+   .cfsolo delete-confirm classes verbatim (single-game and bulk delete
+   share one visual vocabulary). Depot/co-owner class names follow the
+   mockup 1:1 (.dhead/.facts/.depots/.depotwrap/.depot/.owners/.orow/.olabel/
+   .ohint/.unknown, docs/design/vault-app-mockup.html) where the shell
+   doesn't already own the name.
+   ============================================================ */
+
+.dhead{ display:flex; gap:13px; align-items:flex-start; margin-bottom:6px; }
+.dhead .cap{ width:78px; flex:none; }
+.dhead h2{ margin:0 0 3px; font-size:19px; letter-spacing:-.3px; line-height:1.15; text-wrap:balance; }
+.dhead .appid{ font-family:var(--mono); font-size:11px; color:var(--dim-2); }
+.detail-statusrow{ display:flex; align-items:center; gap:6px; font-size:12px; margin-top:6px; }
+
+.detail-block{ margin-top:14px; }
+.facts{ display:flex; flex-direction:column; gap:3px; font-size:11.8px; color:var(--dim); }
+
+.depots{ display:flex; flex-direction:column; gap:1px; background:var(--line-soft); border-radius:var(--r-s); overflow:hidden; }
+.depotwrap{ background:var(--raised); }
+.depot{ display:flex; align-items:center; gap:9px; padding:9px 11px; font-size:12.5px; }
+.depotwrap.sh .depot{ cursor:pointer; }
+.depotwrap.sh .depot:hover{ background:var(--raised-2); }
+.depot .id{ font-family:var(--mono); font-size:12px; color:var(--text); font-variant-numeric:tabular-nums; }
+.depot .tag{
+  font-size:9.5px; text-transform:uppercase; letter-spacing:.5px; font-weight:600;
+  color:var(--stale); border:1px solid rgba(239,143,60,.4); border-radius:5px; padding:1px 5px;
+}
+.depot .b{ margin-left:auto; font-family:var(--mono); font-size:11.5px; color:var(--dim); font-variant-numeric:tabular-nums; }
+.depot .chev{ color:var(--dim-2); display:grid; place-items:center; transition:transform .18s; }
+.depotwrap.open .chev{ transform:rotate(90deg); }
+
+.owners{ display:none; padding:2px 11px 11px; }
+.depotwrap.open .owners{ display:block; }
+.olabel{ margin:0 0 6px; font-size:9.5px; font-weight:700; letter-spacing:.8px; text-transform:uppercase; color:var(--dim-2); }
+.orow{ display:flex; align-items:center; gap:8px; padding:4px 0; font-size:12px; }
+.orow .on{ color:var(--text); }
+.orow .os{ margin-left:auto; font-size:10px; text-transform:uppercase; letter-spacing:.4px; color:var(--dim-2); }
+.orow.off .on{ color:var(--dim-2); }
+.ohint{ margin:7px 0 0; font-size:10.5px; line-height:1.5; color:var(--dim-2); }
+
+.unknown{ border:1px dashed var(--line); border-radius:var(--r-m); padding:14px 13px; }
+.unknown .u1{ margin:0 0 7px; font-size:13px; font-weight:600; color:var(--text); }
+.unknown .u2{ margin:0; font-size:11.5px; line-height:1.55; color:var(--dim); }
+
+.errline{ margin:8px 0 0; font-size:12px; line-height:1.5; color:var(--danger); }
+
+.detail-log{
+  font-family:var(--mono); font-size:10.5px; line-height:1.65; color:var(--dim);
+  white-space:pre-wrap; word-break:break-word; margin-top:2px;
+}

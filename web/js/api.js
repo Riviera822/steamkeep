@@ -148,9 +148,15 @@ export async function request(method, path, { body, params, signal } = {}) {
  * to diff-utils.js / notifications.js keyed the same way the server keys it.
  *
  * Deliberately NOT wrapped here (out of this WP's scope — no current
- * consumer needs them yet): /v1/oracle*, /v1/schedule, /v1/stats,
- * /v1/cache/{appid}/gc. Add them with the WP that first needs them rather
- * than guessing their call shape now.
+ * consumer needs them yet): /v1/oracle*, /v1/schedule, /v1/stats. Add them
+ * with the WP that first needs them rather than guessing their call shape
+ * now.
+ *
+ * `gc` (WP 4a.4) mirrors the Android sibling's `CacheRepository.gc`
+ * semantics exactly: `execute` defaults to `false` (dry run) on both sides,
+ * matching the server's "dry run in three independent places" rule
+ * (api/README.md "Garbage collection") — a caller must pass `execute: true`
+ * explicitly to ever queue a deleting run.
  *
  * `mapping` (WP 4a.3) IS wrapped here: the Library view's bulk-delete
  * confirm dialog needs the full depot->app table to compute the set-aware
@@ -178,6 +184,7 @@ export const api = {
   pauseJob: (id) => request("POST", `/v1/jobs/${id}/pause`),
   resumeJob: (id) => request("POST", `/v1/jobs/${id}/resume`),
   deleteCache: (appid) => request("DELETE", `/v1/cache/${appid}`),
+  gc: (appid, execute = false) => request("POST", `/v1/cache/${appid}/gc`, { body: { execute } }),
   cacheSummary: () => request("GET", "/v1/cache/summary"),
   clients: () => request("GET", "/v1/clients"),
   getSettings: () => request("GET", "/v1/settings"),

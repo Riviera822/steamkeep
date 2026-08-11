@@ -548,6 +548,19 @@ parallel/serial decisions, merge discipline, open user decisions):
       session-only log recorded as divergences; original coder hung in
       live verification and was replaced by a finisher who fixed two
       real gaps; 286 headless tests; Opus PASS, 13/13 mutations)*
+      *(WP 4a.4 done 2026-08-11: game detail sheet on the 4a.7
+      sheet-dialog — four-state depot sharing (adopts the recorded
+      ORPHANED divergence), survives-deletion wording branch, job
+      control incl. queued, single-game delete via multiplan with
+      server-reported bytes, GC dry-run→plan→confirm→execute porting
+      the reviewed Android reducer (execute only via plan+confirm,
+      job-id-bound generation-guarded polling — fork-free), GC-totals
+      scrape with load-bearing after-header scoping and \b insurance
+      verified against gc_execute.py; update_ready notifications now
+      target the detail sheet (4a.7 TODO closed); includes the tracked
+      library.js mounted() fix (empty-grid-on-renavigation regression);
+      demo games routes gained the missing last_manifest_check; 351
+      headless tests; Opus PASS, 15/15 mutations)*
 - [ ] Steam identity via Sign in with Steam (ADR-0004); library fetch per
       the 2026-08-09 addendum (user decision A+C): opt-in server-side relay
       because the Steam Web API sends no CORS headers — Android keeps the

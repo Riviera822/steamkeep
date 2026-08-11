@@ -44,12 +44,33 @@ function isoAgo(msAgo) {
 // Seed data
 // ---------------------------------------------------------------------
 
-function makeGame({ appid, name, status, needsForce = false, depots = [] }) {
+function makeGame({
+  appid,
+  name,
+  status,
+  needsForce = false,
+  depots = [],
+  // WP 4a.4: `apps.last_manifest_check` (api/README.md "Job outcome
+  // honesty") — set on only two seed games below to exercise all three
+  // `lib/detail-wording.js` branches without inventing a fourth game just
+  // for this field. `null` (the default) is the common case: an ordinary
+  // run that actually changed depots leaves it untouched, so most demo
+  // games are honestly "never confirmed" even while `status: "done"`.
+  lastManifestCheck = null,
+  // WP 4a.4 demo-only: bytes a GC dry run "discovers" as reclaimable for
+  // this app, purely so the GC flow has something to show in demo mode —
+  // never serialized into any response (see gcHandler below). Real
+  // vault-api computes this from a manifest diff (`gc.py`); the demo model
+  // tracks no manifests at all, so this is a deliberately simple stand-in,
+  // not an approximation of the real algorithm.
+  gcReclaimableBytes = 0,
+}) {
   return {
     appid,
     name,
     status,
     last_prefill_at: status === "idle" ? null : isoAgo(3 * 3_600_000),
+    last_manifest_check: lastManifestCheck,
     needs_force: needsForce,
     // Doubles as both "mapping rows" and "cache state" for this depot in the
     // demo model (the real vault-api keeps those two facts separately —
@@ -58,6 +79,7 @@ function makeGame({ appid, name, status, needsForce = false, depots = [] }) {
     // /v1/cache/{appid} handler below for where that would matter and how
     // it is approximated.
     depots,
+    _demoGcReclaimableBytes: gcReclaimableBytes,
   };
 }
 
@@ -68,6 +90,9 @@ function buildGames() {
       name: "Aurora Cascade",
       status: "done",
       depots: [{ depotid: 2010011, shared: false, size_bytes: 4_200_000_000 }],
+      // Gives the GC dry-run flow something honest to find on the first
+      // check (WP 4a.4 live-verification fixture) — see makeGame()'s header.
+      gcReclaimableBytes: 120_000_000,
     }),
     makeGame({
       appid: 2010020,
@@ -75,6 +100,13 @@ function buildGames() {
       status: "idle",
       needsForce: true,
       depots: [],
+      // WP 4a.4: last_manifest_check SURVIVING a null last_prefill_at is
+      // exactly the post-deletion shape api/README.md documents — this game
+      // was once prefilled and confirmed current, then had its cache
+      // deleted (needsForce: true is the other half of that same story).
+      // Exercises lib/detail-wording.js's CONFIRMED_BEFORE_CACHE_CLEARED
+      // branch ("Confirmed current at X (before the cache was cleared)").
+      lastManifestCheck: isoAgo(2 * 86_400_000),
     }),
     makeGame({
       appid: 2010030,
@@ -101,6 +133,10 @@ function buildGames() {
       name: "Frostline Convoy",
       status: "done",
       depots: [{ depotid: 2010060, shared: true, size_bytes: 300_000_000 }],
+      // WP 4a.4: the ordinary CONFIRMED case — both timestamps present.
+      // Exercises lib/detail-wording.js's CONFIRMED branch ("Confirmed
+      // current at X").
+      lastManifestCheck: isoAgo(3_600_000),
     }),
     makeGame({
       appid: 2010070,
@@ -509,6 +545,12 @@ function gameSummary(g) {
     name: g.name,
     status: g.status,
     last_prefill_at: g.last_prefill_at,
+    // WP 4a.4: was missing from this projection entirely — the real
+    // GameSummary model (api/vault_api/routers/games.py) has carried this
+    // field since the WP 4c mini-WP, and the detail sheet's "confirmed
+    // current" wording (lib/detail-wording.js) needs it to exercise all
+    // three branches in demo mode.
+    last_manifest_check: g.last_manifest_check,
     depot_count: g.depots.length,
     size_bytes: appSizeBytes(g.depots),
     needs_force: g.needs_force,
@@ -521,6 +563,7 @@ function gameDetail(g) {
     name: g.name,
     status: g.status,
     last_prefill_at: g.last_prefill_at,
+    last_manifest_check: g.last_manifest_check,
     depots: g.depots.map(({ depotid, shared, size_bytes }) => ({
       depotid,
       shared,
@@ -579,15 +622,26 @@ function findJob(id) {
   return jobs.find((j) => j.id === id);
 }
 
-/** Advance one running job a step closer to "done" (see _demoTicksLeft above). */
+/** Advance one running job a step closer to "done" (see _demoTicksLeft above).
+ * Branches on `job.type` (WP 4a.4 addition) — a "gc" job never touches
+ * `apps.status`/`last_prefill_at` (api/README.md "Garbage collection": "What
+ * a GC job does to app state: nothing to apps.status or last_prefill_at"),
+ * so it needs its own completion path rather than falling through the
+ * prefill one below. */
 function advanceJob(job) {
   if (job.status !== "running" || typeof job._demoTicksLeft !== "number") return;
   job._demoTicksLeft -= 1;
   if (job._demoTicksLeft > 0) return;
 
   delete job._demoTicksLeft;
-  job.status = "done";
   job.finished_at = new Date().toISOString();
+
+  if (job.type === "gc") {
+    finishGcJob(job);
+    return;
+  }
+
+  job.status = "done";
   job.updated = 1;
   job.up_to_date = 0;
   job.summary_parse_ok = true;
@@ -598,6 +652,40 @@ function advanceJob(job) {
     game.status = "done";
     game.last_prefill_at = job.finished_at;
     game.needs_force = false;
+  }
+}
+
+/**
+ * Complete a GC job (WP 4a.4) with a log_excerpt shaped exactly like the
+ * real `GC totals (DRY RUN)`/`GC totals (EXECUTED)` lines api/README.md
+ * quotes and `lib/gc-log-summary.js` scrapes — so demo mode exercises the
+ * REAL parser, not a fixture tailored to it.
+ *
+ * The demo model tracks no manifests at all, so "what is reclaimable" is a
+ * single per-game counter (`_demoGcReclaimableBytes`, see makeGame()'s
+ * header) rather than a real orphan-chunk scan: a dry run reports it, an
+ * execute run "collects" it (decrementing the counter to 0) — so a second
+ * dry run against the same game honestly reports nothing left to find,
+ * matching the real endpoint's "the plan is built when the job runs" and
+ * "an executing run... invalidates the size cache" behaviour without
+ * pretending to model chunk-level accounting.
+ */
+function finishGcJob(job) {
+  job.status = "done";
+  const game = findGame(job.appid);
+  const reclaimable = game ? game._demoGcReclaimableBytes || 0 : 0;
+
+  if (job.gc_execute) {
+    const chunksRemoved = reclaimable > 0 ? 1 : 0;
+    job.log_excerpt +=
+      `\n[vault-api] GC totals (EXECUTED): chunks_removed=${chunksRemoved} ` +
+      `bytes_freed=${reclaimable} total_bytes_freed=${reclaimable}`;
+    if (game) game._demoGcReclaimableBytes = 0;
+  } else {
+    const wouldDelete = reclaimable > 0 ? 1 : 0;
+    job.log_excerpt +=
+      `\n[vault-api] GC totals (DRY RUN): would_delete=${wouldDelete} (${reclaimable} bytes) ` +
+      "held_back=0 (0 bytes)";
   }
 }
 
@@ -624,6 +712,7 @@ const JOB_PAUSE_RE = /^\/v1\/jobs\/(\d+)\/pause$/;
 const JOB_RESUME_RE = /^\/v1\/jobs\/(\d+)\/resume$/;
 const GAME_ID_RE = /^\/v1\/games\/(\d+)$/;
 const CACHE_APPID_RE = /^\/v1\/cache\/(\d+)$/;
+const GC_APPID_RE = /^\/v1\/cache\/(\d+)\/gc$/;
 
 function jobControlResponse(job, { status, outcome, detail }) {
   job.status = status;
@@ -908,6 +997,81 @@ export async function demoRequest(method, path, { body, params } = {}) {
       skipped_shared: skippedShared,
       failed: [],
       total_bytes_freed: totalBytesFreed,
+    };
+  }
+
+  // WP 4a.4: POST /v1/cache/{appid}/gc — mirrors api/README.md's
+  // "Garbage collection" section: 404 for an unknown app or one with no
+  // depot mappings (same reasoning/wording as DELETE), a 422-shaped
+  // rejection for an unrecognised body field or a non-boolean `execute`
+  // (StrictBool posture — see vault_api/routers/cache.py's GcRequest kdoc),
+  // and — the one deliberate difference from DELETE — NO 409 for an active
+  // job (the real endpoint queues onto the single worker, which serializes
+  // GC against prefills by construction; see that router's "No 409 for an
+  // active job" note). Dedupe is scoped to the SAME mode (a dry run and an
+  // execute run never dedupe into each other, `jobs.enqueue_gc`'s rule).
+  if (method === "POST" && (m = path.match(GC_APPID_RE))) {
+    const appid = Number(m[1]);
+    const game = findGame(appid);
+    if (!game) {
+      throw notFound(`Unknown appid ${appid} — vault-api tracks no such app, so there is nothing to garbage-collect.`);
+    }
+    if (game.depots.length === 0) {
+      throw notFound(`App ${appid} has no depot mappings, so there is nothing to garbage-collect.`);
+    }
+    if (body != null) {
+      const unknown = Object.keys(body).filter((k) => k !== "execute");
+      if (unknown.length) throw validationError(`unrecognised field(s) in GC request body: ${unknown.join(", ")}`);
+      if ("execute" in body && typeof body.execute !== "boolean") {
+        throw validationError("'execute' must be a literal JSON boolean.");
+      }
+    }
+    const execute = !!(body && body.execute);
+
+    const existing = jobs.find(
+      (j) => j.appid === appid && j.type === "gc" && j.gc_execute === execute && ["queued", "running", "paused"].includes(j.status),
+    );
+    if (existing) {
+      return {
+        appid,
+        job_id: existing.id,
+        status: existing.status,
+        type: "gc",
+        mode: execute ? "execute" : "dry-run",
+        execute,
+        deduplicated: true,
+      };
+    }
+
+    const job = {
+      id: nextJobId++,
+      appid,
+      type: "gc",
+      status: "queued",
+      created_at: new Date().toISOString(),
+      started_at: null,
+      finished_at: null,
+      updated: null,
+      up_to_date: null,
+      summary_parse_ok: null,
+      gc_execute: execute,
+      paused_at: null,
+      stop_request: null,
+      log_excerpt: `[vault-api] GC for app ${appid}: ${execute ? "EXECUTE" : "DRY RUN"}.`,
+      _demoTicksLeft: 1,
+    };
+    jobs.unshift(job);
+    job.status = "running";
+    job.started_at = job.created_at;
+
+    return {
+      appid,
+      job_id: job.id,
+      status: job.status,
+      type: "gc",
+      mode: execute ? "execute" : "dry-run",
+      execute,
+      deduplicated: false,
     };
   }
 

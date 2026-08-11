@@ -29,6 +29,7 @@ import { createStatusIcon } from "./status-icon.js";
 import { createSheetDialog } from "./sheet-dialog.js";
 import { openClientsSheet } from "./clients-sheet.js";
 import { highlightJob } from "../views/downloads.js";
+import { openDetail } from "./game-detail-sheet.js";
 import { formatTimestamp } from "../lib/format.js";
 import {
   metaFor,
@@ -113,6 +114,7 @@ function destinationText(entry) {
   const target = navigationTargetFor(entry);
   if (target.kind === "downloads") return "Opens this job in Downloads";
   if (target.kind === "clients") return "Opens the client list";
+  if (target.kind === "detail") return "Opens this game's detail sheet";
   return "Opens the Library";
 }
 
@@ -199,6 +201,13 @@ function activate(entry) {
     highlightJob(target.jobId);
   } else if (target.kind === "clients") {
     openClientsSheet();
+  } else if (target.kind === "detail") {
+    // WP 4a.4 target upgrade (the recorded WP 4a.7 TODO): navigate to
+    // Library first (the detail sheet is a modal surface over it, same as
+    // every other view it can be opened from) so closing the sheet leaves
+    // the user somewhere sensible, then open it.
+    navigateTo("library");
+    openDetail(target.appid, target.name || gameNameFor(target.appid));
   } else {
     navigateTo("library");
   }

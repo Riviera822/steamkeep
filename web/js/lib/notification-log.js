@@ -132,29 +132,36 @@ export function markAllRead(log) {
  *
  * Adapted from the mockup's own targets (game detail sheet / clients sheet
  * / Downloads history row) onto what the REAL app can actually do without
- * reaching into web/js/views/library.js (this WP's explicit constraint):
- * WP 4a.4's detail sheet has not shipped, so there is nowhere to deep-link
- * a single game into — `update_ready` (and, for the same reason,
- * `job_finished`/`job_failed`) resolve to the best real surface instead:
- * a finished/failed job's own history row lives in Downloads regardless of
- * whether it succeeded or failed, so both land there; a game turning stale
- * has no per-game destination available yet, so it opens the Library (the
- * view that lists it) rather than fabricating a target that doesn't exist.
+ * reaching into web/js/views/library.js (the WP 4a.7 constraint this table
+ * was first written under): a finished/failed job's own history row lives
+ * in Downloads regardless of whether it succeeded or failed, so both land
+ * there; a client bypass event opens the clients sheet.
+ *
+ * **`update_ready` target upgrade (WP 4a.4, the recorded WP 4a.7 TODO):**
+ * now that the detail sheet exists (`components/game-detail-sheet.js`), a
+ * game turning stale has a real per-game destination to deep-link into —
+ * `update_ready`'s diffed event already carries `appid`/`name`
+ * (`notifications.js`'s `diffGamesForNotifications`), so no new data is
+ * needed to open it there instead of the whole Library view.
  */
 const NAVIGATION_KIND = Object.freeze({
   job_finished: "downloads",
   job_failed: "downloads",
-  update_ready: "library",
+  update_ready: "detail",
   bypass_suspected: "clients",
   bypass_resolved: "clients",
 });
 
 /**
  * @param {object} entry a log entry (event fields + id/read/at)
- * @returns {{kind: "downloads", jobId: number} | {kind: "library"} | {kind: "clients"}}
+ * @returns {{kind: "downloads", jobId: number} | {kind: "detail", appid: number, name?: string} | {kind: "clients"} | {kind: "library"}}
  */
 export function navigationTargetFor(entry) {
+  // Fails toward the Library, not a crash, for anything this table doesn't
+  // recognize (same posture "detail" itself couldn't have without an
+  // appid) — unchanged from before the update_ready upgrade.
   const kind = (entry && NAVIGATION_KIND[entry.type]) || "library";
   if (kind === "downloads") return { kind, jobId: entry.jobId };
+  if (kind === "detail") return { kind, appid: entry.appid, name: entry.name };
   return { kind };
 }
