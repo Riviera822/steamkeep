@@ -52,6 +52,9 @@ import dev.steamvault.app.repo.JobsRepository
 import dev.steamvault.app.repo.MappingRepository
 import dev.steamvault.app.repo.SteamIdentityRepository
 import dev.steamvault.app.storage.LibraryPreferences
+import dev.steamvault.app.ui.detail.AndroidDetailStrings
+import dev.steamvault.app.ui.detail.DetailController
+import dev.steamvault.app.ui.detail.GameDetailSheet
 import dev.steamvault.app.ui.library.logic.ChipCount
 import dev.steamvault.app.ui.library.logic.GameCardModel
 import dev.steamvault.app.ui.library.logic.LibraryLayout
@@ -59,10 +62,12 @@ import dev.steamvault.app.ui.library.logic.StatusActionType
 import dev.steamvault.app.ui.library.logic.buildGameCardModel
 import dev.steamvault.app.ui.library.logic.chipCounts
 import dev.steamvault.app.ui.library.logic.indexLiveJobsByAppid
+import dev.steamvault.app.ui.library.logic.isKnownToVault
 import dev.steamvault.app.ui.library.logic.mergeLibrary
 import dev.steamvault.app.ui.library.logic.normalizeQuery
 import dev.steamvault.app.ui.library.logic.visibleGames
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * The Library screen (WP 4b.4 brief): grid/list layouts, search + chips,
@@ -108,6 +113,18 @@ fun LibraryScreen(
             identityRepository,
             libraryPreferences,
             AndroidLibraryStrings(resources),
+        )
+    }
+    // WP 4b.6: the detail sheet opened from a library card. Shares this
+    // screen's lifecycle/repos rather than owning its own -- it is only
+    // ever reachable from here (see `GameDetailSheet.kt`'s kdoc).
+    val detailController = remember {
+        DetailController(
+            gamesRepository,
+            jobsRepository,
+            mappingRepository,
+            cacheRepository,
+            AndroidDetailStrings(resources),
         )
     }
 
@@ -191,7 +208,10 @@ fun LibraryScreen(
                     layout = controller.layout,
                     models = cardModels,
                     selecting = controller.selecting,
-                    onOpen = { /* detail sheet ships in WP 4b.6 -- no-op for now */ },
+                    onOpen = { appid ->
+                        val game = merged.firstOrNull { it.appid == appid }
+                        detailController.open(scope, appid, game?.name, game?.let { isKnownToVault(it) } ?: false)
+                    },
                     onLongPress = { controller.enterSelect(it) },
                     onToggleSelect = { controller.toggleSelect(it) },
                     onAction = { appid, actionType -> controller.onCardAction(scope, appid, actionType) },
@@ -202,6 +222,19 @@ fun LibraryScreen(
 
     if (controller.deletePlan !is DeletePlanUiState.Hidden) {
         DeleteConfirmDialog(controller = controller, scope = scope)
+    }
+
+    if (detailController.openAppid != null) {
+        GameDetailSheet(
+            controller = detailController,
+            games = controller.games,
+            jobs = controller.jobs,
+            scope = scope,
+            onLibraryChanged = {
+                scope.launch { controller.refreshGamesOnce() }
+                scope.launch { controller.refreshJobsOnce() }
+            },
+        )
     }
 }
 

@@ -106,6 +106,22 @@ fun hasProtectedCacheContent(game: GameSummary, hasActiveJob: Boolean): Boolean 
     hasProtectedCacheContent(game.status, game.last_prefill_at, hasActiveJob)
 
 /**
+ * Does this appid have a real `apps` table row at all (WP 4b.4's
+ * [dev.steamvault.app.ui.library.logic.GameCardModel.isKnownToVault] kdoc:
+ * "reserved for the detail sheet (WP 4b.6) to decide whether a depot list /
+ * delete action exists at all" -- extracted here, WP 4b.6, so
+ * [GameCardModel]'s own `buildGameCardModel` and the detail sheet's
+ * `DetailController.open` share exactly one formula instead of two
+ * hand-copied ones drifting apart). A synthetic [mergeLibrary] row for a
+ * Steam-owned-but-never-prefilled game is built with `depot_count = 0`,
+ * `last_prefill_at = null`, `status = "idle"` specifically so this returns
+ * `false` for it (api/README.md: "the apps row is created at enqueue") —
+ * `GET /v1/games/{appid}` would 404 for such an appid today.
+ */
+fun isKnownToVault(game: GameSummary): Boolean =
+    game.depot_count > 0 || game.last_prefill_at != null || game.status != "idle"
+
+/**
  * The status a card should SHOW: a live job overrides the cache state.
  * @param game GameSummary
  * @param liveJob from [indexLiveJobsByAppid], or `null`

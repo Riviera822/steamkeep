@@ -1099,3 +1099,38 @@ phone against a real vault-api before it can be called confirmed:
 - **No update-check affordance anywhere on this screen** — Phase 4c guard
   (binding): a refresh only ever re-polls `GET /v1/jobs`/`GET /v1/games`,
   never triggers or checks for a download on its own initiative.
+
+## Game detail sheet (WP 4b.6)
+
+Serial after 4b.4 per `docs/WORKPACKAGES.md` Phase 4b. Adds the sheet opened
+from a Library card (`ui/detail/`): cover/name/status, sizes, the honest
+last-download/confirmed-current wording, per-depot sharing (computed live
+from `buildMultiPlan`/`buildDepotPresentation`, never stored — mockup round
+3), download/pause/resume/cancel for the app's own tracked job, delete with
+a per-depot freed/kept preview (literally `buildMultiPlan(listOf(appid),
+...)`, so it cannot drift from the Library's bulk-delete arithmetic), and a
+dry-run → confirm → execute GC flow (`ui/detail/logic/GcFlow.kt`'s state
+machine) that can never reach `execute=true` without an explicit second
+confirm after a completed dry run.
+
+**Recorded divergence — a fourth depot-sharing state, `ORPHANED`, beyond the
+mockup's three (same class of documented deviation as the WP 4b.5
+slot-release divergence above, and the WP 4a.5/4b.5 `cancelled` status-icon
+divergences in `docs/WORKPACKAGES.md`'s Phase 4a header — docs/LEARNINGS.md
+requires deviations from the frozen mockup to be recorded, not just
+kdoc'd).** The mockup only ever distinguishes `shared` (kept) from `shared ·
+sole holder` (the viewed game is the last cached holder, deleting frees it —
+round 5). It never modeled a THIRD case the real API's ADR-0003 last-remnant
+rule makes reachable: a game that has ALREADY been deleted keeps its mapping
+rows by design (`DELETE /v1/cache/{appid}` "mapping rows survive deletion"),
+so opening its detail sheet again can show a shared depot where NEITHER the
+viewed game NOR any of its co-owners currently has cache content — the exact
+"previously deleted game, mapping intact, nothing on disk" shape
+`vault-app-mockup-NOTES.md`'s own sample-data note seeds for Meridian Rally,
+just reached from the real deletion flow instead of authored fixture data.
+Tagging that case `SOLE_HOLDER` would be dishonest (the viewed game holds
+nothing to protect by deleting further); the sheet reports it as `ORPHANED`
+("Shared · no cached owner") instead — see
+`ui/detail/logic/DepotPresentation.kt`'s kdoc and `DepotPresentationTest`'s
+"shared, no other holder, THIS app also does not hold it" case for the exact
+condition (`row.free && !thisAppIsHolder`).

@@ -94,6 +94,6 @@ fun buildGameCardModel(
         fallbackPattern = fallbackPattern(game.appid),
         action = statusAction(game, liveJob, selecting),
         selected = selected,
-        isKnownToVault = game.depot_count > 0 || game.last_prefill_at != null || game.status != "idle",
+        isKnownToVault = isKnownToVault(game),
     )
 }

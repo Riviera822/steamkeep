@@ -140,6 +140,14 @@ candidate for the WP 4a.8 polish pass. Shared test gap to close on both
 sides then: the log-excerpt truncation marker must be pinned to
 position 0 (startsWith, not contains).
 
+Recorded divergence (WP 4b.6, 2026-08-11, reviewer-endorsed): the depot
+sharing presentation has a FOURTH state beyond the mockup's three —
+ORPHANED, for a shared depot whose co-owning apps all have no cache
+content (ADR-0003 last-remnant case, the mockup's Meridian Rally
+scenario). Collapsing it into "sole holder" would state a falsehood
+(the viewed game holds nothing). Web 4a.4 adopts the same four-state
+wording when it builds the detail sheet. User veto welcome.
+
 Recorded divergence (WP 4a.5, 2026-08-10, reviewer-endorsed, same class):
 a `cancelled` status-icon kind exists (distinct stop glyph, neutral
 colour, own screen-reader word) because `cancelled` is a real terminal

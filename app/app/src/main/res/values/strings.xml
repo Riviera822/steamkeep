@@ -213,4 +213,107 @@
         <item quantity="one">Idle · %1$d in history</item>
         <item quantity="other">Idle · %1$d in history</item>
     </plurals>
+
+    <!-- Game detail sheet (WP 4b.6). Job-control button labels/notes are
+         deliberately NOT duplicated here - the sheet reuses
+         downloads_action_*/downloads_stopnote_* (same wording, one job-
+         control vocabulary across both screens); the delete confirm dialog
+         reuses library_delete_* the same way (single-game delete is the
+         same dialog shape as bulk delete with one id, LibraryBulkBar.kt's
+         DeletePlanBody). -->
+    <string name="detail_load_error">Could not reach vault-api: %1$s</string>
+
+    <string name="detail_not_tracked_title">Not on the vault yet</string>
+    <string name="detail_not_tracked_body">This game has never been downloaded to the vault, so nothing is known about it yet beyond its name.</string>
+    <string name="detail_depots_unknown">Depots unknown until the first download.</string>
+
+    <string name="detail_last_download">Last download: %1$s</string>
+    <string name="detail_never_downloaded">Never downloaded</string>
+    <!-- ADR/WP 4c rule (docs/LEARNINGS.md "Web UI" section, last_manifest_check
+         mini-WP): "confirmed current at X", NEVER "checked at X" - this
+         column is only stamped on a run that CONFIRMED the app already
+         current, not on every run, and it survives a cache deletion unlike
+         last_prefill_at. -->
+    <string name="detail_confirmed_current">Confirmed current at %1$s</string>
+    <!-- WP 4b.6 review fix S4: the post-deletion shape (last_prefill_at
+         cleared, last_manifest_check deliberately kept, api/README.md
+         "Per-game deletion") reads as a contradiction next to "Never
+         downloaded" unless qualified. -->
+    <string name="detail_confirmed_current_before_cleared">Confirmed current at %1$s (before the cache was cleared)</string>
+    <string name="detail_not_confirmed_current">Not yet confirmed current</string>
+    <string name="detail_needs_force_note">Flagged to force a full re-download on its next download.</string>
+
+    <string name="detail_action_download">Download to cache</string>
+    <string name="detail_action_retry">Retry download</string>
+    <string name="detail_action_delete">Delete from cache</string>
+
+    <!-- Depot sharing wording (docs/design/vault-app-mockup-NOTES.md rounds
+         3-5: "shared", "shared · sole holder", the co-owner expander's
+         "not cached · mapping kept"). ORPHANED (no cached owner at all,
+         including the viewed game itself) is this app's own addition for
+         the real API's mapping-survives-deletion case - see
+         ui/detail/logic/DepotPresentation.kt's kdoc. -->
+    <string name="detail_depot_tag_shared">Shared</string>
+    <string name="detail_depot_tag_sole_holder">Shared · sole holder</string>
+    <string name="detail_depot_tag_orphaned">Shared · no cached owner</string>
+    <string name="detail_depot_note_protected">This depot is only removed once no mapped game needs it.</string>
+    <string name="detail_depot_note_sole_holder">You are the only cached game using this depot — deleting frees it.</string>
+    <string name="detail_depot_note_orphaned">No mapped game currently has this depot cached.</string>
+    <string name="detail_depot_coowner_cached">Cached</string>
+    <string name="detail_depot_coowner_not_cached">Not cached · mapping kept</string>
+    <string name="detail_depot_expand">Show co-owners</string>
+    <string name="detail_depot_collapse">Hide co-owners</string>
+    <string name="detail_depot_size_unknown">—</string>
+    <string name="detail_depots_heading">Depots</string>
+
+    <!-- Garbage collection (WP 4b.6 brief: "dry-run first, show the plan,
+         then execute - the API is already shaped for this"). There is no
+         structured plan on the wire (api/README.md "Garbage collection" -
+         only a free-text log_excerpt); detail_gc_log_heading labels the raw
+         text shown alongside the best-effort headline
+         (ui/detail/logic/GcLogSummary.kt). -->
+    <string name="detail_gc_heading">Garbage collection</string>
+    <string name="detail_action_gc">Check for orphaned chunks</string>
+    <string name="detail_action_gc_running">Checking for orphaned chunks…</string>
+    <string name="detail_action_gc_execute">Delete orphaned chunks</string>
+    <string name="detail_action_gc_executing">Deleting orphaned chunks…</string>
+    <string name="detail_action_gc_again">Check again</string>
+    <string name="detail_gc_confirm_title">Delete orphaned chunks?</string>
+    <plurals name="detail_gc_confirm_body_known">
+        <item quantity="one">This will permanently delete %1$s across %2$d chunk for this game. This cannot be undone.</item>
+        <item quantity="other">This will permanently delete %1$s across %2$d chunks for this game. This cannot be undone.</item>
+    </plurals>
+    <string name="detail_gc_confirm_body_unknown">This will permanently delete whatever orphaned chunks the dry run found. This cannot be undone.</string>
+    <string name="detail_gc_confirm_confirm">Delete</string>
+    <string name="detail_gc_confirm_cancel">Cancel</string>
+    <string name="detail_gc_dry_run_none">No orphaned chunks found — nothing to collect.</string>
+    <!-- AGP lint's PluralsCandidate check flags "%d chunks" as a bare
+         string (app/README.md's lintDebug gate, warningsAsErrors) - same
+         precedent as identity_library_count/library_bulk_selected_count. -->
+    <plurals name="detail_gc_would_delete">
+        <item quantity="one">Would delete %1$s across %2$d chunk.</item>
+        <item quantity="other">Would delete %1$s across %2$d chunks.</item>
+    </plurals>
+    <plurals name="detail_gc_executed">
+        <item quantity="one">Deleted %1$s across %2$d chunk.</item>
+        <item quantity="other">Deleted %1$s across %2$d chunks.</item>
+    </plurals>
+    <plurals name="detail_gc_held_back">
+        <item quantity="one">%1$s across %2$d chunk held back by the grace window.</item>
+        <item quantity="other">%1$s across %2$d chunks held back by the grace window.</item>
+    </plurals>
+    <string name="detail_gc_cancelled">This garbage-collection job was cancelled — you can start a new check below.</string>
+    <string name="detail_gc_error">Garbage collection failed: %1$s</string>
+    <string name="detail_gc_log_heading">Job log (job #%1$d)</string>
+
+    <!-- Toasts (DetailStrings.kt), same pattern/wording as the equivalent
+         LibraryController/DownloadsController toasts. -->
+    <string name="detail_toast_queued_for_download">Queued for download</string>
+    <string name="detail_toast_pause_requested">Pause requested</string>
+    <string name="detail_toast_resuming">Resuming — back in the queue</string>
+    <string name="detail_toast_cancel_requested">Cancel requested</string>
+    <string name="detail_toast_action_failed">Action failed</string>
+    <string name="detail_load_error_fallback">Could not load this game</string>
+    <string name="detail_toast_freed">Freed %1$s</string>
+    <string name="detail_zero_bytes_label">0 GB</string>
 </resources>

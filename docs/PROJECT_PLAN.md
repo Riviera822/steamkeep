@@ -617,6 +617,19 @@ parallel/serial decisions, merge discipline, open user decisions):
       (stop_request drift changes ONLY the action field); 362 JVM
       tests; Opus PASS, 12/12 parity mutations killed)*
 - [ ] Delete flow with size display and confirmation; GC action per game
+      *(WP 4b.6 done 2026-08-11: detail sheet with four-state depot
+      sharing wording (ORPHANED added for the ADR-0003 last-remnant
+      case — recorded divergence), honest last_manifest_check wording
+      incl. the survives-deletion branch ("before the cache was
+      cleared", pinned); delete confirm reuses buildMultiPlan verbatim
+      (single-id ADR-0003 pins); GC flow as a pure reducer — dry-run →
+      plan → confirm → execute, execute reachable ONLY via
+      DryRunPlan→ConfirmExecute (parametrised no-op pins over all
+      states), job-id-bound polling both branches, log-scrape verified
+      against the real gc_execute.py emitter with after-header scoping;
+      fix round also repaired a dead "Check again" button via a
+      controller reset path; 407 JVM tests; Opus PASS + should-fix
+      round)*
 - [ ] Bypass warnings surfaced in the UI
 - [ ] Document APK build (no Play Store requirement; F-Droid as a long-term goal)
 
