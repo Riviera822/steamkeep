@@ -22,7 +22,34 @@
 <div id="app" class="app">
   <header class="topbar">
     <span class="brand">SteamVault</span>
+    <!-- Bell + panel (WP 4a.7, web/js/components/notifications.js). Lives
+         in the app-shell topbar rather than the mockup's Library-header
+         placement so it is reachable from every view without editing
+         web/js/views/library.js. -->
+    <button type="button" class="iconbtn" id="btn-notifs" aria-label="Notifications, no unread">
+      <span class="npip" id="npip" aria-hidden="true">0</span>
+      <svg width="19" height="19" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M10 2.6a5 5 0 0 0-5 5c0 4.2-1.4 5.6-1.4 5.6h12.8S15 11.8 15 7.6a5 5 0 0 0-5-5Z"/><path d="M8.4 16.4a1.9 1.9 0 0 0 3.2 0"/></svg>
+    </button>
   </header>
+
+  <!-- Bypass banner (WP 4a.7, web/js/components/bypass-banner.js). Same
+       app-shell placement reasoning as the bell above; hidden by default,
+       shown/toggled purely via the `hidden` attribute so it takes no
+       layout space at all when nobody is bypass_suspected. -->
+  <div class="banner-wrap" id="bypass-banner-wrap" hidden>
+    <div class="banner">
+      <span class="glyph" aria-hidden="true">
+        <svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M10 2.6 18.4 17H1.6L10 2.6Z"/><path d="M10 8v3.6M10 14.1v.1"/></svg>
+      </span>
+      <div class="body">
+        <span id="bypass-banner-text"></span>
+        <div class="acts">
+          <button type="button" id="bypass-details">Details</button>
+          <button type="button" class="mute" id="bypass-dismiss">Dismiss</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <main id="view-root" class="view-root" aria-live="polite"></main>
 

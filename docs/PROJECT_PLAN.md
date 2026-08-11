@@ -538,6 +538,16 @@ parallel/serial decisions, merge discipline, open user decisions):
       icon kind (recorded divergence), jobs-tick patch-in-place
       (stop_request drift patches, status change rebuilds); 173 headless
       Node tests; Opus PASS, 12/12 mutation battery killed)*
+      *(WP 4a.7 done 2026-08-11: bell + panel consuming the 4a.2 differ
+      (no re-derivation — first-poll-silent inherited), unread badge
+      clears on panel open per NOTES round 6, literal-pinned
+      navigate-to-target via the router incl. downloads job highlight;
+      app-shell bypass banner with WP 3.11's not-accusing wording;
+      clients sheet on real /v1/clients with patch-in-place both
+      directions pinned and the 4a.6 dialog semantics; bell-in-topbar +
+      session-only log recorded as divergences; original coder hung in
+      live verification and was replaced by a finisher who fixed two
+      real gaps; 286 headless tests; Opus PASS, 13/13 mutations)*
 - [ ] Steam identity via Sign in with Steam (ADR-0004); library fetch per
       the 2026-08-09 addendum (user decision A+C): opt-in server-side relay
       because the Steam Web API sends no CORS headers — Android keeps the

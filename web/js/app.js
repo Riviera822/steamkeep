@@ -11,6 +11,14 @@ import { renderLibrary } from "./views/library.js";
 import { renderDownloads } from "./views/downloads.js";
 import { renderSettings } from "./views/settings.js";
 import { maybeShowOnboardingOnStartup } from "./onboarding.js";
+// WP 4a.7 — side-effect imports: both components bind their DOM elements
+// and store subscriptions at module load (same posture as views/downloads.js's
+// module-level nav-pip wiring), so importing them is all app.js needs to do.
+// clients-sheet.js is not imported directly here — both of these already
+// import it (it is the shared target their "Details"/notification-tap
+// actions open), and ES modules are evaluated once and cached.
+import "./components/notifications.js";
+import "./components/bypass-banner.js";
 
 const RENDERERS = {
   library: renderLibrary,

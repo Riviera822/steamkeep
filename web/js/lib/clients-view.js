@@ -1,0 +1,125 @@
+/**
+ * Clients sheet presentation logic (WP 4a.7).
+ *
+ * Pure transforms over `GET /v1/clients` (api/vault_api/routers/clients.py's
+ * `ClientOut`) for the clients sheet: which section a client belongs in
+ * (mockup round 5's "Bypassing" / "Healthy" headings), the stats line for a
+ * healthy client, and the careful, not-accusing wording for a
+ * bypass-suspected one.
+ *
+ * **No separate hostname field exists.** `ClientOut.client_id` already IS
+ * the human-facing label — `api/vault_api/agent_reports.py`: "a client id
+ * is an operator-set label (hostname, 'steam-deck', ...)". The WP brief's
+ * "address, hostname if present" maps onto `source_addrs` being the field
+ * that CAN legitimately be empty (reports stored before schema v9 never
+ * recorded a source address — same module, `ClientOut.source_addrs`'s own
+ * docstring), not onto the id itself.
+ *
+ * **Wording keeps the backend's own "fails toward NOT accusing" posture**
+ * (routers/clients.py's module docstring: "a false positive here sends an
+ * operator hunting a network fault that does not exist"). A bypass-
+ * suspected row states what was OBSERVED (games reported, nothing seen in
+ * the cache log) and lists plausible innocent causes — never a verdict like
+ * "your DNS is broken".
+ *
+ * Pure only — no DOM, no fetch. Covered in web/tests/clients-view.test.js.
+ */
+
+import { formatBytesGB } from "./format.js";
+
+/**
+ * @param {object[] | null | undefined} clients `GET /v1/clients` snapshot.
+ * @returns {{bypassing: object[], healthy: object[]}} order preserved from
+ *   the input within each bucket.
+ */
+export function partitionClients(clients) {
+  const list = Array.isArray(clients) ? clients : [];
+  return {
+    bypassing: list.filter((c) => !!(c && c.bypass_suspected)),
+    healthy: list.filter((c) => !(c && c.bypass_suspected)),
+  };
+}
+
+/**
+ * hits/(hits+misses) as a rounded whole-number percentage, or `null` when
+ * there have been zero cache requests to compute a rate from — never
+ * fabricate "0%" for "no data yet" (same "nothing honest to print" posture
+ * as `lib/format.js`'s `formatBytesGB`/`formatTimestamp`). Non-finite or
+ * missing counters are treated as 0 rather than propagating `NaN` into the
+ * UI (LEARNINGS "Parsers" section: never trust a field's shape blindly).
+ * @param {{cache_hits?: number, cache_misses?: number} | null | undefined} client
+ * @returns {number | null}
+ */
+export function hitRatePercent(client) {
+  const hits = safeCount(client && client.cache_hits);
+  const misses = safeCount(client && client.cache_misses);
+  const total = hits + misses;
+  if (total <= 0) return null;
+  return Math.round((hits / total) * 100);
+}
+
+function safeCount(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * The addresses line for a client row. Empty for a client whose retained
+ * reports predate schema v9 (`ClientOut.source_addrs` is `[]` then) — an
+ * honest "no known address" rather than a blank space.
+ * @param {{source_addrs?: string[]} | null | undefined} client
+ * @returns {string}
+ */
+export function addressesText(client) {
+  const addrs = client && Array.isArray(client.source_addrs) ? client.source_addrs : [];
+  return addrs.length ? addrs.join(", ") : "no known address";
+}
+
+/** One-line stats summary for a HEALTHY client's row. */
+export function describeHealthyClient(client) {
+  const games = gamesReportedText(client);
+  const bytes = formatBytesGB(client && client.bytes_served);
+  const bytesText = bytes ? `${bytes} served` : "nothing served yet";
+  const rate = hitRatePercent(client);
+  const rateText = rate == null ? "no cache requests yet" : `${rate}% hit`;
+  return `${games} · ${bytesText} · ${rateText}`;
+}
+
+/** One-line summary for a BYPASS-SUSPECTED client's row — states what was
+ * observed, never a cause (that part is `BYPASS_EXPLANATION` below, shown
+ * once per section rather than repeated per row). */
+export function describeBypassClient(client) {
+  const games = gamesReportedText(client);
+  return `${games} · none of its downloads have reached the cache recently`;
+}
+
+function gamesReportedText(client) {
+  const count = client && typeof client.app_count === "number" ? client.app_count : null;
+  return count == null ? "game count unknown" : `${count} game${count === 1 ? "" : "s"} reported`;
+}
+
+/** Shared explanatory hint shown under the "Bypassing" section — general
+ * possible causes, never a specific accusation about any one client
+ * (mirrors the backend's own disqualification-chain design, routers/
+ * clients.py). */
+export const BYPASS_EXPLANATION =
+  "This does not necessarily mean anything is wrong. Common causes: " +
+  "DNS-over-HTTPS in the browser or OS, the machine resolving Steam's CDN " +
+  "over IPv6 (bypassing vault-dns), or simply nothing downloaded yet in the " +
+  "current reporting window.";
+
+/**
+ * The bypass banner's message text (empty string when nobody is
+ * suspected — callers should hide the banner in that case, see
+ * `lib/bypass-banner.js`'s `bypassBannerVisible`). Singular/plural wording
+ * are both literal-pinned in tests.
+ * @param {object[] | null | undefined} clients
+ * @returns {string}
+ */
+export function bypassBannerText(clients) {
+  const { bypassing } = partitionClients(clients);
+  if (!bypassing.length) return "";
+  if (bypassing.length === 1) {
+    return `Client ${bypassing[0].client_id} is bypassing the cache — check its DNS.`;
+  }
+  return `${bypassing.length} clients are bypassing the cache — check their DNS.`;
+}

@@ -26,6 +26,11 @@
  * its `.badge .sic` status-icon subtree). See that module's header for why
  * `stop_request` is the ONLY volatile field the real API has here — no
  * live byte progress exists to patch, unlike the mockup.
+ *
+ * `highlightJob(jobId)` (WP 4a.7) is this module's one export beyond
+ * `renderDownloads` — the notification bell's "job events -> Downloads
+ * with the job highlighted" navigation target lands here without any
+ * other module reaching into this view's internals.
  */
 
 import { store } from "../store-singleton.js";
@@ -358,36 +363,101 @@ function paintExcerpt(rowEl, jobId) {
   logEl.appendChild(body);
 }
 
+function historyRowNow(jobId) {
+  return mounted() ? els.historyBody.querySelector(`.hrow[data-jid="${jobId}"]`) : null;
+}
+
+/** Lazily fetch `GET /v1/jobs/{id}` for its `log_excerpt`, exactly once per
+ * job (guarded by `st.excerpt === undefined` — "never fetched", distinct
+ * from a job that genuinely produced no output). Shared by
+ * `toggleHistoryRow` (an operator expanding a row by hand) and
+ * `highlightJob` below (a notification jumping here with the row
+ * pre-expanded) so the two paths cannot drift on the fetch/error/re-paint
+ * bookkeeping. */
+async function ensureExcerptLoaded(jobId, row) {
+  const st = getExcerptState(jobId);
+  if (st.excerpt !== undefined || st.loading) return;
+  st.loading = true;
+  if (row) paintExcerpt(row, jobId);
+  try {
+    const detail = await api.job(jobId);
+    st.excerpt = detail && typeof detail.log_excerpt === "string" ? detail.log_excerpt : "";
+    st.error = null;
+  } catch (err) {
+    st.error = errorText(err);
+  } finally {
+    st.loading = false;
+    // The row may have been rebuilt (a full jobs-tick rebuild) while this
+    // fetch was in flight — re-look-up the live element rather than
+    // trusting the captured reference.
+    const liveRow = historyRowNow(jobId);
+    if (liveRow) paintExcerpt(liveRow, jobId);
+  }
+}
+
 async function toggleHistoryRow(jobId) {
   const st = getExcerptState(jobId);
   st.expanded = !st.expanded;
-  const rowNow = () =>
-    mounted() ? els.historyBody.querySelector(`.hrow[data-jid="${jobId}"]`) : null;
-  let row = rowNow();
+  const row = historyRowNow(jobId);
   if (row) {
     row.classList.toggle("open", st.expanded);
     row.querySelector("button").setAttribute("aria-expanded", String(st.expanded));
     paintExcerpt(row, jobId);
   }
+  if (st.expanded) await ensureExcerptLoaded(jobId, row);
+}
 
-  if (st.expanded && st.excerpt === undefined && !st.loading) {
-    st.loading = true;
-    if (row) paintExcerpt(row, jobId);
-    try {
-      const detail = await api.job(jobId);
-      st.excerpt = detail && typeof detail.log_excerpt === "string" ? detail.log_excerpt : "";
-      st.error = null;
-    } catch (err) {
-      st.error = errorText(err);
-    } finally {
-      st.loading = false;
-      // The row may have been rebuilt (a full jobs-tick rebuild) while this
-      // fetch was in flight — re-look-up the live element rather than
-      // trusting the captured reference.
-      const liveRow = rowNow();
-      if (liveRow) paintExcerpt(liveRow, jobId);
-    }
-  }
+// ---------------------------------------------------------------------
+// Cross-view navigation target (WP 4a.7). The bell panel
+// (components/notifications.js) asks this view to land on and expand one
+// job's history row without reaching into this module beyond this one
+// exported function — the router/app-shell-level hook the WP 4a.7 brief
+// asks for, instead of a library.js-style internal reach-in.
+// ---------------------------------------------------------------------
+
+/** Job id queued for highlighting before this view was (re-)mounted (the
+ * caller navigates here first — app.js's router — and this view may not
+ * have built its section yet at the moment `highlightJob` is called).
+ * Applied by the next `fullRender()`, then cleared — one-shot. */
+let pendingHighlightJobId = null;
+
+/**
+ * Expand (never collapse) job `jobId`'s history row and scroll it into
+ * view — the "job events -> Downloads with the job highlighted"
+ * destination for both a finished and a failed job's notification (see
+ * `lib/notification-log.js`'s `navigationTargetFor`). Safe to call
+ * regardless of whether Downloads is currently mounted or whether the job
+ * has reached the history bucket in `state.jobs` yet.
+ *
+ * Unlike the mockup's `openNote()` (docs/design/vault-app-mockup-NOTES.md
+ * round 6), this uses `scrollIntoView()` directly rather than manually
+ * walking a scroll container: the mockup's own note warns that
+ * `scrollIntoView()` also scrolls an `overflow:hidden` app shell and shifts
+ * every absolutely positioned surface with it — but this app's shell has no
+ * such ancestor (`view-root`/`.app` are plain document flow, verified
+ * against css/app.css: no `overflow:hidden` above `.hrow`), so the mockup's
+ * specific failure mode does not apply here.
+ */
+export function highlightJob(jobId) {
+  if (jobId == null) return;
+  getExcerptState(jobId).expanded = true;
+  pendingHighlightJobId = jobId;
+  applyPendingHighlight();
+}
+
+function applyPendingHighlight() {
+  if (pendingHighlightJobId == null) return;
+  const jobId = pendingHighlightJobId;
+  const row = historyRowNow(jobId);
+  if (!row) return; // job not in the History section on this render yet — stays queued
+  pendingHighlightJobId = null;
+  row.classList.add("open");
+  const toggle = row.querySelector("button");
+  if (toggle) toggle.setAttribute("aria-expanded", "true");
+  paintExcerpt(row, jobId);
+  ensureExcerptLoaded(jobId, row);
+  row.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (toggle) toggle.focus();
 }
 
 function buildHistoryRow(job, gamesByAppid) {
@@ -508,6 +578,8 @@ function fullRender() {
   } else {
     for (const job of p.history) els.historyBody.appendChild(buildHistoryRow(job, gamesByAppid));
   }
+
+  applyPendingHighlight();
 }
 
 /** Patch just the named jobs' `.jobacts`/`.stopnote` (their `stop_request`

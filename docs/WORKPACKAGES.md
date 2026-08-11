@@ -140,6 +140,17 @@ candidate for the WP 4a.8 polish pass. Shared test gap to close on both
 sides then: the log-excerpt truncation marker must be pinned to
 position 0 (startsWith, not contains).
 
+Recorded divergences (WP 4a.7, 2026-08-11, reviewer-endorsed): (1) the
+notification bell lives in the app-shell topbar, not the mockup's
+Library header — reachable from every view, and 4a.7 may not edit
+library.js; functional superset. (2) The notification log is
+session-only (in-memory) — the NOTES' poll+diff model has no
+persistence mandate, and persisting derived events would need its own
+dedupe design; revisit only if real use demands it. For the 4a.8 pass:
+add the update_ready→detail-sheet target upgrade once 4a.4 lands, and
+put the two DOM-wiring fixes (sheet closes on navigation, icon
+aria-hidden) into the DOM-harness or live-check list.
+
 Recorded divergence (WP 4b.6, 2026-08-11, reviewer-endorsed): the depot
 sharing presentation has a FOURTH state beyond the mockup's three —
 ORPHANED, for a shared depot whose co-owning apps all have no cache
