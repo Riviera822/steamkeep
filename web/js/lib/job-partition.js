@@ -26,6 +26,24 @@
  * anything) as genuinely separate sections instead of one that pretends a
  * paused job still occupies a slot it does not hold.
  *
+ * **Unknown status routes to history, not oblivion (WP 4a.8 backport of the
+ * WP 4b.5 divergence, docs/WORKPACKAGES.md's Phase 4a header).** A job whose
+ * `status` is anything other than the six known values used to match none
+ * of this module's filters and silently vanish from every bucket — an
+ * operator-invisible job that still exists server-side. `partitionJobs` now
+ * routes it into `history` with a NEUTRAL presentation instead:
+ * `jobIconKind` already fell back to `"none"` for an unmapped status and
+ * `jobStatusWord` already fell back to the raw status string rather than
+ * fabricating a plausible-looking word, so nothing else needed to change to
+ * make that an honest "something happened, here it is, we don't have a name
+ * for it" row. It deliberately does NOT count toward `countPending`: an
+ * unrecognized status is not confidently "still pending" either, so the nav
+ * pip stays fail-quiet rather than fail-loud on every poll tick. Ported
+ * from the Android sibling's `ui/downloads/logic/JobPartition.kt`
+ * (`KNOWN_STATUSES`/history-filter shape) verbatim — ONE change from that
+ * port: the Kotlin side stayed 4a.5-shaped ("earlier port had no name for
+ * this"), this backport closes the same gap here.
+ *
  * Pure only — no DOM, no fetch. Covered in web/tests/job-partition.test.js.
  */
 
@@ -38,6 +56,7 @@
  * each other. */
 const PENDING_STATUSES = new Set(["queued", "running", "paused"]);
 const HISTORY_STATUSES = new Set(["done", "error", "cancelled"]);
+const KNOWN_STATUSES = new Set(["queued", "running", "paused", "done", "error", "cancelled"]);
 
 /**
  * @param {object[] | null | undefined} jobs `GET /v1/jobs` snapshot.
@@ -46,14 +65,16 @@ const HISTORY_STATUSES = new Set(["done", "error", "cancelled"]);
  *   api/README.md "Queue semantics" — "exactly one job runs at a time...
  *   FIFO by job id"), independent of the snapshot's own order. `history`
  *   keeps the snapshot's order as-is (`GET /v1/jobs` is newest-first per
- *   api/README.md, so a job's most recent occurrence is already first).
+ *   api/README.md, so a job's most recent occurrence is already first) —
+ *   an unrecognized status is included here too (module header, "Unknown
+ *   status routes to history"), appended wherever the snapshot placed it.
  */
 export function partitionJobs(jobs) {
   const list = Array.isArray(jobs) ? jobs : [];
   const running = list.filter((j) => j.status === "running");
   const paused = list.filter((j) => j.status === "paused");
   const queued = list.filter((j) => j.status === "queued").sort((a, b) => a.id - b.id);
-  const history = list.filter((j) => HISTORY_STATUSES.has(j.status));
+  const history = list.filter((j) => HISTORY_STATUSES.has(j.status) || !KNOWN_STATUSES.has(j.status));
   return { running, paused, queued, history };
 }
 

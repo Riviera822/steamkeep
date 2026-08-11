@@ -164,7 +164,12 @@ on is pulled into a pure `web/js/lib/` module and tested here.
   `jobIconKind` (every real status, including the real `cancelled` the
   mockup never modeled), and `jobStatusWord` (cancelled worded distinctly
   from failed — job outcome honesty; GC jobs get GC-specific wording, never
-  the download vocabulary).
+  the download vocabulary). WP 4a.8 backport: an unrecognized status routes
+  into `history` with a neutral presentation (`jobIconKind` -> `"none"`,
+  `jobStatusWord` -> the raw string) instead of matching no bucket at all
+  and silently disappearing — ported from the Android sibling's
+  `JobPartition.kt`, which had already made this improvement over the web
+  port; does NOT count toward `countPending`.
 - `downloads-render-plan.test.js` — `web/js/lib/downloads-render-plan.js`:
   the pure jobs-tick patch-vs-rebuild decision for the Downloads view. First
   poll and added/removed rows always mean a full render. Two named
@@ -330,4 +335,178 @@ classes, and tested here.
   there is nothing to guard against), dry-run/execute mode-scoped dedupe,
   and a completed job's `log_excerpt` being REAL `GC totals (...)` text
   `lib/gc-log-summary.js` parses correctly end to end (not a fixture string
-  tailored to the parser).
+  tailored to the parser). WP 4a.8 extends the fixtures again: Glass
+  Meridian's dry-run/execute log lines now carry the FULL real key set from
+  `api/vault_api/gc_execute.py`'s `GcRunReport.log_text` (`orphans`,
+  `already_gone`, `dedupe_removed`, `dedupe_bytes_freed`, `problems`,
+  `declined`, `depots_touched`, `needs_force_set_for`, ...), including a
+  non-zero `held_back` in both modes — before this WP every demo GC scenario
+  hardcoded `held_back=0 (0 bytes)`, so that branch of
+  `lib/gc-log-summary.js` (and the detail sheet's "N chunks held back" note)
+  was never exercised by demo mode at all. Verified the held-back bytes
+  survive an execute run (a time-window rule, not something an execute run
+  clears).
+
+### WP 4a.8 — End-to-end + a11y pass
+
+Three new files, none of them DOM-building views/components (those stay
+verified live, per every WP above's posture) — these are the pure
+STACK ARITHMETIC and DOM-WIRING primitives introduced or hardened by this
+WP's keyboard-nav/focus-trap work, which genuinely are testable headlessly:
+
+- `fake-dom.js` — not a test file itself, a shared minimal in-memory DOM
+  shim (`createElement`/`createElementNS`/`classList`/`dataset`/
+  `addEventListener`/`dispatchEvent`/`focus`/`activeElement`) used by the
+  two files below. Same spirit as `store-poll-loop.test.js`'s bare-object
+  fake `document`, extended just far enough to run `router.js` (touches
+  `window.addEventListener` at module load) and `sheet-dialog.js`/
+  `status-icon.js` (build real element/SVG subtrees) — NOT a jsdom
+  replacement, see its header.
+- `modal-stack.test.js` — `web/js/lib/modal-stack.js`, the new shared
+  "which overlay is topmost" stack behind the focus trap both
+  `onboarding.js` and `sheet-dialog.js` had deferred to this WP: pushing one
+  overlay marks `#app` `inert`+`aria-hidden`; NESTING a second overlay (the
+  detail sheet's own delete/GC-execute confirm dialogs open ON TOP of the
+  already-open sheet) makes the FIRST one inert too, leaving only the
+  topmost reachable — the mutation target named in the test is exactly "a
+  plain counter instead of a stack cannot express this". Also covers
+  out-of-LIFO-order popping, idempotent push, and — the load-bearing half
+  found LIVE during this WP's e2e pass, not designed up front — the
+  centralized Escape dispatcher: pressing Escape calls ONLY the topmost
+  overlay's `onEscape`, never a lower one's. Before this dispatcher existed,
+  `sheet-dialog.js` and the confirm dialogs each bound their OWN independent
+  `document` keydown listener, and one Escape press fired BOTH — closing a
+  GC-execute confirm AND the whole detail sheet behind it in one keystroke
+  (reproduced live in the Browser pane, then pinned here as a mutation
+  target: "if this dispatcher called every stacked `onEscape` instead of
+  only the topmost's...").
+- `dialog-wiring.test.js` — DOM-harness regression pins for the two WP 4a.7
+  wiring fixes recorded in docs/WORKPACKAGES.md's Phase 4a header as due
+  this WP: (1) a sheet opened via `createSheetDialog` closes when the view
+  changes (`onViewChange(() => dialog.close())`, the exact one-liner every
+  real sheet component uses) and returns focus to its invoker; (2) a status
+  icon whose word is already shown visibly elsewhere is marked
+  `aria-hidden` WITHOUT deleting its underlying `sr-only` label node (the
+  "avoid double announcement" pattern `components/notifications.js`,
+  `components/clients-sheet.js`, `views/downloads.js` and
+  `components/game-card.js` all apply at their own call sites) — pins the
+  shared primitive/contract every one of those call sites relies on, not
+  each call site's own module (those stay DOM-building/verified-live per
+  their existing posture). Also covers Escape-closes-the-sheet now that the
+  WP 4a.8 trap is in place.
+
+#### Real-server e2e checklist (repeatable, scripted — not a from-scratch investigation)
+
+Per the WP 4a.7 "hang lesson" (docs/LEARNINGS.md-adjacent, recorded in this
+WP's brief): keep browser sessions SHORT and SCRIPTED, prefer curl/`fetch`/
+`dispatchEvent` assertions over waiting on animations or racing timers.
+Two independent passes, both re-run for this WP and safe to re-run for any
+future one:
+
+**A. Live vault-api (uvicorn, temp DB + cache dir, no Docker needed):**
+
+```
+cd api
+VAULT_API_KEY=<any string> \
+VAULT_DB_PATH=<scratch>/vault.db \
+VAULT_CACHE_ROOT=<scratch>/cache \
+VAULT_WEB_DIR=<repo>/web \
+python -m uvicorn vault_api.main:create_app --factory --host 127.0.0.1 --port 8123
+```
+
+Then, with `curl -H "X-Api-Key: <key>"`:
+
+1. `GET /` and `GET /library` both 200 (SPA fallback serves `index.html`);
+   `GET /css/theme.css` 200 (static asset mount); `GET /v1/games` with no
+   key 401.
+2. `GET /v1/settings`, `PATCH /v1/settings` (e.g. `vault_name`), re-`GET`
+   confirms the `db`-sourced override round-trips.
+3. `GET /v1/steam/owned-games?steamid=...` with no relay key configured ->
+   409 (the relay's honest "not configured" branch); `PUT /v1/steam/key`
+   with a malformed value -> 422.
+4. `POST /v1/prefill {"appids":[...]}` with no `VAULT_STEAMPREFILL_PATH`
+   configured -> the job is accepted (202-shaped body), the worker picks it
+   up, and `GET /v1/jobs/{id}` settles to `status: "error"` with a clear
+   `log_excerpt` diagnostic — **this error path itself is the valid e2e
+   assertion**: an honest, actionable message, no crash, `GET /v1/health`
+   still 200 afterwards.
+5. Then drive the SAME server from the Browser pane: onboarding step 1
+   "Test connection" against the real key, keyboard-only card open
+   (`dispatchEvent(new KeyboardEvent("keydown", {key:"Enter"}))` — more
+   reliable in this harness than an OS-level key press racing element
+   focus, see the coder's report), confirm `#app[inert]`/`aria-hidden`
+   while the sheet is open and Escape restores both.
+
+**B. Demo mode (`localStorage.setItem("steamvault.demoMode","1")`, reload)
+— no server needed, exercises the richer multi-game/GC/bypass fixtures:**
+
+1. Onboarding overlay's `#app` inert/focus-trap (first-run).
+2. Library: keyboard-open a card, bulk multi-select (`contextmenu` event ->
+   select mode -> click a second card -> bulk bar), bulk delete confirm
+   (nested-overlay-free — this one IS the only modal), Keep/Delete.
+3. Detail sheet: GC dry run -> plan shown -> Execute -> the SECOND,
+   NESTED confirm dialog opens ON TOP of the sheet — verify `#app` inert,
+   the SHEET (now second-from-top) also inert, only the confirm reachable,
+   Escape closes only the confirm (not the sheet), a second Escape then
+   closes the sheet.
+4. Delete-from-cache confirm: same nested-overlay checks.
+5. Bypass banner -> Details -> clients sheet -> Escape -> banner still
+   there (Dismiss is a separate, explicit action).
+6. Notification bell: badge clears on open, tapping a `job_finished` row
+   navigates to Downloads with that job's history row pre-expanded.
+
+Both passes were run for this WP; see the coder's report for what they
+found (a null-`name` fallback bug in `game-card.js` only reachable against
+a real, un-Steam-linked server; the `[hidden]`-vs-author-`display` CSS
+cascade bug on `.btn`/`.onbnav`; the library.js confirm-dialog-nested-
+inside-`#app` bug; the Escape-closes-both-overlays bug — none of which a
+demo-mode-only or unit-test-only pass would have surfaced).
+
+#### Honest list of what this pass could NOT verify
+
+Everything below needs a real device/OS or a real Steam-facing network path
+— the Browser pane and `node --test` cannot exercise them, and no amount of
+additional scripting in this harness closes the gap. Left for the Zeus/
+Android session:
+
+- **A real OS-level `prefers-reduced-motion` toggle.** This WP verified
+  reduced motion by reading the CSS cascade (theme.css's `!important`
+  block wins over every `animation`/`transition` declaration in the
+  stylesheet, confirmed by grep — no competing `!important` exists) and,
+  after the review fix, by reading `web/js/views/downloads.js`'s
+  `prefersReducedMotion()` source — never by actually flipping the setting
+  in a real OS and watching the status-icon animations/scroll actually stop.
+  The Browser pane exposes no `prefers-reduced-motion` emulation.
+- **Real Steam CDN cover art, and its offline/blocked-host fallback, from
+  an actual phone.** `lib/cover-art.js`'s CDN URL and the procedural
+  fallback tile (`img.addEventListener("error", () => img.remove())` in
+  `game-card.js`) were verified against the live vault-api on a desktop
+  Browser-pane session with working internet — not on a phone on a LAN
+  where the CDN might be genuinely unreachable (the real "offline" case
+  this fallback exists for).
+- **Demo mode as an actual FIRST-RUN experience** — walked through in this
+  WP via `localStorage.setItem("steamvault.demoMode","1")` set directly,
+  never by tapping "Skip for now — browse in demo mode" from a truly fresh
+  onboarding overlay with no prior app state at all (browser profile,
+  service workers, etc.) the way a real first-time visitor would arrive at
+  it.
+- Real screen reader (NVDA/JAWS/VoiceOver) AUDIO verification — this WP
+  confirmed the DOM semantics (`aria-hidden`, `aria-label`, `aria-pressed`,
+  `role`, focus targets, and `inert`'s spec-mandated AT-hiding behaviour)
+  are correct, never that a real screen reader actually announces them the
+  way intended.
+- Real touch/long-press timing (the 420 ms press-and-hold that enters
+  multi-select) on an actual touchscreen — simulated here via a synthetic
+  `contextmenu` event, never a real touch sequence.
+- `inert` attribute support outside Chromium (the Browser pane is
+  Chromium-based; `inert` is Baseline-widely-available but was not
+  cross-checked on Firefox/Safari).
+- GC execute against a REAL depot cache with real chunk files on disk —
+  this WP's live-server pass only reached the `POST /v1/prefill` honest-
+  error path (no `VAULT_STEAMPREFILL_PATH` configured, so no real
+  download/cache content ever existed to run GC against); the GC flow
+  itself was only exercised through demo mode's simulated model.
+- Real multi-client bypass detection (demo fixtures only — no second real
+  vault-agent on the LAN during this pass).
+- Performance/rendering with a real, large (400+ game) library — the live
+  server had exactly one game; demo mode has six.

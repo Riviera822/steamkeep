@@ -302,6 +302,16 @@ body.selecting .card .pick{ display:grid; }
 .btn.danger{ background:transparent; border-color:rgba(255,111,111,.45); color:var(--danger); }
 .btn.ghost{ background:transparent; }
 .btn.sm{ padding:7px 11px; font-size:12px; border-radius:9px; }
+/* `.btn{ display:inline-flex }` above is an AUTHOR rule and therefore always
+   beats the UA `[hidden]{ display:none }` default regardless of selector
+   order or specificity (same class of bug this file's `h4.sec[hidden]` rule
+   below already fixes for a different element — WP 4a.8 keyboard-nav audit
+   found the same gap here, live: `onboarding.js`'s/`views/settings.js`'s
+   "Remove key" button and `views/settings.js`'s Reset buttons stayed
+   VISIBLE and TAB-reachable after `.hidden = true` set the DOM attribute
+   correctly). Re-declared here, in the author origin, so the cascade
+   actually hides it. */
+.btn[hidden]{ display:none; }
 
 /* ---------- bulk-delete confirm dialog ----------
    `position:fixed`, viewport-centered (mockup: phone-frame-relative
@@ -546,6 +556,14 @@ body.onboarding .nav{ display:none; }
 .onbfoot{ flex:none; padding-top:12px; }
 .onbnav{ display:flex; gap:10px; }
 .onbnav .btn{ flex:1; }
+/* Same `[hidden]` cascade bug as `.btn[hidden]` above, on the container this
+   time: `views/settings.js`'s Save/Discard bar (`els.saveBar`, class
+   `onbnav`, reused verbatim from the onboarding footer) is `hidden = true`
+   whenever there are no unsaved drafts — verified live it stayed visible
+   (and its two buttons TAB-reachable) on every page load regardless of
+   dirty state, because `.onbnav{ display:flex }` is an author rule and
+   always wins over the UA `[hidden]` default. */
+.onbnav[hidden]{ display:none; }
 .skiplink{
   display:block; width:100%; text-align:center; margin-top:10px; padding:6px;
   font-size:11.5px; color:var(--dim-2); text-decoration:underline; text-underline-offset:3px;

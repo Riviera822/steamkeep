@@ -54,6 +54,19 @@ function errorText(err) {
   return (err && err.message) || "Request failed";
 }
 
+/** Whether the OS/browser has `prefers-reduced-motion: reduce` set. Used
+ * only by `applyPendingHighlight()`'s `scrollIntoView()` call below — see
+ * that function's header for why an explicit `behavior` option needs its
+ * own reduced-motion check rather than relying on css/theme.css's
+ * `scroll-behavior` override. */
+function prefersReducedMotion() {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
 // Static, non-interpolated decorative markup only (no user data ever flows
 // through this helper) — same trust level as library.js's segButton, the
 // documented pattern for CSP-clean literal SVG.
@@ -259,7 +272,13 @@ function buildJobCard(job, mode, gamesByAppid) {
   const kind = jobIconKind(job);
   const badge = document.createElement("span");
   badge.className = "badge tx-" + kind;
-  badge.appendChild(createStatusIcon(kind, { size: "sm" }));
+  const badgeIcon = createStatusIcon(kind, { size: "sm" });
+  // WP 4a.8 icon audit: the word right after this icon already says the
+  // same thing visibly — hide the icon's own sr-only label so it is not
+  // announced twice (same posture as this file's own `buildHistoryRow`
+  // icon, and clients-sheet.js/notifications.js's status icons).
+  badgeIcon.setAttribute("aria-hidden", "true");
+  badge.appendChild(badgeIcon);
   const word = document.createElement("span");
   word.textContent = jobStatusWord(job);
   badge.appendChild(word);
@@ -437,6 +456,16 @@ let pendingHighlightJobId = null;
  * such ancestor (`view-root`/`.app` are plain document flow, verified
  * against css/app.css: no `overflow:hidden` above `.hrow`), so the mockup's
  * specific failure mode does not apply here.
+ *
+ * **`behavior` is resolved per `prefers-reduced-motion` explicitly (WP
+ * 4a.8 review fix), not left to css/theme.css's `scroll-behavior:auto
+ * !important` block.** Per the CSSOM-View spec, an explicit `behavior`
+ * passed to `scrollIntoView()`/`scrollTo()` OVERRIDES the element's CSS
+ * `scroll-behavior` — the reduced-motion block only governs scrolls that
+ * fall back to CSS (a bare `scrollIntoView()`/anchor-jump with no options
+ * object), so a literal `"smooth"` here escapes that block entirely and
+ * animates regardless of the user's preference. There is no `matchMedia`
+ * call anywhere else in `web/js/`; this is the first.
  */
 export function highlightJob(jobId) {
   if (jobId == null) return;
@@ -456,7 +485,7 @@ function applyPendingHighlight() {
   if (toggle) toggle.setAttribute("aria-expanded", "true");
   paintExcerpt(row, jobId);
   ensureExcerptLoaded(jobId, row);
-  row.scrollIntoView({ behavior: "smooth", block: "center" });
+  row.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "center" });
   if (toggle) toggle.focus();
 }
 

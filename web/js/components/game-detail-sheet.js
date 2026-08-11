@@ -41,13 +41,23 @@
  * (`css/theme.css`'s `.sic.k-running`) is never restarted by an unrelated
  * byte-progress tick.
  *
- * GC job polling is its OWN loop, job-id bound (`gcPollGeneration` guards
- * against a stale loop outliving a `close()`/`reset()`/new dry run — the
- * closest plain-JS equivalent to the Android sibling's coroutine-`Job`
+ * GC job polling is its OWN loop, job-id bound (`generation` guards against
+ * a stale loop outliving a `close()`/`reset()`/new dry run — the closest
+ * plain-JS equivalent to the Android sibling's coroutine-`Job`
  * cancellation), completely independent of the shared `store-singleton.js`
  * poll loops: `GET /v1/jobs/{id}` (for `log_excerpt`) is never in that
  * store's vocabulary, same reasoning `views/downloads.js`'s lazy history-row
  * fetch documents.
+ *
+ * **Focus trap + background inert (WP 4a.8).** The sheet itself gets this
+ * for free from `sheet-dialog.js`'s own WP 4a.8 wiring. The delete-confirm
+ * and GC-execute-confirm overlays below are bespoke (not `createSheetDialog`
+ * instances — they reuse `views/library.js`'s delete-dialog markup, see the
+ * header above) and had NO keyboard support at all before this WP: no
+ * Escape, no focus-on-open, no trap. They now push/pop onto the same
+ * `lib/modal-stack.js` stack the sheet uses, which — because they open ON
+ * TOP of the already-open sheet — also correctly makes the SHEET inert
+ * while one of them is up (see that module's header, "why a stack").
  *
  * DOM-building component, not unit-tested directly (same posture as
  * `sheet-dialog.js`/`clients-sheet.js`/`notifications.js` — see
@@ -73,6 +83,7 @@ import { findTrackedJob, detailJobActions, DETAIL_JOB_ACTION } from "../lib/deta
 import { confirmedCurrentWording, CONFIRMED_CURRENT_WORDING } from "../lib/detail-wording.js";
 import { GC_STATE, GC_EVENT, idleGcState, reduceGcFlow } from "../lib/gc-flow.js";
 import { buildDetailStructuralKey } from "../lib/detail-render-plan.js";
+import { pushModal, popModal } from "../lib/modal-stack.js";
 
 const ACTIVE_JOB_STATUSES = ["queued", "running", "paused"];
 const GC_POLL_INTERVAL_MS = 1200;
@@ -175,11 +186,25 @@ document.body.appendChild(deleteBackdrop);
 dNo.addEventListener("click", closeDeleteConfirm);
 dYes.addEventListener("click", confirmDelete);
 
+/** Element to return focus to on close, captured fresh on every open() —
+ * same pattern as `sheet-dialog.js`'s `invokerEl` (WP 4a.8: this dialog had
+ * no focus management at all before this WP). */
+let deleteInvokerEl = null;
+
 function openDeleteConfirm() {
   dText.textContent = "Calculating what this would free…";
   dNote.replaceChildren();
   dYes.disabled = true;
+  deleteInvokerEl = document.activeElement;
   deleteBackdrop.classList.add("on");
+  // WP 4a.8: also makes the sheet BEHIND this dialog inert; Escape routes
+  // through lib/modal-stack.js's single dispatcher (see its header) rather
+  // than a listener bound here directly — an independent one raced with the
+  // sheet's own and closed BOTH on one Escape press, found live.
+  pushModal(deleteBackdrop, closeDeleteConfirm);
+  // "Keep" (the non-destructive default) rather than "Delete" — the usual
+  // alertdialog convention of not defaulting focus onto the dangerous action.
+  dNo.focus();
 
   const gamesByAppid = new Map(state.games.map((g) => [g.appid, g]));
   const activeJobAppids = activeJobAppidsFrom(state.jobs);
@@ -195,6 +220,9 @@ function openDeleteConfirm() {
 
 function closeDeleteConfirm() {
   deleteBackdrop.classList.remove("on");
+  popModal(deleteBackdrop);
+  if (deleteInvokerEl && typeof deleteInvokerEl.focus === "function") deleteInvokerEl.focus();
+  deleteInvokerEl = null;
 }
 
 function renderDeletePlan(plan, gamesByAppid) {
@@ -311,6 +339,16 @@ document.body.appendChild(gcConfirmBackdrop);
 gcNo.addEventListener("click", dismissGcExecuteConfirm);
 gcYes.addEventListener("click", confirmGcExecute);
 
+/** Edge-detected open/close state for the modal-stack push/pop and the
+ * invoker-focus capture in `renderGcSection()` below (WP 4a.8) — needed
+ * because `renderGcSection()` is called on every GC state change, not only
+ * the transitions into/out of `CONFIRM_EXECUTE`, so a naive "push on every
+ * call while showing" would keep stealing focus back to "Cancel" on an
+ * unrelated re-render (e.g. the main sheet's own structural re-render
+ * calling this while the confirm happens to still be open). */
+let gcConfirmWasOpen = false;
+let gcConfirmInvokerEl = null;
+
 // ---------------------------------------------------------------------
 // open / close
 // ---------------------------------------------------------------------
@@ -362,10 +400,21 @@ export function openDetail(appid, name) {
 function closeDetail() {
   generation++;
   state.appid = null;
+  // WP 4a.8: close any confirm overlay stacked on top of the sheet too —
+  // both are no-ops when not open (closeDeleteConfirm unconditionally, and
+  // dismissGcExecuteConfirm via reduceGcFlow's own DISMISS_CONFIRM ->
+  // no-op-outside-CONFIRM_EXECUTE guard — see lib/gc-flow.js). Without this,
+  // closing the sheet while one of them was open left it permanently
+  // pushed on lib/modal-stack.js's stack, i.e. #app stuck `inert` forever.
+  closeDeleteConfirm();
+  dismissGcExecuteConfirm();
   dialog.close();
 }
 
-onViewChange(() => dialog.close()); // navigation dismisses transient surfaces (mockup rule)
+// Navigation dismisses transient surfaces (mockup rule) — closeDetail(),
+// not a bare dialog.close(), so a confirm overlay left open when the user
+// navigates away doesn't strand #app inert (see closeDetail()'s comment).
+onViewChange(() => closeDetail());
 
 // ---------------------------------------------------------------------
 // Live game/job lookups
@@ -457,7 +506,13 @@ function buildHeader(gameLike, liveJob) {
   const kind = dispKind(gameLike, liveJob);
   const statusRow = document.createElement("div");
   statusRow.className = "detail-statusrow";
-  statusRow.appendChild(createStatusIcon(kind, { size: "sm" }));
+  const statusIcon = createStatusIcon(kind, { size: "sm" });
+  // WP 4a.8 icon audit: the word right after this icon already says the
+  // same thing visibly — hide the icon's own sr-only label so it is not
+  // announced twice (same "avoid double announcement" posture as
+  // clients-sheet.js/notifications.js's status icons).
+  statusIcon.setAttribute("aria-hidden", "true");
+  statusRow.appendChild(statusIcon);
   const word = document.createElement("span");
   word.className = "tx-" + kind;
   word.textContent = STATUS_LABEL[kind] || STATUS_LABEL.none;
@@ -904,7 +959,31 @@ function buildGcPlanBody(job, summary, dryRun) {
  * has no round-7 concern of its own to guard against. */
 function renderGcSection() {
   gcSectionEl.replaceChildren();
-  gcConfirmBackdrop.classList.toggle("on", state.gcState.kind === GC_STATE.CONFIRM_EXECUTE);
+
+  // WP 4a.8: focus trap + background inert for the GC-execute confirm,
+  // edge-detected against the LAST kind this function saw (see
+  // `gcConfirmWasOpen`'s doc comment) rather than pushed/popped on every
+  // call while the state happens to stay CONFIRM_EXECUTE.
+  const showGcConfirm = state.gcState.kind === GC_STATE.CONFIRM_EXECUTE;
+  const openingGcConfirm = showGcConfirm && !gcConfirmWasOpen;
+  const closingGcConfirm = !showGcConfirm && gcConfirmWasOpen;
+  if (openingGcConfirm) {
+    gcConfirmInvokerEl = document.activeElement;
+    // Also makes the sheet BEHIND this dialog inert; Escape routes through
+    // lib/modal-stack.js's single dispatcher, not a listener bound here —
+    // see that module's header for the live-found double-close bug an
+    // independent one caused.
+    pushModal(gcConfirmBackdrop, dismissGcExecuteConfirm);
+  } else if (closingGcConfirm) {
+    popModal(gcConfirmBackdrop);
+    if (gcConfirmInvokerEl && typeof gcConfirmInvokerEl.focus === "function") gcConfirmInvokerEl.focus();
+    gcConfirmInvokerEl = null;
+  }
+  gcConfirmBackdrop.classList.toggle("on", showGcConfirm);
+  gcConfirmWasOpen = showGcConfirm;
+  // "Cancel" (the non-destructive default), not "Delete" — same convention
+  // as the delete-confirm dialog's `dNo.focus()`.
+  if (openingGcConfirm) gcNo.focus();
 
   if (!state.detail || !state.detail.depots.length) return; // nothing to collect
 

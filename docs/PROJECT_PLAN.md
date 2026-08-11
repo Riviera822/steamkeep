@@ -495,8 +495,20 @@ parallel/serial decisions, merge discipline, open user decisions):
 
 ### Phase 4 — Frontends (user decision 2026-08-06: web first, then app)
 
-#### Phase 4a — Web UI (served by vault-api as static files)
-- [ ] SPA sharing the mockup's design language; zero extra deploy
+#### Phase 4a — Web UI (served by vault-api as static files) — COMPLETE 2026-08-11
+
+All packages merged: 4a.1 (shell/static serving), 4a.2 (client/store),
+4a.3 (library), 4a.4 (detail sheet + delete/GC), 4a.5 (downloads),
+4a.6 (settings/onboarding/Steam identity) + 4a.6r (relay, api/),
+4a.7 (notifications/bypass), 4a.8 (e2e + a11y). Suite at close: 379
+headless web tests + 1461 api tests green. Every package: Sonnet coder
+→ Opus review with independent mutation batteries → PASS. Recorded
+mockup divergences live in WORKPACKAGES.md (user veto welcome).
+Remaining for real-world validation: the honest still-open list in
+web/tests/README.md (real screen reader, phone browser cover art,
+Zeus-scale library) — the Zeus rollout session covers it.
+
+- [x] SPA sharing the mockup's design language; zero extra deploy
       complexity (vault-api serves it; works over Tailscale/LAN and on
       phone browsers immediately)
       *(WP 4a.1 done 2026-08-10: vault-api serves `web/` via exact GET+HEAD
@@ -507,7 +519,7 @@ parallel/serial decisions, merge discipline, open user decisions):
       reduced-motion, toasts; traversal pinned incl. %2e%2e forms; suite
       1281 green; Opus FAIL→fix→PASS. Docker packaging of web/ is a
       documented known gap until the packaging WP)*
-- [ ] Same API surface as the app: library grid with badges + search,
+- [x] Same API surface as the app: library grid with badges + search,
       download-to-cache/delete flows, jobs view, settings incl. vault name
       *(WP 4a.2 done 2026-08-10: fetch wrapper with X-Api-Key + six-kind
       error taxonomy + demo mode (fixtures 1:1 with the real Pydantic
@@ -561,7 +573,7 @@ parallel/serial decisions, merge discipline, open user decisions):
       library.js mounted() fix (empty-grid-on-renavigation regression);
       demo games routes gained the missing last_manifest_check; 351
       headless tests; Opus PASS, 15/15 mutations)*
-- [ ] Steam identity via Sign in with Steam (ADR-0004); library fetch per
+- [x] Steam identity via Sign in with Steam (ADR-0004); library fetch per
       the 2026-08-09 addendum (user decision A+C): opt-in server-side relay
       because the Steam Web API sends no CORS headers — Android keeps the
       device-local path

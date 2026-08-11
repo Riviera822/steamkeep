@@ -44,6 +44,7 @@ import { planGamesUpdate } from "../lib/render-plan.js";
 import { formatBytesGB } from "../lib/format.js";
 import { onViewChange } from "../router.js";
 import { openDetail } from "../components/game-detail-sheet.js";
+import { pushModal, popModal } from "../lib/modal-stack.js";
 
 const LAYOUT_STORAGE_KEY = "steamvault.libraryLayout";
 const LAYOUT_CLASS = { grid2: "", grid3: "cols3", list: "list" };
@@ -131,6 +132,54 @@ let currentBulkPrimaryTargets = [];
 let currentBulkSecondaryTargets = [];
 let currentBulkDeleteIds = [];
 let pendingDeleteIds = null;
+
+// ---------------------------------------------------------------------
+// Bulk-delete confirm dialog — built ONCE at module load, appended
+// directly to `document.body` (a sibling of `#app`), NOT to the per-mount
+// `<section>` `buildSection()` rebuilds on every navigation.
+//
+// **WP 4a.8 bug found live, fixed here.** This dialog originally WAS built
+// inside `buildSection()` and appended as a child of the Library section —
+// itself inside `#app`. The first version of this WP's `pushModal`/`inert`
+// wiring (matching `components/game-detail-sheet.js`'s confirm dialogs,
+// which genuinely ARE `document.body`-level siblings of `#app`) marked
+// `#app` `inert` on open — which, for a dialog living INSIDE `#app`, made
+// the dialog itself (and its Keep/Delete buttons) unfocusable and
+// unclickable too (the confirm was completely unusable). Reproduced live in
+// the Browser pane: `document.activeElement` was `<body>`, not the "Keep"
+// button, and the dialog's own buttons were inert along with everything
+// else in `#app`. Moving construction here — matching
+// `game-detail-sheet.js`'s pattern exactly — is the fix: the dialog is now
+// a true `document.body` sibling of `#app`, so marking `#app` inert no
+// longer touches it.
+// ---------------------------------------------------------------------
+const dialogBackdrop = document.createElement("div");
+dialogBackdrop.className = "dialog-backdrop";
+const dialogEl = document.createElement("div");
+dialogEl.className = "dialog";
+dialogEl.setAttribute("role", "alertdialog");
+dialogEl.setAttribute("aria-modal", "true");
+dialogEl.setAttribute("aria-label", "Confirm deletion");
+const dTitle = document.createElement("h3");
+const dText = document.createElement("p");
+const dNote = document.createElement("div");
+const dRow = document.createElement("div");
+dRow.className = "row";
+const dNo = document.createElement("button");
+dNo.type = "button";
+dNo.className = "btn ghost sm";
+dNo.textContent = "Keep";
+const dYes = document.createElement("button");
+dYes.type = "button";
+dYes.className = "btn danger sm";
+dYes.textContent = "Delete";
+dRow.append(dNo, dYes);
+dialogEl.append(dTitle, dText, dNote, dRow);
+dialogBackdrop.appendChild(dialogEl);
+document.body.appendChild(dialogBackdrop);
+
+dNo.addEventListener("click", closeDeleteConfirm);
+dYes.addEventListener("click", confirmDelete);
 
 // ---------------------------------------------------------------------
 // Selection mode
@@ -376,9 +425,9 @@ function renderDeletePlan(plan, ids, gamesByAppid) {
   const freedText = formatBytesGB(plan.freedBytes) || "0 GB";
   const occupiedText = formatBytesGB(plan.occupiedBytes) || "0 GB";
 
-  els.dText.replaceChildren();
+  dText.replaceChildren();
   if (ids.length > 1) {
-    els.dText.append(
+    dText.append(
       "Deleting ",
       strong(`${ids.length} games`),
       " frees about ",
@@ -389,7 +438,7 @@ function renderDeletePlan(plan, ids, gamesByAppid) {
     );
   } else {
     const name = gamesByAppid.get(ids[0])?.name || `App ${ids[0]}`;
-    els.dText.append(
+    dText.append(
       "Deleting ",
       strong(name),
       " frees about ",
@@ -400,19 +449,19 @@ function renderDeletePlan(plan, ids, gamesByAppid) {
     );
   }
 
-  els.dNote.replaceChildren();
+  dNote.replaceChildren();
   if (plan.sharedRows.length === 0) {
     const p = document.createElement("p");
     p.className = "cfsolo";
     p.textContent = `No shared depots — the full ${occupiedText} is freed.`;
-    els.dNote.appendChild(p);
+    dNote.appendChild(p);
     return;
   }
 
   const label = document.createElement("p");
   label.className = "cflabel";
   label.textContent = `${plan.sharedRows.length} shared depot${plan.sharedRows.length > 1 ? "s" : ""}`;
-  els.dNote.appendChild(label);
+  dNote.appendChild(label);
 
   const ul = document.createElement("ul");
   ul.className = "cflist";
@@ -440,12 +489,12 @@ function renderDeletePlan(plan, ids, gamesByAppid) {
     li.append(did, mk, dsz, why);
     ul.appendChild(li);
   }
-  els.dNote.appendChild(ul);
+  dNote.appendChild(ul);
 
   const total = document.createElement("p");
   total.className = "cftotal";
   total.append(strong(freedText), " freed · ", strong(formatBytesGB(plan.keptBytes) || "0 GB"), " stays on disk");
-  els.dNote.appendChild(total);
+  dNote.appendChild(total);
 }
 
 function strong(text, extraClass) {
@@ -455,15 +504,27 @@ function strong(text, extraClass) {
   return b;
 }
 
+/** Element to return focus to when the delete-confirm dialog closes,
+ * captured fresh on every open() — same pattern as `sheet-dialog.js`'s
+ * `invokerEl` (WP 4a.8: this dialog had no focus management at all before
+ * this WP: no Escape, no focus-on-open, no trap). */
+let deleteConfirmInvokerEl = null;
+
 async function openDeleteConfirm(ids) {
   pendingDeleteIds = ids;
   const gamesByAppid = new Map(state.games.map((g) => [g.appid, g]));
-  els.dTitle.textContent =
+  dTitle.textContent =
     ids.length > 1 ? `Delete ${ids.length} games from cache?` : "Delete from cache?";
-  els.dText.textContent = "Calculating what this would free…";
-  els.dNote.replaceChildren();
-  els.dYes.disabled = true;
-  els.dialogBackdrop.classList.add("on");
+  dText.textContent = "Calculating what this would free…";
+  dNote.replaceChildren();
+  dYes.disabled = true;
+  deleteConfirmInvokerEl = document.activeElement;
+  dialogBackdrop.classList.add("on");
+  // WP 4a.8: #app goes inert while this is up; Escape routes through
+  // lib/modal-stack.js's single dispatcher (see its header) rather than a
+  // listener bound here directly.
+  pushModal(dialogBackdrop, closeDeleteConfirm);
+  dNo.focus(); // "Keep" — the non-destructive default gets initial focus
 
   try {
     const [details, mapping] = await Promise.all([
@@ -475,26 +536,29 @@ async function openDeleteConfirm(ids) {
     );
     const plan = buildMultiPlan(ids, { details, mapping, gamesByAppid, activeJobAppids });
     renderDeletePlan(plan, ids, gamesByAppid);
-    els.dYes.disabled = false;
+    dYes.disabled = false;
   } catch (err) {
-    els.dText.textContent = `Could not calculate the delete plan: ${errorText(err)}`;
-    els.dYes.disabled = true;
+    dText.textContent = `Could not calculate the delete plan: ${errorText(err)}`;
+    dYes.disabled = true;
   }
 }
 
 function closeDeleteConfirm() {
-  els.dialogBackdrop.classList.remove("on");
+  dialogBackdrop.classList.remove("on");
+  popModal(dialogBackdrop);
+  if (deleteConfirmInvokerEl && typeof deleteConfirmInvokerEl.focus === "function") deleteConfirmInvokerEl.focus();
+  deleteConfirmInvokerEl = null;
   pendingDeleteIds = null;
 }
 
 async function confirmDelete() {
   const ids = pendingDeleteIds;
   if (!ids) return;
-  els.dYes.disabled = true;
-  els.dNo.disabled = true;
+  dYes.disabled = true;
+  dNo.disabled = true;
   const results = await Promise.allSettled(ids.map((id) => api.deleteCache(id)));
-  els.dYes.disabled = false;
-  els.dNo.disabled = false;
+  dYes.disabled = false;
+  dNo.disabled = false;
   closeDeleteConfirm();
   exitSelect();
   store.refreshNow();
@@ -660,32 +724,11 @@ function buildSection() {
   bulkBtns.append(bulkDelete, bulkSecondary, bulkPrimary);
   bulkBar.append(bulkHead, bulkNote, bulkBtns);
 
-  // ---- confirm dialog ----
-  const dialogBackdrop = document.createElement("div");
-  dialogBackdrop.className = "dialog-backdrop";
-  const dialog = document.createElement("div");
-  dialog.className = "dialog";
-  dialog.setAttribute("role", "alertdialog");
-  dialog.setAttribute("aria-modal", "true");
-  dialog.setAttribute("aria-label", "Confirm deletion");
-  const dTitle = document.createElement("h3");
-  const dText = document.createElement("p");
-  const dNote = document.createElement("div");
-  const dRow = document.createElement("div");
-  dRow.className = "row";
-  const dNo = document.createElement("button");
-  dNo.type = "button";
-  dNo.className = "btn ghost sm";
-  dNo.textContent = "Keep";
-  const dYes = document.createElement("button");
-  dYes.type = "button";
-  dYes.className = "btn danger sm";
-  dYes.textContent = "Delete";
-  dRow.append(dNo, dYes);
-  dialog.append(dTitle, dText, dNote, dRow);
-  dialogBackdrop.appendChild(dialog);
-
-  section.append(head, searchWrap, chips, grid, hint, bulkBar, dialogBackdrop);
+  // The delete-confirm dialog is NOT built here — see the module-level
+  // block near the top of this file (WP 4a.8: it must be a `document.body`
+  // sibling of `#app`, not a child of this per-mount `<section>`, or
+  // marking `#app` inert would also make the dialog itself inert).
+  section.append(head, searchWrap, chips, grid, hint, bulkBar);
 
   els = {
     sub,
@@ -704,12 +747,6 @@ function buildSection() {
     bulkDelete,
     bulkSecondary,
     bulkPrimary,
-    dialogBackdrop,
-    dTitle,
-    dText,
-    dNote,
-    dNo,
-    dYes,
   };
 
   // ---- static listeners (wired once per mount — see mounted()) ----
@@ -775,8 +812,8 @@ function buildSection() {
     if (currentBulkDeleteIds.length) openDeleteConfirm(currentBulkDeleteIds);
   });
 
-  dNo.addEventListener("click", closeDeleteConfirm);
-  dYes.addEventListener("click", confirmDelete);
+  // dNo/dYes are wired ONCE at module load — see the module-level dialog
+  // construction block near the top of this file.
 
   return section;
 }
@@ -943,6 +980,16 @@ onViewChange((view) => {
     state.picked.clear();
     document.body.classList.remove("selecting");
   }
+  // Navigation dismisses transient surfaces (mockup rule) — the delete
+  // dialog is now a `document.body`-level sibling of `#app` (module-level
+  // construction block, WP 4a.8 fix) so it survives this view's own DOM
+  // being torn down, and closing it here is purely the UX rule, not a
+  // leak-prevention measure the way it would have been before that fix
+  // (when the dialog was destroyed WITH the section, silently leaving
+  // `lib/modal-stack.js`'s stack referencing a detached element and `#app`
+  // stuck `inert` forever). Safe to call unconditionally — a no-op when the
+  // dialog was not open (see closeDeleteConfirm()).
+  closeDeleteConfirm();
   // Release the detached DOM tree — app.js's replaceChildren() already
   // detached it, but this module held its own reference in `sectionEl`
   // (mounted()'s isConnected check would already report false, this just

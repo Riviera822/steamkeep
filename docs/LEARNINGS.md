@@ -421,3 +421,18 @@ These are not style preferences; each entry cost a review round to learn.
   UPDATE (2.8+) applies changed specs without resetting the period; the
   common KEEP-vs-REPLACE dichotomy is false on modern WorkManager
   (WP 4b.8 review).
+- Native inert (+ aria-hidden) beats hand-rolled Tab interception for
+  modal traps: one attribute removes the subtree from tab order,
+  hit-testing and the a11y tree by spec, with no focusable-enumeration
+  drift; centralize Escape in one stack dispatcher — two independent
+  document listeners closed two stacked overlays with one keypress
+  (WP 4a.8, live-reproduced).
+- An explicit scrollIntoView({behavior:"smooth"}) argument beats the
+  CSS scroll-behavior:auto !important reduced-motion override per
+  CSSOM-View — JS smooth-scroll call sites need their own matchMedia
+  guard (WP 4a.8 review).
+- Author display rules (.btn{display:inline-flex}) silently defeat the
+  UA's [hidden]{display:none} — every class that is both display-styled
+  and hidden-toggled needs a .class[hidden]{display:none} guard; sweep
+  by cross-referencing display rules against .hidden= call sites
+  (WP 4a.8; third instance of the class after h4.sec and .onbnav).

@@ -147,3 +147,39 @@ test("jobStatusWord: GC jobs get GC-specific wording, never the download vocabul
   assert.equal(jobStatusWord(gc(1, "error")), "Garbage collection failed");
   assert.equal(jobStatusWord(gc(1, "cancelled")), "Garbage collection cancelled");
 });
+
+// ---------------------------------------------------------------------
+// WP 4a.8 backport of the WP 4b.5 divergence (job-partition.js's module
+// header): an unrecognized status must land in history with a NEUTRAL
+// presentation, never vanish from every bucket silently.
+// ---------------------------------------------------------------------
+test("partitionJobs: an unrecognized status lands in history, not nowhere", () => {
+  const jobs = [job(1, "queued"), job(2, "quarantined")];
+  const p = partitionJobs(jobs);
+  assert.deepEqual(p.running, []);
+  assert.deepEqual(p.paused, []);
+  assert.deepEqual(
+    p.queued.map((j) => j.id),
+    [1],
+  );
+  // Mutation target: dropping the `|| !KNOWN_STATUSES.has(j.status)` half of
+  // the history filter makes this assertion fail (job 2 would match no
+  // bucket at all).
+  assert.deepEqual(
+    p.history.map((j) => j.id),
+    [2],
+  );
+});
+
+test("countPending: an unrecognized status does NOT count toward the nav pip", () => {
+  const jobs = [job(1, "queued"), job(2, "quarantined")];
+  assert.equal(countPending(jobs), 1);
+});
+
+test("jobIconKind: an unrecognized status falls back to the neutral 'none' glyph", () => {
+  assert.equal(jobIconKind(job(1, "quarantined")), "none");
+});
+
+test("jobStatusWord: an unrecognized status falls back to the raw status string, never a fabricated word", () => {
+  assert.equal(jobStatusWord(job(1, "quarantined")), "quarantined");
+});

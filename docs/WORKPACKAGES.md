@@ -241,7 +241,10 @@ OpenID in a Custom Tab; the PHONE fetches the library from Valve
   reviews: move the unreferenced GalleryScreen (4b.1) and IdentityScreen
   (4b.3, superseded by SettingsScreen in 4b.7) to src/debug/ keeping
   their tests; re-check the security-crypto 1.1.0-alpha pin for a GA
-  release; the OpenID state parameter landed in 4b.7 (residual closed).
+  release; the OpenID state parameter landed in 4b.7 (residual closed);
+  pin the Kotlin LogExcerpt truncation marker to position 0 (web side
+  pinned in 4a.8; the 4b.5 twin is still open); release notification
+  icon art (4b.8 reuses the launcher monochrome).
 
 ---
 

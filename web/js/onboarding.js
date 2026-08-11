@@ -42,12 +42,17 @@
  * to reveal, so `Escape` is a no-op there — and returns focus to whatever
  * invoked it (captured as `document.activeElement` at `openOnboarding()`
  * time, which is the "Start" button mid-click; the same path `onSkip()`'s
- * reconnect branch already used). **Deferred to WP 4a.8, deliberately not
- * done here:** a real focus TRAP (Tab/Shift+Tab wrapping inside the
- * dialog) and `inert`/`aria-hidden` on the app shell behind it — this WP
- * only closes the two cheapest, highest-value gaps (accessible name +
- * name-change announcement, and a working Escape/return-focus pair for the
- * one path that has something to return to).
+ * reconnect branch already used).
+ *
+ * **The full focus trap (WP 4a.8, closing the deferral this header used to
+ * record).** `openOnboarding()`/`closeOnboarding()` push/pop `root` onto
+ * `lib/modal-stack.js`'s shared stack, which marks `#app` `inert` +
+ * `aria-hidden` for the duration — see that module's header for why `inert`
+ * alone is both "a real focus trap" and "inert/aria-hidden on the app shell
+ * behind it" in one mechanism. This applies on a FIRST-RUN open too (there
+ * is nothing behind it worth revealing via Escape, per the paragraph above,
+ * but `#app`'s nav/topbar are still real, still-rendered, still-focusable
+ * DOM at that point and must not be Tab-reachable while the overlay is up).
  */
 
 import {
@@ -65,6 +70,7 @@ import { validSteamId64 } from "./lib/steamid.js";
 import { submitSteamKey } from "./lib/steam-key-form.js";
 import { api, checkVaultApiKey, getStoredApiKey, setStoredApiKey, isDemoMode, setDemoMode } from "./api.js";
 import { showToast } from "./components/toast.js";
+import { pushModal, popModal } from "./lib/modal-stack.js";
 
 const MARK_SVG =
   '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M12 2.6 20.5 6v6.1c0 5-3.6 8.3-8.5 9.3-4.9-1-8.5-4.3-8.5-9.3V6L12 2.6Z"/><circle cx="12" cy="11.4" r="2.6"/><path d="M12 14v3.2"/></svg>';
@@ -478,10 +484,11 @@ function headingForStep(step) {
 /** Escape closes the overlay, but ONLY in `mode: "reconnect"` — a
  * first-run open has nothing behind it to reveal, so Escape is
  * intentionally a no-op there (module header "Dialog semantics"). Bound to
- * `document`, not `root`, because there is no focus trap (yet — WP 4a.8):
- * focus is not guaranteed to still be inside `root` when the key is
- * pressed, and this must still work. Guarded on `root` actually being
- * visible so it is a no-op the rest of the time the module is loaded. */
+ * `document`, not `root`: even with the WP 4a.8 focus trap in place, Escape
+ * must keep working no matter which descendant of `root` currently holds
+ * focus, the same reasoning `sheet-dialog.js`'s identical choice documents.
+ * Guarded on `root` actually being visible so it is a no-op the rest of the
+ * time the module is loaded. */
 function onDocumentKeydown(event) {
   if (event.key !== "Escape") return;
   if (!root || root.classList.contains("gone")) return;
@@ -532,8 +539,9 @@ function buildOverlay() {
     state.step = prevStep(state.step);
     render();
     // Focus the new step's heading (tabindex="-1", never a natural Tab
-    // stop) so a screen reader announces the step changed — the cheap
-    // stand-in for a real focus trap (WP 4a.8; module header).
+    // stop) so a screen reader announces the step changed (independent of
+    // the WP 4a.8 Tab-trap below — this is about ANNOUNCING a step change,
+    // not about containing focus).
     headingForStep(state.step).focus();
   });
   const nextBtn = el("button", "btn primary wide", "Continue");
@@ -634,6 +642,7 @@ export function openOnboarding({ mode = "first-run" } = {}) {
   }
   root.classList.remove("gone");
   document.body.classList.add("onboarding");
+  pushModal(root); // WP 4a.8: #app goes inert/aria-hidden while the overlay is up
   // Move focus to the first real control (module header "Dialog
   // semantics") — not the heading: this is the START of the flow, there is
   // nothing to announce a "change" from yet.
@@ -644,6 +653,7 @@ export function closeOnboarding() {
   if (!root) return;
   root.classList.add("gone");
   document.body.classList.remove("onboarding");
+  popModal(root);
   if (invokerEl) {
     invokerEl.focus();
     invokerEl = null;

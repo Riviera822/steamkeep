@@ -64,6 +64,20 @@ function makeGame({
   // tracks no manifests at all, so this is a deliberately simple stand-in,
   // not an approximation of the real algorithm.
   gcReclaimableBytes = 0,
+  // WP 4a.8 demo-only addition: bytes the dry run finds but reports HELD
+  // BACK (api/vault_api/gc_execute.py's `RecentlyStoredGrace` — a chunk
+  // stored within the grace window). Kept separate from
+  // `gcReclaimableBytes` (which is what an EXECUTE run actually frees) so
+  // demo mode can exercise the real `held_back=N (M bytes)` field
+  // `lib/gc-log-summary.js` parses end to end — before this WP the demo
+  // log's `held_back` was hardcoded to `0 (0 bytes)` in every scenario, so
+  // that branch of the parser (and the detail sheet's "N chunks held
+  // back — inside the grace window" note) was never exercised by demo mode
+  // at all. An execute run does NOT clear this counter: the grace window is
+  // a TIME rule, not something an execute run changes (gc_execute.py: "the
+  // separation is deliberate... time is a policy on top of [the plan],
+  // not part of it").
+  gcHeldBackBytes = 0,
 }) {
   return {
     appid,
@@ -80,6 +94,7 @@ function makeGame({
     // it is approximated.
     depots,
     _demoGcReclaimableBytes: gcReclaimableBytes,
+    _demoGcHeldBackBytes: gcHeldBackBytes,
   };
 }
 
@@ -144,6 +159,13 @@ function buildGames() {
       status: "error",
       needsForce: true,
       depots: [{ depotid: 2010071, shared: false, size_bytes: 2_400_000_000 }],
+      // WP 4a.8: gives the GC dry-run flow a non-zero `held_back` alongside
+      // its `would_delete` — see makeGame()'s header. Aurora Cascade (above)
+      // stays held_back=0 on purpose so the pre-existing
+      // web/tests/demo-data-gc.test.js assertions keep pinning the plain
+      // case unchanged.
+      gcReclaimableBytes: 40_000_000,
+      gcHeldBackBytes: 15_000_000,
     }),
   ];
 }
@@ -656,36 +678,67 @@ function advanceJob(job) {
 }
 
 /**
- * Complete a GC job (WP 4a.4) with a log_excerpt shaped exactly like the
- * real `GC totals (DRY RUN)`/`GC totals (EXECUTED)` lines api/README.md
- * quotes and `lib/gc-log-summary.js` scrapes — so demo mode exercises the
- * REAL parser, not a fixture tailored to it.
+ * Complete a GC job (WP 4a.4; extended WP 4a.8) with a log_excerpt shaped
+ * exactly like the real `GC totals (DRY RUN)`/`GC totals (EXECUTED)` lines
+ * — every field name `api/vault_api/gc_execute.py`'s `GcRunReport.log_text`
+ * writes, in the same order, not just the two or three
+ * `lib/gc-log-summary.js` happens to parse — so demo mode exercises the
+ * REAL production parse path end to end, including `held_back` (WP 4a.8:
+ * before this change the demo log hardcoded `held_back=0 (0 bytes)` in
+ * every scenario, so that branch of the parser — and the detail sheet's "N
+ * chunks held back" note — was never exercised by demo mode at all).
  *
- * The demo model tracks no manifests at all, so "what is reclaimable" is a
- * single per-game counter (`_demoGcReclaimableBytes`, see makeGame()'s
- * header) rather than a real orphan-chunk scan: a dry run reports it, an
- * execute run "collects" it (decrementing the counter to 0) — so a second
- * dry run against the same game honestly reports nothing left to find,
- * matching the real endpoint's "the plan is built when the job runs" and
- * "an executing run... invalidates the size cache" behaviour without
- * pretending to model chunk-level accounting.
+ * The demo model tracks no manifests at all, so "what is reclaimable" and
+ * "what is held back" are two per-game counters
+ * (`_demoGcReclaimableBytes`/`_demoGcHeldBackBytes`, see makeGame()'s
+ * header) rather than a real orphan-chunk scan: a dry run reports both, an
+ * execute run "collects" only the reclaimable half (decrementing it to 0 —
+ * held_back chunks are a TIME rule an execute run does not touch, see
+ * makeGame()'s header) — so a second dry run against the same game
+ * honestly reports nothing left to find *except* whatever is still held
+ * back, matching the real endpoint's "the plan is built when the job runs"
+ * and "an executing run... invalidates the size cache" behaviour without
+ * pretending to model chunk-level accounting. Every count field this
+ * function cannot derive from those two counters (`already_gone`,
+ * `dedupe_removed`, `problems`, `declined`) is honestly `0` — the demo
+ * model has no failure/dedupe scenarios to report — and `depots_touched`/
+ * `planned_depots`/`needs_force_set_for` use the game's own depot/appid
+ * only when something was actually planned, mirroring the real report's
+ * "empty unless something happened" properties.
  */
 function finishGcJob(job) {
   job.status = "done";
   const game = findGame(job.appid);
   const reclaimable = game ? game._demoGcReclaimableBytes || 0 : 0;
+  const heldBack = game ? game._demoGcHeldBackBytes || 0 : 0;
+  const depotid = game && game.depots.length ? game.depots[0].depotid : null;
+  const wouldDeleteCount = reclaimable > 0 ? 1 : 0;
+  const heldBackCount = heldBack > 0 ? 1 : 0;
 
   if (job.gc_execute) {
-    const chunksRemoved = reclaimable > 0 ? 1 : 0;
+    const chunksRemoved = wouldDeleteCount;
+    const touchedDepots = chunksRemoved > 0 && depotid != null ? [depotid] : [];
+    const flaggedAppids = chunksRemoved > 0 ? [job.appid] : [];
     job.log_excerpt +=
       `\n[vault-api] GC totals (EXECUTED): chunks_removed=${chunksRemoved} ` +
-      `bytes_freed=${reclaimable} total_bytes_freed=${reclaimable}`;
+      `bytes_freed=${reclaimable} already_gone=0 dedupe_removed=0 ` +
+      "dedupe_bytes_freed=0 " +
+      `total_bytes_freed=${reclaimable} problems=0 declined=0 ` +
+      `held_back=${heldBackCount} (${heldBack} bytes) ` +
+      `depots_touched=[${touchedDepots.join(", ")}] ` +
+      `needs_force_set_for=[${flaggedAppids.join(", ")}]`;
     if (game) game._demoGcReclaimableBytes = 0;
   } else {
-    const wouldDelete = reclaimable > 0 ? 1 : 0;
+    const orphans = wouldDeleteCount + heldBackCount;
+    const orphanBytes = reclaimable + heldBack;
+    const plannedDepots = depotid != null && orphans > 0 ? [depotid] : [];
     job.log_excerpt +=
-      `\n[vault-api] GC totals (DRY RUN): would_delete=${wouldDelete} (${reclaimable} bytes) ` +
-      "held_back=0 (0 bytes)";
+      `\n[vault-api] GC totals (DRY RUN): orphans=${orphans} (${orphanBytes} bytes) ` +
+      `held_back=${heldBackCount} (${heldBack} bytes) ` +
+      `would_delete=${wouldDeleteCount} (${reclaimable} bytes) ` +
+      "reclaimable_dedupe_bytes=0 " +
+      `planned_depots=[${plannedDepots.join(", ")}]. ` +
+      'NOTHING was deleted — re-run with {"execute": true} to reclaim it.';
   }
 }
 

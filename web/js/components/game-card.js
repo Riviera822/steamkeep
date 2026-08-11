@@ -23,6 +23,32 @@
  * the real API has no live progress number the mockup's `patchGridProgress`
  * used to patch) — `cardStructuralKey` is exported so library.js's tick
  * handler and this file can never disagree about what "structural" means.
+ *
+ * **Nested-interactive-widget a11y (WP 4a.3 review nit, closed WP 4a.8).**
+ * The card is `role="button"` yet contains two REAL nested `<button>`s (the
+ * capsule pill and the meta-row icon, both only present when `statusAction`
+ * returns something) — an ARIA authoring-practices grey area (a "button"
+ * widget is conventionally a leaf). The fix shipped here is NOT removing
+ * the nesting (the pill/icon must stay independently focusable and
+ * operable — a screen-reader user needs to reach "download this one game"
+ * without opening the detail sheet first) but making the OUTER card's
+ * accessible NAME explicit (`aria-label`, set below) instead of
+ * name-from-content: without it, focusing the card would concatenate the
+ * cover's empty alt, the pill's own aria-label (when a button), `.name`,
+ * the list-layout `.rowname` DUPLICATE of the same text, the meta icon's
+ * sr-only word, the visible state word and the size — a garbled, doubled
+ * announcement having nothing to do with nested buttons specifically. An
+ * explicit `aria-label` makes accname computation skip content entirely, so
+ * the card reads as one clean "Name — Status, Size" and the nested buttons
+ * remain separately reachable/announced on their own terms when tabbed to
+ * directly (activating them already `stopPropagation()`s so they never also
+ * fire the card's `onOpen` — see the interaction wiring below). Redundant
+ * icon sr-only labels next to an already-visible word are hidden via
+ * `aria-hidden` for the same "avoid double announcement" reason
+ * `components/clients-sheet.js`/`components/notifications.js` already
+ * apply to their own status icons. Verified live with a screen reader
+ * (see the WP 4a.8 coder's report); not unit-tested (DOM-building
+ * component, see this file's own long-standing header note above).
  */
 
 import { createStatusIcon, STATUS_LABEL } from "./status-icon.js";
@@ -80,6 +106,11 @@ export function patchCardVolatile(cardEl, game, kind) {
   }
   const sizeEl = cardEl.querySelector(".meta .size");
   if (sizeEl) sizeEl.textContent = formatBytesGB(game.size_bytes) || "—";
+  // Keep the explicit accessible name (module header) in sync too — `kind`
+  // is unchanged by definition on the patch path (round-7 rule), but the
+  // SIZE this same tick just wrote above is part of the announced name and
+  // would otherwise go stale until the next structural rebuild.
+  cardEl.setAttribute("aria-label", cardAccessibleLabel(game, kind));
 }
 
 function buildCover(game) {
@@ -116,7 +147,16 @@ function buildCover(game) {
 
 function buildIcon(kind, { action, gameName }) {
   const icon = createStatusIcon(kind);
-  if (!action) return icon;
+  if (!action) {
+    // No action -> a plain, non-focusable span (see createStatusIcon). The
+    // meta row always shows the SAME status word right next to this icon
+    // (the `.state` span in buildCard below) — mark the icon aria-hidden so
+    // its own built-in sr-only label is not announced a second time (same
+    // "avoid double announcement" posture as clients-sheet.js/
+    // notifications.js's status icons).
+    icon.setAttribute("aria-hidden", "true");
+    return icon;
+  }
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "icnact";
@@ -133,9 +173,17 @@ function buildPill(game, kind, action) {
   if (wantsButton) {
     pill.type = "button";
     pill.title = action.title;
-    pill.setAttribute("aria-label", `${action.title} — ${game.name}`);
+    pill.setAttribute("aria-label", `${action.title} — ${displayName(game)}`);
   }
-  pill.appendChild(createStatusIcon(kind));
+  const icon = createStatusIcon(kind);
+  // The pill's icon is always redundant with the meta row's visible status
+  // word on the SAME card (round 6 gave every layout that word back) — hide
+  // it from assistive tech whether or not the pill itself is a button: a
+  // button's own aria-label already wins for ITS name, but the icon's
+  // sr-only text is still a distinct node a linear/browse-mode read would
+  // otherwise announce a second (or third) time.
+  icon.setAttribute("aria-hidden", "true");
+  pill.appendChild(icon);
   const num = pillNumberText(game, kind);
   if (num) {
     const pv = document.createElement("span");
@@ -144,6 +192,43 @@ function buildPill(game, kind, action) {
     pill.appendChild(pv);
   }
   return pill;
+}
+
+/**
+ * A NAME FALLBACK BUG found live against a real vault-api during this WP's
+ * e2e pass (WP 4a.8): `GameSummary.name` is genuinely `null` for an app
+ * vault-api has never resolved a display name for (no Steam identity linked
+ * — api/vault_api/routers/games.py; the demo-mode fixtures always seed a
+ * name, so this state was never exercised until testing against a real,
+ * un-Steam-linked server). Before this fix, a card for such a game rendered
+ * with a completely BLANK title (`.textContent = null` coerces to `""`) and
+ * — once `cardAccessibleLabel` below started building an explicit
+ * `aria-label` — an aria-label reading a bare `" — Failed"` with no
+ * identifying text at all. `components/game-detail-sheet.js` and
+ * `views/downloads.js`'s `nameFor` already fall back to `App {appid}` for
+ * exactly this case; this was the one remaining place in the app that did
+ * not. Verified live: reloading against the running instance now shows
+ * "App 440" instead of a blank title/name row.
+ *
+ * Exported (review fix, WP 4a.8 cycle 2): the live e2e pass exercised this
+ * through the running app, but nothing pinned it as a regression test —
+ * `web/tests/game-card.test.js` covers it directly against the fake DOM.
+ */
+export function displayName(game) {
+  return game.name && game.name.trim() ? game.name.trim() : `App ${game.appid}`;
+}
+
+/** The card's explicit accessible name (module header, "Nested-interactive-
+ * widget a11y") — game name, status word, and size when there is one to
+ * report (mirrors the visible `.meta` row's own size fallback: "—" is a
+ * visual placeholder, not spoken). Recomputed by `patchCardVolatile` too,
+ * since a size-only tick (no structural change) would otherwise leave a
+ * stale byte count in the announced name. */
+function cardAccessibleLabel(game, kind) {
+  const parts = [displayName(game), STATUS_LABEL[kind] || STATUS_LABEL.none];
+  const sizeText = formatBytesGB(game.size_bytes);
+  if (sizeText) parts.push(sizeText);
+  return parts.join(" — ");
 }
 
 /**
@@ -170,6 +255,12 @@ export function buildCard(game, ctx) {
   card.dataset.dk = kind;
   card.setAttribute("role", "button");
   card.tabIndex = 0;
+  card.setAttribute("aria-label", cardAccessibleLabel(game, kind));
+  // In multi-select mode the card's default action is "toggle selection",
+  // not "open" — aria-pressed makes that a stated TOGGLE state instead of a
+  // silent visual-only "picked" class (mirrors the `.pick` checkmark, which
+  // stays aria-hidden since this is the accessible equivalent of it).
+  if (selecting) card.setAttribute("aria-pressed", String(picked));
 
   card.appendChild(buildCover(game));
   const cap = card.firstChild;
@@ -177,7 +268,7 @@ export function buildCard(game, ctx) {
 
   const name = document.createElement("div");
   name.className = "name";
-  name.textContent = game.name;
+  name.textContent = displayName(game);
   cap.appendChild(name);
 
   const pick = document.createElement("span");
@@ -198,12 +289,12 @@ export function buildCard(game, ctx) {
 
   const rowname = document.createElement("span");
   rowname.className = "rowname";
-  rowname.textContent = game.name;
+  rowname.textContent = displayName(game);
   card.appendChild(rowname);
 
   const meta = document.createElement("div");
   meta.className = "meta";
-  meta.appendChild(buildIcon(kind, { action, gameName: game.name }));
+  meta.appendChild(buildIcon(kind, { action, gameName: displayName(game) }));
   const state = document.createElement("span");
   state.className = "state tx-" + kind;
   state.textContent = STATUS_LABEL[kind] || STATUS_LABEL.none;

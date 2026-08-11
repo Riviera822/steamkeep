@@ -181,3 +181,68 @@ test("execute run frees the reclaimable bytes and a subsequent dry run reports n
   const dryRunSummary = parseGcLogSummary(dryRunJob.log_excerpt);
   assert.equal(dryRunSummary.wouldDeleteCount, 0);
 });
+
+// ---------------------------------------------------------------------
+// WP 4a.8: demo GC log seeds extended to the FULL real key set (both
+// DRY RUN and EXECUTED lines, per api/vault_api/gc_execute.py's
+// GcRunReport.log_text literals) so demo mode exercises the production
+// parse path including `held_back` — before this WP the demo log
+// hardcoded `held_back=0 (0 bytes)` in every scenario.
+// ---------------------------------------------------------------------
+
+test("a dry run reports held_back separately from would_delete (full key-set log line)", async () => {
+  // Glass Meridian seeded with gcReclaimableBytes: 40_000_000,
+  // gcHeldBackBytes: 15_000_000 (demo-data.js buildGames()).
+  const ref = await demoRequest("POST", `/v1/cache/${GLASS_MERIDIAN}/gc`);
+  let job;
+  for (let i = 0; i < 5 && (!job || job.status !== "done"); i++) {
+    job = await demoRequest("GET", `/v1/jobs/${ref.job_id}`);
+  }
+  assert.equal(job.status, "done");
+  assert.match(job.log_excerpt, /GC totals \(DRY RUN\)/);
+  // The full literal key set from gc_execute.py's log_text — orphans is the
+  // SUM of would_delete + held_back, not just would_delete.
+  assert.match(job.log_excerpt, /orphans=2 \(55000000 bytes\)/);
+  assert.match(job.log_excerpt, /reclaimable_dedupe_bytes=0/);
+  assert.match(job.log_excerpt, /planned_depots=\[2010071\]/);
+  const summary = parseGcLogSummary(job.log_excerpt);
+  assert.equal(summary.wouldDeleteCount, 1);
+  assert.equal(summary.wouldDeleteBytes, 40_000_000);
+  assert.equal(summary.heldBackCount, 1);
+  assert.equal(summary.heldBackBytes, 15_000_000);
+});
+
+test("an execute run also reports held_back, and does NOT clear it on a follow-up dry run", async () => {
+  const executeRef = await demoRequest("POST", `/v1/cache/${GLASS_MERIDIAN}/gc`, { body: { execute: true } });
+  let executeJob;
+  for (let i = 0; i < 5 && (!executeJob || executeJob.status !== "done"); i++) {
+    executeJob = await demoRequest("GET", `/v1/jobs/${executeRef.job_id}`);
+  }
+  assert.match(executeJob.log_excerpt, /GC totals \(EXECUTED\)/);
+  // The full literal key set from gc_execute.py's log_text.
+  assert.match(executeJob.log_excerpt, /already_gone=0/);
+  assert.match(executeJob.log_excerpt, /dedupe_removed=0 dedupe_bytes_freed=0/);
+  assert.match(executeJob.log_excerpt, /problems=0 declined=0/);
+  assert.match(executeJob.log_excerpt, /depots_touched=\[2010071\]/);
+  assert.match(executeJob.log_excerpt, new RegExp(`needs_force_set_for=\\[${GLASS_MERIDIAN}\\]`));
+  const executedSummary = parseGcLogSummary(executeJob.log_excerpt);
+  assert.equal(executedSummary.chunksRemoved, 1);
+  assert.equal(executedSummary.bytesFreed, 40_000_000);
+  assert.equal(executedSummary.totalBytesFreed, 40_000_000);
+  assert.equal(executedSummary.heldBackCount, 1);
+  assert.equal(executedSummary.heldBackBytes, 15_000_000);
+
+  const dryRunRef = await demoRequest("POST", `/v1/cache/${GLASS_MERIDIAN}/gc`);
+  let dryRunJob;
+  for (let i = 0; i < 5 && (!dryRunJob || dryRunJob.status !== "done"); i++) {
+    dryRunJob = await demoRequest("GET", `/v1/jobs/${dryRunRef.job_id}`);
+  }
+  const dryRunSummary = parseGcLogSummary(dryRunJob.log_excerpt);
+  // The reclaimable bytes were collected by the execute run above; the
+  // held-back bytes were NOT — a time rule an execute run does not touch
+  // (gc_execute.py: "time is a policy on top of [the plan], not part of
+  // it"; finishGcJob's module header records the same choice for demo).
+  assert.equal(dryRunSummary.wouldDeleteCount, 0);
+  assert.equal(dryRunSummary.heldBackCount, 1);
+  assert.equal(dryRunSummary.heldBackBytes, 15_000_000);
+});
