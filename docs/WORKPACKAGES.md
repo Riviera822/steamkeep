@@ -128,6 +128,18 @@ real shipped API surface the mockup never modeled — a failed prefill
 needs a findable home. When the stale field lands, Update ready returns
 and the chip set is re-decided against the mockup.
 
+Recorded cross-frontend divergence (WP 4b.5, 2026-08-11,
+reviewer-endorsed): the ANDROID job partition routes a job with an
+unknown status into History (neutral glyph, raw status word) instead of
+silently dropping it from every section as `web/js/lib/job-partition.js`
+does; unknown statuses deliberately do NOT count toward the nav pip
+(an unknown terminal status must not pin an uncloseable badge; an
+unknown active status self-corrects and stays visible in History).
+BACKPORT NOTE for the web: adopt the same routing in job-partition.js —
+candidate for the WP 4a.8 polish pass. Shared test gap to close on both
+sides then: the log-excerpt truncation marker must be pinned to
+position 0 (startsWith, not contains).
+
 Recorded divergence (WP 4a.5, 2026-08-10, reviewer-endorsed, same class):
 a `cancelled` status-icon kind exists (distinct stop glyph, neutral
 colour, own screen-reader word) because `cancelled` is a real terminal

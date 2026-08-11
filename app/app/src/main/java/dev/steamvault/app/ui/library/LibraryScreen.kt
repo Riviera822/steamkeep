@@ -45,6 +45,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import dev.steamvault.app.R
+import dev.steamvault.app.net.model.JobSummary
 import dev.steamvault.app.repo.CacheRepository
 import dev.steamvault.app.repo.GamesRepository
 import dev.steamvault.app.repo.JobsRepository
@@ -78,6 +79,12 @@ import kotlinx.coroutines.delay
  * multi-select is deliberately a no-op for now, the same placeholder
  * decision `web/js/views/library.js`'s `onOpen` documents for its own
  * not-yet-shipped WP.
+ *
+ * @param onJobsSnapshot fired whenever this screen's own jobs poll ticks
+ *   (WP 4b.5 addition) -- lets `MainActivity` keep the Downloads nav pip
+ *   live while Library, not Downloads, is the screen currently polling
+ *   `GET /v1/jobs`. See `MainActivity.kt`'s kdoc for the honest scope
+ *   limitation this implies.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -88,6 +95,7 @@ fun LibraryScreen(
     cacheRepository: CacheRepository,
     identityRepository: SteamIdentityRepository,
     libraryPreferences: LibraryPreferences,
+    onJobsSnapshot: (List<JobSummary>) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val resources = LocalContext.current.resources
@@ -119,6 +127,7 @@ fun LibraryScreen(
             controller.refreshOwnedGamesOnce()
         }
     }
+    LaunchedEffect(controller.jobs) { onJobsSnapshot(controller.jobs) }
 
     val merged = remember(controller.games, controller.ownedGames) {
         mergeLibrary(controller.games, controller.ownedGames)

@@ -605,6 +605,17 @@ parallel/serial decisions, merge discipline, open user decisions):
       "not connected" placeholder until 4b.7 lands the connection UI;
       314 JVM tests; Opus PASS + should-fix round (string-resource
       rule recorded in app/README))*
+      *(WP 4b.5 done 2026-08-11: downloads screen — Active/Paused as
+      independent sections with the web's verbatim slot-release wording,
+      FIFO queue with positions, history newest-first with session-
+      cached lazy log excerpts (truncation marker pinned to position 0),
+      non-optimistic pause/resume/cancel with prefill-only pause gating,
+      nav pip (queued|running|paused, foreground-only — recorded in the
+      device-test list); unknown job statuses route to History instead
+      of vanishing (recorded cross-frontend divergence, web backport in
+      4a.8); JobCardModel stability with the strongest pin yet
+      (stop_request drift changes ONLY the action field); 362 JVM
+      tests; Opus PASS, 12/12 parity mutations killed)*
 - [ ] Delete flow with size display and confirmation; GC action per game
 - [ ] Bypass warnings surfaced in the UI
 - [ ] Document APK build (no Play Store requirement; F-Droid as a long-term goal)

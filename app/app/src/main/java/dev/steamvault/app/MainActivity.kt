@@ -26,6 +26,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import dev.steamvault.app.net.VaultApiClient
+import dev.steamvault.app.net.model.JobSummary
 import dev.steamvault.app.net.profile.buildConnectivityProfile
 import dev.steamvault.app.net.steam.SteamOpenIdConfig
 import dev.steamvault.app.repo.SteamIdentityRepository
@@ -37,6 +38,8 @@ import dev.steamvault.app.repo.VaultJobsRepository
 import dev.steamvault.app.repo.VaultMappingRepository
 import dev.steamvault.app.storage.EncryptedCredentialStore
 import dev.steamvault.app.storage.SharedPreferencesLibraryPreferences
+import dev.steamvault.app.ui.downloads.DownloadsScreen
+import dev.steamvault.app.ui.downloads.logic.countPending
 import dev.steamvault.app.ui.identity.IdentityScreen
 import dev.steamvault.app.ui.library.LibraryScreen
 import dev.steamvault.app.ui.nav.BottomNavBar
@@ -92,6 +95,22 @@ class MainActivity : ComponentActivity() {
 
     private var identityState by mutableStateOf(SteamIdentityScreenState())
 
+    /** Latest `GET /v1/jobs` snapshot from WHICHEVER screen is currently
+     * polling jobs (Library or Downloads -- both now report through
+     * `onJobsSnapshot`, see `LibraryScreen.kt`/`DownloadsScreen.kt`'s own
+     * kdoc for that parameter). Feeds the bottom-nav pip
+     * ([dev.steamvault.app.ui.downloads.logic.countPending]).
+     *
+     * **Honest scope limitation (WP 4b.5).** This is NOT a background poll
+     * -- it is only ever updated while a jobs-polling screen is on screen,
+     * same foreground-only constraint every poll loop in this app has
+     * before WP 4b.8's WorkManager wiring lands. Concretely: the pip goes
+     * stale (does not update) while Settings is showing, and resets to
+     * whatever the newly-shown screen's first poll tick reports the moment
+     * the user switches back to Library or Downloads. A fully
+     * background-independent pip needs WP 4b.8, deliberately not this WP. */
+    private var pendingJobsSnapshot by mutableStateOf<List<JobSummary>>(emptyList())
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -101,14 +120,21 @@ class MainActivity : ComponentActivity() {
         setContent {
             SteamVaultTheme {
                 var destination by remember { mutableStateOf(Destination.LIBRARY) }
+                val pendingJobsCount = countPending(pendingJobsSnapshot)
 
                 Scaffold(
-                    bottomBar = { BottomNavBar(current = destination, onSelect = { destination = it }) },
+                    bottomBar = {
+                        BottomNavBar(
+                            current = destination,
+                            pendingJobsCount = pendingJobsCount,
+                            onSelect = { destination = it },
+                        )
+                    },
                 ) { innerPadding ->
                     Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
                         when (destination) {
                             Destination.LIBRARY -> LibraryDestinationContent()
-                            Destination.DOWNLOADS -> DownloadsPlaceholder()
+                            Destination.DOWNLOADS -> DownloadsDestinationContent()
                             Destination.SETTINGS -> IdentityScreen(
                                 state = identityState.identity,
                                 ownedGamesCountPreview = identityState.ownedGamesCountPreview,
@@ -141,6 +167,22 @@ class MainActivity : ComponentActivity() {
             cacheRepository = remember(client) { VaultCacheRepository(client) },
             identityRepository = identityRepository,
             libraryPreferences = libraryPreferences,
+            onJobsSnapshot = { pendingJobsSnapshot = it },
+        )
+    }
+
+    /** WP 4b.5's screen (Downloads + job control). */
+    @Composable
+    private fun DownloadsDestinationContent() {
+        val client = vaultApiClient
+        if (client == null) {
+            NotConnectedPlaceholder()
+            return
+        }
+        DownloadsScreen(
+            jobsRepository = remember(client) { VaultJobsRepository(client) },
+            gamesRepository = remember(client) { VaultGamesRepository(client) },
+            onJobsSnapshot = { pendingJobsSnapshot = it },
         )
     }
 
@@ -194,20 +236,6 @@ class MainActivity : ComponentActivity() {
             val preview = identityRepository.ownedGamesCountPreview()
             identityState = identityState.copy(ownedGamesCountPreview = preview)
         }
-    }
-}
-
-/** WP 4b.5's screen (Downloads + job control) has not landed yet -- this is
- * a deliberate placeholder, not a fabricated feature, same posture
- * `web/js/views/library.js`'s `onOpen` no-op documents for its own
- * not-yet-shipped WP. */
-@Composable
-private fun DownloadsPlaceholder() {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text(
-            text = stringResource(R.string.downloads_placeholder),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
 

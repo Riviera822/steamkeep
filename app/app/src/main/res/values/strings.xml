@@ -115,7 +115,102 @@
 
     <!-- Placeholders for WPs that have not shipped yet (WP 4b.4 review
          fix: static UI chrome, moved out of MainActivity.kt literals). -->
-    <string name="downloads_placeholder">Downloads — coming in WP 4b.5</string>
     <string name="not_connected_title">No vault-api connection configured yet.</string>
     <string name="not_connected_body">Connection setup is coming in WP 4b.7 (Onboarding + settings).</string>
+
+    <!-- Nav pip (WP 4b.5): contentDescription overrides the plain "Downloads"
+         accessible name whenever the pip is showing (mirrors
+         web/js/views/downloads.js's updateNavPip aria-label override).
+         A plurals resource per app/README.md's PluralsCandidate precedent
+         (library_bulk_selected_count), even though "pending" itself does
+         not inflect in English. -->
+    <plurals name="nav_downloads_pip_description">
+        <item quantity="one">Downloads — %1$d pending</item>
+        <item quantity="other">Downloads — %1$d pending</item>
+    </plurals>
+
+    <!-- Downloads screen (WP 4b.5). Job partitioning/wording ports
+         web/js/lib/job-partition.js; UI structure ports
+         web/js/views/downloads.js (read-only reference per the WP brief).
+         Static UI chrome per app/README.md's default string-resource rule;
+         DownloadsStrings.kt carries only the handful of strings produced
+         from inside a suspend/scope.launch block (toasts + the log-fetch
+         error fallback). -->
+    <string name="downloads_title">Downloads</string>
+    <string name="downloads_section_active">Active</string>
+    <string name="downloads_section_paused">Paused</string>
+    <string name="downloads_section_queue">Queue %1$d</string>
+    <string name="downloads_section_history">History</string>
+    <string name="downloads_active_empty">No download running. Start one from the Library.</string>
+    <string name="downloads_queue_empty">Nothing waiting.</string>
+    <string name="downloads_history_empty">Nothing finished yet.</string>
+    <string name="downloads_load_error">Could not reach vault-api: %1$s</string>
+
+    <!-- The slot-release divergence note (api/README.md "The worker slot —
+         a paused job does NOT hold it", docs/WORKPACKAGES.md Phase 4a
+         header). Verbatim port of web/js/views/downloads.js::buildJobCard's
+         "held" mode note — same words on both frontends, on purpose. -->
+    <string name="downloads_paused_hold_note">Paused — this does not hold the worker slot. vault-api released it immediately, so another queued job may already be running. Resume puts this job back at the front of the queue.</string>
+
+    <!-- Queue hint, verbatim port of web/js/views/downloads.js::fullRender's
+         els.queueHint text (base sentence + a conditional second sentence
+         when a paused job exists — the app composes the two with a single
+         space, see DownloadsScreen.kt). -->
+    <string name="downloads_queue_hint_base">vault-api runs one job at a time, oldest first. Drag-to-reorder is not built yet — the queue is FIFO.</string>
+    <string name="downloads_queue_hint_paused_suffix">A paused job does not hold this queue back — it keeps draining oldest-first.</string>
+
+    <string name="downloads_job_subtitle">job #%1$d · appid %2$d</string>
+    <string name="downloads_history_subtitle">job #%1$d · %2$s · %3$s</string>
+
+    <string name="downloads_action_pause">Pause</string>
+    <string name="downloads_action_pausing">Pausing…</string>
+    <string name="downloads_action_resume">Resume</string>
+    <string name="downloads_action_cancel">Cancel</string>
+    <string name="downloads_action_cancelling">Cancelling…</string>
+    <string name="downloads_action_remove">Remove</string>
+
+    <!-- Stop-request notes, verbatim port of
+         web/js/views/downloads.js::paintJobActions's stopNote text. -->
+    <string name="downloads_stopnote_cancelling">Cancel requested — the download is stopping. Bytes already fetched stay on the cache.</string>
+    <string name="downloads_stopnote_pausing">Pause requested — stopping. Resume re-runs from the cache, not from zero.</string>
+
+    <!-- Log-excerpt display states, verbatim port of
+         web/js/views/downloads.js::paintExcerpt's literal text. -->
+    <string name="downloads_log_loading">Loading log…</string>
+    <string name="downloads_log_error">Could not load the log: %1$s</string>
+    <string name="downloads_log_empty">No log output for this job.</string>
+    <string name="downloads_log_truncated_note">Truncated — showing the last portion of the output.</string>
+    <string name="downloads_log_fetch_error_fallback">Request failed</string>
+    <string name="downloads_history_expand">Show log</string>
+    <string name="downloads_history_collapse">Hide log</string>
+
+    <!-- Toasts (DownloadsStrings.kt), verbatim port of
+         web/js/views/downloads.js::onPause/onResume/onCancel. -->
+    <string name="downloads_toast_pause_requested">Pause requested — bytes already fetched stay on the cache</string>
+    <string name="downloads_toast_resuming">Resuming — back at the front of the queue</string>
+    <string name="downloads_toast_cancel_requested">Cancel requested</string>
+    <string name="downloads_toast_action_failed">Action failed</string>
+
+    <!-- Subtitle counts (web's subtitleText). None of these words actually
+         inflect in English ("1 running"/"2 running" are both grammatical),
+         but a plurals resource is used anyway per app/README.md's
+         PluralsCandidate precedent (library_bulk_selected_count) so
+         lintDebug's warningsAsErrors gate does not flag a bare "%1$d
+         running" literal. -->
+    <plurals name="downloads_count_running">
+        <item quantity="one">%1$d running</item>
+        <item quantity="other">%1$d running</item>
+    </plurals>
+    <plurals name="downloads_count_paused">
+        <item quantity="one">%1$d paused</item>
+        <item quantity="other">%1$d paused</item>
+    </plurals>
+    <plurals name="downloads_count_queued">
+        <item quantity="one">%1$d queued</item>
+        <item quantity="other">%1$d queued</item>
+    </plurals>
+    <plurals name="downloads_idle_history">
+        <item quantity="one">Idle · %1$d in history</item>
+        <item quantity="other">Idle · %1$d in history</item>
+    </plurals>
 </resources>

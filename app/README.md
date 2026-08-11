@@ -1029,3 +1029,73 @@ they can be called confirmed:
 - **No WorkManager-driven persona/library refresh** — `refreshPersonaName`/
   `ownedGamesCountPreview` are both manual, button-triggered calls; any
   background refresh is WP 4b.8's polling work.
+
+## Downloads + job control (WP 4b.5)
+
+Branch-parallel after 4b.2 per `docs/WORKPACKAGES.md` Phase 4b. Adds the
+Downloads screen (`ui/downloads/`): an Active section and an INDEPENDENT
+Paused section (the slot-release divergence — api/README.md "The worker
+slot — a paused job does NOT hold it" — ported from `web/js/lib/
+job-partition.js` onto the real WP 3.12 status set), a FIFO queue with
+positions, and history newest-first with lazily-fetched log excerpts (one
+`GET /v1/jobs/{id}` per job on first expand, cached for the session).
+Job control (pause/resume/cancel) is non-optimistic — a click only calls
+`VaultApiClient` and nudges an immediate re-poll, same "server confirms"
+pattern `web/js/views/downloads.js` documents.
+
+`ui/downloads/logic/JobPartition.kt` records one deliberate IMPROVEMENT
+over the web port: an unrecognized job status is routed into the History
+section with a neutral presentation instead of silently vanishing from
+every bucket (the web module's own review nit) — see that file's kdoc.
+
+### What is verifiable only on-device (WP 4b.5)
+
+Everything in `ui/downloads/logic/` is proven pure/JVM-side
+(`JobPartitionTest`, `JobCardModelTest`, `LogExcerptTest`,
+`FormatTest`), and `DownloadsController`'s network calls go through the
+same `VaultApiClient`/`VaultApiError` seams WP 4b.2 already device-verified
+for other endpoints. What is NOT exercised by any of that, and needs a real
+phone against a real vault-api before it can be called confirmed:
+
+1. **Pause/resume/cancel against a REAL running job.** The `stop_request`
+   round trip (`POST /v1/jobs/{id}/pause`/`resume`, `DELETE /v1/jobs/{id}`)
+   is proven client-side against `VaultApiClient`'s request/response
+   shapes only — that the WORKER actually terminates the SteamPrefill
+   subprocess, that `stop_request` clears once it does, and that the
+   "Pausing…"/"Cancelling…" note on the job card disappears at the right
+   poll tick, is only observable end-to-end with a genuine vault-api
+   worker doing real work.
+2. **Active-vs-Paused slot-release presentation with a genuinely paused
+   job.** `JobPartitionTest` proves the pure partitioning logic (running
+   and paused as independent buckets); it does not prove that a real
+   pause against a real download leaves a DIFFERENT queued job claimed and
+   running while the paused one sits in its own section on screen — that
+   needs two real jobs and a real worker.
+3. **The lazy log-excerpt fetch on first expand.** `ExcerptCache`'s
+   fetch-once/cache-for-the-session/retry-after-failure state machine is
+   proven against a canned fetcher (`LogExcerptTest`); the real `GET
+   /v1/jobs/{id}` call — its latency, a genuine truncated SteamPrefill
+   log, and the Compose recomposition `DownloadsController.excerptVersion`
+   drives on a real device — has not been exercised outside a JVM test.
+4. **The nav pip's foreground-only staleness** (see `MainActivity.kt`'s
+   `pendingJobsSnapshot` kdoc for the mechanism). The pip is only ever
+   updated while Library or Downloads — whichever screen currently owns
+   the jobs poll — is on screen; it goes stale (does not update) while
+   Settings is visible, and only catches up once the user switches back.
+   This is a real, user-visible behaviour, not just an implementation
+   detail: a device test should confirm it reads as "a little behind",
+   not as broken, and that a screen reader announces the overridden
+   `contentDescription` (`"Downloads — N pending"`) correctly once a job
+   is actually pending.
+
+### What WP 4b.5 deliberately did NOT do
+
+- **No WorkManager / background jobs poll** — foreground-only via
+  `repeatOnLifecycle`, same constraint every screen in this app has before
+  WP 4b.8.
+- **No queue reordering / drag-to-reorder** — post-v1 backlog item per
+  `docs/WORKPACKAGES.md`; the queue is presentation-only FIFO.
+- **No detail-sheet integration** — WP 4b.6.
+- **No update-check affordance anywhere on this screen** — Phase 4c guard
+  (binding): a refresh only ever re-polls `GET /v1/jobs`/`GET /v1/games`,
+  never triggers or checks for a download on its own initiative.
