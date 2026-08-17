@@ -923,6 +923,17 @@ platform actually wants to react to.
       into one click
 - [ ] Integration docs: n8n in BOTH directions (receiving events; calling
       `/v1/jobs` to trigger a prefill), Discord, ntfy
+- [ ] Structured log export — opt-in `VAULT_EVENT_LOG_STDOUT` mirroring the
+      cache-event TSV (WP 3.10) to vault-core's stdout, so Loki/Promtail/
+      Vector-style collectors can ingest the machine-readable events without
+      mounting the volume (user request 2026-08-17: keep it open for the
+      community even though the requester uses Dozzle). Deliberately NOT a
+      Dozzle gap: Dozzle reads container stdout, where vault-core's
+      human-readable per-request log with HIT/MISS/BYPASS already is — a
+      file-tailing log viewer is what the TSV would need, and no popular
+      Docker log viewer does that. Cost side: doubles the line volume inside
+      the json-file ring buffer, and the config-drift check's pinned
+      `access_log` counts must be updated in the same change. Off by default
 - [ ] Named, scoped API keys — the direct consequence of inviting external
       systems in (user question 2026-08-10). Today there is exactly ONE
       key: `auth.require_api_key` compares against `VAULT_API_KEY` for every
