@@ -451,6 +451,7 @@ clients, schedule and stats rows are implemented so far.
 | GET    | `/v1/mapping`                      | Full depot→app mapping table: list of `{depotid, appid}` |
 | DELETE | `/v1/mapping/{depotid}/{appid}`    | Remove one mapping pair (correction path for the additive `PUT`, see below); `204` on success, `404` if the pair doesn't exist, `422` for non-positive ids |
 | POST   | `/v1/prefill`                      | Body `{"appids": [int, ...]}` — queue one prefill job per app id. `202` with a list of `{appid, job_id, status, deduplicated}`. `422` for an empty list, an appid `< 1`, a non-list, or an unrecognized body field |
+| POST   | `/v1/prefill/cached`               | Phase 4c, WP 4c-api. **No request body.** Selects every app that currently has cache content and queues a prefill for each through the exact same path `POST /v1/prefill` uses (same dedupe, same response shape). `202` with a list of `{appid, job_id, status, deduplicated}`, one entry per selected app, `[]` if nothing is cached. See "Check & update all cached games" below |
 | GET    | `/v1/jobs`                         | Recent jobs, newest first. `?limit=` 1–200, default 20 (`422` outside that range). Omits `log_excerpt` on purpose — this is the polling list. Includes `updated`, `up_to_date`, `summary_parse_ok` (schema v4, WP 3.3 — see "Job outcome honesty" below; `null` until the job finishes or if the summary couldn't be parsed), `gc_execute` (schema v7, WP 3.8 — `null` for a prefill job, `false`/`true` for a GC job's mode), plus `paused_at` and `stop_request` (schema v8, WP 3.12 — see "Job control" below) |
 | GET    | `/v1/jobs/{id}`                    | One job incl. `log_excerpt` plus the same `updated`/`up_to_date`/`summary_parse_ok`/`gc_execute` fields; `404` for an unknown id |
 | DELETE | `/v1/jobs/{id}`                    | **Cancel** a job (WP 3.12). `200` with `{job_id, status, outcome, detail}` — `outcome` is `"immediate"` (a queued/paused job, finalized here) or `"requested"` (a running job; the worker stops it, keep polling). `404` unknown id; `409` if the job already finished. See "Job control" below |
@@ -502,6 +503,144 @@ clients, schedule and stats rows are implemented so far.
 - `log_excerpt` is the ANSI-stripped **tail** of SteamPrefill's combined
   stdout/stderr, capped at 4 KiB and prefixed with `[...truncated...]` when it
   was cut, plus vault-api's own `[vault-api] …` diagnostic lines.
+
+### Check & update all cached games (`POST /v1/prefill/cached`, Phase 4c, WP 4c-api)
+
+`docs/PROJECT_PLAN.md` §7 Phase 4c asked a decision question: does a
+convenience route that selects "every cached app" server-side earn its keep,
+or does the frontend simply post the ids it already has? **Decision taken:
+ship the server-side route.** Reasons accepted, costs accepted along with
+them:
+
+- **Robust for very large libraries.** The frontend would otherwise have to
+  enumerate every cached app itself (paging `GET /v1/games`, filtering by
+  `size_bytes is not null`) before doing exactly what this route does in one
+  round trip — duplicated client-side logic in both frontends (WP 4a/4b) for
+  no benefit.
+- **Directly callable by external automation** (n8n, cron, a shell script
+  over the tailnet) without needing to already know the app id list — "check
+  my whole vault now" becomes one authenticated `curl` call.
+- **The cost, stated up front:** this is new, write-capable API surface (a
+  single call can trigger real Steam downloads for every cached app). Phase
+  6's scoped API keys — not designed yet — must cover this route explicitly
+  when that phase lands, the same way they will need to cover every other
+  mutating route that exists by then. Recorded here so it is a known,
+  pre-accepted obligation rather than a surprise at Phase 6 time.
+
+**No new enqueue mechanism.** The route selects app ids and hands every one
+of them to the exact same `jobs.enqueue_prefill` that `POST /v1/prefill`
+calls — same dedupe against `queued`/`running`/`paused` jobs, same
+`PrefillJobRef` response shape (`{appid, job_id, status, deduplicated}`).
+There is deliberately no second queue-writing code path; this endpoint is a
+*selection* convenience layered on top of the one that already existed.
+
+**Selection: disk-and-mapping truth, one query.** "Currently has cache
+content" is decided from the same `SizeCache`-backed disk snapshot
+`GET /v1/cache/summary` and `GET /v1/games` already share (so a request right
+after either of those costs nothing extra within the TTL), intersected
+against a single bulk read of the entire `depot_app_map` table — never a
+per-app or per-depot query
+(`vault_api/routers/jobs.py::_select_appids_with_cache_content`,
+statement-count-pinned in `tests/test_prefill_cached.py`). Consequences,
+each deliberate:
+
+- A depot with bytes on disk but **no mapping row** (an unmapped depot, same
+  concept `GET /v1/cache/summary`'s `unmapped_depots` reports) contributes to
+  no app — there is no id to enqueue a job for.
+- An app left at `status='error'` by a **partially-failed**
+  `DELETE /v1/cache/{appid}` (WP 1.6: `shutil.rmtree` can leave a depot half
+  removed) is still selected as long as any of its depots still have bytes on
+  disk. This is the honest answer, not a gap: "check & update" is exactly the
+  repair such an app needs, and its leftover `needs_force = 1` (set by the
+  failed deletion) makes the resulting run forced automatically — see
+  "needs_force" below.
+- **No cached apps ⇒ `[]` with a normal `202`**, never an error.
+
+**"Non-forced" describes what happens by construction, not a flag this route
+sets.** `jobs.enqueue_prefill` has no per-job force parameter — whether a
+queued job's run passes `--force` is decided entirely by the per-app
+`apps.needs_force` flag at claim time (`worker.py`, see "needs_force"
+below), exactly like every other prefill job in the system. That flag is set
+back to `1` by **two routine (non-error) events**, not one: a deletion
+touching a depot the app maps, **and an executing `POST
+/v1/cache/{appid}/gc` run that actually reclaimed chunks from a depot the
+app maps** (`gc_execute.flag_needs_force_for_depots`, ADR-0007 — see
+"needs_force" and "Garbage collection" below). GC execute is routine
+maintenance, not a failure path, so "the ordinary case is non-forced" is
+only true for an app that has not recently been through either event — it
+is false for the whole window right after a GC execute touches a depot it
+shares. An app this route selects that carries `needs_force = 1` for either
+reason still gets queued and correctly runs forced — the route defers to
+the existing flag in every case rather than asserting a blanket "always
+non-forced" guarantee it has no mechanism to enforce.
+
+**What a forced run actually costs, quantified, since "forced" sounds like
+"re-download everything":** per the module docstring in `vault_api/prefill.py`,
+`--force` re-*requests* every chunk, but a chunk still present on disk is
+served by vault-core as a local HIT — measured ~120x faster than a MISS
+(ADR-0001). The real-world consequence of a forced run in this route's
+selection is therefore **duration, not bandwidth**: minutes of disk-speed
+re-touching instead of the ~3 s non-forced no-op, serialized behind whatever
+else is ahead of it on the single worker — genuine internet traffic only for
+chunks that are actually gone (the deletion or GC-reclaim case, where those
+bytes are, correctly, no longer on disk to replay).
+
+**Bypasses the WP 3.11 miss-trigger cooldown — structurally, on purpose.**
+That cooldown (`event_sweep.in_cooldown`, backed by `miss_trigger_state`) is
+consulted by exactly one caller, `event_sweep.run_miss_trigger`, and exists
+to stop an unattended, flapping cache-MISS signal from re-triggering the same
+app repeatedly. A human pressing "check & update now" is a deliberate one-off
+ask, not a flapping signal, and must not be silently absorbed by another
+feature's cooldown. This route never imports `event_sweep` and never touches
+`miss_trigger_state`, so the bypass falls out of the code structure rather
+than a conditional that could later be "fixed" into a silent no-op —
+`tests/test_prefill_cached.py::test_cached_prefill_bypasses_the_miss_trigger_cooldown`
+seeds an app still inside the cooldown window and asserts a fresh job is
+queued anyway; adding a cooldown check to this route fails that test by name
+(verified by temporarily adding one during review of this package). Still
+bounded by the two guards that were never about the cooldown: **worker
+slots** (exactly one worker, plan §3 — queuing 500 jobs here still runs them
+strictly one at a time) and **job dedupe** (the same `enqueue_prefill` rule
+every other prefill request follows).
+
+**Immediate relative to the prefill work — not necessarily fast on the wall
+clock, and that caveat is not new here.** The request never waits for a
+single prefill job to run; it only enqueues and returns `202` with the job
+ids, the same way `POST /v1/prefill` does, and a 50-game library (roughly
+2.5 minutes of serial Steam logins on the single worker) shows its progress
+in `GET /v1/jobs`, never behind a spinner on this endpoint. But the
+*selection* step's `size_cache.get(cache_root)` (see above) can itself pay
+for a full `depot/` walk while holding `SizeCache`'s lock — a pre-existing
+cost this route shares with `GET /v1/cache/summary` and `GET /v1/games`, not
+something new. `VAULT_SIZE_CACHE_TTL` defaults to 60 s, and `worker.py`
+invalidates the cache after **every** successful prefill job — so a second
+call to this route while the queue it just filled is still draining can pay
+a fresh cold walk again. Warm, on SSD, this is sub-second even at hundreds
+of thousands of files (measured 1.76 µs/file); cold and seek-bound on a
+spinning-disk target it is plausibly tens of seconds. A client calling this
+endpoint should use the same timeout it already uses for
+`GET /v1/cache/summary`.
+
+**Any request body is silently accepted and ignored.** The route declares no
+body parameter, and FastAPI does not reject an unexpected one by default —
+an empty body, `{}`, `{"appids": [...]}`, even invalid JSON or a form
+content-type all still reach the handler and still return `202`. This is
+the opposite of `POST /v1/prefill`'s `extra="forbid"` `PrefillRequest`, which
+`422`s a typo'd field. A frontend that posts `{"appids": [...]}` to this
+route by mistake (expecting it to behave like `POST /v1/prefill`) gets a
+cheerful `202` that queues **every cached app**, not the ids it sent — worth
+getting right in client code, since the server gives no signal that the body
+was pointless.
+
+**A mid-loop `5xx` leaves a partial, unreported result — same as
+`POST /v1/prefill`.** Both routes loop over app ids inside one open
+connection and enqueue one at a time; if SQLite's `busy_timeout` is exceeded
+partway through (contention with the worker's own writes) the request can
+fail after some apps are already durably `queued` but before a response
+body is ever sent. A `5xx` from either route means "unknown outcome for this
+call" — the client's correct recovery is `GET /v1/jobs`, not a blind retry
+that would re-enqueue everything (dedupe makes a retry safe, but reading the
+actual state first is the honest first step).
 
 ### Worker lifecycle
 
@@ -705,11 +844,15 @@ start of every job, whether `run_prefill` is called with `use_force=True`.
 `jobs.get_app_needs_force` reads it; `jobs.clear_needs_force_if_unchanged`
 (the worker's end-of-job clear, see "Concurrent DELETE" below),
 `deletion.reset_app_after_deletion(..., set_needs_force=...)` (the deletion
-path's set for the *requesting* app) and
+path's set for the *requesting* app),
 `deletion.set_needs_force_for_remnant_co_owners` (the deletion path's set for
 a last-remnant depot's *co-owners* — ADR-0003 addendum, see "Per-game
-deletion" below) are the only three writers — `set_app_status` deliberately
-has **no** `needs_force` parameter at all, so there is no unconditional-write
+deletion" below), **and `gc_execute.flag_needs_force_for_depots`** (an
+*executing* GC run's set, for every app mapped to a depot it actually removed
+chunks from — see "Garbage collection" below; corrected here in the WP
+4c-api fix round, this table previously said "only three writers" and
+omitted this one) — are the writers. `set_app_status` deliberately has
+**no** `needs_force` parameter at all, so there is no unconditional-write
 path left for a future call site to accidentally reintroduce the race
 described next. The lifecycle:
 
@@ -723,6 +866,17 @@ described next. The lifecycle:
 | `DELETE /v1/cache/{appid}` — any depot landed in `failed` (partial deletion; cache state now unknown) | `1` |
 | `DELETE /v1/cache/{appid}` — nothing exclusive/remnant existed to delete (every mapped depot was shared and protected) | unchanged |
 | `DELETE /v1/cache/{appid}` deleted (or attempted, or found already-absent) a last-remnant depot — every **other** app still mapping it (ADR-0003 addendum) | `1` |
+| `POST /v1/cache/{appid}/gc` with `execute: true` actually removed chunks from a depot — every app mapped to that depot, whether or not it is the app the GC job was queued for (ADR-0007) | `1` |
+| `POST /v1/cache/{appid}/gc` — dry run, or an executing run that removed nothing | unchanged |
+
+**This is routine maintenance, not a failure path — say so wherever this
+flag's "ordinary case" is described.** A GC execute run is expected to run
+periodically (optionally automatically, see `VAULT_AUTO_GC`), so any app
+sharing a depot GC just reclaimed orphans from can carry `needs_force = 1`
+while its cache content is otherwise perfectly healthy. A blanket "the
+ordinary case is `needs_force = 0`" is therefore false for the window after
+a GC execute touches a shared depot — it is only true absent a recent
+deletion *or* a recent executing GC run.
 
 Why deletion sets it rather than clearing it (this is the WP 1.4 rationale
 ADR-0006 decision 2 explicitly preserves): SteamPrefill's own
@@ -3670,6 +3824,13 @@ up WP 1.4's three new routes, WP 1.6's `DELETE /v1/cache/{appid}` and WP 2.4's
 rerunning it each time (a route that deletes user data, or one that accepts
 writes from a machine on the tailnet, is exactly the one you do not want to add
 unauthenticated by accident).
+
+**Phase 6 obligation (recorded WP 4c-api):** the API key today is a single
+static all-or-nothing secret (plan §6: "Auth: static API key in a header").
+`POST /v1/prefill/cached` (see "Check & update all cached games" above) is
+new write-capable surface that can trigger real downloads for every cached
+app in one call — Phase 6's planned scoped API keys must cover it explicitly,
+not just the routes that existed when that phase was designed.
 
 **`GET /v1/ping` removed (WP 1.3).** It was WP 1.2's scaffold route,
 existing solely so the test suite had an authenticated endpoint to exercise

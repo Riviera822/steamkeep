@@ -734,8 +734,6 @@ must be worded honestly (`Check & update`, not `Check`) — pressing it can
 consume real bandwidth. A check that only reports without filling is not
 available at any reasonable cost, and would be the less useful half anyway.
 
-- [ ] Trigger in both frontends: a library-header action over all cached
-      games, plus the existing per-game and multi-select paths
 - [x] Backend gap: `GET /v1/games` exposes `last_prefill_at` but NOT
       `apps.last_manifest_check`. Surface it in `GameSummary`/`GameDetail`
       — ADR-0006 tier 1 semantics are "current as of <timestamp>", which is
@@ -748,20 +746,57 @@ available at any reasonable cost, and would be the less useful half anyway.
       *(mini-WP done 2026-08-10: field in both models, verbatim/null
       semantics with byte-for-byte round-trip pin, README honesty-table
       pointer; suite 1379 green; Opus PASS, 6/6 reviewer mutations killed)*
-- [ ] No new enqueue endpoint needed: `POST /v1/prefill` already takes a LIST
-      of app ids and dedupes against `queued`/`running` jobs, so an impatient
-      double-tap converges on one job. Open: whether a convenience route that
-      selects "all cached apps" server-side is worth it, or the frontend
-      simply posts the ids it already has
+- [x] Enqueue endpoint question, decided (2026-08-17, WP 4c-api): `POST
+      /v1/prefill` already takes a LIST of app ids and dedupes against
+      `queued`/`running`/`paused` jobs, so an impatient double-tap converges
+      on one job — but the open question was whether a server-side "select
+      all cached apps" convenience route is worth it anyway. **Decision:
+      ship it.** Robust for very large libraries (no frontend needs to
+      enumerate `GET /v1/games` and filter by size first) and directly
+      callable by external automation (n8n, a shell script over the
+      tailnet) without already knowing the app id list. Cost accepted along
+      with it: new write-capable API surface Phase 6's scoped keys must
+      cover explicitly (recorded in `api/README.md`'s Auth section)
+      *(WP 4c-api done: `POST /v1/prefill/cached`, no body — selects every
+      app with cache content (disk-and-mapping truth, one bulk query, no
+      per-app N+1) and enqueues through the SAME `jobs.enqueue_prefill`
+      `POST /v1/prefill` uses, identical dedupe and response shape; "non-
+      forced" is `apps.needs_force`'s existing per-app decision, not a new
+      flag, and its lifecycle table in api/README.md was corrected in the
+      fix round to also name GC execute (not only deletion) as a writer.
+      Fix round (Opus FAIL→fix→PASS): added the primary-guarantee test the
+      first pass shipped without — a multi-depot app plus an ADR-0003
+      shared depot, asserting exactly one response entry per app — after
+      the reviewer's mutation (per-depot instead of per-app selection) went
+      undetected by the original 12 tests; that mutation is now killed by
+      name (`test_multi_depot_apps_and_an_adr_0003_shared_depot_yield_
+      exactly_one_entry_per_app`, verified by re-applying it and watching
+      it fail, then reverting). Also added a route-level paused-dedupe
+      test, fixed two dangling docstring test-file references, renamed a
+      misleadingly-named test, and documented the cold-size-cache latency,
+      the silently-ignored request body, and the mid-loop 5xx case. Suite
+      1475 green (14 new tests). See api/README.md "Check & update all
+      cached games" for the full, corrected contract. Frontend trigger UI
+      and the pull-to-refresh divergence below are separate, unticked,
+      packages that consume this route)*
+- [ ] Trigger in both frontends: a library-header action over all cached
+      games, plus the existing per-game and multi-select paths
 - [ ] Mockup divergence to resolve in design: `doRefresh()`
       (`vault-app-mockup-NOTES.md`) only reloads what vault-api already
       knows. The update check asks Steam and must NOT be silently folded into
       pull-to-refresh — a gesture that can start downloads is a trap
-- [ ] Guardrails: a user-initiated check deliberately bypasses the WP 3.11
-      miss-trigger cooldown (the user pressed the button), but stays bounded
-      by worker slots and job dedupe. A 50-game library is ~2.5 min of
-      serial Steam logins, so progress belongs in the Jobs view rather than
-      behind a spinner
+- [x] Guardrails (backend half, WP 4c-api): a user-initiated check
+      deliberately bypasses the WP 3.11 miss-trigger cooldown (the user
+      pressed the button) — structural, not conditional: `POST
+      /v1/prefill/cached` never imports `event_sweep`/consults
+      `miss_trigger_state` at all, mutation-tested (adding a cooldown check
+      fails the pinning test by name) — but stays bounded by worker slots
+      (one worker, plan §3) and job dedupe (the same rule every prefill
+      request follows). A 50-game library is ~2.5 min of serial Steam
+      logins, so progress belongs in the Jobs view, never behind a spinner
+      — the endpoint returns `202` immediately by construction. The
+      frontend half (routing an actual button press to this endpoint) is
+      the unticked trigger item above
 - Remote use ("check from work") needs no extra work: 4a is served over
   Tailscale/LAN by design, 4b has the connectivity-profile abstraction
 - Complements Phase 6's `app.updated` webhook: that is the passive/push
