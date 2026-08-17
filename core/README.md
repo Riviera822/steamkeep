@@ -483,16 +483,27 @@ being explicit about:
 
 `core/docker/nginx.conf.template` renders the two `access_log` lines'
 path from `${VAULT_EVENT_LOG}` (envsubst, `NGINX_ENVSUBST_FILTER=^VAULT_`,
-same mechanism as `VAULT_RESOLVER`). Default in `core/Dockerfile`: **empty
+same mechanism as `VAULT_RESOLVER`). Default in `core/Dockerfile` (the
+IMAGE's own baked-in default, unchanged by anything below): **empty
 (feature off)**, deliberately -- ADR-0008 frames the feed as "optional at
-runtime", and as of this work package nothing consumes or rotates the file
-yet (WP 3.11 ships that). Defaulting it on would grow an unbounded file on
-every vault-core deployment that hasn't also deployed the sweeper.
+runtime", and WP 3.10 itself shipped no consumer for the file, only the
+groundwork for one.
 
-Turning it on is a single `deploy/.env` value once a consumer exists (that
-wiring -- exposing `VAULT_EVENT_LOG` through `deploy/compose.yaml` /
-`deploy/.env.example` -- is explicitly **out of scope for WP 3.10**, which
-touches `core/` only; see "What this work package does NOT cover" below):
+**That consumer has since shipped, and the deployment-level default has
+changed as a result (kept here for historical accuracy about WP 3.10's own
+scope; see `deploy/README.md` "Cache-event log" for what is actually true
+of a fresh `docker compose up` today).** WP 3.11 added the sweeper that
+reads this file (miss-triggered prefill completion, per-client hit
+statistics, bypass detection -- requirement A12), and the 2026-08-17
+packaging work package wired `VAULT_EVENT_LOG` through
+`deploy/compose.yaml`/`deploy/.env.example` (the wiring WP 3.10 explicitly
+left out of its own scope, "What this work package does NOT cover" below)
+and made the pair **default ON** in `deploy/.env.example` now that turning
+it on actually does something. The image-level default above is still
+empty/off; a fresh `deploy/.env` from `.env.example` is what turns it on --
+that value is not `VAULT_EVENT_LOG` alone, it also needs vault-api's
+matching `VAULT_EVENT_LOG_PATH` (`deploy/README.md` has the full pairing
+requirement):
 
 ```
 VAULT_EVENT_LOG=/vault/logs/event.log

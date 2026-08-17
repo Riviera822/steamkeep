@@ -8,7 +8,7 @@ situations.
 | Example | For |
 |---|---|
 | [`minimal-lan.md`](minimal-lan.md) | The smallest working setup: `vault-core` + `vault-api`, using a DNS server you already run (AdGuard Home, Pi-hole, dnsmasq, Unbound) instead of the bundled `vault-dns` container. Start here. |
-| [`tuned-setup.md`](tuned-setup.md) | Growing past the defaults: a dedicated cache disk/dataset (`VAULT_CACHE_PATH`), scheduler cadence, and the garbage-collection grace window — including an honest note on which of these `deploy/compose.yaml` wires through today and which need a small Compose override. |
+| [`tuned-setup.md`](tuned-setup.md) | Growing past the defaults: a dedicated cache disk/dataset (`VAULT_CACHE_PATH`), scheduler cadence (`PATCH /v1/settings`, no restart needed), and the two path overrides (`VAULT_MANIFEST_ARCHIVE_DIR`, `VAULT_STEAMPREFILL_CACHE_DIR`) genuinely rare enough to need a small Compose override instead. |
 | [`truenas-scale-dockge.md`](truenas-scale-dockge.md) | TrueNAS SCALE + Dockge specifically: a dedicated ZFS dataset for the cache (with the `recordsize`/`atime`/`compression` reasoning for ~1 MiB Steam chunks), the Traefik/port-80 conflict SCALE's own Apps ingress commonly creates, and using AdGuard Home as a SCALE app for DNS redirection. |
 
 Every example assumes you've read

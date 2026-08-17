@@ -177,17 +177,25 @@ move only one of them with this variable, by design.
 `docker compose up -d` (or the equivalent Dockge "Start"/"Restart" button)
 picks it up on next start.
 
-### 4.4 A quota note if you also turn on the cache-event log
+### 4.4 A quota note about the cache-event log
 
-If you later enable `VAULT_EVENT_LOG` (`deploy/README.md` "Phase-3 knobs" --
-off by default, no reason to touch it before something actually consumes the
-file), its path lands inside this same dataset: `core/Dockerfile` pre-creates
-`logs/` alongside `cache/` and `tmp/` under the one `/vault` mount, and
-`VAULT_CACHE_PATH` redirects all three together, not just `cache/`. Worth
-knowing before you set a tight `zfs set quota=...` on `<pool>/steamvault-cache`
-(§4.1) -- the event log competes for the same quota as the depot cache itself,
-though at a much smaller scale (one TSV line per request, not per-chunk
-bytes).
+`VAULT_EVENT_LOG` / `VAULT_EVENT_LOG_PATH` (`deploy/README.md` "Phase-3
+knobs") ship **ON by default** as of the 2026-08-17 packaging work package --
+earlier phases left this off because nothing consumed it yet, but WP 3.11's
+sweeper is the consumer now (miss-triggered prefill completion, per-client
+hit stats, bypass detection), so there is no longer a reason to leave it off
+by default. Its path lands inside this same dataset either way:
+`core/Dockerfile` pre-creates `logs/` alongside `cache/` and `tmp/` under the
+one `/vault` mount, and `VAULT_CACHE_PATH` redirects all three together, not
+just `cache/`. Worth knowing before you set a tight `zfs set quota=...` on
+`<pool>/steamvault-cache` (§4.1) -- the event log competes for the same
+quota as the depot cache itself. It is a much smaller scale (one TSV line
+per request, not per-chunk bytes) but genuinely unbounded over time, and
+`deploy/README.md`/`.env.example` are explicit that vault-api can read the
+file but has no permission to truncate it in the shipped containers -- if
+this quota matters to you, rotating/truncating `/vault/logs/event.log` is on
+you (e.g. a periodic TrueNAS cron task), not something either image does
+automatically.
 
 ---
 
@@ -288,6 +296,58 @@ should show `USED` growing, and `ls /mnt/<pool>/steamvault-cache/cache/depot`
 should show real depot-ID directories -- not an empty dataset with all the
 bytes landing somewhere else.
 
+### 7.1 Also check: does SteamPrefill *inside the container* actually reach the cache?
+
+This is a NAS-specific enough gotcha to call out separately here, on top of
+`deploy/README.md`'s general "A container-specific trap" section (read that
+one first -- it explains the full four-candidate detection mechanism and
+which layout actually needs this check; this section only restates why the
+TrueNAS/§5 layout specifically is the one that DOES need it).
+
+SteamPrefill runs as a subprocess inside `vault-api` and finds the cache by
+probing, in order, DNS for `lancache.steamcontent.com`, `localhost`, the
+**fixed literal `172.17.0.1`** (the classic Docker default bridge's gateway
+address, hardcoded in the SteamPrefill binary -- NOT dynamically detected
+from whatever network `vault-api` is actually on), then the local hostname
+-- accepting the first one that answers `/lancache-heartbeat` with
+`X-LanCache-Processed-By`. **§5 of this guide has you set `VAULT_CORE_BIND`
+to a dedicated alias IP** (the port-80-conflict fix), and that is precisely
+the layout where candidates 2 and 3 (loopback and `172.17.0.1`) BOTH refuse
+to connect -- measured in `deploy/README.md`: binding to one specific
+address means Docker publishes port 80 only there, not on `172.17.0.1` or
+loopback (on the DEFAULT `0.0.0.0` bind, `172.17.0.1` actually does work,
+via ordinary host-level routing between the host's own bridge interfaces --
+see `deploy/README.md` for the full explanation and measurement; that case
+just doesn't apply once you've followed §5). That leaves DNS (candidate 1)
+as the only remaining chance, and on TrueNAS SCALE specifically the Docker
+daemon's own resolver is very often NOT the AdGuard Home instance §6 has
+you configure the rewrite in (AdGuard Home there is just another
+app-managed container/VM on the same box, not necessarily what the host's
+Docker daemon resolves through) -- so DNS often doesn't save you here
+either. If none of the four candidates succeeds, prefill jobs silently
+download straight from Valve -- the job still finishes green, and
+`zfs list -o space <pool>/steamvault-cache` never grows.
+
+Check it with the heartbeat probe, not a DNS lookup -- a DNS lookup only
+tells you about candidate 1, and candidates 2-4 never touch DNS at all.
+**`curl` is not installed in the `vault-api` image** (`python:3.13-slim`) --
+use `python3`, which is:
+
+```bash
+docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://<your §5 alias IP>/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
+```
+
+A line printing `200 steamvault` is success. A traceback ending in
+`ConnectionRefusedError`/`URLError` means it's missing --
+`deploy/README.md`'s fix recipe applies unchanged here: pin
+`lancache.steamcontent.com` to your §5 alias IP via `extra_hosts` on
+`vault-api` in a `compose.override.yaml` next to this stack's
+`compose.yaml` -- **the value must be that plain IPv4 alias address, not a
+hostname**, since SteamPrefill's own resolution step requires an
+RFC1918-or-loopback IPv4 before it ever sends the heartbeat probe. This is
+DNS-independent by design, which is exactly what you want on a NAS where you
+may not control what the Docker daemon's own resolver is doing.
+
 ---
 
 ## 8. Troubleshooting additions specific to this layout
@@ -299,3 +359,4 @@ bytes landing somewhere else.
 | `docker compose up` starts but nothing ever gets cached, and there's no ownership error | Check `VAULT_CACHE_PATH` was actually picked up (Dockge/`docker compose config | grep -A3 /vault`) -- a value without a leading `/` is parsed as a *named volume reference*, not a bind path, and Compose refuses with `refers to undefined volume ...: invalid compose project` if it doesn't match `vault-cache` exactly. |
 | Every request is a cache MISS at internet speed, cache empty | DNS redirection isn't reaching the client, or the AAAA/RA bypass (§6) is open. `dig A` and `dig AAAA` against your resolver from an actual client, not just the NAS. |
 | Port 80 already answers something else (a Traefik/NPM welcome page) | You bound `vault-core` to the host's primary address instead of the alias from §5 -- double-check `VAULT_CORE_BIND` in `.env` against `ip addr show` on the TrueNAS host. |
+| Prefill jobs finish `done` but `zfs list -o space <pool>/steamvault-cache` never grows | SteamPrefill inside the container isn't finding the cache via any of its four detection candidates (§7.1 above -- this is the expected risk of the §5 dedicated-alias layout specifically). Check with `docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://<your §5 alias IP>/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"` (`curl` is not in the `vault-api` image), looking for `200 steamvault`, and fix with the `extra_hosts` override in `deploy/README.md`. |

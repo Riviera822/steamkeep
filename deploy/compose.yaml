@@ -51,10 +51,14 @@ services:
       # OFF: core/docker/25-vault-eventlog.sh strips the access_log
       # directives entirely, so nothing is created or written. Same
       # default-empty passthrough pattern as CACHE_IP below for vault-dns.
-      # No consumer exists yet (that's WP 3.11) -- see .env.example before
-      # turning this on. When set, it must be a path under /vault/; see the
-      # volume note on vault-api's /vault mount below for why no extra mount
-      # is needed here for vault-api to read it later.
+      # The consumer is WP 3.11's sweeper (miss-triggered prefill
+      # completion, per-client hit stats, bypass detection -- requirement
+      # A12): vault-api's matching VAULT_EVENT_LOG_PATH is set a few lines
+      # down. .env.example ships both uncommented as of the 2026-08-17
+      # packaging work package -- see it before turning this back off. When
+      # set, it must be a path under /vault/; see the volume note on
+      # vault-api's /vault mount below for why no extra mount is needed here
+      # for vault-api to read it later.
       VAULT_EVENT_LOG: ${VAULT_EVENT_LOG:-}
     ports:
       # PORT 80 IS NOT NEGOTIABLE FOR REAL CLIENTS. Steam CDN traffic is plain
@@ -111,8 +115,21 @@ services:
   # ===========================================================================
   vault-api:
     build:
-      context: ../api
-      dockerfile: Dockerfile
+      # Repo ROOT, not ../api (packaging work package, docs/PROJECT_PLAN.md
+      # §7 Phase 5, 2026-08-17: user decision -- bake the web UI into the
+      # image rather than a mount-only fix, because a mount-only fix cannot
+      # survive `docker pull` of a published image, WP 5.5). api/Dockerfile
+      # now COPYs web/ in too, and web/ is a repo-root SIBLING of api/, not a
+      # child of it -- an api/-only context could never reach it. The root
+      # .dockerignore keeps this wider context from also sending app/ (the
+      # Android tree), poc/ (Phase-0 evidence) and every other component's
+      # own directory to the daemon on every build -- measured 9.734 MB ->
+      # 1.54 MB (84% smaller) on the checkout this was built against
+      # (.dockerignore has the "Sending build context" numbers). vault-core
+      # and vault-dns below are UNCHANGED: each keeps its own directory as
+      # build context, unaffected by this.
+      context: ..
+      dockerfile: api/Dockerfile
     image: steamvault/vault-api:${VAULT_IMAGE_TAG:-0.1.0}
     restart: unless-stopped
     environment:
@@ -122,7 +139,7 @@ services:
       VAULT_LOG_LEVEL: ${VAULT_LOG_LEVEL:-INFO}
       VAULT_PREFILL_TIMEOUT_SECONDS: ${VAULT_PREFILL_TIMEOUT_SECONDS:-14400}
       VAULT_WORKER_POLL_SECONDS: ${VAULT_WORKER_POLL_SECONDS:-1.0}
-      VAULT_SIZE_CACHE_TTL: ${VAULT_SIZE_CACHE_TTL:-60}
+      VAULT_SIZE_CACHE_TTL: ${VAULT_SIZE_CACHE_TTL:-60.0}
       VAULT_AGENT_REPORT_KEEP: ${VAULT_AGENT_REPORT_KEEP:-20}
       # Manifest-based GC (WP 3.8b/3.12, api/README.md "The recently-stored
       # grace window" / "Auto-GC"). Defaults match vault-api's own built-in
@@ -130,9 +147,81 @@ services:
       # variable in .env sees identical behaviour to today.
       VAULT_GC_GRACE_DAYS: ${VAULT_GC_GRACE_DAYS:-14}
       VAULT_AUTO_GC: ${VAULT_AUTO_GC:-off}
-      # VAULT_DB_PATH, VAULT_CACHE_ROOT and VAULT_STEAMPREFILL_PATH are baked
-      # into the image (they describe the image's own layout, not a deployment
-      # choice) -- see api/Dockerfile.
+      # How many archived manifest .bin files prune_archive keeps PER DEPOT
+      # (WP 3.2, api/README.md "Manifest archive"). Default matches
+      # config.py's own built-in default byte-for-byte.
+      VAULT_MANIFEST_KEEP: ${VAULT_MANIFEST_KEEP:-3}
+      # vault-api's READ side of the cache-event log vault-core writes via
+      # VAULT_EVENT_LOG above (WP 3.10/3.11, ADR-0008; packaging WP gap
+      # closed 2026-08-17 -- this key existed in config.py since WP 3.11 but
+      # was never forwarded here, so the miss-triggered prefill completion,
+      # per-client hit stats and bypass detection it drives (requirement
+      # A12) were unreachable in the shipped stack; see LEARNINGS.md
+      # "Containers" for the general shape of this class of bug). Empty
+      # (default) keeps the sweeper off even if VAULT_EVENT_LOG is set on
+      # vault-core -- both variables must name the SAME path under the
+      # shared /vault volume both services already mount, see .env.example.
+      VAULT_EVENT_LOG_PATH: ${VAULT_EVENT_LOG_PATH:-}
+      # The rest of the WP 3.11 event-sweep tuning knobs -- same audit finding
+      # as VAULT_EVENT_LOG_PATH above (present in config.py, never forwarded
+      # here before the packaging WP's B1 fix-round). Defaults match
+      # config.py's own built-in defaults byte-for-byte; see .env.example for
+      # what each one actually does.
+      VAULT_EVENT_SWEEP_INTERVAL_MINUTES: ${VAULT_EVENT_SWEEP_INTERVAL_MINUTES:-5}
+      VAULT_MISS_TRIGGER_COOLDOWN_MINUTES: ${VAULT_MISS_TRIGGER_COOLDOWN_MINUTES:-60}
+      VAULT_MISS_TRIGGER_MAX_PER_SWEEP: ${VAULT_MISS_TRIGGER_MAX_PER_SWEEP:-5}
+      VAULT_BYPASS_WINDOW_DAYS: ${VAULT_BYPASS_WINDOW_DAYS:-3}
+      VAULT_CLIENT_STATS_KEEP: ${VAULT_CLIENT_STATS_KEEP:-48}
+      # Truncate the event log past this size (api/README.md "Rotation --
+      # best-effort..."). Reachable now for the specific reason that section
+      # documents: in the SHIPPED containers vault-api cannot truncate at all
+      # (PermissionError, /vault/logs is vault-core's), so every sweep past
+      # this size warns and increments truncate_denied_count forever --
+      # setting this to 0 (disables truncation attempts entirely) is the
+      # documented way to silence that without lying about rotation actually
+      # happening. Default matches config.py's own built-in default
+      # byte-for-byte (64 MiB).
+      VAULT_EVENT_LOG_MAX_BYTES: ${VAULT_EVENT_LOG_MAX_BYTES:-67108864}
+      # Opt-in manifest oracle (WP 3.9, ADR-0007 addendum B). Empty/off by
+      # default -- see .env.example for the privacy note (queries leave the
+      # LAN) before setting this. Same forwarding gap as above until the
+      # packaging WP: present in config.py, never wired through here.
+      VAULT_MANIFEST_ORACLE: ${VAULT_MANIFEST_ORACLE:-}
+      # The oracle's URL and per-request timeout -- forwarding these is NOT
+      # optional once VAULT_MANIFEST_ORACLE is on: .env.example's privacy note
+      # tells operators to point VAULT_MANIFEST_ORACLE_URL at their own
+      # private mirror/proxy instead of the public default, and that advice
+      # is a no-op without this line (B1 reviewer finding -- the exact
+      # "advertised but unreachable" bug this audit exists to close).
+      # Defaults match config.py's own built-in defaults byte-for-byte.
+      VAULT_MANIFEST_ORACLE_URL: ${VAULT_MANIFEST_ORACLE_URL:-https://api.steamcmd.net/v1/info}
+      VAULT_MANIFEST_ORACLE_TIMEOUT: ${VAULT_MANIFEST_ORACLE_TIMEOUT:-10.0}
+      # Per-attempt delivery timeout for the webhook feature (WP 3.13). Unlike
+      # VAULT_WEBHOOK_URL/VAULT_WEBHOOK_EVENTS (DB-overridable at runtime via
+      # PATCH /v1/settings, ADR-0009 -- see settings_store.OVERRIDABLE_SPECS),
+      # this one has no DB-backed path, so env forwarding is the ONLY way to
+      # reach it. Default matches config.py's own built-in default
+      # byte-for-byte.
+      VAULT_WEBHOOK_TIMEOUT_SECONDS: ${VAULT_WEBHOOK_TIMEOUT_SECONDS:-5.0}
+      # VAULT_DB_PATH, VAULT_CACHE_ROOT, VAULT_STEAMPREFILL_PATH and
+      # VAULT_WEB_DIR are baked into the image (they describe the image's own
+      # layout, not a deployment choice) -- see api/Dockerfile. VAULT_NAME,
+      # VAULT_SCHEDULE_WINDOW, VAULT_SCHEDULE_INTERVAL_MINUTES,
+      # VAULT_SCHEDULE_CLIENT_STALE_DAYS, VAULT_WEBHOOK_URL and
+      # VAULT_WEBHOOK_EVENTS are deliberately NOT forwarded here either, but
+      # for a different reason: they are DB-overridable at runtime via
+      # PATCH /v1/settings (ADR-0009) once the stack is up, which is the
+      # supported way to set them -- see api/README.md "Settings" and the
+      # web UI / app settings screens. VAULT_SETTINGS_READONLY is
+      # deliberately env-only BY DEFINITION (a settings-API lock cannot be
+      # unlockable through that same API). VAULT_MANIFEST_ARCHIVE_DIR and
+      # VAULT_STEAMPREFILL_CACHE_DIR are genuine path overrides tied to
+      # volume layout, not general-purpose tuning knobs -- left env-only and
+      # documented via the compose.override.yaml recipe in
+      # deploy/examples/tuned-setup.md rather than a bare .env line, because
+      # a wrong value here silently loses persistence with no volume backing
+      # it, unlike the numeric knobs above where a wrong value at worst picks
+      # a different (still valid) number.
     ports:
       # LAN-only, like everything else here. This is the interface the Android
       # app and vault-agent talk to. For access from outside the LAN do NOT
@@ -155,12 +244,12 @@ services:
       # inside this same one volume, next to cache/ and tmp/. Because this
       # line already mounts the identical /vault volume into vault-api, no
       # additional volume or mount is needed for vault-api to read
-      # /vault/logs/event.log once WP 3.11's sweeper ships and actually wants
-      # to (WP 3.10/ADR-0008 deliberately left this wiring to whichever
-      # package first consumes the file). Deliberately not narrowed to a
-      # read-only logs/-only bind here: WP 3.11 owns the cursor/truncation
-      # contract (core/README.md "Rotation and the USR1 contract") and can
-      # decide its own access shape when it lands.
+      # /vault/logs/event.log -- WP 3.11's sweeper (this service's
+      # VAULT_EVENT_LOG_PATH env var above) reads it straight off this same
+      # mount. Deliberately not narrowed to a read-only logs/-only bind
+      # here: WP 3.11 owns the cursor/truncation contract (core/README.md
+      # "Rotation and the USR1 contract") and decided its own access shape
+      # (read, never truncate) rather than one imposed by the mount.
       - ${VAULT_CACHE_PATH:-vault-cache}:/vault
       # SQLite database (mapping, jobs, agent reports). Small; back this up.
       - vault-db:/data

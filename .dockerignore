@@ -1,0 +1,94 @@
+# Root build-context excludes (packaging work package, docs/PROJECT_PLAN.md
+# §7 Phase 5, 2026-08-17). Only vault-api's build uses the repo root as its
+# context (`docker build -f api/Dockerfile .`, deploy/compose.yaml's
+# vault-api `build:` block) -- needed so `COPY web /app/web` in
+# api/Dockerfile can reach web/, a repo-root SIBLING of api/, not a child of
+# it. vault-core and vault-dns keep their OWN build contexts (../core, ../dns
+# in deploy/compose.yaml) and never see this file at all -- Docker only
+# applies a .dockerignore that lives at the root of the context being used.
+#
+# Without this file, that repo-root context would include the entire Android
+# toolchain tree (app/), the Phase-0 PoC evidence trees (poc/), and every
+# other component's own directory on every `docker build` -- none of it used
+# by the vault-api image. MEASURED on this checkout (`docker build`'s own
+# "Sending build context to Docker daemon" line, real WSL2/Docker 29.1.3,
+# re-measured after the api/*.md /pytest.ini /requirements-dev.txt
+# additions below): 9.734 MB without this file, 1.54 MB with it -- an 84%
+# reduction, on a
+# worktree checkout where `.git` is just a small link file, not the full
+# object store, and where the Android tree has never actually been built
+# (no populated Gradle cache under app/). A normal clone with a real `.git/`
+# and a built `app/` would see a far bigger absolute reduction; the ~81%
+# relative share this file removes is the number that carries over. None of
+# the excludes below touch api/ or web/ (aside from web/tests/, which the
+# image never serves) -- api/Dockerfile COPYs both of those in and needs
+# them present.
+
+# VCS and tooling metadata -- never part of a built image.
+.git
+.github
+.claude
+
+# Other components' own trees. core/ and dns/ build from their own
+# directories (see the header note) so excluding them here costs vault-api's
+# build nothing; agent/ (Go) and app/ (Android/Kotlin) are entirely unrelated
+# runtimes; deploy/ is Compose/docs, not image content; docs/ and poc/ are
+# documentation and throwaway PoC evidence.
+app/
+poc/
+docs/
+agent/
+core/
+dns/
+deploy/
+
+# Test trees -- not shipped, and web/tests/ specifically drags in a Node
+# toolchain's worth of fixtures that have nothing to do with the served app
+# shell. api/tests/ is pytest-only, already excluded from the image by
+# api/Dockerfile only ever COPYing api/vault_api (never api/tests).
+web/tests/
+api/tests/
+
+# api/'s own dev-only files -- carried over from the deleted api/.dockerignore
+# so its "everything is folded in here" claim below is actually true.
+# api/requirements-dev.txt in particular is not an oversight: api/Dockerfile
+# spends a whole comment explaining that dev dependencies (pytest, httpx) are
+# deliberately never installed in the image, and excluding the file this
+# early keeps that decision visible instead of leaving an unused file sitting
+# in the context for someone to wonder about. None of these three are ever
+# COPYed by api/Dockerfile; excluding them only shrinks the context, it does
+# not change what ships. api/README.md alone measured 302,992 bytes -- 16%
+# of the 1.845 MB build context above -- so this is not a rounding-error
+# cleanup.
+api/*.md
+api/pytest.ini
+api/requirements-dev.txt
+
+# Python bytecode / cache artifacts, wherever they exist in the tree. The
+# `**/` prefix is load-bearing, not decoration: a bare `__pycache__/` (no
+# `**/`) anchors at the CONTEXT ROOT only -- a lesson learned in review the
+# first time this project had a Python build context, under api/'s own
+# now-deleted `.dockerignore` (its rules, including this one, are folded in
+# here; it is gone because Docker only reads a .dockerignore at the root of
+# whatever context is actually in use, and that root moved to the repo root
+# -- an api/-rooted build no longer even works, every COPY source in
+# api/Dockerfile is repo-root-relative now). vault_api/__pycache__,
+# vault_api/routers/__pycache__ etc. all need the recursive form or the
+# exact same stale-bytecode bug reappears one directory level deeper.
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+
+# Local, uncommitted, or generated -- never valid build input. Same `**/`
+# requirement as above: api/vault.db, a stray api/.env, etc. all live below
+# the new context root, not at it. api/cache/ is what a native dev run's
+# default VAULT_CACHE_ROOT ("./cache", relative to cwd) creates if uvicorn is
+# ever launched from inside api/ -- carried over from the old api/-rooted
+# .dockerignore, which excluded it for the same reason.
+**/.venv/
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/.env
+api/cache/

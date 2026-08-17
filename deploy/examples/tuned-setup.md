@@ -35,59 +35,74 @@ recipe (`recordsize=1M`, `atime=off`, `compression=off`, and the measured
 reasoning behind each — Steam chunks are already Valve-compressed, so ZFS
 compression buys nothing here).
 
-## 2. Scheduler cadence and GC grace window (needs one extra step)
+## 2. Scheduler cadence (now DB-settable — no override file needed)
 
-`vault-api` reads four more settings that control when the scheduler sweeps
-installed-app lists and how long a freshly-stored chunk is protected from
-garbage collection — all documented in
-[`api/README.md`](../../api/README.md) (see "Scheduler" and "Garbage
-collection → The recently-stored grace window"):
+`vault-api` reads three more settings that control when the scheduler sweeps
+installed-app lists — documented in [`api/README.md`](../../api/README.md)
+("Scheduler"):
 
 | Variable | Meaning | Default |
 |---|---|---|
 | `VAULT_SCHEDULE_WINDOW` | Daytime window the scheduler sweeps in, `HH:MM-HH:MM` server-local time (overnight windows like `22:00-06:00` are supported). Empty = scheduler off. | *(empty — off)* |
 | `VAULT_SCHEDULE_INTERVAL_MINUTES` | Minimum spacing between two sweeps. | `180` |
 | `VAULT_SCHEDULE_CLIENT_STALE_DAYS` | A client whose newest agent report is older than this drops out of the sweep's target set. | `7` |
-| `VAULT_GC_GRACE_DAYS` | Days a freshly-stored chunk is protected from garbage collection, by store time. `0` disables the window. | `14` |
 
-**Honest gap, found while writing this document:** these four are real
-`vault_api/config.py` settings, read directly from the process environment —
-but as of this writing, `deploy/compose.yaml`'s `vault-api` service does
-**not** forward them from `deploy/.env` the way it forwards
-`VAULT_API_KEY`/`VAULT_LOG_LEVEL`/`VAULT_PREFILL_TIMEOUT_SECONDS`/
-`VAULT_WORKER_POLL_SECONDS`/`VAULT_SIZE_CACHE_TTL`/`VAULT_AGENT_REPORT_KEEP`.
-Compose's `.env` file only feeds `${...}` substitutions inside
-`compose.yaml` itself — it is not a blanket pass-through into the
-container's environment. Setting these four in `deploy/.env` alone
-currently has **no effect**; `vault-api` will run with the defaults above
-(scheduler off, GC grace window at 14 days) regardless.
+**Updated 2026-08-17 (packaging work package B1 audit) — the "honest gap"
+this section used to describe is closed, and the fix is better than the
+override-file workaround it originally recommended.** These three are
+DB-overridable at runtime via `PATCH /v1/settings` (ADR-0009, shipped in the
+settings-API work package) — set them from the web UI / Android app
+Settings screen, or directly:
 
-Until that wiring lands in `deploy/compose.yaml` itself, the working way to
-set them today is a small Compose override file next to your `.env` — this
-does not modify the tracked `deploy/compose.yaml`:
+```bash
+curl -X PATCH -H "X-Api-Key: $VAULT_API_KEY" -H 'Content-Type: application/json' \
+  http://<server>:8080/v1/settings \
+  -d '{"schedule_window": "09:00-17:00", "schedule_interval_minutes": 180, "schedule_client_stale_days": 7}'
+curl -H "X-Api-Key: $VAULT_API_KEY" http://<server>:8080/v1/schedule   # confirm the scheduler is enabled
+```
+
+No `docker compose up -d --build` or override file needed — this takes
+effect at the next scheduler tick, no restart. `deploy/.env`/`.env.example`
+still has no entry for these three, and that is correct, not a gap: an env
+value here WOULD still apply — it sets the STARTUP fallback a DB row can
+override once the stack has booted at least once, which matters for a
+first-boot/infra-as-code deployment that wants the scheduler on from the
+very first `docker compose up` before anyone has called `/v1/settings` yet.
+It buys little *once the stack is up*, though: at that point a DB row
+already wins over whatever the env value says, so editing `.env` and
+restarting to change these three is strictly more work than the `PATCH`
+above for the common case of tuning an already-running deployment.
+
+(`VAULT_GC_GRACE_DAYS`, listed here in earlier revisions of this document,
+is a plain forwarded `deploy/.env` value today — see `.env.example` — and
+was never one of these three's problems to begin with; this section was
+simply written before that got fixed and never updated.)
+
+## 3. Two path overrides that genuinely need the override-file route
+
+Unlike the schedule settings above, `VAULT_MANIFEST_ARCHIVE_DIR` and
+`VAULT_STEAMPREFILL_CACHE_DIR` (`vault_api/config.py`) are deliberately
+**not** forwarded by `deploy/compose.yaml` and have no DB-backed
+alternative either — both are directory paths tied to the container's
+volume layout, not general tuning knobs, and a wrong value here silently
+loses persistence (no volume backs an arbitrary path) rather than merely
+picking a different valid number. If you have a genuine reason to move
+either — e.g. redirecting the manifest archive off the `vault-db` volume
+onto its own mount — a Compose override file is still the right tool:
 
 ```yaml
 # deploy/compose.override.yaml (not tracked by git -- your local addition)
 services:
   vault-api:
     environment:
-      VAULT_SCHEDULE_WINDOW: "09:00-17:00"
-      VAULT_SCHEDULE_INTERVAL_MINUTES: "180"
-      VAULT_SCHEDULE_CLIENT_STALE_DAYS: "7"
-      VAULT_GC_GRACE_DAYS: "14"
+      VAULT_MANIFEST_ARCHIVE_DIR: "/data/manifests"          # default: sibling of VAULT_DB_PATH
+      VAULT_STEAMPREFILL_CACHE_DIR: "/opt/steamprefill/home/.cache/SteamPrefill/v1"  # default: under HOME
+    # ...and a matching volume/mount for wherever you point these, or the
+    # data simply isn't persisted across a container recreate.
 ```
 
 `docker compose` picks up a file named `compose.override.yaml` (or
 `docker-compose.override.yml`) next to `compose.yaml` automatically — no
-extra `-f` flag needed:
-
-```bash
-cd deploy
-docker compose up -d --build
-docker compose exec vault-api env | grep -E 'VAULT_SCHEDULE|VAULT_GC_GRACE'   # confirm it took
-curl -H "X-Api-Key: $VAULT_API_KEY" http://<server>:8080/v1/schedule          # confirm the scheduler is enabled
-```
-
-If you'd rather see this wired into `deploy/compose.yaml` directly so a
-plain `.env` edit is enough, that's a good, small, self-contained
-contribution — see [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
+extra `-f` flag needed. Most deployments never need this section at all:
+both defaults already resolve inside volumes the stack mounts anyway
+(`vault-db` and `vault-steamprefill-home` respectively).

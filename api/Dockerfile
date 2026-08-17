@@ -1,9 +1,20 @@
 # SteamVault vault-api -- FastAPI + SQLite brain, and the SteamPrefill host
 # (Phase 1, WP 1.9).
 #
-# Build from the repo's api/ directory:
-#     docker build -t steamvault/vault-api:0.1.0 api/
-# or, normally, via deploy/compose.yaml.
+# Build from the REPO ROOT, not api/ (packaging work package,
+# docs/PROJECT_PLAN.md §7 Phase 5, 2026-08-17): the web UI (web/, Phase 4a) is
+# baked into this image now (see the `COPY web /app/web` below), and web/ is a
+# SIBLING of api/, not a child of it -- an api/-only build context cannot see
+# it. deploy/compose.yaml's vault-api service sets `context: ..` /
+# `dockerfile: api/Dockerfile` accordingly; every COPY source path below is
+# repo-root-relative as a result. vault-core and vault-dns are UNCHANGED --
+# they keep their own directories as build context.
+#     docker build -t steamvault/vault-api:0.1.0 -f api/Dockerfile .
+# or, normally, via deploy/compose.yaml. The root `.dockerignore` keeps this
+# wider context from also sending app/ (the Android tree), poc/ (Phase-0
+# evidence) and every other component's own directory to the daemon on
+# every build -- measured 9.734 MB -> 1.54 MB (84% smaller) on this
+# checkout (see the .dockerignore's own header for how that was measured).
 #
 # --- Base image pin ----------------------------------------------------------
 #   python:3.13.14-slim-trixie
@@ -113,13 +124,25 @@ RUN set -eux; \
 # Runtime dependencies only -- requirements-dev.txt (pytest, httpx) is
 # deliberately not installed: the test suite runs in CI/dev, not in production.
 # --no-cache-dir keeps the wheel cache out of the layer.
-COPY requirements.txt /tmp/requirements.txt
+# Repo-root-relative source path (see the header note on the build context).
+COPY api/requirements.txt /tmp/requirements.txt
 RUN set -eux; \
     pip install --no-cache-dir -r /tmp/requirements.txt; \
     rm -f /tmp/requirements.txt
 
 COPY --from=steamprefill /opt/steamprefill/SteamPrefill /opt/steamprefill/SteamPrefill
-COPY vault_api /app/vault_api
+# Repo-root-relative (see header note): this used to be plain `vault_api`
+# when the build context was api/ itself.
+COPY api/vault_api /app/vault_api
+# The built web UI (Phase 4a, WP 4a.1-4a.8), baked into the image rather than
+# left mount-only: mount-only cannot survive a `docker pull` of a published
+# image (WP 5.5, ghcr.io) -- there is no repo checkout on the pulling host to
+# mount web/ from, so packaging it INTO the image is the only option that
+# still works after publish. web/ is a repo-root sibling of api/, hence the
+# build-context move documented at the top of this file. The chown -R
+# .../app below (RUN block) already covers this path -- no extra chown needed
+# here.
+COPY web /app/web
 
 # Mount points, all owned by the service user:
 #   /data                     -> SQLite database (own named volume)
@@ -165,6 +188,17 @@ ENV PYTHONUNBUFFERED=1 \
     VAULT_DB_PATH=/data/vault.db \
     VAULT_CACHE_ROOT=/vault/cache \
     VAULT_STEAMPREFILL_PATH=/opt/steamprefill/SteamPrefill \
+    # Web UI static directory (packaging WP). config._default_web_dir()'s
+    # relative computation climbs three dirname() calls from THIS file's own
+    # location (api/vault_api/config.py -> api/vault_api -> api/ -> repo
+    # root) to find web/ as a repo-root sibling of api/ -- correct for a
+    # native checkout, but wrong in here: vault_api/ lives at /app/vault_api
+    # in this image (see the COPY above), so that same climb lands on `/`
+    # and looks for `/web`, which does not exist. Setting VAULT_WEB_DIR
+    # explicitly to the actual COPY target sidesteps the wrong computation
+    # entirely rather than trying to make the relative math agree with the
+    # image's layout.
+    VAULT_WEB_DIR=/app/web \
     DOTNET_CLI_TELEMETRY_OPTOUT=1
 
 # VAULT_API_KEY is deliberately NOT given a default here. vault-api raises

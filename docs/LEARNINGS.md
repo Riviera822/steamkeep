@@ -140,6 +140,24 @@ These are not style preferences; each entry cost a review round to learn.
   dedupe); Steam LAN P2P transfers can legitimately replace cache traffic
   (WP 0.3/0.6).
 
+- SteamPrefill's cache discovery probes **four** candidates in order —
+  `lancache.steamcontent.com`, `localhost`, the Docker gateway
+  `172.17.0.1`, then the local hostname — and accepts one only if it is a
+  private/loopback **IPv4** AND answers `/lancache-heartbeat` with
+  `X-LanCache-Processed-By` (`poc/steamprefill/PROTOCOL.md`, source-read).
+  Two consequences that invert each other: with vault-core on the default
+  `0.0.0.0` bind, the **gateway** candidate carries detection inside a
+  container with no DNS involved — so a DNS lookup is the wrong
+  diagnostic and reports a bypass that isn't happening; but with core
+  bound to a dedicated address (the port-80-conflict/NAS recipe), gateway
+  and loopback both refuse and detection hangs entirely on candidate 1,
+  i.e. on container DNS. Probe the heartbeat, never the name. Pinning that
+  ONE hostname is sufficient: after detection SteamPrefill talks to the
+  resolved IP for all depot traffic (WP 0.4: 1272 chunks through a single
+  hosts entry), so depot hostnames need no rewrite — and the pin value
+  must be a private IPv4 or it is rejected before any probe
+  (P1 review, measured in both layouts).
+
 ## Parsers / input handling
 - Recursive-descent parsers need an explicit depth limit raising the
   module's own error type — RecursionError escapes the documented catch
@@ -210,6 +228,20 @@ These are not style preferences; each entry cost a review round to learn.
   (VAULT_SCHEDULE_WINDOW, VAULT_SCHEDULE_INTERVAL_MINUTES,
   VAULT_SCHEDULE_CLIENT_STALE_DAYS, VAULT_GC_GRACE_DAYS) and documented a
   compose.override.yaml recipe instead of a silently-broken .env example.
+- Third occurrence of the above, so treat it as a rule, not a war story:
+  **a doc sentence telling an operator to set a variable IS a claim that
+  the shipped stack forwards it, and must be verified in the same diff.**
+  The P1 packaging review caught a privacy mitigation ("point
+  VAULT_MANIFEST_ORACLE_URL at your own mirror instead") whose key
+  compose never forwarded and which is not DB-overridable either — an
+  operator following our own advice still shipped their cached app IDs to
+  api.steamcmd.net, with no error. The cheap systematic guard: when a
+  package touches env plumbing, produce the FULL table of variables
+  config.py reads against what compose forwards, and decide each one
+  explicitly (forward it, or say in the docs that it needs a
+  compose.override.yaml). Key-presence preconditions in the verify suite
+  are what actually catch this — a value-only assertion passes happily on
+  the empty string an unforwarded key renders as.
 
 ## Subprocess output handling
 - SteamPrefill writes its summary table in the OS OEM codepage (cp850
@@ -272,6 +304,21 @@ These are not style preferences; each entry cost a review round to learn.
   (WP 2.1).
 - Verify empirically over believing docs or reviewers — several review
   claims were corrected by rigs (WP 1.1 301/302, WP 1.6 rmtree).
+
+- nginx's event log is written with `buffer=64k flush=5s`, so a
+  "request it, then grep the log" test is **never** raceless: measured
+  0 lines at t≈0 s and t≈2 s, the correct 9-field line at t≈7 s. Any such
+  check needs a bounded wait-for-line loop, not a fixed sleep — and the
+  same 5 s applies to WP 3.11's sweeper, which therefore sees every line
+  up to 5 s late (harmless against a 5-minute sweep interval, but it is
+  the reason the naive test shape cannot be made reliable). Found as four
+  failures in `verify-stack.sh` step 5i — reproducible, but **inherently
+  timing-dependent, not deterministic**: the direction depends on how fast
+  the grep follows the request, and on a slow or loaded host the
+  `docker compose exec` alone can exceed 5 s and the step passes. Do not
+  record it as deterministic, or a later green 5i reads as a regression.
+  Pre-existing, and independently reproduced on the untouched baseline
+  during the P1 review.
 
 ## Docs / community release
 - Entry-point docs describe SHIPPED behavior, not ADR designs: an ADR

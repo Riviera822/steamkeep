@@ -144,7 +144,21 @@ section "2. Image builds"
 # =============================================================================
 for svc in core api dns; do
     step "2.$svc  docker build $svc/"
-    if docker build -t "steamvault/vault-$svc:$TAG" "$repo_root/$svc" > "$work/build-$svc.log" 2>&1; then
+    build_failed=0
+    if [ "$svc" = "api" ]; then
+        # vault-api's build context moved to the REPO ROOT in the packaging
+        # work package (docs/PROJECT_PLAN.md §7 Phase 5): api/Dockerfile now
+        # COPYs web/ in too (`COPY web /app/web`), and web/ is a repo-root
+        # SIBLING of api/, not a child of it -- an api/-only context can no
+        # longer reach it. core and dns are UNCHANGED, still built from their
+        # own directories below.
+        docker build -t "steamvault/vault-api:$TAG" -f "$repo_root/api/Dockerfile" "$repo_root" \
+            > "$work/build-$svc.log" 2>&1 || build_failed=1
+    else
+        docker build -t "steamvault/vault-$svc:$TAG" "$repo_root/$svc" \
+            > "$work/build-$svc.log" 2>&1 || build_failed=1
+    fi
+    if [ "$build_failed" -eq 0 ]; then
         ok "vault-$svc image built"
     else
         bad "vault-$svc build FAILED"
@@ -168,6 +182,20 @@ say ''
 say 'Dynamic libraries the binary needs, resolved inside the image (no "not found"):'
 printf '%s\n' "$sp_deps" | sed 's/^/    /'
 assert_not_contains "$sp_deps" "not found" "every shared library SteamPrefill needs resolves in the image"
+
+step "2.web  Web UI is baked into the vault-api image (packaging WP)"
+say 'docs/PROJECT_PLAN.md §7 Phase 5: the web UI moved from mount-only (a'
+say 'documented gap since WP 4a.1) into the image itself -- api/Dockerfile now'
+say 'COPYs web/ in at /app/web and sets VAULT_WEB_DIR=/app/web explicitly.'
+say 'Checked here at the IMAGE layer (docker run, no compose stack needed yet),'
+say 'so a broken COPY path is caught even before section 6 exercises it over HTTP.'
+web_ls=$(docker run --rm --entrypoint sh "steamvault/vault-api:$TAG" -c 'ls -la /app/web /app/web/css /app/web/js 2>&1')
+printf '%s\n' "$web_ls" | sed 's/^/    /'
+assert_contains "$web_ls" "index.html" "/app/web/index.html exists in the image"
+assert_contains "$web_ls" "app.css" "/app/web/css/app.css (an app-shell asset) exists in the image"
+assert_contains "$web_ls" "app.js" "/app/web/js/app.js (an app-shell asset) exists in the image"
+webdir_env=$(docker run --rm --entrypoint sh "steamvault/vault-api:$TAG" -c 'printf %s "$VAULT_WEB_DIR"')
+assert_eq "/app/web" "$webdir_env" "VAULT_WEB_DIR is baked into the image and points at the actual COPY target"
 
 step "2.home  HOME for uid 101 exists, is owned by it, and both definitions agree"
 say 'Regression guard for the WP 1.9 review blocker: with HOME unwritable,'
@@ -242,21 +270,30 @@ noKey=$(docker compose --env-file /dev/null -f "$compose_file" -p "$PROJECT" con
 say "$noKey" | sed 's/^/    /'
 assert_contains "$noKey" "VAULT_API_KEY" "compose refuses to render without VAULT_API_KEY"
 
-# --- Known gap, honestly flagged (WP D1) ------------------------------------
-# Steps 3e and 5i (this one and the one in section 5 below) are new in this
-# work package and have never been run against a real Docker host: WP D1's
-# environment had no Docker available, the same standing constraint prior
-# work packages have flagged (core/README.md "Known gap, honestly flagged").
-# Everything about them was validated statically instead -- YAML parse of
-# compose.yaml, an env-var cross-reference against .env.example, `sh -n` on
-# this whole script, and the awk/sed extraction logic below replayed against
-# a synthetic docker-compose-config-shaped fixture (both quoted and unquoted
-# value styles, and the case where the extracted service is last before a
-# top-level key). What is NOT yet confirmed: the real, version-specific
-# `docker compose config` rendering this depends on, and the actual
-# MISS -> event-log-line round trip in 5i. Both are confirmed by this
-# script's first real run on the deploy target -- treat that run's PASS/FAIL
-# on 3e/5i specifically as the first real evidence, not a formality.
+# --- WP D1's gap CLOSED by the packaging WP's real run (2026-08-17) --------
+# Steps 3e and 5i (this one and the one in section 5 below) were written in
+# WP D1 with no Docker available and had never run against a real host --
+# only statically validated (YAML parse, `sh -n`, the awk/sed extraction
+# logic replayed against synthetic fixtures). The packaging work package
+# (build-context move to the repo root, the twelve env-forwarding additions
+# across this step and the B1 audit block below it, and 2.web/6h/6i/6j in
+# the sections that follow -- 109 checks total, up from WP D1's 73) was
+# written the same way, then actually run THREE times against a real
+# Docker host across two review rounds (WSL2, Engine 29.1.3/Compose
+# 2.40.3): 105/109 passed on the final run. Every packaging-WP check passed
+# on every run. The 4 failures are ALL in step 5i below, and are a genuine
+# PRE-EXISTING bug unrelated to this package: nginx's cache-event
+# `access_log` uses `buffer=64k flush=5s` (core/nginx/nginx.conf), and step
+# 5i's grep runs immediately after the triggering request with no wait for
+# that flush -- an isolated repro (fresh `docker run` of vault-core alone,
+# one real MISS, checking the file at increasing delays) shows the correct
+# 9-field line reliably once you wait past 5 s, and reliably empty before
+# that. Reproducible on every run so far, but NOT deterministic in the
+# strict sense -- the pass/fail line depends on real wall-clock timing
+# against a host whose speed varies, so a future green 5i on a slower
+# check would not by itself mean the underlying race is fixed. Tracked
+# separately for a fix to step 5i's timing; not fixed here to keep this
+# work package's diff confined to the packaging scope it was reviewed for.
 step "3e. Phase-3 knobs (VAULT_EVENT_LOG / VAULT_GC_GRACE_DAYS / VAULT_AUTO_GC): feature-off defaults pass through unchanged"
 say 'The test .env above (section 3) sets none of the three -- deploy/README.md'
 say '"Phase-3 knobs" -- so the rendered config must show vault-core with an empty'
@@ -292,6 +329,55 @@ autogc_val=$(printf '%s\n' "$api_block" | grep 'VAULT_AUTO_GC:' | head -1 | sed 
 assert_eq "" "$event_log_val"    "vault-core: VAULT_EVENT_LOG renders empty (feature off) by default"
 assert_eq "14" "$grace_val"      "vault-api: VAULT_GC_GRACE_DAYS default (14) passes through"
 assert_eq "off" "$autogc_val"    "vault-api: VAULT_AUTO_GC default (off) passes through"
+
+# Packaging WP regression guard (docs/PROJECT_PLAN.md §7 Phase 5): these two
+# keys existed in config.py well before they were ever forwarded in
+# deploy/compose.yaml's vault-api `environment:` block -- LEARNINGS.md
+# "Containers" names exactly this class of bug (a setting config.py reads is
+# dead unless the service block forwards it by name). Same precondition-then-
+# value pattern as VAULT_EVENT_LOG above: presence is checked BEFORE
+# emptiness, or a deleted passthrough line would read as an unnoticed pass.
+event_log_path_key_count=$(printf '%s\n' "$api_block" | grep -c 'VAULT_EVENT_LOG_PATH:')
+manifest_oracle_key_count=$(printf '%s\n' "$api_block" | grep -c 'VAULT_MANIFEST_ORACLE:')
+assert_eq "1" "$event_log_path_key_count" "vault-api: VAULT_EVENT_LOG_PATH key is present exactly once in the rendered block (precondition)"
+assert_eq "1" "$manifest_oracle_key_count" "vault-api: VAULT_MANIFEST_ORACLE key is present exactly once in the rendered block (precondition)"
+
+event_log_path_val=$(printf '%s\n' "$api_block" | grep 'VAULT_EVENT_LOG_PATH:' | head -1 | sed -e 's/^[[:space:]]*VAULT_EVENT_LOG_PATH:[[:space:]]*//' -e 's/"//g')
+manifest_oracle_val=$(printf '%s\n' "$api_block" | grep 'VAULT_MANIFEST_ORACLE:' | head -1 | sed -e 's/^[[:space:]]*VAULT_MANIFEST_ORACLE:[[:space:]]*//' -e 's/"//g')
+assert_eq "" "$event_log_path_val"    "vault-api: VAULT_EVENT_LOG_PATH renders empty (feature off) with the test .env's defaults"
+assert_eq "" "$manifest_oracle_val"   "vault-api: VAULT_MANIFEST_ORACLE renders empty (oracle off) by default"
+
+# B1 audit (Opus review, packaging-WP fix round): a complete pass over every
+# env var api/vault_api/config.py reads found TEN MORE forwarded nowhere in
+# deploy/compose.yaml -- VAULT_MANIFEST_ORACLE_URL/VAULT_MANIFEST_ORACLE_TIMEOUT
+# are the two the reviewer named explicitly (.env.example told operators to
+# set the URL for a privacy mitigation that could not work while unforwarded
+# -- exactly the LEARNINGS.md "Containers" bug class this whole package
+# exists to close, re-introduced by the package itself). The rest are the
+# same gap found systematically. Same precondition-then-value pattern as
+# above, looped rather than repeated ten times by hand -- `${pair%%:*}` /
+# `${pair#*:}` split on the FIRST colon only (shortest match from the front,
+# longest match from the back), which matters because the oracle URL's own
+# value contains colons ("https://...") and must not be mis-split by them.
+for pair in \
+    "VAULT_MANIFEST_KEEP:3" \
+    "VAULT_EVENT_SWEEP_INTERVAL_MINUTES:5" \
+    "VAULT_MISS_TRIGGER_COOLDOWN_MINUTES:60" \
+    "VAULT_MISS_TRIGGER_MAX_PER_SWEEP:5" \
+    "VAULT_BYPASS_WINDOW_DAYS:3" \
+    "VAULT_CLIENT_STATS_KEEP:48" \
+    "VAULT_EVENT_LOG_MAX_BYTES:67108864" \
+    "VAULT_MANIFEST_ORACLE_URL:https://api.steamcmd.net/v1/info" \
+    "VAULT_MANIFEST_ORACLE_TIMEOUT:10.0" \
+    "VAULT_WEBHOOK_TIMEOUT_SECONDS:5.0"
+do
+    key=${pair%%:*}
+    expected=${pair#*:}
+    count=$(printf '%s\n' "$api_block" | grep -c "${key}:")
+    assert_eq "1" "$count" "vault-api: $key key is present exactly once in the rendered block (precondition for the value check below)"
+    val=$(printf '%s\n' "$api_block" | grep "${key}:" | head -1 | sed -e "s/^[[:space:]]*${key}:[[:space:]]*//" -e 's/"//g')
+    assert_eq "$expected" "$val" "vault-api: $key default ($expected) passes through"
+done
 
 # =============================================================================
 section "4. Stack up (vault-core + vault-api)"
@@ -537,6 +623,53 @@ assert_contains     "$sp_exec" "account is required in order to prefill apps" "c
 
 step "6g. What SteamPrefill actually wrote under HOME (now persistent)"
 run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' exec -T vault-api sh -c 'find /opt/steamprefill/home -maxdepth 3 | head -20; echo; stat -c \"%n %u:%g\" /opt/steamprefill/home'"
+
+step "6h. Web UI served from the IMAGE, over the running container, no bind mount involved (packaging WP)"
+say 'Section 2.web already proved the files exist inside the image; this proves'
+say 'GET / actually serves them through a real running container -- and that no'
+say 'bind mount is doing the work behind the scenes, which would make 2.web look'
+say 'load-bearing when it was not: this Compose project (the checked-in'
+say "deploy/compose.yaml, no override file) never mounts anything over /app/web."
+# Anchored to an actual mount-target SHAPE (a sequence item ending
+# ":/app/web"), not a bare substring match -- a plain 'grep /app/web' would
+# also fire on a comment merely MENTIONING the path (this file has several,
+# e.g. the say lines just above), which would make this check pass for the
+# wrong reason forever (reviewer nitpick).
+webmount=$(grep -nE '^\s*-\s*\S*:/app/web(:|[[:space:]]*$)' "$compose_file" || true)
+assert_eq "" "$webmount" "compose.yaml has no bind mount over /app/web -- a 200 below can only come from the image's own COPY"
+webroot_code=$(curl -s -o "$work/webroot.html" -w '%{http_code}' --max-time 10 "$API_URL/")
+say "    GET / -> http $webroot_code"
+assert_eq "200" "$webroot_code" "GET / returns 200"
+webroot_body=$(cat "$work/webroot.html")
+assert_contains "$webroot_body" "<title>SteamVault</title>" "GET / body is the real app shell (title tag), not a generic 404 page"
+assert_contains "$webroot_body" 'id="app"' "GET / body contains the app shell's root element"
+
+step "6i. Env-forwarding regression guard: VAULT_EVENT_LOG_PATH and VAULT_MANIFEST_ORACLE actually reach vault-api's process environment"
+say 'Section 3e already proved these render into `docker compose config` output;'
+say 'this is the stronger claim -- that the value genuinely lands in the RUNNING'
+say "container's environment, not merely in the rendered YAML (a passthrough"
+say 'line can exist in compose.yaml and still not reach the process if, say, the'
+say 'key were misspelled on one side). `printenv NAME` exits 0 iff NAME is a'
+say 'defined variable, even when its value is empty -- exactly what is being'
+say 'proved here, since the test .env leaves both unset.'
+run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' exec -T vault-api sh -c 'printenv VAULT_EVENT_LOG_PATH; echo \"exit=\$?\"; printenv VAULT_MANIFEST_ORACLE; echo \"exit=\$?\"'"
+evpath_defined=$(dc exec -T vault-api sh -c 'printenv VAULT_EVENT_LOG_PATH >/dev/null 2>&1; echo "exit=$?"')
+oracle_defined=$(dc exec -T vault-api sh -c 'printenv VAULT_MANIFEST_ORACLE >/dev/null 2>&1; echo "exit=$?"')
+assert_contains "$evpath_defined" "exit=0" "VAULT_EVENT_LOG_PATH is a defined env var inside the running vault-api container"
+assert_contains "$oracle_defined" "exit=0" "VAULT_MANIFEST_ORACLE is a defined env var inside the running vault-api container"
+
+step "6j. Regression guard: /v1/health and an authed route still behave after the build-context change"
+say '6a/6b above already exercise these for auth-contract reasons; restated'
+say 'explicitly here because the build-context move (api/ -> repo root,'
+say 'packaging WP) is exactly the kind of change that could silently break'
+say 'something else while still building and starting cleanly -- a wrong COPY'
+say 'source path does not stop Python from importing vault_api, so the signal'
+say 'has to come from these routes actually answering, not from `docker build`'
+say 'exiting 0.'
+regcheck_health=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$API_URL/v1/health")
+assert_eq "200" "$regcheck_health" "GET /v1/health still returns 200 after the build-context change"
+regcheck_games=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "X-Api-Key: $TEST_API_KEY" "$API_URL/v1/games")
+assert_eq "200" "$regcheck_games" "GET /v1/games (authed) still returns 200 after the build-context change"
 
 # =============================================================================
 section "7. vault-dns (--profile dns)"

@@ -869,21 +869,132 @@ refreshed and silently rots.
       companies in the early phase)
       *(WP 5.4: root `LICENSE`, canonical text, copyright line "Copyright
       2026 SteamVault contributors")*
-- [ ] **Packaging gap — release blocker, recorded 2026-08-17.** The
-      finished web UI is NOT in the shipped image: `api/Dockerfile` only
-      `COPY`s `vault_api/`, and `web/` sits outside the `context: ../api`
-      build context entirely, so `config._default_web_dir()` resolves to a
-      non-existent path in the container and `webui.mount_web_ui` skips the
-      mount by design (documented as a known gap since WP 4a.1). Fixing it
-      means moving the build context to the repo root (plus a
-      `.dockerignore`) or copying `web/` in via a second stage — a
-      deliberate deploy decision, hence its own package. The same package
-      should close the env-forwarding gaps in `deploy/compose.yaml`:
-      `VAULT_EVENT_LOG_PATH` is never passed to vault-api, so WP 3.11's
-      miss-trigger, per-client stats and bypass detection are unreachable
-      in the shipped stack; `VAULT_MANIFEST_ORACLE` likewise. (Schedule and
-      webhook keys are covered — they became DB-settable with ADR-0009 —
-      but the event-log path is env-only and cannot be set from the UI.)
+- [x] **Packaging: ship the web UI in the vault-api image + close the
+      env-forwarding gaps** (gap recorded 2026-08-17, closed same day, WP
+      P1, two Opus review rounds: FAIL → fix → FAIL → fix → re-verified).
+      User decision: bake `web/` into the image (a mount-only fix cannot
+      survive `docker pull` of a published image, WP 5.5) — vault-api's
+      `build:` in `deploy/compose.yaml` moved to `context: .. / dockerfile:
+      api/Dockerfile`, every `COPY` in `api/Dockerfile` became
+      repo-root-relative, `COPY web /app/web` was added, and
+      `ENV VAULT_WEB_DIR=/app/web` replaces the now-wrong relative default
+      inside the image. New root `.dockerignore` keeps the wider context
+      from also sending `app/` (Android), `poc/` (Phase-0 evidence) and
+      api/'s own dev-only files (`README.md`, `pytest.ini`,
+      `requirements-dev.txt` — round-2 review caught these missing from the
+      first pass) to the daemon (measured 9.734 MB → 1.54 MB, 84% smaller);
+      the old api/-rooted `api/.dockerignore` is deleted and its rules fully
+      folded in (Docker only reads a `.dockerignore` at the context root,
+      and an api/-rooted build no longer even works); `core/`/`dns/` keep
+      their own build contexts, unaffected.
+      **Env-forwarding: a complete audit, not a two-key patch** (the
+      round-2 reviewer's B1: `.env.example` told operators to set
+      `VAULT_MANIFEST_ORACLE_URL` for a privacy mitigation that could not
+      work while unforwarded — the exact `docs/LEARNINGS.md` "Containers"
+      bug class this package exists to close, re-introduced by an
+      incomplete first pass). Every env var `config.py` reads was checked
+      against `deploy/compose.yaml`: twelve were unforwarded with no
+      good reason and now are —
+      `VAULT_EVENT_LOG_PATH`/`VAULT_MANIFEST_ORACLE`/
+      `VAULT_MANIFEST_ORACLE_URL`/`VAULT_MANIFEST_ORACLE_TIMEOUT`/
+      `VAULT_MANIFEST_KEEP`/`VAULT_EVENT_SWEEP_INTERVAL_MINUTES`/
+      `VAULT_MISS_TRIGGER_COOLDOWN_MINUTES`/`VAULT_MISS_TRIGGER_MAX_PER_SWEEP`/
+      `VAULT_BYPASS_WINDOW_DAYS`/`VAULT_CLIENT_STATS_KEEP`/
+      `VAULT_EVENT_LOG_MAX_BYTES`/`VAULT_WEBHOOK_TIMEOUT_SECONDS`
+      (round-2 reviewer independently re-derived all 33 keys from
+      `config.py` and reconciled this classification exactly, then proved
+      every default byte-identical by diffing `Settings.from_env()` JSON
+      dumped from a bare container against one fed exactly what `docker
+      compose config` renders; this package additionally proved each key
+      arrives with a non-default value too). New `api/tests/
+      test_p1_compose_env_defaults.py` (round-2 should-fix S-D) keeps this
+      from drifting again without Docker: it derives expected values from
+      `config.py`'s own `DEFAULT_*` constants and diffs them against
+      `compose.yaml`'s `${VAR:-default}` text on every `pytest` run,
+      mutation-tested in both directions (a changed default, a deleted
+      passthrough line) — and its first real run caught a genuine,
+      harmless pre-existing drift of its own: `VAULT_SIZE_CACHE_TTL`'s
+      compose default was the bare string `60` against `config.py`'s
+      `60.0`; fixed to match (both parse to the same float, so no behavior
+      changed). The rest stay unforwarded for one of three recorded
+      reasons: baked into the image (`VAULT_DB_PATH`/`VAULT_CACHE_ROOT`/
+      `VAULT_STEAMPREFILL_PATH`/`VAULT_WEB_DIR`); DB-overridable at runtime
+      via `PATCH /v1/settings` instead (ADR-0009: `VAULT_NAME`,
+      `VAULT_SCHEDULE_*`, `VAULT_WEBHOOK_URL`/`VAULT_WEBHOOK_EVENTS` —
+      `deploy/examples/tuned-setup.md` §2 rewritten to point at this instead
+      of its now-stale override-file workaround, and its `VAULT_GC_GRACE_DAYS`
+      claim corrected, that one having already been forwarded before this
+      package); or deliberately env-only, volume-topology-sensitive
+      (`VAULT_MANIFEST_ARCHIVE_DIR`, `VAULT_STEAMPREFILL_CACHE_DIR` — new §3
+      in `tuned-setup.md`); plus `VAULT_SETTINGS_READONLY`, env-only by
+      definition. `.env.example` makes the cache-event log pair default-ON
+      (user decision, WP 3.11's consumer justifies it) with an honest
+      read-not-truncate growth warning, a reachable
+      `VAULT_EVENT_LOG_MAX_BYTES=0` escape hatch, an upgrade note that a
+      dozen previously-silent-no-op keys now fail loudly at boot if
+      malformed, and widens the `VAULT_RESOLVER` warning from
+      vault-dns-only to any same-host rewriting resolver (AdGuard
+      Home/Pi-hole).
+      **The SteamPrefill container-detection trap — corrected twice.**
+      Round 1 named only the DNS candidate and treated a DNS miss as
+      universally fatal; round-2 review (B2) fixed that to a four-candidate
+      model but used `curl`/`ip`, neither of which exists in the
+      `python:3.13-slim`-based `vault-api` image (measured: `curl: not
+      found`), and its worked-example transcript was mislabelled — the
+      `200 OK` shown as `curl` output was actually produced by the
+      `python3`/`urllib.request` command this package used throughout, not
+      by running `curl` inside `vault-api`, which cannot happen. Round-2's
+      OWN measurement (the container's dynamic default-route gateway) also
+      turned out not to be the actual mechanism: round-3 review (S-A)
+      settled, via a string scan of the shipped SteamPrefill binary, that
+      candidate 3 is the FIXED LITERAL `172.17.0.1` (present as a managed
+      UTF-16LE string; the only private IPv4 literal there matching the
+      documented candidate list — `127.0.0.1` also appears, as candidate 2 —
+      and no `host.docker.internal`-style name at all) — not something SteamPrefill
+      dynamically detects from `vault-api`'s own routing table. Re-verified
+      directly: a real Compose stack's `vault-api` container, whose OWN
+      network gateway is `172.19.0.1` (a Compose-managed bridge, not the
+      classic default bridge), still reaches the literal `172.17.0.1` and
+      gets the heartbeat back when `VAULT_CORE_BIND=0.0.0.0` — ordinary
+      host-level routing between the host's own `docker0` and Compose-bridge
+      interfaces, not container-to-container traffic (which Docker's
+      inter-network isolation WOULD block). The conclusion is unchanged
+      (default layout: nothing to fix; dedicated `VAULT_CORE_BIND`: the
+      trap is real), only the mechanism description and the diagnostic
+      command are corrected. `deploy/README.md`, `deploy/examples/
+      truenas-scale-dockge.md` §7.1 and its troubleshooting row now state
+      the literal, use `docker compose exec vault-api python3 -c
+      "import urllib.request as u; ..."` (verified present and working;
+      `curl` stays available only in vault-core's own Alpine image, a
+      different question), and every transcript shown was re-run with that
+      exact command and pasted verbatim, including the real Python
+      traceback tail for the refused-connection case. The `extra_hosts` fix
+      recipe itself was correct in every round and stays unchanged —
+      confirmed sufficient on its own (SteamPrefill uses the resolved IP
+      for all subsequent depot traffic once detection succeeds, per WP
+      0.4), with the added requirement that the value be a plain IPv4
+      address, never a hostname.
+      Verified against real Docker (WSL2, Engine 29.1.3/Compose 2.40.3),
+      three review rounds: built the image from the repo-root context, ran
+      it standalone with zero volumes and confirmed `GET /` serves the real
+      app shell (`docker inspect` showed `Mounts: []`); proved all twelve
+      newly-forwarded keys reach `Settings.from_env()` with non-default
+      values in a running container; rendered `docker compose config`
+      against both the shipped `.env.example` defaults and with every knob
+      uncommented; re-ran the exact documented `python3`/`urllib.request`
+      diagnostic (not a stand-in) in both `VAULT_CORE_BIND` layouts and
+      pasted the real transcripts into the docs; and ran `deploy/tests/
+      verify-stack.sh` to completion four times across three review rounds
+      (109 checks, up from WP D1's 73): 105/109 passed on the final run,
+      every time. The 4 failures are a pre-existing WP D1 bug in step 5i
+      unrelated to this package (nginx's `flush=5s` event-log buffer vs. an
+      immediate post-request grep with no wait; confirmed by an isolated
+      repro) — reproducible on every run so far, but genuinely
+      timing-dependent rather than strictly deterministic (a slower/faster
+      host could tip the race either way), corrected wording per
+      `docs/LEARNINGS.md`. Every check this package added, across all three
+      rounds, passed on every run; api suite 1482 passed/1 skipped on the
+      final run (1461 baseline + 21 new in `test_p1_compose_env_defaults.py`).
 - [ ] CI: GitHub Actions — lint, tests, multi-arch image build (amd64/arm64),
       publish to ghcr.io with pinned version tags
       *(WP 5.1 done 2026-08-09 — the test/lint half: api pytest (Linux),
@@ -1072,10 +1183,12 @@ repository, then start Phase 1) are all DONE — Phase 0 answered the
 `proxy_store` question in favour of Plan B (ADR-0001), the repo exists, and
 Phases 1–3 plus 4a shipped. Rewritten 2026-08-17 to reflect the real state.
 
-1. [ ] **Packaging package** (§7 Phase 5, first bullet): `web/` into the
-   vault-api image, `VAULT_EVENT_LOG_PATH` + `VAULT_MANIFEST_ORACLE` through
-   Compose, `deploy/tests/verify-stack.sh` extended. Small, and nothing else
-   makes Phase 4a's work reachable in a real deployment.
+1. [x] **Packaging package** (§7 Phase 5, first bullet) — DONE, WP P1: `web/`
+   baked into the vault-api image, the full env-forwarding gap audited and
+   closed (not just `VAULT_EVENT_LOG_PATH` + `VAULT_MANIFEST_ORACLE` —
+   twelve keys total, see §7 Phase 5's own bullet for the complete list),
+   `deploy/tests/verify-stack.sh` extended and run for real. What follows is
+   unchanged by it: next up is item 2 below.
 2. [ ] **Zeus rollout** — joint interactive session (see the Deployment
    section of `docs/WORKPACKAGES.md`). Two user-side blockers first: the
    stale HADES Tailscale subnet route, and the Fritz!Box announcing itself

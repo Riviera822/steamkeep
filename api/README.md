@@ -3858,20 +3858,20 @@ resolves to the real `web/` directory in a native checkout regardless of
 the process's current working directory. Override it with `VAULT_WEB_DIR`
 if you ever need to point at a different build of the UI.
 
-**Known gap, deliberately out of this work package's scope:** the shipped
-Docker image does NOT copy `web/` in. `api/Dockerfile`'s build context is
-`api/` (see `deploy/compose.yaml`: `context: ../api`), and `web/` lives
-outside that context entirely — copying it in would need both a
-`COPY web /app/web` line in the Dockerfile AND a build-context change in
-`deploy/compose.yaml` (`context: ..` with an explicit `dockerfile:
-api/Dockerfile`), which is shared, cross-service surface a single
-work package should not quietly rewrite. Until a follow-up package does
-that: `_default_web_dir()` resolves to a path that does not exist inside
-the container, and `mount_web_ui` treats that exactly like any other
-missing optional directory — it logs once at startup and vault-api serves
-the API only, same as today. Native dev (`uvicorn
-vault_api.main:create_app --factory`, run from anywhere in the repo) gets
-the real UI with zero configuration.
+**Packaging gap CLOSED (packaging work package, `docs/PROJECT_PLAN.md` §7
+Phase 5, 2026-08-17).** Earlier text on this page said the shipped Docker
+image did not copy `web/` in at all — that was true through WP 4a.1–4a.8,
+and is no longer true. `deploy/compose.yaml`'s vault-api service now builds
+with `context: ..` / `dockerfile: api/Dockerfile` (repo root, not `api/`,
+because `web/` is a sibling of `api/`, not a child of it); `api/Dockerfile`
+COPYs `web/` in at `/app/web` and sets `ENV VAULT_WEB_DIR=/app/web`
+explicitly, because `_default_web_dir()`'s relative computation is correct
+for a native checkout but resolves to the wrong path (`/web`, not
+`/app/web`) once `vault_api/` itself lives at `/app/vault_api` inside the
+image — see the comment next to that `ENV` line in `api/Dockerfile` for the
+exact dirname-climb reasoning. The container now serves the real UI, same
+as native dev (`uvicorn vault_api.main:create_app --factory`, run from
+anywhere in the repo), with zero configuration beyond `docker compose up`.
 
 ### Auth boundary
 

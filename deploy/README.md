@@ -28,16 +28,25 @@ deploy/
 ## Requirements
 
 - Docker Engine with Compose v2 (`docker compose`, not `docker-compose`).
-  Verified against **Docker Engine 29.1.3 / Compose 2.40.3** on Ubuntu 26.04.
-  **Known gap, honestly flagged (WP D1):** that verification predates the
-  Phase-3 knobs section below. `deploy/tests/verify-stack.sh` steps 3e and
-  5i, which exercise `VAULT_EVENT_LOG` / `VAULT_GC_GRACE_DAYS` /
-  `VAULT_AUTO_GC`, were added in WP D1 in an environment with no Docker
-  available and have not yet run against a real Docker host — only
-  statically validated (YAML parse, `sh -n`, extraction logic replayed
-  against synthetic fixtures; see the comments at the top of each step in
-  `verify-stack.sh`). Pending confirmation on the deploy target's first real
-  run of the suite.
+  Verified against **Docker Engine 29.1.3 / Compose 2.40.3** on Ubuntu 26.04
+  (WSL2) — and, as of the 2026-08-17 packaging work package, `deploy/tests/
+  verify-stack.sh` has now actually run against that real host: 105/109
+  checks passed on the final run, across three total runs spanning two
+  review rounds. **The 4 failures are a genuine pre-existing bug in step
+  5i, unrelated to the packaging work package that finally ran it for
+  real:** nginx's cache-event `access_log` uses `buffer=64k flush=5s`
+  (`core/nginx/nginx.conf`), and step 5i greps the log file immediately
+  after the triggering request with no wait for that flush — an isolated
+  repro confirms the correct 9-field line appears once you wait past the
+  5-second buffer (a fresh `docker run` of vault-core, one real MISS, and a
+  check 7 s later shows the expected line every time; checking at 1 s does
+  not). **Reproducible, not deterministic:** the same 4 lines failed on
+  every run so far, but the pass/fail line is genuinely timing-dependent —
+  a slower host could clear the 5 s window before the grep and pass by
+  chance, so a future green 5i is not proof the underlying bug is fixed.
+  The feature itself is correct; the test's timing isn't. Tracked
+  separately for a fix to step 5i. Every check the packaging work package
+  itself added, across both review rounds, passed on every run.
 - Outbound internet (the cache fetches from the Steam CDN on a miss).
 - Disk space for the cache. There is no eviction, ever — that is the
   project's whole point (`docs/PROJECT_PLAN.md` §3). You delete games
@@ -115,6 +124,181 @@ Steam session.
 
 ---
 
+## A container-specific trap: does SteamPrefill actually reach your cache?
+
+This has only ever been proven **natively** (Phase 0, WP 1.7 — via a Windows
+hosts-file entry) and never inside the container SteamPrefill actually ships
+in here, which matters because the mechanism is different from every DNS mode
+above — and, measured, matters in only ONE of the two `VAULT_CORE_BIND`
+layouts, not both. Read to the end before adding anything to your setup.
+
+### The real detection mechanism (four candidates, not one)
+
+SteamPrefill runs *inside* the `vault-api` container as a subprocess, and it
+does **not** simply trust the Windows client's hosts-file hostname. Per its
+own source (confirmed by this project's own read, `poc/steamprefill/
+PROTOCOL.md` §0 "SteamPrefill's cache-detection contract", and independently
+confirmed by scanning the shipped SteamPrefill binary itself for embedded
+strings), it tries, **in this order**, resolving each to an
+RFC1918-or-loopback IPv4 address:
+
+1. `lancache.steamcontent.com` (DNS — the same name the Windows client and
+   vault-agent's hosts mode use)
+2. `localhost`
+3. **the fixed literal `172.17.0.1`** — the classic Docker default bridge's
+   gateway address, hardcoded verbatim inside the binary (confirmed present
+   as a UTF-16LE string in the shipped `.NET` executable; it is the only
+   private IPv4 literal there matching SteamPrefill's documented candidate
+   list — `127.0.0.1` also appears, as candidate 2 — and no
+   `host.docker.internal`-style hostname appears at all). This
+   is NOT SteamPrefill dynamically detecting "whatever this container's own
+   gateway happens to be" — it is one specific, unconditional address.
+4. the local machine's own hostname
+
+For **each** candidate that resolves to a private/loopback IPv4, it sends
+`GET http://<ip>/lancache-heartbeat` and accepts the candidate only if the
+response carries `X-LanCache-Processed-By` — vault-core answers this at
+`core/nginx/nginx.conf`'s `/lancache-heartbeat` location with `steamvault`.
+It stops at the first candidate that passes. If none does, SteamPrefill
+quietly downloads straight from Valve instead: **the job still finishes and
+reports success, and the cache stays empty.** No error, no red job status —
+the same silent-failure shape requirement A12 is scoped to catch for
+*client* traffic, except here it is vault-api's own prefill traffic
+bypassing itself.
+
+### Whether this bites you depends entirely on `VAULT_CORE_BIND`
+
+**Default layout (`VAULT_CORE_BIND` unset, i.e. `0.0.0.0`): candidate 3
+already succeeds, DNS-independently, even though `172.17.0.1` is not
+`vault-api`'s own network's gateway.** `deploy/compose.yaml` puts every
+service on its own Compose-managed bridge network (a DIFFERENT subnet from
+the classic default bridge — `172.19.0.0/16` in one measured run, not
+`172.17.0.0/16`), so `172.17.0.1` is not directly reachable the way a
+same-network address would be. It works anyway, for a specific, checked
+reason: Docker publishes vault-core's port 80 on **every** host interface
+when bound to `0.0.0.0`, including the classic default bridge's own gateway
+address `172.17.0.1` (that bridge always exists on a Docker host, used or
+not). A packet from `vault-api`'s container aimed at `172.17.0.1` leaves via
+its own network's gateway, arrives at the HOST, and the host — which has a
+direct, local route to `172.17.0.0/16` via its own `docker0` interface —
+forwards it the rest of the way to vault-core's published port. This is
+ordinary host-level routing between two of the host's own interfaces, not
+container-to-container traffic crossing Docker's inter-network isolation
+(which does block THAT). Measured directly, from inside a real Compose
+stack's `vault-api` container whose OWN network gateway is `172.19.0.1`,
+probing the literal `172.17.0.1` regardless:
+
+```
+$ docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://172.17.0.1/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
+200 steamvault
+```
+
+So in the layout `docker compose up` gives you out of the box, **there is
+nothing to fix here** — candidate 1 (DNS) may well fail exactly as
+`docs/PROJECT_PLAN.md`'s evidence note records, but candidate 3 catches it
+DNS-independently before SteamPrefill ever falls back to Valve, as long as
+the host's default bridge is up (it is, by default, on any Docker
+installation) and nothing has firewalled inter-bridge host routing.
+
+**The trap is real in the *other* layout: `VAULT_CORE_BIND` set to a
+dedicated address** — the port-80-conflict recipe above, and exactly what
+[the TrueNAS guide](examples/truenas-scale-dockge.md) instructs whenever
+something else already owns port 80. Binding to one specific address means
+Docker publishes port 80 **only** there — not on `172.17.0.1`, not on
+loopback. Measured, same command, this time against a stack with
+`VAULT_CORE_BIND` set to a dedicated address instead of `0.0.0.0`:
+
+```
+$ docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://172.17.0.1/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
+[...]
+urllib.error.URLError: <urlopen error [Errno 111] Connection refused>
+
+$ docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://127.0.0.1/lancache-heartbeat',timeout=5); print(r.status)"
+[...]
+urllib.error.URLError: <urlopen error [Errno 111] Connection refused>
+
+$ docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://192.168.1.50/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
+200 steamvault
+```
+
+(`[...]` above elides the Python traceback's middle frames for readability —
+the meaningful line is the final `URLError`/`ConnectionRefusedError`; nothing
+is hidden except stack-frame noise, and the exit still happened with no
+response.) Candidates 2 and 3 both refuse; candidate 1 (DNS) is your only
+remaining chance, and only if your resolver rewrites the zone for the
+CONTAINER too (not a given — see the earlier DNS section). If it doesn't,
+this is exactly where prefill jobs silently fill nothing.
+
+### Check it
+
+Probe the heartbeat directly, from inside `vault-api` — a DNS lookup
+answers the wrong question, since candidates 2–4 never involve DNS at all.
+**`curl` and `ip` are not installed in the `vault-api` image** (it's
+`python:3.13-slim`, not vault-core's nginx/Alpine image) — use `python3`,
+which is:
+
+```bash
+# the fixed-literal candidate (works out of the box on the default 0.0.0.0 bind):
+docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://172.17.0.1/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
+
+# the address you actually bound VAULT_CORE_BIND to, if you set one:
+docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://<VAULT_CORE_BIND value>/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
+```
+
+A line printing `200 steamvault` means that candidate works. A traceback
+ending in `ConnectionRefusedError`/`URLError` means it doesn't — check the
+next candidate down the list. If you're on the default `0.0.0.0` bind and
+the first command already prints `200 steamvault`, you are done — skip the
+fix below. (If you'd rather probe from vault-core's own shell instead,
+vault-core's Alpine/nginx image does have `curl` — but that checks
+vault-core's OWN reachability of an address, a related but different
+question from what `vault-api` can reach; the commands above check the
+right container.)
+
+### Fix it (only needed with a dedicated `VAULT_CORE_BIND`)
+
+Two options, neither baked into `compose.yaml` by default (a wrong default
+here would break setups where the container already finds the cache without
+it):
+
+1. **Preferred, DNS-independent, and confirmed sufficient on its own:**
+   pin `lancache.steamcontent.com` directly via `extra_hosts` on `vault-api`
+   only, in a `deploy/compose.override.yaml` you create yourself:
+   ```yaml
+   services:
+     vault-api:
+       extra_hosts:
+         - "lancache.steamcontent.com:192.168.1.50"   # vault-core's own address
+   ```
+   **The value must be a plain private IPv4 address, not a hostname** —
+   SteamPrefill's own resolution step requires an RFC1918-or-loopback IPv4
+   before it ever sends the heartbeat probe, so anything else (a hostname, an
+   IPv6 literal) is rejected before it gets that far. Pinning only this one
+   name is enough: once cache detection succeeds, SteamPrefill uses the
+   resolved IP for every subsequent depot request too (confirmed in this
+   project's own testing, WP 0.4: 1272 chunks prefilled through a single
+   hosts entry), and vault-core accepts requests under the real CDN Host
+   header regardless of which address they arrived on — depot hostnames
+   themselves never need to resolve to the cache.
+   Then `docker compose -f compose.yaml -f compose.override.yaml up -d`.
+2. **Alternative:** point the container's own resolver at your LAN's
+   rewriting DNS server instead:
+   ```yaml
+   services:
+     vault-api:
+       dns:
+         - 192.168.1.50   # your AdGuard Home / Pi-hole / vault-dns address
+   ```
+   Caveat: this makes vault-api resolve *everything* (Steam login, the
+   manifest oracle if enabled, webhook URLs) through that resolver too — the
+   `extra_hosts` route above changes nothing except this one hostname, which
+   is why it is the preferred fix.
+
+Re-run the heartbeat probe above after either change to confirm it actually
+took.
+
+---
+
 ## DNS: pick one of three modes
 
 The Steam client has to be told to fetch from your cache instead of Valve's
@@ -143,8 +327,16 @@ transcript in this directory). For modes 1 and 3 it is on you; `dns/README.md`
 shows exactly what to add and how to verify it with `dig`.
 
 > `VAULT_RESOLVER` (vault-core's own upstream resolver) must **never** point at
-> vault-dns. vault-dns answers `*.steamcontent.com` with vault-core's address,
-> so vault-core would proxy every cache miss back into itself.
+> **any** resolver that rewrites `*.steamcontent.com` to this cache. `vault-dns`
+> is the obvious case — it answers `*.steamcontent.com` with vault-core's own
+> address by design — but the identical failure hits an **AdGuard Home or
+> Pi-hole instance running on this same host** if you configured the
+> `*.steamcontent.com` rewrite there instead (mode 1 above; a very common
+> homelab layout — AdGuard Home/Pi-hole and this stack side by side on a NAS
+> or a small server). Point `VAULT_RESOLVER` at that resolver and vault-core
+> would proxy every cache miss back into itself, indistinguishable from a
+> hung upstream from the outside. `deploy/.env.example` carries the same
+> warning next to the setting itself.
 
 ---
 
@@ -281,23 +473,38 @@ and the port-80/DNS gotchas that come up on a NAS specifically.
 
 ## Phase-3 knobs: cache-event log and garbage collection
 
-Three Phase-3 settings, all optional, all off/at-their-safe-default unless you
-set them in `deploy/.env` (`.env.example` documents each in full):
+Four Phase-3 settings, documented in full in `.env.example`:
 
-| Variable              | Required | Default      | Purpose                                                            |
-|-----------------------|----------|--------------|---------------------------------------------------------------------|
-| `VAULT_EVENT_LOG`      | no       | *(empty — feature off)* | vault-core: path to the machine-readable cache-event log (WP 3.10, ADR-0008), e.g. `/vault/logs/event.log`. No consumer exists yet — this is groundwork for WP 3.11's miss-triggered prefill completion and bypass detection. See `core/README.md` "Cache-event log" |
-| `VAULT_GC_GRACE_DAYS`  | no       | `14`         | vault-api: days a freshly stored chunk is protected from garbage collection purely by its own store time (protects beta-branch/demo content GC cannot otherwise see); `0` disables the window. See `api/README.md` "The recently-stored grace window" |
-| `VAULT_AUTO_GC`        | no       | `off`        | vault-api: `off` \| `dry-run` \| `execute` — automatically queue a GC job after a prefill that actually updated something. See `api/README.md` "Auto-GC" |
+| Variable               | Required | Default                                    | Purpose                                                            |
+|-------------------------|----------|---------------------------------------------|---------------------------------------------------------------------|
+| `VAULT_EVENT_LOG`       | no       | `/vault/logs/event.log` (**on** by default as of the 2026-08-17 packaging WP) | vault-core: path to the machine-readable cache-event log (WP 3.10, ADR-0008) — its WRITE side |
+| `VAULT_EVENT_LOG_PATH`  | no       | `/vault/logs/event.log` (**on** by default, same WP) | vault-api: the SAME path — its READ side. WP 3.11's sweeper tails it to drive miss-triggered prefill completion, per-client hit stats and bypass detection (requirement A12). Must equal `VAULT_EVENT_LOG` above |
+| `VAULT_GC_GRACE_DAYS`   | no       | `14`         | vault-api: days a freshly stored chunk is protected from garbage collection purely by its own store time (protects beta-branch/demo content GC cannot otherwise see); `0` disables the window. See `api/README.md` "The recently-stored grace window" |
+| `VAULT_AUTO_GC`         | no       | `off`        | vault-api: `off` \| `dry-run` \| `execute` — automatically queue a GC job after a prefill that actually updated something. See `api/README.md` "Auto-GC" |
 
-**The cache-event log needs no extra volume.** `VAULT_EVENT_LOG` (once set)
-writes into `/vault/logs/`, which lives on the exact same `/vault` volume
-`cache/` and `tmp/` already share — `core/Dockerfile` pre-creates it there.
-vault-api already mounts that identical volume (see the "Volumes" table
-above), so it can already read `/vault/logs/event.log` today, with zero
-`compose.yaml` changes required. Nothing consumes the file yet — turning it
-on before WP 3.11's sweeper exists just grows an unbounded file, exactly as
-`core/README.md` warns.
+A fifth, `VAULT_MANIFEST_ORACLE` (WP 3.9), stays off by default and is
+**not** in this table on purpose — see `.env.example`'s privacy note before
+touching it: enabling it sends outbound queries to a third party.
+
+**The cache-event log is now the feed for a real feature, and needs no extra
+volume.** `VAULT_EVENT_LOG` writes into `/vault/logs/`, which lives on the
+exact same `/vault` volume `cache/` and `tmp/` already share —
+`core/Dockerfile` pre-creates it there. vault-api's matching
+`VAULT_EVENT_LOG_PATH` reads from that identical volume (see the "Volumes"
+table above) with zero extra `compose.yaml` wiring. It now feeds WP 3.11's
+sweeper: miss-triggered prefill completion (a cache miss on an
+unknown/partial app queues a prefill job for it), per-client hit statistics,
+and bypass detection (`GET /v1/clients`, `GET /v1/stats`) — this was
+groundwork with no consumer through WP 3.10, and stayed off-by-default
+UNTIL the packaging work package that closed the actual
+`deploy/compose.yaml` forwarding gap (`VAULT_EVENT_LOG_PATH` existed in
+`config.py` since WP 3.11 but was never wired into vault-api's
+`environment:` block, so the whole feature was unreachable in the shipped
+stack even though the code was correct — see `docs/LEARNINGS.md`
+"Containers"). To turn it back off, set BOTH variables to empty in `.env` —
+`.env.example` has the exact wording. It genuinely grows over time (one TSV
+line per request); `.env.example` also states plainly that vault-api can
+read the file but not truncate it, so rotation is on the operator.
 
 **Turning on auto-GC deletes files automatically once you pick `execute`.**
 Start with `dry-run` and read a few job logs (`GET /v1/jobs/{id}`) before
@@ -341,6 +548,16 @@ cd deploy
 git pull
 docker compose up -d --build
 ```
+
+**Newly-enforced `.env` keys (2026-08-17 packaging work package).** A dozen
+settings that Compose used to silently drop — set them in `.env` and nothing
+happened, no error, no effect — are forwarded and validated now (the full
+list is in `.env.example`'s upgrade note and `docs/PROJECT_PLAN.md` §7
+Phase 5). If your existing `.env` already has a stale or malformed value for
+one of them, it was harmless before this upgrade and becomes vault-api
+refusing to start, with an explicit error naming the bad key, after it.
+Check `docker compose logs vault-api` for exactly that message if a
+previously-working `.env` suddenly fails to start post-upgrade.
 
 **Database schema.** vault-api creates and upgrades its schema itself at
 startup (`init_db`, `api/README.md` "Database schema"). Every change so far is
@@ -404,16 +621,29 @@ What this deployment assumes, stated plainly so it can be checked:
 sudo sh deploy/tests/verify-stack.sh
 ```
 
-Builds all three images and runs 62 checks against real containers: the
-config-drift contract (both directions), a **real Steam CDN** cache
-MISS → stored → HIT with byte-identical bodies, the LanCache heartbeat, the
-Host allowlist, the `?nocache=1` bypass, API auth and a mapping round-trip,
-vault-api reading the same cache volume vault-core just wrote, DNS A/AAAA
-behaviour, a **credential-free SteamPrefill smoke run on all three invocation
-paths** (it must reach the username prompt, never a
-`TypeInitializationException`), and every fail-fast guard (split filesystems,
-empty/injected resolver, unrendered template, unwritable cache, missing/invalid
-`CACHE_IP`).
+Builds all three images and runs 109 checks against real containers: the
+config-drift contract (both directions), **the web UI baked into the
+vault-api image and served from it with no bind mount involved** (packaging
+work package), all twelve env-forwarding-audit keys (`VAULT_EVENT_LOG_PATH`,
+`VAULT_MANIFEST_ORACLE` and the ten more B1 found — see §7 Phase 5 in
+`docs/PROJECT_PLAN.md` for the full list) actually reaching vault-api's
+process environment with the correct default (not just rendering in the
+YAML), a **real Steam CDN** cache MISS → stored → HIT with byte-identical
+bodies, the LanCache heartbeat, the Host allowlist, the `?nocache=1` bypass,
+API auth and a mapping round-trip, vault-api reading the same cache volume
+vault-core just wrote, DNS A/AAAA behaviour, a **credential-free SteamPrefill
+smoke run on all three invocation paths** (it must reach the username
+prompt, never a `TypeInitializationException`), and every fail-fast guard
+(split filesystems, empty/injected resolver, unrendered template, unwritable
+cache, missing/invalid `CACHE_IP`).
+
+**Known result, confirmed on three real runs across two review rounds
+(2026-08-17):** 105/109 pass on the final run; the 4 failures are step 5i's
+own timing bug (nginx's event-log buffer flushes after 5 s, the step checks
+immediately, and this is reproducible rather than strictly deterministic —
+see "Requirements" above) — see `verify-stack.sh`'s own comment above step
+5i. Everything else, including every check the packaging work package
+added across both rounds, is green.
 
 It never enters credentials — reaching the login prompt is the pass condition.
 
@@ -424,6 +654,19 @@ volumes afterwards. A recorded run is in `VERIFICATION-*.md` in this directory.
 Component-level tests live with their components: `core/tests/test-core.ps1`,
 `api/tests/` (pytest), `dns/tests/test-dnsmasq-config.ps1`, and
 `core/docker/check-config-drift.sh`.
+
+**One check `verify-stack.sh` deliberately does NOT cover** (it never enters
+Steam credentials and this trap only shows up with a dedicated
+`VAULT_CORE_BIND`, which the suite doesn't use): the SteamPrefill
+cache-detection trap above. **Only relevant if you set `VAULT_CORE_BIND` to
+a dedicated address** — the default `0.0.0.0` bind already works, measured
+(see ["A container-specific
+trap"](#a-container-specific-trap-does-steamprefill-actually-reach-your-cache)
+above for why). If you did set a dedicated bind, add the heartbeat probe
+from that section to your own post-deploy checklist — a DNS lookup answers
+the wrong question here, since the mechanism that actually matters in this
+layout is which address the heartbeat reaches, not what `lancache.
+steamcontent.com` resolves to.
 
 ---
 
