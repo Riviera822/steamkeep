@@ -2,7 +2,8 @@
 
 A Steam game cache with true per-game management — self-hosted, Docker-first.
 
-Status: PLANNING · License: Apache-2.0
+Status: IMPLEMENTATION — Phases 0–3 and 4a complete, Phase 4b at 4b.8 of
+4b.9; pre-release (see §11 Next Steps) · License: Apache-2.0
 
 > SteamVault is a community project and is not affiliated with Valve Corporation.
 > "Steam" is a trademark of Valve Corporation.
@@ -425,8 +426,14 @@ parallel/serial decisions, merge discipline, open user decisions):
 - [x] Configurable cron window (e.g. 09:00–17:00, every 3 h)
       *(WP 3.5: schedule_window parsing incl. overnight windows + 24:00 end,
       OnCalendar-style sweeps from agent reports)*
-- [ ] Manifest-based garbage collection (`/v1/cache/{appid}/gc`, optional
+- [x] Manifest-based garbage collection (`/v1/cache/{appid}/gc`, optional
       auto-GC after successful update prefill)
+      *(auto-GC half CLOSED — the earlier "still open" note below is
+      superseded: WP 3.12 shipped `VAULT_AUTO_GC=off|dry-run|execute`
+      (`worker.py::_maybe_queue_auto_gc`, re-read per job so a
+      `PATCH /v1/settings` applies without restart, key exposed by
+      ADR-0009 and wired through `deploy/compose.yaml` in WP D1). This
+      is NOT a Phase-4d blocker any more)*
       *(WP 3.7 done: read-only GC core — `plan_gc()` with exact on-disk
       orphan bytes, shared-depot UNION keep sets, ADR-0007 readiness gate,
       uncached-app exclusion per ADR-0007 addendum, stored-manifest dedupe
@@ -587,8 +594,16 @@ Zeus-scale library) — the Zeus rollout session covers it.
       tests, 13-mutation review set killed; suite 1375 green; Opus
       FAIL→fix→PASS. Web-UI consumption follows in WP 4a.6)*
 
-#### Phase 4b — Android App
-- [ ] Kotlin/Compose project, Steam Web API integration (library + covers)
+#### Phase 4b — Android App — 4b.1–4b.8 MERGED 2026-08-11
+
+Open: WP 4b.9 (release build/signing/APK docs + the review carry-over list
+in `docs/WORKPACKAGES.md`), tsnet (post-v1 by decision), a clients/bypass
+detail surface (4b.8 routes bypass notifications to Settings for now), and
+the honest on-device list in `app/README.md` — no emulator or phone was
+available in any implementation session. Suite at close: 534 JVM tests,
+lint clean, `assembleDebug` green.
+
+- [x] Kotlin/Compose project, Steam Web API integration (library + covers)
       *(WP 4b.1 done 2026-08-10: self-contained app/ Gradle project —
       pinned catalog (AGP 8.7.3, Kotlin 2.0.21, Compose BOM 2024.10.01,
       SDK 35/min 26), checksum-pinned wrapper; dark theme byte-for-byte
@@ -598,8 +613,10 @@ Zeus-scale library) — the Zeus rollout session covers it.
       API-key storage); 30 JVM tests incl. literal cross-frontend
       wire-name contract; assembleDebug/test/lint green from cold build;
       Opus PASS + should-fix round)*
-- [ ] Connectivity-profile abstraction (one API-client interface, three
+- [x] Connectivity-profile abstraction (one API-client interface, three
       implementations: tsnet / system VPN / public domain)
+      *(two of three shipped — System-VPN and Public-domain; tsnet stays a
+      documented seam, see the post-v1 item below)*
       *(WP 4b.2 done 2026-08-11: suspend OkHttp client for the full /v1
       surface the app needs (no /v1/steam/* — ADR-0004 device-local
       path), DTOs field-exact vs HEAD Pydantic incl. strict-Json fixture
@@ -626,7 +643,10 @@ Zeus-scale library) — the Zeus rollout session covers it.
       JVM tests; Opus PASS, 12/12 security mutations dead after fix
       round)*
 - [ ] tsnet Go module + gomobile build (`.aar`), auth-key handling
-- [ ] Grid + badges + multi-select + trigger + polling
+      *(deliberately POST-V1: the profile abstraction from WP 4b.2 makes
+      this additive, and the System-VPN profile covers Tailscale via the
+      regular Tailscale app on day one)*
+- [x] Grid + badges + multi-select + trigger + polling
       *(WP 4b.4 done 2026-08-11: library screen with grid 2/3/list +
       persisted layout, ANDed search+chips (recorded chip set),
       multi-select with bulk-download split and set-aware multiPlan bulk
@@ -651,7 +671,7 @@ Zeus-scale library) — the Zeus rollout session covers it.
       4a.8); JobCardModel stability with the strongest pin yet
       (stop_request drift changes ONLY the action field); 362 JVM
       tests; Opus PASS, 12/12 parity mutations killed)*
-- [ ] Delete flow with size display and confirmation; GC action per game
+- [x] Delete flow with size display and confirmation; GC action per game
       *(WP 4b.6 done 2026-08-11: detail sheet with four-state depot
       sharing wording (ORPHANED added for the ADR-0003 last-remnant
       case — recorded divergence), honest last_manifest_check wording
@@ -677,7 +697,12 @@ Zeus-scale library) — the Zeus rollout session covers it.
       192-bit CSPRNG state in return_to, single-use consume before any
       network call, mutation-pinned in all directions; 492 JVM tests;
       Opus PASS 8/8 mutations + nit round)*
-- [ ] Bypass warnings surfaced in the UI
+- [ ] Bypass warnings surfaced in the UI — PARTIAL: WP 4b.8 ships the
+      bypass_suspected/resolved notifications (both directions), but the app
+      has no clients/bypass detail surface yet (the web UI's clients sheet
+      from WP 4a.7 has no Android twin), so tapping the notification routes
+      to Settings. Closing this needs a small `GET /v1/clients` screen —
+      carry-over, candidate for 4b.9's window
       *(WP 4b.8 done 2026-08-11: background notifications via
       WorkManager — 15-min constrained PeriodicWorkRequest with UPDATE
       policy, Doze respected by design (no exact alarms/foreground
@@ -809,6 +834,21 @@ refreshed and silently rots.
       companies in the early phase)
       *(WP 5.4: root `LICENSE`, canonical text, copyright line "Copyright
       2026 SteamVault contributors")*
+- [ ] **Packaging gap — release blocker, recorded 2026-08-17.** The
+      finished web UI is NOT in the shipped image: `api/Dockerfile` only
+      `COPY`s `vault_api/`, and `web/` sits outside the `context: ../api`
+      build context entirely, so `config._default_web_dir()` resolves to a
+      non-existent path in the container and `webui.mount_web_ui` skips the
+      mount by design (documented as a known gap since WP 4a.1). Fixing it
+      means moving the build context to the repo root (plus a
+      `.dockerignore`) or copying `web/` in via a second stage — a
+      deliberate deploy decision, hence its own package. The same package
+      should close the env-forwarding gaps in `deploy/compose.yaml`:
+      `VAULT_EVENT_LOG_PATH` is never passed to vault-api, so WP 3.11's
+      miss-trigger, per-client stats and bypass detection are unreachable
+      in the shipped stack; `VAULT_MANIFEST_ORACLE` likewise. (Schedule and
+      webhook keys are covered — they became DB-settable with ADR-0009 —
+      but the event-log path is env-only and cannot be set from the UI.)
 - [ ] CI: GitHub Actions — lint, tests, multi-arch image build (amd64/arm64),
       publish to ghcr.io with pinned version tags
       *(WP 5.1 done 2026-08-09 — the test/lint half: api pytest (Linux),
@@ -981,7 +1021,30 @@ gomobile toolchain as the Android `.aar`.
 
 ## 11. Next Steps
 
-1. [ ] **Build the Phase 0 PoC**: test nginx + DNS rewrite + one real Steam
-   download. The result decides Plan A vs. Plan B.
-2. [ ] Create the public repository.
-3. [ ] Only then: start implementation of Phase 1.
+The original three steps here (build the Phase-0 PoC, create the public
+repository, then start Phase 1) are all DONE — Phase 0 answered the
+`proxy_store` question in favour of Plan B (ADR-0001), the repo exists, and
+Phases 1–3 plus 4a shipped. Rewritten 2026-08-17 to reflect the real state.
+
+1. [ ] **Packaging package** (§7 Phase 5, first bullet): `web/` into the
+   vault-api image, `VAULT_EVENT_LOG_PATH` + `VAULT_MANIFEST_ORACLE` through
+   Compose, `deploy/tests/verify-stack.sh` extended. Small, and nothing else
+   makes Phase 4a's work reachable in a real deployment.
+2. [ ] **Zeus rollout** — joint interactive session (see the Deployment
+   section of `docs/WORKPACKAGES.md`). Two user-side blockers first: the
+   stale HADES Tailscale subnet route, and the Fritz!Box announcing itself
+   as an IPv6 DNS server via RA (a live cache bypass). This session is also
+   where the honest still-open lists in `web/tests/README.md` and
+   `app/README.md` get verified — real screen reader, phone browser cover
+   art, GC against real on-disk chunks, real multi-client bypass detection.
+3. [ ] **WP 4b.9** Android release build + signing docs + APK distribution
+   (keystore creation is a user action), plus the review carry-over list in
+   `docs/WORKPACKAGES.md`.
+4. [ ] **Phase 4c / 4d** frontend halves: the manual "check & update" trigger
+   in both UIs, and the opt-in "keep the cache current" sweep mode (its
+   auto-GC prerequisite is shipped — see §7 Phase 3).
+5. [ ] **WP 5.3** SECURITY.md + threat model + pre-release security review
+   (Fable mandatory) — after an api/core code freeze.
+6. [ ] **User-gated:** WP 5.5 (GitHub org + `ghcr.io/steamvault/*` publish)
+   and WP 5.6 (announcement, only after the user's own end-to-end test with
+   the Android app). Phase 6 integrations are deliberately post-release.
