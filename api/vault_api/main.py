@@ -17,6 +17,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 
+from vault_api import __version__ as VAULT_API_VERSION
 from vault_api.config import Settings
 from vault_api.db import get_connection, init_db
 from vault_api.jobs import recover_stale_jobs
@@ -195,8 +196,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Swagger/ReDoc would otherwise expose the full route/schema map without
     # a key, and Swagger UI loads its assets from a CDN anyway (won't work
     # offline on an isolated homelab install).
+    # version=VAULT_API_VERSION (WP 4e.7): reconciled with the ONE constant in
+    # vault_api/__init__.py rather than a second hardcoded "0.1.0" literal here
+    # — this value used to be its own copy and could silently drift from the
+    # one GET /v1/settings now also reports.
     app = FastAPI(
-        title="vault-api", version="0.1.0", openapi_url=None, lifespan=_lifespan
+        title="vault-api",
+        version=VAULT_API_VERSION,
+        openapi_url=None,
+        lifespan=_lifespan,
     )
     # WP 4a.1. Installed before any route exists: the middleware wraps
     # every response regardless of registration order, but doing it first

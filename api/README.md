@@ -4377,6 +4377,22 @@ that one route because:
 - external monitoring (uptime checks, container healthchecks) is a stated
   requirement (plan §10) that an API-key gate would defeat.
 
+**No version string either (WP 4e.7).** `GET /v1/settings`' `server_version`
+field (see "Persisted settings" below) is deliberately NOT mirrored onto
+`/v1/health` — a version number is free fingerprinting for anything that can
+reach the port. **Correction (review round 1, should-fix S2):** an earlier
+draft of this note cited "the one route this deployment's own docs say must
+never be exposed to the open internet", which misattributes §10's rule —
+that section says never to expose **vault-core**/port 80, and explicitly
+offers a public-domain remote-access profile that fronts **vault-api**
+itself (TLS-terminated, behind a reverse proxy) with `/v1/health` still
+meant to answer an external monitor either way. The real point is the
+opposite framing: because `/v1/health` CAN legitimately be internet-
+reachable in that shipped profile, keeping its body minimal matters MORE,
+not less. `tests/test_health.py::test_health_body_is_byte_for_byte_unchanged_by_wp_4e7`
+pins the exact response text so a future change is caught by an assertion,
+not a review comment.
+
 This is now factually the *only* unauthenticated surface: FastAPI's
 auto-generated docs (`/docs`, `/redoc`) and schema (`/openapi.json`) are
 disabled (`FastAPI(..., openapi_url=None)` in `main.py`) rather than left
@@ -5358,6 +5374,67 @@ Forcing a value back to the env/default is explicit and first-class:
 `PATCH` with `null` for a key **deletes** the override row outright — there
 is no tombstone, no "overridden to blank" state — so "does an override
 exist" is a plain row-presence check, not a `NULL` check.
+
+### `server_version` — the running server's own version (WP 4e.7)
+
+`GET /v1/settings` reports one more field, `server_version` (a JSON string,
+e.g. `"0.1.0"`), a sibling of `readonly` at the TOP LEVEL of the response —
+not a row in the `settings` list. It is the value of `vault_api.__version__`
+(`api/vault_api/__init__.py`), the same constant `main.py` now passes to
+`FastAPI(version=...)` — one source of truth for "what code is running", not
+two independently hardcoded `"0.1.0"` literals.
+
+Why this shape, and why here:
+
+- **Not a setting.** It cannot be changed, has no db/env/default precedence
+  and no `applies` timing, so it does not belong in `SettingInfoOut` — that
+  would either fake those fields or special-case a row that behaves
+  differently from every other one. `PATCH /v1/settings` rejects
+  `server_version` exactly like any other name it does not recognise (`422`,
+  "not a recognised setting") — it needs no entry in `OVERRIDABLE_SPECS` or
+  `ENV_ONLY_KEYS` to be refused correctly; adding one would wrongly imply it
+  is either overridable or environment-controlled.
+- **On `/v1/settings`, not a new route.** That endpoint is already
+  authenticated and already polled by every frontend that has a settings
+  screen, so this costs zero new routes and zero new requests.
+- **Deliberately NOT on `GET /v1/health`.** See "Auth" above for the full
+  reasoning (fingerprinting risk on the one unauthenticated route).
+
+**What the number does and does not claim.** There are no release tags yet
+(`docs/PROJECT_PLAN.md` §7 Phase 5, WP 5.5 unstarted) — this is a
+hand-maintained value meaning "the code baked into this image", not a
+published release. `deploy/compose.yaml`'s `VAULT_IMAGE_TAG` answers a
+*different* question (which locally-built image tag `docker compose up -d
+--build` produces and runs — there is no registry to publish to yet, so
+"already-published" would overstate it) but is meant to track the same
+release number as a matter of house style.
+
+**Bump ALL of the following together — this is the full list, not an
+illustrative pair (review round 1 correction: an earlier draft here, and in
+`api/vault_api/__init__.py`'s own header, wrongly implied only two sites
+existed):**
+
+1. `api/vault_api/__init__.py`'s `__version__` — the source of truth;
+2. every `image:` line in `deploy/compose.yaml` (`${VAULT_IMAGE_TAG:-...}`);
+3. `api/Dockerfile`'s `org.opencontainers.image.version` LABEL (a build-time
+   literal — it cannot read a Python module);
+4. `deploy/tests/verify-stack.sh`'s `TAG=${VAULT_IMAGE_TAG:-...}` line;
+5. `deploy/.env.example`'s commented-out `#VAULT_IMAGE_TAG=...` example.
+
+`api/tests/test_version_pin.py` derives 1-5 independently from their real
+sources (no Docker, no network) and fails by name, in either drift
+direction, for each of 2-5 against 1 — see that file's module docstring for
+the full table, including a mutation-tested account of what it actually
+proves.
+
+**Two more copies exist and are explicitly OUT of this pin's reach, by WP
+4e.7's own footprint boundary (`api/` plus `deploy/` only):**
+`core/Dockerfile`'s and `dns/Dockerfile`'s own
+`org.opencontainers.image.version` LABELs. A release bump must touch these
+by hand too; nothing in this repository's test suite catches a miss there
+today. This is a stated, real gap, not a silent one — see
+`test_version_pin.py`'s module docstring for the same table, kept in one
+place rather than duplicated here.
 
 ### Which keys are overridable, and when a change takes effect
 

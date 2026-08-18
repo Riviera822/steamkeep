@@ -34,6 +34,7 @@ from fastapi.testclient import TestClient
 
 from tests import stub_prefill
 from tests.conftest import TEST_API_KEY
+from vault_api import __version__ as VAULT_API_VERSION
 from vault_api import scheduler as scheduler_module
 from vault_api import settings_store
 from vault_api.config import Settings
@@ -130,6 +131,51 @@ def test_vault_api_key_never_appears_in_the_response(client: TestClient) -> None
     response = client.get("/v1/settings", headers=AUTH)
     assert "vault_api_key" not in keys_of(response.json())
     assert TEST_API_KEY not in response.text
+
+
+# ==========================================================================
+# server_version (WP 4e.7) — its own top-level field, not a settings row
+# ==========================================================================
+
+
+def test_get_reports_server_version_as_a_top_level_field(client: TestClient) -> None:
+    """`vault_api.__version__` -- not env-derived, not a `settings` row (see
+    `routers/settings.py`'s module docstring for the shape decision)."""
+    body = client.get("/v1/settings", headers=AUTH).json()
+    assert body["server_version"] == VAULT_API_VERSION
+    assert "server_version" not in keys_of(body)
+
+
+def test_server_version_is_unaffected_by_a_db_override_of_an_unrelated_key(
+    client: TestClient,
+) -> None:
+    """Not a setting: nothing a PATCH does to a real key can move it."""
+    client.patch("/v1/settings", json={"vault_name": "homelab"}, headers=AUTH)
+    body = client.get("/v1/settings", headers=AUTH).json()
+    assert body["server_version"] == VAULT_API_VERSION
+
+
+def test_patch_rejects_server_version_like_any_unknown_key(
+    client: TestClient,
+) -> None:
+    """A version is not settable -- `PATCH` must answer exactly the generic
+    "not a recognised setting" 422 (not the distinct env-only 422, and not a
+    silent 200) precisely because `server_version` is in neither
+    `OVERRIDABLE_SPECS` nor `ENV_ONLY_KEYS`."""
+    response = client.patch(
+        "/v1/settings", json={"server_version": "9.9.9"}, headers=AUTH
+    )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "not a recognised setting" in detail
+    assert "environment-only" not in detail
+
+    # And the attempt persisted nothing.
+    conn = get_connection(client.app.state.settings.db_path)
+    try:
+        assert settings_store.get_override(conn, "server_version") is None
+    finally:
+        conn.close()
 
 
 # ==========================================================================

@@ -1564,6 +1564,69 @@ D-4, D-11) for what each package diverges from the mockup and why.
       their own content shape at desktop widths)
 - [ ] Pointer/keyboard interaction model pass (hover states, focus order)
       beyond the one rail hover affordance WP 4e.1 added
+- [x] **4e.7 (api)** — the server's own version, reported once (`GET
+      /v1/settings`) and pinned against drift, so the new left rail can show
+      what is actually running rather than a frontend-side constant that
+      would only state what the UI believes, not what is running
+      (`VAULT_WEB_DIR` can point at a different `web/` than the image
+      shipped, so the two really can diverge)
+      *(WP 4e.7 done: `vault_api.__version__` (`api/vault_api/__init__.py`)
+      is the one hand-maintained constant — no env var, no git describe (no
+      `.git` in the image) — now also used for `FastAPI(version=...)` in
+      `main.py` instead of a second hardcoded `"0.1.0"` literal;
+      `GET /v1/settings` gained a top-level `server_version` field (string),
+      a sibling of `readonly`, deliberately NOT a `settings` row (not
+      settable, no source/applies semantics) — `PATCH` rejects it exactly
+      like any unrecognised key (`422`, generic detail, not the env-only
+      one) since it lives in neither `OVERRIDABLE_SPECS` nor
+      `ENV_ONLY_KEYS`; deliberately NOT mirrored onto `GET /v1/health`
+      (the one unauthenticated route, fixed body by design — a version
+      there is free fingerprinting), pinned with a byte-for-byte response-
+      text assertion so a future addition trips an assertion, not a review
+      comment. Anti-drift pin (`api/tests/test_version_pin.py`) derives
+      `vault_api.__version__` and `deploy/compose.yaml`'s three
+      `${VAULT_IMAGE_TAG:-0.1.0}` image-tag defaults independently and
+      compares them, no Docker/network required; mutation-verified in both
+      directions plus a narrower internal-consistency pin catching a
+      partial hand-edit across the three `image:` lines. `api/README.md`
+      documents the field and states plainly that the number is
+      hand-maintained and means "the code in this image", not a published
+      release (no release tags exist yet, WP 5.5 unstarted).
+      **Opus review round 1: FAIL — one blocker (B1), two should-fixes,
+      three nitpicks, all fixed same day.** B1: the first version's pin
+      covered only `deploy/compose.yaml`, while THREE more hand-maintained
+      copies of the same number existed unpinned — `api/Dockerfile`'s
+      `org.opencontainers.image.version` LABEL (a build-time literal that
+      cannot read a Python module, so it can never be collapsed into
+      `__version__` itself), `deploy/tests/verify-stack.sh`'s
+      `TAG=${VAULT_IMAGE_TAG:-...}`, and `deploy/.env.example`'s example
+      line — plus `api/Dockerfile`'s own free-text `docker build` comment,
+      fixed by removing the literal instead of pinning a comment. All
+      three real sites now have their own named, mutation-verified (both
+      directions) pin; two more copies (`core/Dockerfile`,
+      `dns/Dockerfile`) stay explicitly OUT of this pin's reach per this
+      WP's `api/`+`deploy/`-only footprint and are named as a real,
+      documented gap rather than omitted — see `test_version_pin.py`'s
+      module docstring for the full table. **S1:** `main.py`'s
+      `version=VAULT_API_VERSION` wiring had a comment-only guarantee —
+      `version="9.9.9"` survived the full suite (bounded blast radius,
+      confirmed empirically: `openapi_url=None` makes `GET /openapi.json`
+      404, so the value is unobservable over HTTP either way) — closed
+      with a direct `app.version == __version__` assertion through a real
+      `create_app()` call, mutation-verified. **S2:** the `/v1/health`
+      justification in both `routers/settings.py` and this README
+      misattributed §10's "never expose vault-core/port 80" rule to
+      vault-api itself; corrected to the real, STRONGER reason — §10's
+      public-domain profile fronts vault-api (not vault-core) and can
+      legitimately put `/v1/health` on the open internet, which is exactly
+      why its body must stay minimal. Nitpicks: the compose precondition
+      test now asserts the key SET directly instead of a self-referential
+      dict comparison; every by-name lookup uses `.get(...)` so a mutated-
+      away key reports a clear value mismatch instead of a bare
+      `KeyError`; and this README no longer calls `VAULT_IMAGE_TAG` an
+      "already-published" tag (nothing is published yet — it is a locally
+      built image's tag). Suite 1617 passed, 1 skipped (baseline 1603/1)
+      — 14 new tests.)*
 #### Phase 4h — Decision support in the reclaimed desktop width (user decision 2026-08-18)
 
 The desktop portering (Phase 4e) frees width that today carries nothing. The

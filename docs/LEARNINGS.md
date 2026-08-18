@@ -84,6 +84,23 @@ These are not style preferences; each entry cost a review round to learn.
   pin each rejection arm with its own mutation-tested case (WP 3.8 →
   caught by WP 5.1 CI run #1).
 
+- **Never round-trip a file through Python text mode on Windows.**
+  `read_text()` + `write_text()` rewrites EVERY line ending to CRLF, which
+  bites three different ways — all three hit in one session: (a) `dash`
+  refuses to parse a shell script with CRLF, so a patched `verify-stack.sh`
+  died with `Syntax error: word unexpected`; (b) CRLF silently defeated a
+  brand-new `verify-stack.sh` guard whose regex ended in `$` — the guard
+  asserts ABSENCE, so it passed for the wrong reason on every run (P1
+  review); (c) it corrupts embedded `` literals elsewhere in the file
+  (WP 4e.7, caught only by `git diff --stat` showing an unexpected hunk).
+  Read and write **bytes**, or `open(..., newline="")`, and remember that
+  `read_text()` also normalises on the way IN — a search string written with
+  `
+` will not match a CRLF file, which is a separate failure that looks
+  like "anchor not found" (WP 4f). After any scripted edit on Windows, check
+  `git diff --stat` for hunks you did not intend and `git ls-files --eol`
+  for the file's declared ending.
+
 ## PowerShell 5.1 (dev/test harnesses)
 - `2>&1` on native commands wraps stderr lines in NativeCommandError and
   kills the script under `$ErrorActionPreference=Stop` (WP 1.8/0.6) — and

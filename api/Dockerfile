@@ -9,7 +9,10 @@
 # `dockerfile: api/Dockerfile` accordingly; every COPY source path below is
 # repo-root-relative as a result. vault-core and vault-dns are UNCHANGED --
 # they keep their own directories as build context.
-#     docker build -t steamvault/vault-api:0.1.0 -f api/Dockerfile .
+#     docker build -t steamvault/vault-api:<version> -f api/Dockerfile .
+# (<version> is a free-text tag for your own build -- see the
+# org.opencontainers.image.version LABEL below for the pinned-and-tested
+# constant, api/vault_api/__init__.py's __version__, WP 4e.7.)
 # or, normally, via deploy/compose.yaml. The root `.dockerignore` keeps this
 # wider context from also sending app/ (the Android tree), poc/ (Phase-0
 # evidence) and every other component's own directory to the daemon on
@@ -71,6 +74,15 @@ RUN set -eux; \
 # --- Stage 2: the runtime image ----------------------------------------------
 FROM python:3.13.14-slim-trixie@sha256:bf503bb2243c5aad0aa951544dd60d165f992646441d35dea90893703fc26251
 
+# org.opencontainers.image.version is a THIRD hand-maintained copy of the
+# same release number as api/vault_api/__init__.py's __version__ and
+# deploy/compose.yaml's VAULT_IMAGE_TAG default (WP 4e.7) -- a build-time
+# LABEL cannot read a Python module, so this cannot be collapsed into the
+# other two; api/tests/test_version_pin.py derives this line's value with its
+# own regex and compares it to __version__, pinned in both directions. Bump
+# all three together (see that test file's module docstring for the full
+# enumeration of every site a release bump must touch, including the ones
+# outside this pin's reach).
 LABEL org.opencontainers.image.title="SteamVault vault-api" \
       org.opencontainers.image.description="FastAPI + SQLite control plane: prefill orchestration, per-game size and deletion" \
       org.opencontainers.image.source="https://github.com/steamvault/steamvault" \

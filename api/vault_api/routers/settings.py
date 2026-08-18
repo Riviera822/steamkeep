@@ -34,6 +34,41 @@ same answer regardless of what the request contains.
 Auth is attached at the router level (secure-by-default pattern, see
 api/README.md "Auth") — both routes are authenticated like every other
 endpoint in this codebase.
+
+**``server_version`` (WP 4e.7).** ``GET /v1/settings`` also reports the
+running server's own version, as its own top-level field, sibling to
+``readonly`` — NOT as a row in the ``settings`` list. This is a deliberate
+shape decision, not an oversight: a version is not settable, has no
+db/env/default precedence, and no ``applies`` timing, so shoehorning it into
+``SettingInfoOut`` would either fake those fields or special-case a row that
+does not behave like the others. ``PATCH`` treats ``server_version`` exactly
+like any other name it does not recognise — ``422`` "not a recognised
+setting" — because it is not in ``OVERRIDABLE_SPECS`` and not in
+``ENV_ONLY_KEYS`` either; it needs no entry in either catalog to be rejected
+correctly, and adding one would wrongly imply it is either overridable or
+env-controlled.
+
+This endpoint carries it (instead of a new route, or ``GET /v1/health``)
+because it is already authenticated and already polled by every frontend
+that has settings UI, so exposing it here costs zero new routes and zero
+new requests. **Deliberately not on ``GET /v1/health``:** that route is the
+one intentionally unauthenticated endpoint in this API (api/README.md
+"Auth"), with a fixed ``{"status": "ok"}`` body by design — anything reachable
+without a key should tell an unauthenticated caller as little as possible.
+
+The precise reason this matters (corrected, review round 1 S2 — the plan
+does NOT say vault-api itself must never face the internet; it says the
+opposite of vault-core: `docs/PROJECT_PLAN.md` §10 lists a "Public domain"
+remote-access profile that fronts **vault-api** with a reverse proxy,
+explicitly TLS-terminated but with `/v1/health` still meant to answer an
+external monitor, per that same section — "never expose vault-core/port
+80" is the vault-core rule, not a vault-api one): `/v1/health` can
+legitimately be internet-reachable in that shipped profile, which makes
+the minimalism argument STRONGER, not weaker — free fingerprinting matters
+more, not less, on a route that may sit on the open internet with no key
+in front of it. See ``vault_api.__version__``'s docstring in
+``vault_api/__init__.py`` for where the value itself comes from and how it
+is pinned against drift.
 """
 
 from __future__ import annotations
@@ -43,6 +78,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
+from vault_api import __version__ as VAULT_API_VERSION
 from vault_api import settings_store
 from vault_api.auth import require_api_key
 from vault_api.config import Settings
@@ -79,6 +115,12 @@ class SettingInfoOut(BaseModel):
 class SettingsOut(BaseModel):
     #: Mirrors ``Settings.settings_readonly`` — true means PATCH answers 403.
     readonly: bool
+    #: WP 4e.7: the running server's own version (``vault_api.__version__``).
+    #: Its own top-level field, not a row in ``settings`` — see this module's
+    #: docstring for why. Hand-maintained, not a published release number
+    #: (there are no release tags yet, plan §7 Phase 5 / WP 5.5); it states
+    #: "the code in this image", nothing more.
+    server_version: str
     settings: list[SettingInfoOut]
 
 
@@ -86,6 +128,7 @@ def _build_response(conn, base: Settings) -> SettingsOut:
     infos = settings_store.describe_settings(conn, base)
     return SettingsOut(
         readonly=base.settings_readonly,
+        server_version=VAULT_API_VERSION,
         settings=[SettingInfoOut(**vars(info)) for info in infos],
     )
 
