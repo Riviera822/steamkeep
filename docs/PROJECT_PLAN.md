@@ -1036,6 +1036,64 @@ refreshed and silently rots.
   /v1/settings` being the one supported path; `deploy/.env.example` documents
   the key with that framing instead of a commented assignment line.
 
+#### Phase 4h — Decision support in the reclaimed desktop width (user decision 2026-08-18)
+
+The desktop portering (Phase 4e) frees width that today carries nothing. The
+question "what do we put there" was answered deliberately: **decision support
+about the cache, not taste.** SteamVault knows things Steam does not — what is
+on the disk, how much of it sits in SHARED depots, when a game was last
+confirmed current, what is installed on which machine, and from
+`depot_manifests`, how often a game actually changes. Crossed with playtime
+(already relayed and validated, see below) that yields statements nobody else
+can make:
+
+- "43 GB cached, 0 minutes played" — prefilled and never touched
+- "Installed on your PC, not in the cache" — the real prefill list, not a guess
+- "Not confirmed current for 40 days" (`last_manifest_check` already exists)
+- "Deleting frees 12 of 43 GB; the other 31 GB sit in depots other games use"
+  (pure ADR-0003 data)
+- "Changes every three days" vs "unchanged for two years" — the actual input
+  for the Phase 4d decision about which games the sweep should keep current
+
+**Deliberately rejected: taste recommendations** ("what should I play next" in
+the Steam-discovery sense). They need tags, similar titles and review scores
+from the store API, they duplicate a Steam feature, and they turn a cache
+manager into a storefront — against the scope discipline in §9. The honest
+version of the same idea needs no foreign data and is uniquely ours: *"these
+games are fully cached and you have never started them — playable now, no
+wait."* The cache is the reason "playable now" is true.
+
+**Privacy stance (user, 2026-08-18), binding on every item below:** playtime
+makes the UI judgemental ("never played"), and a household vault has more than
+one person in the living room. So: off by default or dismissible at any time,
+no nagging, and no number that gets held up to somebody else. This is the same
+posture §7 Phase 6 already takes toward client addresses in webhook payloads,
+for the same reason. WP 5.3's threat model must cover the new personal-data
+surface (playtime and last-played now flow through the API response).
+
+- [ ] **4h.1 (api)** — two small additions that make the panel sharp:
+      `rtime_last_played` carried through the Steam relay (Steam returns it,
+      we simply never asked; `playtime_forever` is ALREADY relayed and
+      validated — `steam_relay.py`, unused by any frontend today), and a
+      per-app change frequency derived from `depot_manifests`. Two honesty
+      pins are the point of this package, not the plumbing: **an absent
+      upstream field must surface as UNKNOWN, never as "never played"** (0 is
+      a claim, absence is not), and **a short observation window must surface
+      as "not enough data", never as "changes rarely"** — the manifest history
+      starts when WE started watching, so on a young vault every game looks
+      stable.
+- [ ] **4h.2 (web)** — the panel itself: a right-hand column at BP-XL
+      (>=1800px), a collapsible card below that width. Serves the statements
+      above. Depends on 4h.1's fields and on Phase 4e's breakpoints.
+- [ ] **4h.3 (web)** — header art in the detail drawer. Nearly free: a
+      predictable `header.jpg` URL on the CDN host the CSP already allows for
+      cover art, no relay endpoint, no new external call.
+- Screenshots (the `appdetails` store API) are **not** in this phase:
+  undocumented, rate-limited, no CORS, so they need their own relay endpoint
+  and privacy note — and a screenshot does not help anyone manage a cache.
+  If wanted at all, they belong to Phase 6 with the other external
+  integrations.
+
 ### Phase 5 — Community Release
 - [x] README with architecture diagram, quickstart (compose up in 5 minutes),
       and an explicit "works for guests" FAQ note: any Steam client behind
