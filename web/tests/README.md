@@ -1299,3 +1299,209 @@ Suite 543 green after both fix rounds (539 first pass + 1 B1's centring-
 axis pin + 3 the width-token pair — N1/N2/S3/S4/S6 all extended or renamed
 EXISTING assertions/comments rather than adding new test cases, matching
 how WP 4e.2's own N5/N6 nitpicks were closed in place).
+
+### WP 4e.4 — Pointer and keyboard interaction model (Phase 4e, D-14)
+
+An inventory pass (every shipped view — library grid, game detail card,
+notifications/clients drawers, downloads, settings, bulk bar, rail) found
+the desktop shell (WP 4e.1-4e.3) still touch-first underneath: almost every
+`:hover` rule was ungated (live at every width, every pointer type,
+including touch — the sticky-hover risk `(hover:hover)`/`(pointer:fine)`
+exists to prevent), three interactive controls sat flush against an
+`overflow:hidden` ancestor that clipped the global `:focus-visible` ring,
+the bulk bar kept its two buttons in the tab order while invisible, and
+three surfaces hid their scrollbar with no other affordance for a mouse
+user. Keyboard operability of the primary flows needed no new mechanism at
+all — the grid card, the depot co-owner toggle and every delete/GC-execute
+confirm were already fully wired (WP 4a.3/4a.4/4a.8) — but the composed,
+NESTED sheet+confirm flow had no test of its own walking it end to end.
+Full inventory and the roving-tabindex judgment call (explicitly NOT built,
+and why, including its full measured cost) are recorded as D-14,
+`docs/WORKPACKAGES.md`.
+
+**Opus review round 1: FAIL — one blocker (B1), one must-fix (B2), plus a
+D-14 sharpening (S1) and two cheap fixes (S2/S3), all fixed in round 2.**
+B1: relocating all 11 pre-existing hover rules into one trailing block
+(instead of gating each in place) inverted the cascade for five
+equal-specificity state-vs-hover pairs, measured live in real Chrome —
+`.iconbtn.on`, `.segs button[aria-pressed]`, `.chip[aria-pressed]`,
+`.btn:disabled` (a disabled button visibly lit up under the cursor), and
+`.notif.unread` each used to WIN on hover only by being written AFTER the
+hover rule; moving every hover rule to the file's end flipped all five
+ties. The round-1 test file's own header claimed a "moving a hover rule out
+changes nothing else" pin existed — it did not; every hover assertion was
+positional, never a cascade-OUTCOME check, so 22 passing tests coexisted
+with all five regressions. Fixed by gating every hover rule in place, at
+its exact original source position, plus six new named cascade-outcome
+pins (source order for the five pairs, a higher-specificity override for
+the `.nav-btn`/S2 sixth pair the review found in the ORIGINAL WP 4e.1
+precedent). B2: `.bulk`'s opacity/pointer-events-only hide left its two
+buttons reachable by Tab while invisible (measured: Tab from the last
+library card landed on an invisible Cancel, then Download, then BODY) —
+fixed with `visibility:hidden`/`.up{visibility:visible}`, composed with the
+existing fade transition. S1: D-14 now states the Delete-selected button's
+~590-Tab-press cost on the 394-game fixture, corrects the false "a skip
+link exists" implication (`.skiplink` is onboarding's demo-mode button,
+not a skip-to-content link, and appears nowhere on the library view), and
+corrects stops-per-card to `>1` (measured 9 focusables for 6 demo-mode
+games — action buttons are separate stops). S3: the scrollbar block's "no
+layout shift" framing is corrected to scope that claim to the hover
+tweaks only — an 8px scrollbar track is a real, if small, layout cost,
+stated rather than hidden.
+
+- `keyboard-pointer-model.test.js` — four structural CSS checks (same
+  static-analysis posture as `css-hygiene.test.js`/`css-layout-
+  foundation.test.js`, self-contained parsing rather than importing either
+  file's helpers, matching this suite's existing per-file convention) plus
+  a fake-DOM behavioural pin:
+  1. **Hover gate.** Every `:hover` rule in `css/app.css`/`css/theme.css`
+     must sit inside a media context requiring BOTH `(hover:hover)` and
+     `(pointer:fine)` IN THE SAME and-chain — checked against the real tree
+     (a `mediaStack` array per parsed rule, tracking enclosing `@media`
+     headers) plus a synthetic mutation-proof fixture covering five shapes:
+     a properly gated rule, a width-only-gated rule, a top-level rule, an
+     `(any-hover: hover)` probe (a DIFFERENT, real media feature the round-1
+     regex matched by bare substring — "any-**hover: hover**" — fixed by
+     anchoring each feature check to its own opening parenthesis), and a
+     comma-OR probe (`(hover:hover), (pointer:fine)` is EITHER-alone, not
+     AND — the round-1 check ran two independent `.test()` calls against
+     the whole header and would have been satisfied by either branch
+     containing either substring; fixed by splitting the header on
+     top-level commas first and requiring both features inside the SAME
+     branch). Named pins for the pre-existing `.nav-btn:hover` precedent
+     and for every new hover affordance this WP adds (`.hrow > button`,
+     `.banner .acts button`, `.icnact`, `.card:hover .cap`, `.grid.list
+     .card:hover`).
+  2. **Cascade-outcome pins (the B1 fix, round 2's core addition).** For
+     each of the five order-dependent pairs above, the STATE rule's source
+     INDEX must be strictly greater than its hover rule's (the parser now
+     records each rule's character offset for exactly this) — proven
+     non-vacuous with a fixture asserting the check flags a
+     deliberately-wrong-order pair and clears a correctly-ordered one. The
+     sixth pair (`.nav-btn[aria-current="page"]` vs `.nav-btn:hover`)
+     cannot use order at all — the BP-L breakpoint block the hover rule
+     lives in structurally cannot move before the base rule — so it is
+     checked by specificity arithmetic instead (a small selector-component
+     counter) plus the override rule's own existence and `color` value.
+  3. **Focus convention.** The base `:focus-visible` rule (theme.css) is a
+     bare, universal selector using `var(--accent)`. A "real cross-section"
+     pin (brief requirement, explicitly NOT one hand-picked example) checks
+     ten interactive classes spanning every inventoried view
+     (`.btn`/`.chip`/`.nav-btn`/`.card`/`.notif`/`.segs button`/
+     `.depotwrap.sh .depot`/`.hrow > button`/`.iconbtn`/`.qx`) for any rule
+     that suppresses `outline` entirely — none do. The one real,
+     pre-existing exception (`.search input`/`.inp input`'s `outline:none`,
+     substituted by a `:focus-within` border-color change on the wrapper,
+     WP 4a.3/4a.6) is asserted as exactly that, by name, so it cannot be
+     mistaken for something the cross-section pin should have caught.
+     Named pins for the three new `outline-offset:-2px` overflow-clip
+     fixes (`.segs button`, `.hrow > button`, `.depotwrap.sh .depot`), plus
+     the B2 pin: `.bulk` is `visibility:hidden` while closed, `.bulk.up`
+     restores `visibility:visible` — with its own mutation-proof fixture
+     showing the pre-fix (opacity/pointer-events-only) shape does not
+     satisfy the check.
+  4. **Reduced motion.** The override is the universal wildcard `*,
+     *::before, *::after` (not an enumerated list), so every hover-
+     triggered transition this WP rides on (e.g. `.cap`'s pre-existing
+     `transition:box-shadow`, now also triggered by the new `.card:hover
+     .cap` rule, and `.bulk`'s new `visibility` transition) is covered by
+     construction — pinned by asserting the wildcard itself, plus a
+     synthetic fixture proving a NARROWED selector provably would not cover
+     an arbitrary class the way the wildcard does.
+  5. **Keyboard flow (fake-DOM).** Four tests walking the sheet +
+     nested-confirm flow via `click` (standing in for native Enter/Space
+     activation of a real `<button>` — a browser guarantee this harness
+     does not re-test) and `keydown` `Escape`/`Tab` events only, using the
+     shared `fake-dom.js` harness (`createFakeDom`/`fakeKeyEvent`/
+     `fakeClickEvent`) already established by `dialog-wiring.test.js`/
+     `modal-stack.test.js`. A confirm dialog is hand-built to the EXACT
+     shape every real one in this codebase uses (`document.body`-level
+     sibling, `pushModal`/`popModal`, safe-default focus on open, invoker
+     focus restored on close) rather than importing `game-detail-sheet.js`
+     directly — that module is a singleton DOM-building component this
+     codebase deliberately does not unit-test (pulls in `store-
+     singleton.js`/`api.js`, which need a real fetch-capable environment).
+     Covers: the confirm receiving focus on its safe default (Keep) when
+     opened on top of an already-open sheet; Escape unwinding INNER-first
+     (first Escape closes only the confirm, restoring focus to the sheet's
+     own Delete button; second Escape then closes the sheet, restoring
+     focus to the original invoker); a Tab keydown never reaching the
+     centralized Escape dispatcher at ANY stack depth (extends `modal-
+     stack.test.js`'s single-overlay "Enter never triggers onEscape" check
+     to the nested case, with the specific key — Tab — native focus order
+     depends on staying uncaptured); and that closing the confirm via a
+     real click on its own button restores focus identically to Escape.
+     (Round 1's file also imported `router.js`'s `onViewChange` unused —
+     dropped in round 2, a reviewer nitpick.)
+
+  543 baseline → 565 green round 1 (undetected B1) → **574 green round 2**.
+  Mutations applied to the REAL files and reverted, each dying by the exact
+  name below:
+  - Moving `.chip:hover` out of its in-place gate back to a top-level rule
+    → **"real tree: every :hover rule in app.css/theme.css is gated behind
+    (hover:hover) and (pointer:fine)"**.
+  - Deleting `.hrow > button:focus-visible{ outline-offset:-2px }` →
+    **"named pin: .hrow > button:focus-visible{ outline-offset:-2px }
+    exists (overflow-clipped ancestor fix)"**.
+  - Narrowing `theme.css`'s reduced-motion selector from `*, *::before,
+    *::after` to `.btn, .chip` → **"the reduced-motion override is the
+    universal wildcard *, *::before, *::after with !important on
+    transition/animation duration"**.
+  - Reverting `lib/modal-stack.js`'s `onEscapeKeydown` to call every
+    stacked overlay's `onEscape` instead of only the topmost's (the exact
+    historical WP 4a.8 bug) → **both** this WP's **"keyboard flow: Escape
+    unwinds inner-first — the confirm closes before the sheet, restoring
+    focus to the confirm's own invoker"** AND the pre-existing
+    `modal-stack.test.js` pin **"Escape calls the topmost overlay's
+    onEscape and nothing else"** — confirming the new, composed-level test
+    and the old, primitive-level test agree on exactly what breaks.
+  - **Round 2's B1 re-verification (the reviewer's explicit ask):**
+    reconstructing the ORIGINAL bug shape — reversing source order for all
+    five order-dependent pairs at once (`.iconbtn.on`/`.iconbtn:hover`,
+    `.segs button[aria-pressed]`/`.segs button:hover`, `.chip[aria-pressed]`/
+    `.chip:hover`, `.btn:disabled`/`.btn:hover`, `.notif.unread`/
+    `.notif:hover`) → all five named cascade-outcome tests died
+    SIMULTANEOUSLY, by name: **"cascade outcome: .iconbtn.on still wins
+    over .iconbtn:hover on hover..."**, **"...segs button[aria-pressed]..."**,
+    **"...chip[aria-pressed]..."**, **"...btn:disabled..."**,
+    **"...notif.unread..."**.
+  - **Round 2's B2 re-verification:** reverting `.bulk`/`.bulk.up` to the
+    pre-fix opacity/pointer-events-only shape (no `visibility`) →
+    **"B2: .bulk is visibility:hidden while closed and .bulk.up restores
+    visibility:visible"**.
+  - Every mutation above was reverted immediately after observing the named
+    failure; suite re-confirmed at 574 green after each individual revert.
+
+  Live-verified in the Browser pane against a static-served copy of `web/`,
+  since neither a screenshot nor the polling store's first tick reliably
+  completes in this pane's non-displayed/headless posture (`document.hidden`
+  reads `true` there, parking every `store.js` loop by design — the same
+  park-while-hidden behavior `store.js`'s own module header documents, not
+  a bug). Round 1: `matchMedia('(hover:hover)')`/`(pointer:fine)` are `true`
+  at a 1280×900 desktop viewport and `false`/`(pointer:coarse)` `true` at an
+  emulated 375×812 touch viewport; a genuine CDP-level mouse hover (not a
+  dispatched event) over the "Comfortable" segmented button painted
+  `color:var(--text)` on its icon; a genuine CDP-level keyboard Tab (a
+  JS-only `.focus()` call was confirmed NOT to trigger `:focus-visible` in
+  this same browser, so the check specifically avoided that) onto the same
+  button showed `outlineOffset: "-2px"` in its computed style. Round 2 (the
+  reviewer's explicit re-measurement ask): six synthetic probe elements
+  (carrying the exact class/attribute combination of each restored pair —
+  `.iconbtn.on`, `.segs button[aria-pressed="true"]`,
+  `.chip[aria-pressed="true"]`, a disabled `.btn`, `.notif.unread`, a
+  `.nav-btn[aria-current="page"]`) were injected into the live page and
+  hovered with genuine CDP mouse events; every one resolved to its STATE
+  value under hover, not the plain hover value — `color:rgb(46,217,206)`
+  (`--accent`) for the first three and the sixth, `filter:"none"` for the
+  disabled button, and the accent gradient background for the unread
+  notification. `.bulk`'s B2 fix was checked the same way: closed, its
+  computed `visibility` is `"hidden"` and calling `.focus()` directly on its
+  Cancel button does NOT move `document.activeElement`, confirming it is
+  genuinely unreachable, not merely unpainted.
+
+  No production JS changed — the inventory's keyboard-operability findings
+  were all "already correct" (game-card.js, game-detail-sheet.js's depot
+  toggle, lib/modal-stack.js's existing inert+Escape stack), so this
+  package's only footprint is `css/app.css` (in-place hover gating, six
+  cascade fixes, three focus-ring fixes, the B2 visibility fix, new hover/
+  scrollbar affordances) and the one test file.

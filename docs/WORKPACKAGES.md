@@ -771,6 +771,201 @@ entry in this register): one new divergence lands in this package.
   rather than adding a new byte-snapshot style this file would be the only
   one to use.
 
+- **D-14 (pointer/keyboard interaction model: hover, focus, scroll — no
+  mockup analogue).** The frozen mockup is phone-only and touch-first; it
+  has no concept of `:hover`, no opinion on what a keyboard focus ring
+  should look like beyond the browser default, and no mouse-drag scrollbar
+  — every decision below is WP 4e.4 inventing desktop-pointer/keyboard
+  behavior from nothing, the same class of divergence D-1/D-12/D-13 already
+  are for the rail/overlay geometry, not a change to an existing mockup
+  shape.
+  - **Hover gating.** Every `:hover` rule that existed before this WP
+    (`.iconbtn`/`.segs button`/`.qx`/`.chip`/`button.cappill`/`.btn`/`.inp
+    button`/`.skiplink`/`.notif`/`.depotwrap.sh .depot`) was a bare rule,
+    live at every width for every pointer type, including touch — only
+    `.nav-btn:hover` (WP 4e.1) was already gated behind
+    `(hover:hover) and (pointer:fine)`. All 11, plus five new affordances
+    for previously-silent controls (`.hrow > button`, `.banner .acts
+    button`, `.icnact`, and a pointer-only echo of the existing `:active`
+    press feedback on `.card`/`.grid.list .card`), now live inside that
+    same gate.
+    **Opus review round 1: FAIL — B1 (blocker), measured live in real
+    Chrome at 1280px.** The first pass relocated all 11 rules into ONE
+    trailing block at the end of `css/app.css`. The rule TEXT never
+    changed, only its SOURCE POSITION — but five of them were an
+    equal-specificity `(0,2,0)` sibling of a "state" rule
+    (`.iconbtn.on`/`.segs button[aria-pressed]`/`.chip[aria-pressed]`/
+    `.btn:disabled`/`.notif.unread`) that used to WIN on hover only because
+    it was written AFTER the element's `:hover` rule; moving every hover
+    rule to the file's end made it "later" instead, flipping all five ties
+    (measured: a disabled button visibly re-enabled under the cursor, an
+    active multi-select icon read as switched off, an unread notification's
+    gradient vanished on hover, and so on for the other two). The reviewer
+    also caught a comment claiming a "moving a hover rule out changes
+    nothing else" pin existed when it did not — every hover assertion in
+    the first draft was positional (rule text lives inside SOME gate),
+    never a cascade-OUTCOME check, so all 22 first-pass tests passed with
+    all five regressions present. **Fixed:** every hover rule now gets its
+    OWN small `@media (hover:hover) and (pointer:fine){...}` wrapper, in
+    place, at its exact original source position — preserving the
+    pre-existing win order by construction, the reviewer's own
+    reviewer-endorsed minimal fix. `web/tests/keyboard-pointer-model.test.js`
+    gained a cascade-OUTCOME pin (source-index comparison) for each of the
+    five pairs, re-verified by reconstructing the exact original bug
+    (temporarily reversing all five pairs on the real file) and confirming
+    all five named tests die, then reverting — see the coder's report.
+    **S2 (cheap fix, same review):** `.nav-btn:hover` — the WP 4e.1
+    precedent this package generalized — carried the identical defect on
+    its OWN, independent of this WP's relocation: `.nav-btn[aria-current=
+    "page"]` (the current-page accent, base "bottom nav" section) is an
+    equal-`(0,2,0)`-specificity sibling that structurally CANNOT be
+    reordered before `.nav-btn:hover` (the hover rule lives inside a
+    `min-width:1024px` block, which by this file's own top-to-bottom
+    convention can only appear after the base rules it overrides). Fixed
+    instead with a higher-`(0,3,0)`-specificity override
+    (`.nav-btn[aria-current="page"]:hover{ color:var(--accent); }`), which
+    wins regardless of source order. Both the five order-dependent fixes
+    and this specificity fix were re-measured live (Browser pane, real CDP
+    mouse hover over synthetic probe elements carrying the exact class/
+    attribute combinations): `.iconbtn.on`/`.segs button[aria-pressed]`/
+    `.chip[aria-pressed]` all kept `color:rgb(46,217,206)` (`--accent`)
+    under hover; `.btn:disabled` kept `filter:"none"`; `.notif.unread` kept
+    its accent gradient background; `.nav-btn[aria-current="page"]` kept
+    `color:rgb(46,217,206)` — none fell back to the plain hover treatment.
+  - **Focus-ring visibility.** The existing global `:focus-visible` rule
+    (`theme.css`, unchanged) already covers every focusable element by
+    construction. Three controls were found to sit flush against an
+    `overflow:hidden` ancestor with no inset — `.segs button` (inside
+    `.segs`), `.hrow > button` (inside `.hrow`), `.depotwrap.sh .depot`
+    (inside `.depots`) — so the ring's default 2px-OUTSIDE offset was
+    invisible, clipped by the very container each control lives in. Fixed
+    with a per-selector `outline-offset:-2px` (pulls the ring inside the
+    box instead of loosening the container's own clip, which is
+    load-bearing for each one's rounded-corner seam). Verified live: a real
+    keyboard Tab (CDP Input, not a dispatched `keydown`) onto the
+    "Comfortable" segmented button showed `outlineOffset: "-2px"` in the
+    computed style, confirming the fix actually takes effect against a real
+    focus-visible match (a JS-only `.focus()` call was measured NOT to
+    trigger `:focus-visible` in this same browser, so the check specifically
+    used a genuine input-level Tab press instead) — this pin was the one
+    the reviewer confirmed as measured and load-bearing without a fix
+    round: baseline ring clipped on three sides, the shipped fix fully
+    inside the clip box.
+  - **B2 (must-fix, same review) — invisible tab stops in the bulk bar.**
+    `.bulk{opacity:0; pointer-events:none; transform:...}` kept its two
+    action buttons (Cancel/Download) IN the tab order while invisible —
+    measured live: Tab from the last library card landed on an invisible
+    Cancel, then an invisible Download, then BODY, two dead stops
+    immediately after the grid, squarely inside this package's own
+    focus-order scope. Pre-existing (every WP back through 4a.3), but this
+    package's full focus inventory makes it this WP's to fix. **Fixed:**
+    `.bulk{visibility:hidden}` / `.bulk.up{visibility:visible}`, composed
+    with the existing `opacity`/`transform` fade (per the CSS Transitions
+    spec, animating TO `hidden` keeps the interpolated value `visible`
+    until 100% of the transition, so the bar stays reachable through its
+    own fade-out rather than vanishing from the tab order a frame early;
+    animating FROM `hidden` flips to `visible` at 0%, immediately). Verified
+    live: with the bar closed, `getComputedStyle(.bulk).visibility` is
+    `"hidden"` and calling `.focus()` directly on its Cancel button (whose
+    `tabIndex` attribute is still the native `0`) does NOT move
+    `document.activeElement` — confirming `visibility:hidden` genuinely
+    removes it from the reachable set, not merely from paint.
+  - **Scroll affordances.** `.sheet .body` (notifications/clients/detail
+    drawer or centred card), `.cflist` (delete-confirm shared-depot list)
+    and `.onb .rest` (onboarding wizard) all hide their scrollbar
+    unconditionally — a deliberate touch-surface choice, kept as the
+    default. Decision (per the brief's own framing, "styled scrollbar OR
+    another affordance"): a real, thin, themed scrollbar for pointer users,
+    gated the same way as the hover rules (`(hover:hover) and
+    (pointer:fine)`, not tied to BP-L) rather than a fade hint, which would
+    need either JS scroll-position tracking or a static overlay that lies
+    on non-overflowing content — a native scrollbar is honest by
+    construction. `.chips`' own hidden scrollbar needed no decision: it
+    already stops scrolling entirely from BP-M (720px) up (`flex-wrap:wrap`,
+    WP 4e.1), so there is no scrollbar to reveal at any desktop width.
+    **S3 (cheap fix, same review):** an earlier draft's "no layout shift"
+    framing for this WP overreached — it is true of the hover box-shadow/
+    background/filter tweaks above, but a scrollbar occupies a track by
+    definition: an 8px-wide track narrows each of these three surfaces'
+    content column by up to 8px the instant a fine pointer is detected.
+    Stated plainly in `css/app.css`'s own comment rather than left
+    overclaimed; accepted (not engineered around) because all three
+    surfaces already carry generous padding relative to their own running
+    text.
+  - **Keyboard operability of the primary flows** needed no NEW mechanism —
+    the inventory found the grid card (`role="button"`, `tabIndex=0`,
+    Enter/Space wired, `components/game-card.js`), the depot co-owner toggle
+    (`tabIndex=0` when expandable, Enter/Space wired,
+    `components/game-detail-sheet.js`), and every delete/GC-execute confirm
+    (focus-on-open to the safe default, `lib/modal-stack.js` inert +
+    centralized Escape) were already fully wired by WP 4a.3/4a.4/4a.8 — this
+    WP added a regression pin (`web/tests/keyboard-pointer-model.test.js`)
+    for the composed, NESTED sheet+confirm flow (open → confirm opens on top
+    → Escape closes the confirm only → second Escape closes the sheet,
+    focus restored correctly at each step) that did not exist as its own
+    test before, built from the same primitives `modal-stack.test.js`/
+    `dialog-wiring.test.js` already unit-test individually.
+  - **Roving tabindex for the library grid — explicitly NOT built —
+    corrected and sharpened (Opus review S1).** The deferral's underlying
+    reasoning held up under measurement (nav/search/chips genuinely precede
+    the grid in DOM/tab order, and "filter first" is a real, reachable
+    mitigation), but the first draft understated the cost and overstated
+    one fact:
+    (1) **Omitted cost, now stated:** with multi-select ON, the "Delete
+    selected" bulk-bar button sits AFTER the entire grid in DOM order — on
+    the `demo-data-large-library.test.js` 394-game fixture, that is
+    measured at **~590 Tab presses** to reach the primary DESTRUCTIVE action
+    of the bulk-delete flow from the top of the grid, not merely an
+    inconvenience reaching an arbitrary card.
+    (2) **False claim, corrected:** the inventory's mention of `.skiplink`
+    implied a skip-to-content link exists on the library view. It does not
+    — `.skiplink` is `onboarding.js:559`'s demo-mode "browse in demo mode"
+    button, part of the first-run overlay, and appears nowhere on the
+    library view itself. **No skip link exists anywhere in this app.**
+    (3) **Undercounted stops-per-card, corrected:** the first draft implied
+    roughly one Tab stop per card. Measured live against 6 demo-mode games:
+    **9 focusable elements**, not 6 — a card with an available action
+    (download/pause/resume) adds its own pill/meta-icon button as a
+    SEPARATE tab stop alongside the card itself, so stops-per-card is
+    `>1`, not `1`, and the ~590-press estimate above is if anything a floor.
+    Decided AGAINST building roving tabindex in this package regardless: a
+    real implementation needs to (a) survive `library.js`'s existing
+    patch-vs-rebuild round-7 card lifecycle (a card can be replaced by
+    `rebuildCard()` mid-session — the roving index would need to follow the
+    NEW node, not silently point at a detached one), and (b) resolve
+    2-D (arrow-key) movement against a column count that is not fixed
+    (`auto-fill`, WP 4e.2) — both genuinely separate, non-trivial features
+    with their own failure modes and test surface, not a same-package
+    add-on, and the brief's own text says not to build a speculative ARIA
+    grid pattern. Recorded here as a real, deliberately deferred gap with
+    its full, now-corrected cost — not silently dropped, and not
+    undersold — a follow-up package (its own effort estimate) is the
+    honest way to build it.
+
+  Verification: `web/tests/keyboard-pointer-model.test.js` (new) — structural
+  CSS pins (hover-gate coverage including the two Opus-review regex
+  nitpicks — `any-hover` false-positive rejection and comma-OR-disjunction
+  rejection —, six named cascade-OUTCOME pins for the five order-dependent
+  pairs plus the `.nav-btn` specificity pair, the focus-ring cross-section
+  and the three named overflow-clip fixes, the B2 `.bulk` visibility pin,
+  the reduced-motion wildcard) plus four fake-DOM behavioural pins for the
+  nested sheet+confirm keyboard flow, using the same `fake-dom.js` harness
+  `dialog-wiring.test.js`/`modal-stack.test.js` already share. 543 baseline
+  → 574 green (round 2, after the fix round; round 1 shipped at 565 with
+  the B1 defect undetected). Mutations applied to the REAL files and
+  reverted, each dying by the exact name reported in the coder's report:
+  moving `.chip:hover` out of the gate; deleting `.hrow >
+  button:focus-visible`; narrowing the reduced-motion wildcard to `.btn,
+  .chip`; reverting `lib/modal-stack.js`'s centralized Escape dispatcher to
+  fire every stacked overlay's `onEscape` instead of only the topmost's
+  (also killed the PRE-EXISTING `modal-stack.test.js` pin for the same
+  historical bug); reconstructing the exact original B1 bug (reversing all
+  five order-dependent pairs) killed all five named cascade-outcome tests
+  by name simultaneously; reverting `.bulk`/`.bulk.up` to the pre-B2-fix
+  opacity/pointer-events-only shape killed the B2 pin by name. All
+  mutations reverted afterward; suite confirmed back to 574 green after
+  each.
+
 ### WP 4a.1 — Static serving + app shell (api/ + web/) — **first, serial**
 - vault-api mounts `web/` (StaticFiles, SPA fallback, sane CSP/security
   headers, no-cache for index). Router auth must NOT cover static assets;

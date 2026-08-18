@@ -146,7 +146,20 @@
   display:grid; place-items:center; color:var(--dim);
   border:1px solid transparent; flex:none;
 }
-.iconbtn:hover{ background:var(--raised); color:var(--text); }
+/* Gated in place (WP 4e.4), not in a trailing block: `.iconbtn.on` right
+   below is an equal-specificity (0,2,0) sibling that must keep WINNING on
+   hover (a switched-on icon button — e.g. multi-select's "Select games" —
+   must not visually read as switched off just because the cursor is over
+   it). Source order is the tie-break for equal specificity, so this rule
+   has to stay exactly where it already was, before `.iconbtn.on`, not
+   relocated after it — see this file's "scroll affordances" section header
+   (further down) for the live-measured regression a first draft's
+   trailing-block relocation caused here, and
+   web/tests/keyboard-pointer-model.test.js for the named cascade-outcome
+   pin covering this exact pair. */
+@media (hover:hover) and (pointer:fine){
+  .iconbtn:hover{ background:var(--raised); color:var(--text); }
+}
 .iconbtn.on{ background:var(--accent-glow); color:var(--accent); border-color:rgba(46,217,206,.3); }
 
 /* segmented layout switch */
@@ -156,8 +169,25 @@
 }
 .segs button{ width:28px; height:28px; display:grid; place-items:center; color:var(--dim-2); }
 .segs button + button{ border-left:1px solid var(--line); }
-.segs button:hover{ color:var(--text); }
+/* In place (WP 4e.4), not in a trailing block — same equal-specificity
+   reasoning as `.iconbtn:hover`/`.iconbtn.on` above: `.segs
+   button[aria-pressed="true"]` right below must keep winning on hover (the
+   active density choice must not read as unselected under the cursor),
+   which only holds if this rule stays BEFORE it in source. */
+@media (hover:hover) and (pointer:fine){
+  .segs button:hover{ color:var(--text); }
+}
 .segs button[aria-pressed="true"]{ background:var(--accent-glow); color:var(--accent); }
+/* `.segs` clips its own children (`overflow:hidden` above) with no inset —
+   a segmented button's border-box sits flush against that clip, so the
+   DEFAULT `:focus-visible` ring (theme.css: 2px OUTSIDE the border box) is
+   invisible, clipped by the very container the button lives in. Found by
+   the WP 4e.4 pointer/keyboard audit; the same overflow-clip shape recurs
+   at `.hrow > button` and `.depotwrap.sh .depot` below — pulling the ring
+   INSIDE the box (negative offset) keeps it fully visible without loosening
+   the container's own clip, which is load-bearing for the rounded seam
+   between adjacent segmented buttons / list rows. */
+.segs button:focus-visible{ outline-offset:-2px; }
 
 /* ---------- search ---------- */
 .search{
@@ -175,7 +205,9 @@
 }
 .search input::placeholder{ color:var(--dim-2); }
 .qx{ display:none; color:var(--dim-2); flex:none; }
-.qx:hover{ color:var(--text); }
+@media (hover:hover) and (pointer:fine){
+  .qx:hover{ color:var(--text); }
+}
 .search.filled .qx{ display:grid; place-items:center; }
 .noresult{ grid-column:1/-1; text-align:center; padding:30px 16px; }
 .noresult p{ margin:0 0 14px; font-size:12.5px; line-height:1.6; color:var(--dim-2); }
@@ -222,7 +254,13 @@
   transition:background .14s, color .14s, border-color .14s;
 }
 .chip .n{ font-family:var(--mono); font-size:10.5px; opacity:.65; font-variant-numeric:tabular-nums; }
-.chip:hover{ color:var(--text); border-color:var(--raised-2); }
+/* In place (WP 4e.4): `.chip[aria-pressed="true"]` right below must keep
+   winning on hover (an active filter chip must not lose its selection cue
+   under the cursor) — same equal-specificity/source-order reasoning as
+   `.iconbtn.on`/`.segs button[aria-pressed]` above. */
+@media (hover:hover) and (pointer:fine){
+  .chip:hover{ color:var(--text); border-color:var(--raised-2); }
+}
 .chip[aria-pressed="true"]{
   background:var(--accent-glow); border-color:rgba(46,217,206,.45); color:var(--accent);
 }
@@ -241,6 +279,20 @@
   transition:transform .16s ease, box-shadow .16s ease;
 }
 .card:active .cap{ transform:scale(.972); }
+/* New affordance (WP 4e.4): a pointer-only echo of the `:active` press
+   feedback right above, so a mouse user gets a preview on the way to a
+   click, matching what a touch user already feels on tap. Placed HERE,
+   before `.card.picked .cap` (the "selection" section, much further down
+   this file), not in a trailing block — `.card.picked .cap` sets the SAME
+   property (`box-shadow`) at the SAME (0,3,0) specificity as `.card:hover
+   .cap`, so it must stay later in source to keep winning: a selected card
+   must still show its accent selection ring while hovered, not fall back
+   to this plain hover highlight (the exact cascade-inversion class Opus
+   review found for five OTHER pairs in this WP's first draft — see the
+   "scroll affordances" section header further down for the full story). */
+@media (hover:hover) and (pointer:fine){
+  .card:hover .cap{ box-shadow:0 3px 12px rgba(0,0,0,.4), inset 0 0 0 1px rgba(255,255,255,.18); }
+}
 .cap .art{ position:absolute; inset:0; }
 .cap.p0 .art{ background:linear-gradient(112deg,transparent 38%, hsl(var(--h1) 90% 62% / .34) 39%, hsl(var(--h1) 90% 62% / .34) 46%, transparent 47%); }
 .cap.p1 .art{ background:radial-gradient(120% 62% at 50% 112%, hsl(var(--h2) 92% 58% / .5), transparent 62%); }
@@ -278,7 +330,9 @@
 .cappill .pv{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .cappill .sic{ --sz:17px; }
 button.cappill{ cursor:pointer; transition:transform .12s ease, box-shadow .12s ease; }
-button.cappill:hover{ box-shadow:inset 0 0 0 1px rgba(255,255,255,.34), 0 2px 9px rgba(0,0,0,.5); }
+@media (hover:hover) and (pointer:fine){
+  button.cappill:hover{ box-shadow:inset 0 0 0 1px rgba(255,255,255,.34), 0 2px 9px rgba(0,0,0,.5); }
+}
 button.cappill:active{ transform:scale(.93); }
 .card:active .cap button.cappill{ transform:none; }
 
@@ -315,10 +369,25 @@ button.cappill:active{ transform:scale(.93); }
 .grid.list .meta{ flex:none; gap:8px; }
 .grid.list .meta .size{ display:inline; margin-left:0; }
 .grid.list .meta > .sic, .grid.list .meta > .icnact{ display:grid; }
+/* `.icnact` (the list-layout per-row action icon, only ever visible via the
+   rule directly above) has no box of its own beyond the `.sic` circle it
+   wraps — no padding/border-radius, so a hover BACKGROUND would need a new
+   base-level box first, which is a layout change outside this WP's
+   hover-only scope. `filter` changes no box size at all, the same
+   technique `.btn:hover` uses, so this is hover-only and layout-inert. */
+@media (hover:hover) and (pointer:fine){
+  .icnact:hover{ filter:brightness(1.3); }
+}
 .grid.list .meta .state{ display:inline; margin-left:0; }
 .grid.list .pick{ position:static; margin:0; flex:none; }
 .grid.list .card:active .cap{ transform:none; }
 .grid.list .card:active{ background:var(--raised); }
+/* New affordance (WP 4e.4): a pointer-only hover echo of the `:active`
+   press feedback right above (same value — no conflict either way order
+   is read, kept adjacent for readability). */
+@media (hover:hover) and (pointer:fine){
+  .grid.list .card:hover{ background:var(--raised); }
+}
 
 .tx-cached{ color:var(--ok); } .tx-none{ color:var(--none); }
 .tx-running{ color:var(--run); } .tx-paused{ color:var(--run); } .tx-error{ color:var(--danger); }
@@ -356,9 +425,27 @@ body.selecting .card .pick{ display:grid; }
   border:1px solid var(--raised-2);
   box-shadow:0 12px 28px -8px rgba(0,0,0,.7);
   opacity:0; pointer-events:none; transform:translateY(22px);
-  transition:transform .22s cubic-bezier(.2,.8,.3,1), opacity .18s;
+  /* `visibility` (Opus review must-fix B2, WP 4e.4): `opacity:0` +
+     `pointer-events:none` hide this bar visually and to a mouse, but its
+     "Cancel"/"Download" buttons stayed IN the tab order regardless —
+     measured live: Tab from the last library card lands on an invisible
+     Cancel, then an invisible Download, then BODY, two dead stops right
+     after the grid, exactly the region this WP's focus-order inventory
+     owns. `visibility:hidden` removes an element (and its descendants,
+     `.bulk.up` below excepted) from the tab order AND the accessibility
+     tree per spec, closing this without `inert` or any JS: transitioning
+     `visibility` alongside `opacity` is the standard "fade AND become
+     unfocusable" pairing — per the CSS Transitions spec, animating TO
+     `hidden` keeps the interpolated value `visible` until 100% of the
+     transition (so the bar stays reachable through its own fade-out, never
+     vanishing from the tab order a frame before it's visually gone),
+     while animating FROM `hidden` flips to `visible` at 0% (immediately
+     reachable the instant `.up` is added, not after the fade-in
+     completes). Same `.18s` duration as `opacity` so both finish together. */
+  visibility:hidden;
+  transition:transform .22s cubic-bezier(.2,.8,.3,1), opacity .18s, visibility .18s;
 }
-.bulk.up{ opacity:1; pointer-events:auto; transform:none; }
+.bulk.up{ opacity:1; pointer-events:auto; transform:none; visibility:visible; }
 .bulk .bulkhead{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .bulk .count{ font-size:12.5px; color:var(--dim); line-height:1.25; }
 .bulk .count b{ color:var(--text); font-family:var(--mono); }
@@ -375,7 +462,17 @@ body.selecting .card .pick{ display:grid; }
   border:1px solid var(--line); background:var(--raised); color:var(--text);
   transition:filter .14s, background .14s;
 }
-.btn:hover{ filter:brightness(1.14); }
+/* In place (WP 4e.4), not in a trailing block: `.btn:disabled` right below
+   must keep winning on hover — its `filter:none` exists specifically to
+   CANCEL `.btn:hover`'s `filter:brightness(...)`, so a disabled button
+   does not visibly light up under the cursor. That only holds if this
+   rule stays BEFORE `:disabled` in source (equal (0,2,0) specificity,
+   source order breaks the tie) — Opus review measured this exact
+   regression live when a first draft moved every hover rule to the end of
+   the file instead of gating in place. */
+@media (hover:hover) and (pointer:fine){
+  .btn:hover{ filter:brightness(1.14); }
+}
 .btn:disabled{ opacity:.45; cursor:not-allowed; filter:none; }
 .btn.primary{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
 .btn.danger{ background:transparent; border-color:rgba(255,111,111,.45); color:var(--danger); }
@@ -513,6 +610,23 @@ h4.sec[hidden]{ display:none; }
 .hrow > button{
   width:100%; display:flex; align-items:center; gap:10px; padding:11px 12px; text-align:left;
 }
+/* New affordance (WP 4e.4): the toggle button had no hover cue at all —
+   indistinguishable from static text until clicked. No equal-specificity
+   state sibling to collide with here (unlike `.iconbtn.on`/`.chip[aria-
+   pressed]`/etc. below), so placement relative to it is not load-bearing —
+   kept in place, right after the base rule, for the same "in-place, not a
+   trailing block" convention every hover rule in this file now follows. */
+@media (hover:hover) and (pointer:fine){
+  .hrow > button:hover{ background:var(--raised); }
+}
+/* `.hrow` clips its only child (`overflow:hidden` above) with no inset, and
+   that child IS the toggle button, flush edge to edge (`width:100%`, no
+   margin) — the first of three overflow-clip instances the WP 4e.4
+   pointer/keyboard audit found (see `.segs button`/`.depotwrap.sh .depot`
+   for the other two, same fix, same reasoning): the default OUTSIDE
+   `:focus-visible` ring is invisible here, clipped by the very row it
+   belongs to. */
+.hrow > button:focus-visible{ outline-offset:-2px; }
 .hrow-info{ flex:1; min-width:0; }
 .hrow .nm{ display:block; font-size:13px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .hrow .when{ font-size:10.5px; color:var(--dim-2); font-family:var(--mono); margin-top:2px; }
@@ -550,7 +664,9 @@ h4.sec[hidden]{ display:none; }
 }
 .inp:focus-within{ border-color:var(--accent); }
 .inp button{ color:var(--dim); flex:none; display:grid; place-items:center; }
-.inp button:hover{ color:var(--accent); }
+@media (hover:hover) and (pointer:fine){
+  .inp button:hover{ color:var(--accent); }
+}
 input.inp, .inp input{
   font-family:var(--mono); font-size:12.5px; color:var(--text);
   background:transparent; border:0; outline:none; width:100%; min-width:0; padding:0;
@@ -647,7 +763,9 @@ body.onboarding .nav{ display:none; }
   display:block; width:100%; text-align:center; margin-top:10px; padding:6px;
   font-size:11.5px; color:var(--dim-2); text-decoration:underline; text-underline-offset:3px;
 }
-.skiplink:hover{ color:var(--accent); }
+@media (hover:hover) and (pointer:fine){
+  .skiplink:hover{ color:var(--accent); }
+}
 
 .steamrow{
   border:1px solid var(--line); background:var(--surface); border-radius:var(--r-m);
@@ -723,6 +841,18 @@ body.onboarding .nav{ display:none; }
 .banner .acts{ display:flex; gap:14px; margin-top:7px; }
 .banner .acts button{ font-size:11.5px; font-weight:600; letter-spacing:.3px; text-transform:uppercase; color:var(--stale); }
 .banner .acts button.mute{ color:rgba(246,220,196,.55); }
+/* New affordance (WP 4e.4): the banner's Details/Mute actions had no hover
+   cue at all. `filter`, not `color` — a hover rule setting `color` here
+   would be an equal-specificity (0,2,0) sibling of `.banner .acts
+   button.mute`'s OWN `color` rule two lines up, i.e. exactly this WP's B1
+   cascade-inversion shape (whichever comes later in source would win,
+   silently erasing the mute button's dimmer tone on hover). `filter`
+   avoids the collision entirely — it composites over whatever `color`
+   already resolved to, so both the plain and `.mute` buttons keep their
+   own tone AND brighten on hover, with no ordering dependency either way. */
+@media (hover:hover) and (pointer:fine){
+  .banner .acts button:hover{ filter:brightness(1.25); }
+}
 
 /* ---------- sheets (notifications panel, clients sheet) ----------
    Real-DOM analogue of the mockup's phone-frame-relative .sheet/.scrimlayer
@@ -755,7 +885,15 @@ body.onboarding .nav{ display:none; }
   padding:11px 6px; border-bottom:1px solid var(--line-soft);
 }
 .notif:last-of-type{ border-bottom:0; }
-.notif:hover{ background:rgba(255,255,255,.045); border-radius:var(--r-s); }
+/* In place (WP 4e.4), not in a trailing block: `.notif.unread` right below
+   must keep winning on hover (the unread gradient marks a row a screen
+   reader/sighted user hasn't seen yet — it must not disappear the instant
+   the pointer passes over the row while scanning the list). Equal (0,2,0)
+   specificity, source order breaks the tie — same regression class Opus
+   review measured for the other four relocated pairs. */
+@media (hover:hover) and (pointer:fine){
+  .notif:hover{ background:rgba(255,255,255,.045); border-radius:var(--r-s); }
+}
 .notif.unread{
   background:linear-gradient(90deg,var(--accent-glow),transparent 70%);
   border-radius:var(--r-s);
@@ -768,7 +906,9 @@ body.onboarding .nav{ display:none; }
 .notif .undot{ width:7px; height:7px; border-radius:50%; background:var(--accent); flex:none; margin-top:6px; opacity:0; }
 .notif.unread .undot{ opacity:1; }
 .notif .ngo{ align-self:center; color:var(--dim-2); flex:none; }
-.notif:hover .ngo{ color:var(--accent); }
+@media (hover:hover) and (pointer:fine){
+  .notif:hover .ngo{ color:var(--accent); }
+}
 .notif .sic{ --sz:16px; }
 
 /* ---------- clients sheet ---------- */
@@ -801,7 +941,9 @@ body.onboarding .nav{ display:none; }
 .depotwrap{ background:var(--raised); }
 .depot{ display:flex; align-items:center; gap:9px; padding:9px 11px; font-size:12.5px; }
 .depotwrap.sh .depot{ cursor:pointer; }
-.depotwrap.sh .depot:hover{ background:var(--raised-2); }
+@media (hover:hover) and (pointer:fine){
+  .depotwrap.sh .depot:hover{ background:var(--raised-2); }
+}
 .depot .id{ font-family:var(--mono); font-size:12px; color:var(--text); font-variant-numeric:tabular-nums; }
 .depot .tag{
   font-size:9.5px; text-transform:uppercase; letter-spacing:.5px; font-weight:600;
@@ -810,6 +952,16 @@ body.onboarding .nav{ display:none; }
 .depot .b{ margin-left:auto; font-family:var(--mono); font-size:11.5px; color:var(--dim); font-variant-numeric:tabular-nums; }
 .depot .chev{ color:var(--dim-2); display:grid; place-items:center; transition:transform .18s; }
 .depotwrap.open .chev{ transform:rotate(90deg); }
+/* `.depots` above clips its children (`overflow:hidden`) with no inset, and
+   `.depot` fills its row edge to edge — same overflow-clip shape as
+   `.segs button`/`.hrow > button` (see those rules' comments, WP 4e.4
+   pointer/keyboard audit): the default OUTSIDE `:focus-visible` ring would
+   be clipped left/right on every row and top/bottom on the first/last one.
+   Scoped to `.sh` only — a depot with no co-owners is never `tabIndex=0`
+   (game-detail-sheet.js's `buildDepotRow`), so it never receives
+   `:focus-visible` at all; a plain `.depot:focus-visible` selector would be
+   dead weight, never matching anything. */
+.depotwrap.sh .depot:focus-visible{ outline-offset:-2px; }
 
 .owners{ display:none; padding:2px 11px 11px; }
 .depotwrap.open .owners{ display:block; }
@@ -834,13 +986,21 @@ body.onboarding .nav{ display:none; }
 /* ============================================================
    Desktop layout foundation (WP 4e.1)
    ------------------------------------------------------------
-   Everything below lives in `min-width` blocks ONLY — that is what keeps
-   `base` (< 720px, the phone/Android-parity surface every WP through 4a.8
-   was measured against) unable to regress: nothing above this comment
-   changed in a way that alters what renders below BP-M (token
+   Everything below lived in `min-width` blocks ONLY through WP 4e.3 — that
+   is what kept `base` (< 720px, the phone/Android-parity surface every WP
+   through 4a.8 was measured against) unable to regress: nothing above this
+   comment changed in a way that alters what renders below BP-M (token
    substitutions resolve to the exact same pixel values there; see
    theme.css's spatial-tokens comment and web/tests/css-hygiene.test.js's
-   "base is untouched" pin).
+   "base is untouched" pin). **Correction (Opus review nitpick, WP 4e.4):**
+   this is no longer literally true — WP 4e.4's scroll-affordance block
+   (further down, `.sheet .body`/`.cflist`/`.onb .rest`'s styled
+   scrollbar) is a bare `(hover:hover) and (pointer:fine)` query with NO
+   `min-width` at all, deliberately (a mouse user benefits at any
+   viewport, not just BP-L up — see that block's own header). It still
+   cannot regress `base`: `hover:hover` is false on every touch-only
+   device regardless of width, so nothing below this comment reaches a
+   phone at all, by pointer capability rather than by width.
 
    Layout is keyed on WIDTH only in every block below. Pointer-only
    affordances (anything that only makes sense with a mouse) are kept in
@@ -1434,6 +1594,21 @@ body.onboarding .nav{ display:none; }
      with the same click/keyboard handling as the base bottom nav); this
      only adds a highlight a mouse user sees on the way to clicking. */
   .nav-btn:hover{ background:var(--raised); color:var(--text); }
+  /* S2 (Opus review, WP 4e.4): the rule above is the ORIGINAL WP 4e.1
+     precedent this package generalized to every other hover rule — and it
+     already carried the exact B1 cascade-inversion defect on its own,
+     independent of this WP's relocation. `.nav-btn[aria-current="page"]`
+     (the "current page" accent, `css/app.css`'s base "bottom nav" section,
+     line ~80) has EQUAL (0,2,0) specificity to `.nav-btn:hover` above, but
+     this rule structurally CANNOT be moved before it — it lives inside a
+     `min-width:1024px` breakpoint block, which by this file's own
+     top-to-bottom convention can only appear AFTER the base rules it
+     overrides, so "gate in place" alone (the fix used for every other
+     pair in this file) cannot restore a winning order here. Fixed instead
+     with a higher-specificity (0,3,0) override, which wins regardless of
+     source order: hovering the CURRENT page's rail button keeps its accent
+     colour instead of flashing to the plain hover tone. */
+  .nav-btn[aria-current="page"]:hover{ color:var(--accent); }
 }
 
 /* ---------- BP-XL (>= 1800px) — the tile wall gets a second, wider cap ---
@@ -1469,4 +1644,95 @@ body.onboarding .nav{ display:none; }
    live-measured column counts). */
 @media (min-width:1800px){
   :root{ --w-wall:2000px; }
+}
+
+/* ============================================================
+   Pointer and keyboard interaction model (WP 4e.4) — scroll affordances
+   ------------------------------------------------------------
+   The 11 pre-existing hover rules and the new ones this WP adds are NOT
+   consolidated here — see each rule's own IN-PLACE `@media (hover:hover)
+   and (pointer:fine){...}` wrapper throughout this file instead (grep
+   `hover:hover` for the full list). A first draft of this WP DID relocate
+   every hover rule into one trailing block like this one; that inverted
+   the cascade for five equal-specificity state-vs-hover pairs that used to
+   resolve correctly by SOURCE ORDER alone (`.iconbtn.on`, `.segs
+   button[aria-pressed]`, `.chip[aria-pressed]`, `.btn:disabled`,
+   `.notif.unread` — each previously WON over its own element's `:hover`
+   rule because it was written AFTER it; moved to the end of the file, the
+   hover rule became "later" instead, and won on hover for every one of
+   them, e.g. a disabled button visibly re-enabling under the cursor).
+   Opus review caught this measuring the real tree; the fix is gating each
+   rule exactly where it already was, so relative order — and therefore the
+   cascade outcome for every existing equal-specificity pair — is preserved
+   by construction. Only the scroll-affordance rules below stay
+   consolidated: they don't compete against a state class the way a hover
+   *treatment* rule does (they deliberately override this file's own
+   `scrollbar-width:none` DEFAULT, which is the point, not a collision with
+   an unrelated selector), so there is no order-sensitive pair to protect.
+   `web/tests/keyboard-pointer-model.test.js` pins the six specific
+   equal-specificity pairs this WP found (five hover/state, one hover/
+   aria-current) so a future relocation regresses loudly instead of
+   silently — see that file's header for exactly what it checks and does
+   not check (a cascade-OUTCOME pin, not merely "the rule text exists
+   somewhere in a gated block").
+
+   `.sheet .body`/`.cflist`/`.onb .rest` all hide their scrollbar
+   unconditionally elsewhere in this file (`scrollbar-width:none` +
+   `::-webkit-scrollbar{display:none}`) — a deliberate touch-surface choice
+   (no chrome a finger needs), but it leaves a MOUSE user with no visual
+   hint that a notifications/clients/detail-sheet body, a delete-confirm's
+   shared-depot list, or the onboarding wizard can scroll at all. Decision
+   (per surface, as the brief asks): a real, thin, themed scrollbar for
+   pointer users rather than a second affordance layered on top (a fade
+   hint needs either JS scroll-position tracking or a static overlay that
+   lies when the content does NOT overflow — a native scrollbar is honest
+   by construction, appearing exactly when and only when there is
+   something to scroll to, with zero JS). Gated on pointer capability, not
+   width: a touch-only device never benefits from a scrollbar it cannot
+   drag as precisely as a mouse, and a mouse user benefits at any
+   viewport, not just BP-L up. **This DOES cost real layout space at
+   fine-pointer widths (Opus review S3 — an earlier draft of this comment
+   overclaimed "no layout shift" for the whole package; that claim is true
+   only of the hover box-shadow/background/filter tweaks elsewhere in this
+   file, never of a scrollbar, which occupies a track by definition):** an
+   8px-wide scrollbar track narrows each surface's own content column by up
+   to 8px the instant a fine pointer is detected (`.sheet .body`'s
+   `padding:10px 18px 22px`/`.cflist`'s list items/`.onb .rest`'s wizard
+   copy all reflow into 8px less width). Accepted, not engineered around:
+   every one of these three surfaces already has generous side padding
+   relative to its own content (11.5-13px running text in a 480-680px-wide
+   sheet, `--w-sheet`/`--w-sheet-l`), so an 8px narrowing is not the kind of
+   reflow that breaks a layout the way it would in a tightly-fit column —
+   but it is a real cost, stated rather than hidden. `scrollbar-color`'s two
+   values are thumb then track (Firefox); the three `::-webkit-scrollbar*`
+   rules are the Chromium/Safari equivalent — `display:block` on the
+   pseudo-element is load-bearing, not decorative: it overrides the base
+   rule's own `display:none` for the exact same selector (equal
+   specificity, later source wins per-property), which a bare
+   `width:`/`background:` next to it would NOT do on its own.
+   ============================================================ */
+@media (hover:hover) and (pointer:fine){
+  .sheet .body,
+  .cflist,
+  .onb .rest{
+    scrollbar-width:thin;
+    scrollbar-color:var(--line) transparent;
+  }
+  .sheet .body::-webkit-scrollbar,
+  .cflist::-webkit-scrollbar,
+  .onb .rest::-webkit-scrollbar{
+    display:block;
+    width:8px;
+  }
+  .sheet .body::-webkit-scrollbar-track,
+  .cflist::-webkit-scrollbar-track,
+  .onb .rest::-webkit-scrollbar-track{
+    background:transparent;
+  }
+  .sheet .body::-webkit-scrollbar-thumb,
+  .cflist::-webkit-scrollbar-thumb,
+  .onb .rest::-webkit-scrollbar-thumb{
+    background:var(--line);
+    border-radius:999px;
+  }
 }
