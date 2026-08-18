@@ -115,6 +115,57 @@ class VaultApiClientTest {
     }
 
     @Test
+    fun `prefillCached POSTs with no body, ever -- not even an empty appids list`() = runTest {
+        // api/README.md: this route declares no body parameter at all, and
+        // ANY body (including one shaped like PrefillRequest) is silently
+        // accepted and ignored server-side -- the client-side contract this
+        // pins is that it never even TRIES to send one, so a caller cannot
+        // accidentally reintroduce the "looks scoped, queues everything"
+        // trap by adding a body parameter to prefillCached() later.
+        server.enqueue(
+            MockResponse().setResponseCode(202).setBody(
+                """[{"appid":440,"job_id":1,"status":"queued","deduplicated":false}]""",
+            ),
+        )
+
+        val refs = client.prefillCached()
+
+        assertEquals(1, refs.size)
+        assertFalse(refs[0].deduplicated)
+        val recorded = server.takeRequest()
+        assertEquals("POST", recorded.method)
+        assertEquals("/v1/prefill/cached", recorded.path)
+        assertEquals(0L, recorded.bodySize)
+        // N4 (Opus review on this WP): assert the wire-level shape a
+        // throwaway probe verified by hand, so it stays pinned instead of
+        // relying on a review that no longer exists once this lands.
+        assertEquals("test-key-123", recorded.getHeader("X-Api-Key"))
+        assertEquals("0", recorded.getHeader("Content-Length"))
+        // ByteArray(0).toRequestBody(null) (postEmpty's body, no MediaType)
+        // means OkHttp adds no Content-Type header at all -- distinct from
+        // "empty string": a caller checking for an ABSENT header, not a
+        // blank one.
+        assertNull(recorded.getHeader("Content-Type"))
+        // Redirect posture matters here specifically because there is no
+        // trailing slash on this route: api/README.md documents a 307 on
+        // the slash form, and this client's followRedirects(false) means it
+        // would never follow that redirect to begin with -- pin the
+        // configuration directly rather than only via an end-to-end
+        // redirect scenario (same S1b technique WP 4b.2's review required).
+        assertFalse(client.debugHttpClientForTesting.followRedirects)
+        assertFalse(client.debugHttpClientForTesting.followSslRedirects)
+    }
+
+    @Test
+    fun `prefillCached decodes an empty selection as a normal 202, not an error`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(202).setBody("[]"))
+
+        val refs = client.prefillCached()
+
+        assertTrue(refs.isEmpty())
+    }
+
+    @Test
     fun `gc defaults to a dry run body when execute is omitted`() = runTest {
         server.enqueue(
             MockResponse().setResponseCode(202).setBody(

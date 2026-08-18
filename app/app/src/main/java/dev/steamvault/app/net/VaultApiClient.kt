@@ -166,6 +166,20 @@ class VaultApiClient(
     suspend fun prefill(appids: List<Int>): List<PrefillJobRef> =
         post("/v1/prefill", PrefillRequest(appids))
 
+    /**
+     * `POST /v1/prefill/cached` (Phase 4c, WP 4c-api/4c-app): selects every
+     * app that currently has cache content and queues a prefill for each,
+     * server-side. **No request body ever** — api/README.md documents that
+     * ANY body this route receives (including an `{"appids": [...]}` shape
+     * that would look plausible for this client's own [prefill] method) is
+     * silently accepted and ignored, so sending one here would be worse
+     * than a no-op: it would look like a scoped call while the server
+     * queues EVERY cached app regardless. [postEmpty] is the same "no body"
+     * plumbing [pauseJob]/[resumeJob] already use. Always `202`, including
+     * an empty selection (`[]`) — never an error on its own account.
+     */
+    suspend fun prefillCached(): List<PrefillJobRef> = postEmpty("/v1/prefill/cached")
+
     suspend fun cancelJob(id: Int): JobControlOut = delete("/v1/jobs/$id")
 
     suspend fun pauseJob(id: Int): JobControlOut = postEmpty("/v1/jobs/$id/pause")

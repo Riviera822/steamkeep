@@ -1,23 +1,29 @@
 package dev.steamvault.app.ui.library
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
@@ -66,6 +72,8 @@ import dev.steamvault.app.ui.library.logic.isKnownToVault
 import dev.steamvault.app.ui.library.logic.mergeLibrary
 import dev.steamvault.app.ui.library.logic.normalizeQuery
 import dev.steamvault.app.ui.library.logic.visibleGames
+import dev.steamvault.app.ui.theme.VaultColors
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -174,12 +182,42 @@ fun LibraryScreen(
         },
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = {
-            controller.toast?.let { message ->
-                LaunchedEffect(message) {
-                    delay(2500)
+            controller.toast?.let { toastState ->
+                LaunchedEffect(toastState) {
+                    delay(toastState.durationMs)
                     controller.dismissToast()
                 }
-                Snackbar(modifier = Modifier.padding(12.dp)) { Text(message) }
+                if (toastState.warn) {
+                    // S2 fix (Opus review on this WP): `colorScheme.errorContainer`/
+                    // `onErrorContainer` are NOT in Theme.kt's VaultDarkColorScheme
+                    // (only `error`/`onError` are defined there), so the original
+                    // version of this branch silently fell back to Material 3's
+                    // BASELINE red (#8C1D18/#F9DEDC) -- outside the frozen, literal-
+                    // pinned palette, and wrong on MEANING too: a paused dedupe is a
+                    // partial success ("N queued... N paused, resume or cancel it
+                    // first"), not an error, and painting it full-red says the
+                    // opposite. web's own warn toast (`.toast.warn .toast-key`,
+                    // theme.css) does not recolour the whole surface either -- it
+                    // keeps the normal toast background and swaps a 3px leading
+                    // accent bar from `--accent` to `--stale` (VaultColors.StatusStale
+                    // here). Ported as the same leading stripe, on the default
+                    // (unchanged) Snackbar surface, so "warn" reads as "pay
+                    // attention", never as "failed".
+                    Snackbar(modifier = Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .width(3.dp)
+                                    .height(20.dp)
+                                    .background(VaultColors.StatusStale, RoundedCornerShape(2.dp)),
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(toastState.message)
+                        }
+                    }
+                } else {
+                    Snackbar(modifier = Modifier.padding(12.dp)) { Text(toastState.message) }
+                }
             }
         },
         bottomBar = {
@@ -190,6 +228,7 @@ fun LibraryScreen(
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             LibraryToolbar(controller = controller)
+            CheckAndUpdateRow(controller = controller, scope = scope)
             FilterChipsRow(counts = counts, selectedKey = controller.filterKey, onSelect = { controller.filterKey = it })
 
             controller.loadError?.let { error ->
@@ -278,6 +317,48 @@ private fun LibraryToolbar(controller: LibraryController) {
                 // IconButton's own semantics above, not on this glyph text.
                 Text(if (controller.selecting) "✕" else "☐")
             }
+        }
+    }
+}
+
+/**
+ * "Check & update all cached games" (Phase 4c, WP 4c-app) — the Android
+ * twin of `web/js/views/library.js`'s header row below `.lib-head`
+ * (WP 4c-web, `docs/WORKPACKAGES.md`'s recorded divergence: the frozen
+ * round-7 mockup has no equivalent control at all, since Phase 4c is itself
+ * post-mockup scope). **Stated precisely, not as "full-width" (Opus review
+ * on this WP):** this row's `fillMaxWidth()` CONTAINER spans the width, but
+ * the button inside it is end-aligned and only as wide as its own label —
+ * unlike web's own button, which IS `width:100%`. Placement also differs
+ * from web's (web: tools → check row → search; Android: search →
+ * layout/select → check row). A SEPARATE control from this screen's poll
+ * loops — never folded into a pull-to-refresh gesture, which this screen
+ * does not have to begin with (no `SwipeRefresh`/`pull-refresh` anywhere in
+ * `ui/library/`); the same "a refresh gesture that can start downloads is a
+ * trap" rule the web divergence entry records applies here too, it is just
+ * satisfied by omission rather than by an explicit carve-out.
+ *
+ * The wording/error/in-flight logic itself lives in
+ * `ui/library/logic/CachedPrefillOutcome.kt` — this composable only paints
+ * [LibraryController.checkAndUpdateBusy] and forwards the click.
+ */
+@Composable
+private fun CheckAndUpdateRow(controller: LibraryController, scope: CoroutineScope) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.End,
+    ) {
+        OutlinedButton(
+            enabled = !controller.checkAndUpdateBusy,
+            onClick = { controller.checkAndUpdateCachedGames(scope) },
+        ) {
+            Text(
+                if (controller.checkAndUpdateBusy) {
+                    stringResource(R.string.library_check_update_button_busy)
+                } else {
+                    stringResource(R.string.library_check_update_button)
+                },
+            )
         }
     }
 }

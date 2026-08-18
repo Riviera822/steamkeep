@@ -15,13 +15,17 @@ import dev.steamvault.app.repo.JobsRepository
 import dev.steamvault.app.repo.MappingRepository
 import dev.steamvault.app.repo.SteamIdentityRepository
 import dev.steamvault.app.storage.LibraryPreferences
+import dev.steamvault.app.ui.library.logic.CheckAndUpdateAction
+import dev.steamvault.app.ui.library.logic.CheckAndUpdateResult
 import dev.steamvault.app.ui.library.logic.LibraryLayout
 import dev.steamvault.app.ui.library.logic.MultiPlan
 import dev.steamvault.app.ui.library.logic.StatusActionType
 import dev.steamvault.app.ui.library.logic.buildMultiPlan
 import dev.steamvault.app.ui.library.logic.classifyBulkSelection
+import dev.steamvault.app.ui.library.logic.describeCachedPrefillError
 import dev.steamvault.app.ui.library.logic.findLiveJob
 import dev.steamvault.app.ui.library.logic.formatBytesGB
+import dev.steamvault.app.ui.library.logic.summarizeCachedPrefillOutcome
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -71,11 +75,89 @@ class LibraryController(
     var selectedAppids by mutableStateOf<Set<Int>>(emptySet())
         private set
 
-    var toast by mutableStateOf<String?>(null)
+    var toast by mutableStateOf<LibraryToast?>(null)
         private set
 
     var deletePlan by mutableStateOf<DeletePlanUiState>(DeletePlanUiState.Hidden)
         private set
+
+    // ---- "Check & update all cached games" (Phase 4c, WP 4c-app) --------
+    // See ui/library/logic/CachedPrefillOutcome.kt's module kdoc for the
+    // full contract this wiring is glue for -- wording, error handling and
+    // the in-flight guard itself all live there (DOM-free -- Android-
+    // framework-free -- and unit-tested); this class is only the
+    // Compose-observable busy flag plus the suspend orchestration, mirroring
+    // web/js/views/library.js's onCheckAndUpdate() one-to-one.
+
+    /** One guard instance per [LibraryController] -- unlike web's
+     * module-level singleton, this does NOT survive leaving the Library tab
+     * (see this class's own kdoc: not a ViewModel, `remember`-scoped). A
+     * screen re-entered while a previous call from the OLD controller
+     * instance is still running therefore starts a fresh, un-busy guard --
+     * an honest, documented narrowing of web's cross-remount guarantee, not
+     * a silent gap: the server-side dedupe (`enqueue_prefill`) still makes a
+     * second concurrent call harmless, it would just not show as `busy`. */
+    private val checkAndUpdateAction = CheckAndUpdateAction(fetcher = { jobsRepository.prefillCached() })
+
+    var checkAndUpdateBusy by mutableStateOf(checkAndUpdateAction.isInFlight())
+        private set
+
+    /**
+     * Belt: [dev.steamvault.app.ui.library.LibraryScreen] already disables
+     * the real button the instant [checkAndUpdateBusy] flips `true` (see
+     * the click listener there), so a second click cannot even reach here
+     * while one is in flight. Suspenders: [checkAndUpdateAction] itself
+     * no-ops a concurrent [dev.steamvault.app.ui.library.logic.CheckAndUpdateAction.run]
+     * regardless of how it was invoked.
+     *
+     * **N1 fix (Opus review on this WP).** [checkAndUpdateBusy] is cleared
+     * ONLY on [CheckAndUpdateResult.Success]/[CheckAndUpdateResult.Failure]
+     * -- never on [CheckAndUpdateResult.Skipped]. The earlier version
+     * cleared it unconditionally, so two presses landing in the same frame
+     * (before Compose has a chance to repaint the now-disabled button)
+     * produced one real call plus one `Skipped` result whose `finally`
+     * block re-enabled the button while the FIRST call's request was still
+     * in flight -- the guard itself still correctly refused a second
+     * network call (that guarantee is [checkAndUpdateAction]'s own, proven
+     * by `CachedPrefillOutcomeTest`'s in-flight-guard pin), only the visible
+     * "belt" (button state) went stale. Leaving [checkAndUpdateBusy]
+     * untouched on `Skipped` means it stays exactly whatever the ORIGINAL,
+     * still-running call set it to.
+     */
+    fun checkAndUpdateCachedGames(scope: CoroutineScope) {
+        scope.launch {
+            checkAndUpdateBusy = true
+            val result = checkAndUpdateAction.run()
+            when (result) {
+                is CheckAndUpdateResult.Skipped -> {} // already running -- this press changed nothing, including checkAndUpdateBusy
+                is CheckAndUpdateResult.Success -> {
+                    checkAndUpdateBusy = false
+                    // `games` is passed through only as the best-effort
+                    // needs_force lookup table for the forced-run note --
+                    // summarizeCachedPrefillOutcome itself decides whether
+                    // that note applies at all (see its kdoc: gated on its
+                    // OWN queued bucket, never on this snapshot alone).
+                    val summary = summarizeCachedPrefillOutcome(result.refs, games)
+                    toast = LibraryToast(
+                        message = summary.message,
+                        warn = summary.warn,
+                        durationMs = if (summary.warn) CHECK_UPDATE_WARN_TOAST_MS else DEFAULT_TOAST_DURATION_MS,
+                    )
+                    refreshNow(scope)
+                }
+                is CheckAndUpdateResult.Failure -> {
+                    checkAndUpdateBusy = false
+                    val desc = describeCachedPrefillError(result.err)
+                    toast = LibraryToast(message = desc.message, warn = desc.warn, durationMs = DEFAULT_TOAST_DURATION_MS)
+                    // README's mid-loop-5xx honesty rule: re-read GET
+                    // /v1/jobs rather than implying the press did nothing --
+                    // describeCachedPrefillError sets `refresh` only for
+                    // that one error kind.
+                    if (desc.refresh) refreshNow(scope)
+                }
+            }
+        }
+    }
 
     // ---- layout -----------------------------------------------------------
 
@@ -179,22 +261,22 @@ class LibraryController(
                 when (actionType) {
                     StatusActionType.DOWNLOAD, StatusActionType.RETRY -> {
                         jobsRepository.prefill(listOf(appid))
-                        toast = strings.queuedForDownload()
+                        toast = LibraryToast(strings.queuedForDownload())
                     }
                     StatusActionType.PAUSE -> {
                         val job = findLiveJob(jobs, appid) ?: return@launch
                         jobsRepository.pause(job.id)
-                        toast = strings.pauseRequested()
+                        toast = LibraryToast(strings.pauseRequested())
                     }
                     StatusActionType.RESUME -> {
                         val job = findLiveJob(jobs, appid) ?: return@launch
                         jobsRepository.resume(job.id)
-                        toast = strings.resuming()
+                        toast = LibraryToast(strings.resuming())
                     }
                 }
                 refreshNow(scope)
             } catch (e: VaultApiError) {
-                toast = e.message ?: strings.actionFailedFallback()
+                toast = LibraryToast(e.message ?: strings.actionFailedFallback())
             }
         }
     }
@@ -206,11 +288,11 @@ class LibraryController(
         scope.launch {
             try {
                 jobsRepository.prefill(appids)
-                toast = strings.jobsQueued(appids.size)
+                toast = LibraryToast(strings.jobsQueued(appids.size))
                 exitSelect()
                 refreshNow(scope)
             } catch (e: VaultApiError) {
-                toast = e.message ?: strings.actionFailedFallback()
+                toast = LibraryToast(e.message ?: strings.actionFailedFallback())
             }
         }
     }
@@ -267,11 +349,26 @@ class LibraryController(
             deletePlan = DeletePlanUiState.Hidden
             exitSelect()
             refreshNow(scope)
-            toast = strings.freed(formatFreed(freedTotal), failedCount)
+            toast = LibraryToast(strings.freed(formatFreed(freedTotal), failedCount))
         }
     }
 
     private fun formatFreed(bytes: Long): String = formatBytesGB(bytes) ?: ZERO_GB_LABEL
+
+    companion object {
+        /** Unchanged from the Snackbar auto-dismiss cadence `LibraryScreen.kt`
+         * hardcoded before WP 4c-app (2500ms) -- kept as-is rather than
+         * nudged to web toast.js's literal 2.6s default; not this WP's job
+         * to touch every existing toast's timing for a 100ms difference
+         * nobody asked about. */
+        internal const val DEFAULT_TOAST_DURATION_MS = 2500L
+
+        /** Mirrors web/js/views/library.js's `CHECK_UPDATE_WARN_TOAST_MS` --
+         * `warn` means "the user must go DO something" (a paused dedupe --
+         * resume or cancel it), the one outcome of this action that needs a
+         * follow-up, not just an acknowledgement. */
+        internal const val CHECK_UPDATE_WARN_TOAST_MS = 6000L
+    }
 }
 
 /** "0 GB" is not localizable copy in the same sense the rest of this file's
@@ -280,6 +377,19 @@ class LibraryController(
  * here only as the floor value when nothing was freed. Kept as a constant
  * next to its only caller rather than a resource for that reason. */
 private const val ZERO_GB_LABEL = "0 GB"
+
+/**
+ * A queued Snackbar message plus how long it stays up and whether it reads
+ * as a warning (WP 4c-app: introduced for "Check & update all cached
+ * games", but now the one shape every toast in this controller produces).
+ * [warn] mirrors web toast.js's `warn` option; [durationMs] mirrors its
+ * per-call duration override (`CHECK_UPDATE_WARN_TOAST_MS` vs the default).
+ */
+data class LibraryToast(
+    val message: String,
+    val warn: Boolean = false,
+    val durationMs: Long = LibraryController.DEFAULT_TOAST_DURATION_MS,
+)
 
 /** Bulk-delete confirm dialog state -- mirrors `library.js`'s
  * `openDeleteConfirm`/`renderDeletePlan` three phases (calculating,

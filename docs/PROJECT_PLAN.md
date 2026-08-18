@@ -886,7 +886,41 @@ available at any reasonable cost, and would be the less useful half anyway.
       instead of hanging the suite. Suite 414 green (35 new tests). The
       Android half of this trigger is a separate, still-open work
       package.)*
-- [ ] Trigger in the Android frontend: the same action (separate work package)
+- [x] Trigger in the Android frontend (WP 4c-app, 2026-08-18): the same
+      action, a Kotlin port of the web trigger's pure logic
+      *(`ui/library/logic/CachedPrefillOutcome.kt` ports
+      `web/js/lib/cached-prefill-outcome.js`'s five functions verbatim —
+      partition into `queued`/`alreadyQueued`/`alreadyRunning`/
+      `alreadyPaused` (with the unknown-status catch-all landing in
+      `alreadyRunning`, never dropped), the wording/forced-note composer
+      (`summarizeCachedPrefillOutcome`), the mid-loop-5xx "re-read jobs"
+      signal (`describeCachedPrefillError`), and the in-flight guard
+      (`CheckAndUpdateAction`). `LibraryController.checkAndUpdateCachedGames`
+      wires it through `VaultApiClient.prefillCached()`
+      (`POST /v1/prefill/cached`, no body ever — reusing the same
+      `postEmpty` plumbing `pauseJob`/`resumeJob` already use) and a new,
+      end-aligned button in its own `fillMaxWidth()` row directly below
+      `LibraryScreen.kt`'s search/layout toolbar — the row's CONTAINER
+      spans the width, the button itself does not (unlike web's own
+      `width:100%` button), and the placement order also differs from web's
+      (web: tools → check row → search; Android: search → layout/select →
+      check row) — said plainly rather than reusing web's "full-width
+      header row" description for a materially different layout. Both of
+      `docs/WORKPACKAGES.md`'s recorded WP 4c-web decisions are adopted
+      verbatim, per that entry's instruction: the button wording rule
+      ("check & update", never bare "check") and pull-to-refresh staying
+      passive-only (this screen has no pull-to-refresh gesture at all, so
+      the rule is satisfied by omission). `warn` stays paused-only, pinned
+      by an explicit
+      alreadyQueued-must-not-warn assertion (the gap the web port shipped
+      without). Suite 591 green (41 new tests: the four-bucket partition
+      incl. the unknown-status catch-all, both ported BLOCKER REGRESSION
+      cases, the in-flight guard's synchronous assertion, and a literal
+      cross-frontend wording-contract test file, hand-transcribed against
+      the web source, never derived from the Kotlin functions under test).
+      No emulator/device in this environment — `lintDebug`/`assembleDebug`
+      both green is the build evidence; see app/README.md's honest
+      on-device list for what could not be verified here.)*
 - [x] Mockup divergence to resolve in design: `doRefresh()`
       (`vault-app-mockup-NOTES.md`) only reloads what vault-api already
       knows. The update check asks Steam and must NOT be silently folded into
@@ -902,8 +936,14 @@ available at any reasonable cost, and would be the less useful half anyway.
       sooner — never as a substitute for the Steam-contacting call itself.
       Decision recorded in `web/js/views/library.js`'s module header and
       (review round 1, S3) `docs/WORKPACKAGES.md`'s Phase 4a divergence
-      register. Android's own pull-to-refresh gesture is that work
-      package's concern, unaffected by this WP.)*
+      register. Resolved on the Android frontend too, WP 4c-app,
+      2026-08-18, by omission rather than by an explicit carve-out:
+      `ui/library/` has no pull-to-refresh gesture at all
+      (`LibraryController.pollGamesForever`/`pollJobsForever` are
+      fixed-cadence foreground polls only, never triggered by a swipe), so
+      there is no gesture for `POST /v1/prefill/cached` to be folded into
+      in the first place — the same rule holds with nothing extra to
+      write.)*
 - [x] Guardrails (backend half, WP 4c-api): a user-initiated check
       deliberately bypasses the WP 3.11 miss-trigger cooldown (the user
       pressed the button) — structural, not conditional: `POST
@@ -915,7 +955,7 @@ available at any reasonable cost, and would be the less useful half anyway.
       logins, so progress belongs in the Jobs view, never behind a spinner
       — the endpoint returns `202` immediately by construction. The
       frontend half (routing an actual button press to this endpoint) is
-      the unticked trigger item above
+      done in both UIs — the web and Android trigger items above
 - Remote use ("check from work") needs no extra work: 4a is served over
   Tailscale/LAN by design, 4b has the connectivity-profile abstraction
 - Complements Phase 6's `app.updated` webhook: that is the passive/push
@@ -1446,8 +1486,10 @@ Phases 1–3 plus 4a shipped. Rewritten 2026-08-17 to reflect the real state.
    `docs/WORKPACKAGES.md` — done 2026-08-17, together with WP 4b.10 (the
    clients/bypass detail surface); see §7 Phase 4b's evidence notes.
 4. [ ] **Phase 4c / 4d** frontend halves: the manual "check & update" trigger
-   in both UIs, and the opt-in "keep the cache current" sweep mode (its
-   auto-GC prerequisite is shipped — see §7 Phase 3).
+   in both UIs (web done WP 4c-web, Android done WP 4c-app — both frontend
+   triggers now shipped), and the opt-in "keep the cache current" sweep mode
+   (its auto-GC prerequisite is shipped — see §7 Phase 3; the sweep mode's
+   own frontend surface in both UIs is still open).
 5. [ ] **WP 5.3** SECURITY.md + threat model + pre-release security review
    (Fable mandatory) — after an api/core code freeze.
 6. [ ] **User-gated:** WP 5.5 (GitHub org + `ghcr.io/steamvault/*` publish)

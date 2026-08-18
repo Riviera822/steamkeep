@@ -204,6 +204,29 @@ package) should adopt both decisions verbatim: its own equivalent header/
 toolbar gains the same button, worded with the same "Check & update, never
 Check" rule, and its own pull-to-refresh equivalent stays passive-only.
 
+**Adopted verbatim on Android (WP 4c-app, 2026-08-18).** Both decisions
+carried over exactly as recorded above, with the layout stated precisely
+rather than reusing web's "full-width header row" description for a
+materially different one (Opus review, this WP): `LibraryScreen.kt` gains
+an end-aligned button inside its own `fillMaxWidth()` row directly below
+`LibraryToolbar` (the Android equivalent of `.lib-head`) — the row's
+container spans the width, the button does not (web's own button is
+`width:100%`), and the placement order differs too (web: tools → check row
+→ search; Android: search → layout/select → check row) — for the same
+"Check & update all cached games" control, worded with the same "check &
+update, never bare check" rule (`library_check_update_button`/`_busy` in
+`strings.xml`); and `ui/library/` has no pull-to-refresh gesture at all
+(`LibraryController.pollGamesForever`/`pollJobsForever` are fixed-cadence
+foreground polls only), so the "stays passive-only" rule is satisfied by
+the gesture's absence rather than by an explicit carve-out. The pure
+wording/partition/error/in-flight logic is a line-for-line Kotlin port of
+`web/js/lib/cached-prefill-outcome.js` in
+`ui/library/logic/CachedPrefillOutcome.kt`, pinned by a literal
+cross-frontend wording-contract test
+(`CachedPrefillOutcomeWordingContractTest`) in addition to the ported
+functional suite (`CachedPrefillOutcomeTest`, including both BLOCKER
+REGRESSION cases by name).
+
 ### WP 4a.1 — Static serving + app shell (api/ + web/) — **first, serial**
 - vault-api mounts `web/` (StaticFiles, SPA fallback, sane CSP/security
   headers, no-cache for index). Router auth must NOT cover static assets;

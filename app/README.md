@@ -2156,3 +2156,203 @@ count, since it is a build-configuration property, not a JVM test.
 - **No on-device install/launch verification of the signed release APK**
   — see "Updated honest on-device list" above; unreachable in this
   environment for the same reason every earlier 4b.x WP records.
+
+## "Check & update all cached games" — the Android trigger (Phase 4c, WP 4c-app)
+
+Android twin of the web frontend's WP 4c-web trigger (`docs/WORKPACKAGES.md`'s
+recorded divergence entry, both of whose decisions this WP adopts verbatim —
+see that entry's own "Adopted verbatim on Android" addendum). Library gains
+an end-aligned "Check & update all cached games" button inside its own
+`fillMaxWidth()` row (`ui/library/LibraryScreen.kt`'s `CheckAndUpdateRow`),
+placed directly below the search/layout toolbar. Stated precisely rather
+than as "a full-width header row" (Opus review, this WP): the row's
+CONTAINER spans the width, the button itself does not — unlike web's own
+`width:100%` button — and the placement order differs from web's too (web:
+tools → check row → search; Android: search → layout/select → check row).
+It calls the new `POST /v1/prefill/cached`
+(`VaultApiClient.prefillCached()` — `postEmpty`, the SAME no-body plumbing
+`pauseJob`/`resumeJob` already use, since api/README.md documents that any
+body this route receives is silently accepted and ignored). The existing
+per-game and multi-select download/delete paths are unchanged.
+
+```
+app/app/src/main/java/dev/steamvault/app/
+├── net/VaultApiClient.kt          # + prefillCached()
+├── repo/JobsRepository.kt         # + prefillCached()
+└── ui/library/
+    ├── logic/CachedPrefillOutcome.kt   # the ported pure module (below)
+    ├── LibraryController.kt            # + checkAndUpdateCachedGames(), LibraryToast
+    └── LibraryScreen.kt                # + CheckAndUpdateRow, warn-aware Snackbar
+```
+
+### `ui/library/logic/CachedPrefillOutcome.kt` — verbatim port
+
+A line-for-line Kotlin port of `web/js/lib/cached-prefill-outcome.js`'s
+five functions, ported rather than re-derived (the module kdoc quotes the
+web source's own header near-verbatim): `partitionCachedPrefillOutcome`
+(four buckets — `queued`/`alreadyQueued`/`alreadyRunning`/`alreadyPaused`,
+with a `deduplicated: true` entry whose status is neither `paused` nor
+`queued` landing in `alreadyRunning` as a catch-all, never dropped, the
+WP 4b.5 lesson pinned on both frontends), `countForcedCachedGames` (scoped
+to the `queued` bucket only — never the whole `GET /v1/games` snapshot,
+the web port's own review round 1 blocker), `summarizeCachedPrefillOutcome`
+(the wording composer, `warn` true if-and-only-if a paused dedupe is
+present), `describeCachedPrefillError` (the mid-loop-5xx "re-read
+`GET /v1/jobs`" signal), and `CheckAndUpdateAction` (the run-at-most-once
+in-flight guard).
+
+**String-resource exception invoked, same as `BulkPlan.kt`/`LibraryFilters.kt`
+(see "String resources" above).** Every message literal
+`summarizeCachedPrefillOutcome`/`describeCachedPrefillError` builds stays a
+Kotlin string in this file, not a `strings.xml` resource — the wording is
+"whatever `web/js/lib/cached-prefill-outcome.js` already decided", and
+`CachedPrefillOutcomeWordingContractTest` pins every one of them by
+hand-transcribed literal string equality, the condition the exception
+requires. The button label that triggers the action
+(`library_check_update_button`/`_busy`) is ordinary static UI chrome and
+stays in `strings.xml` — it is an independent Android wording decision
+(worded to match the project-wide honesty rule, not lifted from one web
+literal), not the narrow exception.
+
+`LibraryController.checkAndUpdateCachedGames` is the stateful glue:
+`checkAndUpdateBusy` (a Compose-observable flag `LibraryScreen.kt` uses to
+disable the button and swap its label) plus a private `CheckAndUpdateAction`
+instance. Unlike web's module-level singleton guard, this instance lives on
+the `LibraryController` itself, which does not survive leaving the Library
+tab (this class's own kdoc: not a ViewModel, `remember`-scoped) — an
+honest, documented narrowing from web's cross-remount guarantee, not a
+silent gap: server-side dedupe (`enqueue_prefill`) still makes a second
+concurrent call harmless, it would just not paint as `busy` across a
+tab-leave-and-return. `LibraryToast` (message + `warn` + `durationMs`)
+replaced the previous bare-`String?` toast state so this action's paused
+outcome can use the longer 6 s duration web's `CHECK_UPDATE_WARN_TOAST_MS`
+uses, while every pre-existing toast (queued/paused/resumed/freed/action
+failed) keeps its prior wording and the prior 2500 ms cadence unchanged.
+
+### Tests (WP 4c-app)
+
+42 new/changed JVM unit tests (592 total with the prior WPs' 550 baseline),
+no Robolectric/emulator dependency:
+
+- `ui/library/logic/CachedPrefillOutcomeTest` (28) — the four-bucket
+  partition including the unknown-status catch-all and the null-input
+  defensive case; both ported BLOCKER REGRESSION cases by name (an empty
+  response plus a stale `needs_force` game still reads EXACTLY "Nothing
+  cached to check.", and an all-deduplicated response with a forced app
+  among them credits no forced note); a THIRD forced-note MUTATION PIN
+  (S1, Opus review round on this WP) for the scoping half specifically —
+  one fresh, non-forced app queued alongside an unrelated `needs_force`
+  app elsewhere in the snapshot must NOT produce a forced note, closing
+  the gap where replacing `countForcedCachedGames(p.queued, games)` with a
+  whole-snapshot count passed every other test in the file because the
+  `p.queued.isNotEmpty()` gate masked it; the explicit MUTATION PIN that an
+  `alreadyQueued`-only outcome does not warn (the gap the web port shipped
+  without — widening `warn`'s expression to OR in `alreadyQueued` would
+  pass every other test in this suite too, so this is its own standalone
+  assertion); the paused-never-worded-as-queued/started pin; and
+  `CheckAndUpdateAction`'s in-flight guard with the call count asserted
+  SYNCHRONOUSLY via `testScheduler.runCurrent()` before the gating
+  `CompletableDeferred` resolves, so a removed guard fails the assertion
+  immediately instead of the suite hanging.
+- `ui/library/logic/CachedPrefillOutcomeWordingContractTest` (12) — one
+  literal, hand-transcribed string-equality test per wording shape
+  (empty/single-new/multiple-new/already-queued/already-running/
+  single-paused/plural-paused/mixed-bucket-join-order/forced-note-suffix/
+  forced-note-pluralization/SERVER-error/generic-fallback), never derived
+  from `CachedPrefillOutcome.kt`'s own templates — the same technique
+  `StatusIconCrossFrontendContractTest` applies to `StatusKind`.
+- `net/VaultApiClientTest` (+2, one widened) — `prefillCached()` sends a
+  genuinely empty body (`recorded.bodySize == 0L`) to `/v1/prefill/cached`,
+  never an `{"appids": [...]}` shape, and decodes both a populated and an
+  empty (`[]`) `202` response. Widened per N4 (Opus review round on this
+  WP): also asserts `X-Api-Key` is present, `Content-Length: 0`, NO
+  `Content-Type` header at all (distinct from a blank one —
+  `ByteArray(0).toRequestBody(null)` means OkHttp never adds the header,
+  since there is no `MediaType` to derive it from), and that
+  `followRedirects`/`followSslRedirects` are still `false` on the built
+  client (`debugHttpClientForTesting`, the same WP 4b.2 S1b technique) —
+  pinned directly rather than left to a review transcript that no longer
+  exists once this lands. The redirect posture matters specifically
+  because this route has no trailing slash (api/README.md: the slash form
+  is a `307`), and this client would refuse to follow it either way.
+
+**M5 mutation, verified by name (Opus review round on this WP):**
+temporarily replacing `countForcedCachedGames(p.queued, games)` in
+`CachedPrefillOutcome.kt` with `(games ?: emptyList()).count { it.needs_force }`
+(a whole-snapshot count, no scoping) and re-running
+`CachedPrefillOutcomeTest` in isolation fails exactly the new
+`MUTATION PIN -- the forced note is scoped to the queued bucket, not the
+whole games snapshot` test (1 of 28 in the file) — every other test in the
+class stays green under the mutant, confirming the gate alone was doing
+all the previous work. Reverted before this report; not left in the tree.
+
+Verified command + output tail (this environment's JDK 17/Android SDK were
+provisioned fresh for this WP — see the toolchain note below):
+
+```
+$ ./gradlew.bat --stop && ./gradlew.bat test lintDebug assembleDebug
+...
+BUILD SUCCESSFUL in 1m 29s
+74 actionable tasks: 74 executed
+```
+
+(`--stop` first, then every task actually executed rather than
+up-to-date-skipped, per the same "verify empirically" discipline — a stale
+Gradle daemon had one file lock issue against a bare `clean` in this
+environment, unrelated to the source changes, worked around by stopping
+the daemon rather than trusted away.)
+
+`592 tests completed, 0 failed` (both `testDebugUnitTest` and
+`testReleaseUnitTest` XML reports: `tests="592" skipped="0" failures="0"
+errors="0"`, summed across all test classes);
+`app/app/build/reports/lint-results-debug.txt`: "No issues found";
+`assembleDebug` produced `app/app/build/outputs/apk/debug/app-debug.apk`.
+
+**Toolchain note for this WP's own verification, not a project decision:**
+this particular environment had neither a JDK nor an Android SDK installed
+(unlike the "pinned local toolchain" the "Toolchain setup" section above
+otherwise assumes exists already) — a Temurin 17.0.20 JDK (matching the
+version already pinned there) and `platform-tools`/`platforms;android-35`/
+`build-tools;35.0.0` were downloaded into scratch locations outside the
+repo for this one verification run, matching every version this file
+already pins. No repo file changed as a result beyond the machine-specific,
+gitignored `app/local.properties` `sdk.dir` entry every contributor
+generates locally per the "Toolchain setup" instructions above.
+
+### Two findings recorded, not fixed, here (WP 4c-app brief)
+
+- **No `BackHandler` anywhere in `app/`, and its actual effect is stronger
+  than "does not leave multi-select" (corrected by Opus review, this WP —
+  verified against `MainActivity.kt` at HEAD, not assumed).**
+  `MainActivity.destination` (`ui/nav/Destination.kt`) is a plain
+  `mutableStateOf` switch with no `NavHost` and no back stack entries at
+  all — the twin of a bug the WP 4a.8 web review found and fixed there
+  (native `inert`/`Escape` handling for modals), but never ported to this
+  app's navigation model. `ModalBottomSheet` (`GameDetailSheet.kt`,
+  `ClientsSheet.kt`) DOES consume the back gesture while a sheet is open —
+  that composable registers its own back handling internally — but with no
+  sheet open and no `BackHandler` registered anywhere else, the system back
+  gesture/button falls all the way through to the platform default for a
+  single Activity with an empty back stack: **it finishes the Activity**,
+  i.e. exits the app. It neither leaves multi-select
+  (`LibraryController.selecting`/`exitSelect()`) nor returns to the
+  previously active [Destination] tab — there is no stack entry for either
+  to pop to. A future WP should wire a
+  `BackHandler(enabled = controller.selecting) { controller.exitSelect() }`
+  in `LibraryScreen.kt` for the multi-select case, and separately decide
+  whether tab switches should push a back-stack entry at all (a plain state
+  switch was a deliberate WP 4a.1-era choice for this app, per
+  `ui/nav/Destination.kt`'s own kdoc — reversing it is a bigger call than
+  this one-line fix and is not assumed here).
+- **The Android queue row (`ui/downloads/DownloadsScreen.kt`'s `QueueRow`)
+  has no grip glyph at all, decorative or otherwise** — checked against the
+  WP 4c-app brief's claim that it "mirrors a web grip with no drag
+  handler": `web/js/views/downloads.js`'s queue row DOES render one
+  (`GRIP_SVG`, purely decorative — no reorder functionality on either
+  frontend today), but the current Android `QueueRow` is just
+  `"#position  name"` plus a remove button, with no grip element to mirror
+  in the first place (verified by reading both files at HEAD; not
+  guessed). Recorded as the accurate version of that finding for whichever
+  later package next touches `QueueRow` — either add the equivalent
+  decorative glyph for visual parity with web, or note explicitly that
+  Android intentionally omits it.

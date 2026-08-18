@@ -70,6 +70,17 @@
     <string name="library_load_error">Could not reach vault-api: %1$s</string>
     <string name="library_cover_fallback_description">No cover art available for %1$s</string>
 
+    <!-- "Check & update all cached games" (Phase 4c, WP 4c-app): the
+         Android twin of web/js/views/library.js's CHECK_UPDATE_LABEL/
+         CHECK_UPDATE_BUSY_LABEL. Ordinary static UI chrome (button labels),
+         NOT the narrow verbatim-port exception ui/library/logic/
+         CachedPrefillOutcome.kt's module kdoc documents for the toast
+         wording it produces; "check & update, never bare check" is a
+         project-wide honesty rule (docs/PROJECT_PLAN.md §7 Phase 4c), not a
+         literal lifted from one specific web file. -->
+    <string name="library_check_update_button">Check &amp; update all cached games</string>
+    <string name="library_check_update_button_busy">Checking &amp; updating…</string>
+
     <!-- Multi-select bulk bar. -->
     <plurals name="library_bulk_selected_count">
         <item quantity="one">%1$d selected</item>
