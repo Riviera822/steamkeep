@@ -82,9 +82,14 @@ EXPECTED_DEFAULTS: dict[str, str] = {
     # `settings_readonly: bool = False` is a real dataclass default
     # (config.py:923), just not one that is itself named. Not a coverage
     # hole either way: the env default (`False` for unset/blank) is already
-    # pinned by three tests in test_config.py
-    # (test_settings_readonly_defaults_to_false and its true/false-spelling
-    # and rejects-anything-else siblings).
+    # pinned by three tests in test_config.py --
+    # test_settings_readonly_defaults_to_false, the blank-string case of
+    # test_settings_readonly_accepts_false_spellings (falsy="", which falls
+    # through to the default rather than parsing anything), and
+    # test_env_bool_error_names_the_original_unstripped_value_and_the_default
+    # (pins the default's own value inside its error-message assertion) --
+    # NOT the true-spellings/rejects-anything-else siblings, which set the
+    # env var explicitly and would not notice a default change.
     "VAULT_SETTINGS_READONLY": "false",
 }
 

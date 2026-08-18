@@ -2048,12 +2048,14 @@ surface (playtime and last-played now flow through the API response).
       bypass, ADR-0004's credentials claim verified against the code (and
       exactly where a real Steam session lives at rest —
       `vault-steamprefill` volume), the WP 4h.1 personal-data surface
-      (playtime/last-played: no display has shipped yet, so the operator's
-      "off by default or dismissible" requirement cannot yet be said to be
-      met, and — as of the commit this was verified against — the API
-      answers unconditionally to anyone holding the one shared key, ahead of
-      an env-only relay opt-out now in flight; flagged for whoever builds
-      WP 4h.2 to read first), outbound data flows (the opt-in Steam relay,
+      (playtime/last-played: the API-level half of the operator's privacy
+      stance has landed since — WP 4h.0's two env-only, off-by-default
+      gates mean the API no longer answers unconditionally to anyone
+      holding the one shared key. What remains open is the display-side
+      half: no UI renders either field yet, so "off by default or
+      dismissible" cannot be said fully met until WP 4h.2/4h.3 ship;
+      flagged for whoever builds those to read the threat model's own
+      framing first), outbound data flows (the opt-in Steam relay,
       the opt-in manifest oracle, and the CSP's one external cover-art
       host — what leaves the LAN and under what conditions), the ADR-0008
       event log, precisely what `VAULT_SETTINGS_READONLY` and the bypass
@@ -2066,12 +2068,18 @@ surface (playtime and last-played now flow through the API response).
       FAIL, four must-fixes — two broken-by-drift citations into this very
       file, an understated personal-data claim, a missing outbound-data-flows
       section, and the plan tick overreaching the delivered scope — all
-      fixed; round 2 pending). Several claims explicitly could not be
-      substantiated from code alone and are listed as open gaps in the
-      document's own closing section rather than asserted anyway.
+      fixed; round 2: FAIL, two blockers plus should-fixes — §4 citations
+      drifted again when WP 4h.0 rewrote that section in the same commit
+      that added 109 lines to `routers/steam.py`, and §5's outbound-flows
+      list falsely claimed exhaustiveness while omitting the Android app's
+      own direct Steam Web API and OpenID calls — addressed in the WP
+      5.3-fix follow-up commit; round 3: PASS, 2026-08-18). Several claims
+      explicitly could not be substantiated from code alone and are listed
+      as open gaps in the document's own closing section rather than
+      asserted anyway.
 - [ ] **Pre-release security review (WP 5.3 review half, Fable mandatory)**
       — after an api/core code freeze. Not started: `api`/`core` are not
-      frozen (4h.2/4h.3 are open, and a relay privacy opt-out is in flight),
+      frozen (4h.2/4h.3 are open, and WP 4h.4 is in review),
       so this cannot start yet regardless of the docs half above being done.
       See §11 item 5.
 - [ ] Announcement: r/selfhosted, r/homelab, LanCache Discord (stay fair:
@@ -2256,7 +2264,11 @@ Phases 1–3 plus 4a shipped. Rewritten 2026-08-17 to reflect the real state.
    (its auto-GC prerequisite is shipped — see §7 Phase 3; the sweep mode's
    own frontend surface in both UIs is still open).
 5. [x] **WP 5.3 docs half** — `SECURITY.md` + `docs/security/threat-model.md`,
-   done 2026-08-18 (see §7 Phase 5).
+   done 2026-08-18 (see §7 Phase 5). Round-2 review ran and FAILED (two
+   blockers plus should-fixes, mostly citation drift from WP 4h.0 landing
+   in the same commit range plus a false §5 exhaustiveness claim) —
+   findings addressed in the WP 5.3-fix follow-up commit; round 3: PASS
+   (2026-08-18).
 6. [ ] **WP 5.3 review half, still open** — pre-release security review
    (Fable mandatory), after an api/core code freeze that has not happened
    yet.

@@ -2,15 +2,20 @@
 
 **Verified against commit `234f16c`, 2026-08-18**, with §4 re-verified
 against the code as of **WP 4h.0** (not yet its own commit at the time of
-this update — see that section for file/line citations into the current
-tree instead of a hash). Every other citation below was opened and read at
-`234f16c`. `docs/PROJECT_PLAN.md` in particular grows under active editing
-— including this very package's own tick — so citations into it are given
-as section-plus-quote anchors, never line numbers, precisely because a line
-number into a file that grows is a claim with a short shelf life. Citations
-into files that are not actively growing (source code, other docs) are
-given as line numbers/ranges, each verified at the stated commit; re-open
-them if reading this well after that date.
+that update — see that section for file/line citations into the current
+tree instead of a hash). **WP 5.3-fix (this follow-up commit, 2026-08-18)
+re-verified every citation into `api/vault_api/routers/steam.py`,
+`config.py` and `settings_store.py` against the current tree** — see §4's
+own "Citation style note" for what changed there — **and corrected §5's
+outbound-flows list**, which had omitted two Android outbound calls it
+should have named from the start. Every other citation below was opened
+and read at `234f16c`. `docs/PROJECT_PLAN.md` in particular grows under
+active editing — including this very package's own tick — so citations
+into it are given as section-plus-quote anchors, never line numbers,
+precisely because a line number into a file that grows is a claim with a
+short shelf life. Citations into files that are not actively growing
+(source code, other docs) are given as line numbers/ranges, each verified
+at the stated commit; re-open them if reading this well after that date.
 
 This document describes the security posture of SteamVault *as shipped*, not
 as designed or aspired to. Every claim about behaviour below is followed by
@@ -284,6 +289,23 @@ in-database encryption.
 This is the surface most likely to be missed, and the brief that produced
 this document is right to call it out by name.
 
+**Citation style note.** `api/vault_api/routers/steam.py`, `config.py` and
+`settings_store.py` are under active development in this same phase — WP
+4h.0 alone drifted four of this section's citations by adding 109 lines to
+`routers/steam.py` in the same commit that rewrote this prose, on top of a
+`settings_readonly` drift the same review round caught in §7. Every
+citation into these three files **within this section (§4)** is therefore
+a `module::symbol` anchor (function/class/constant name, optionally with a
+short verbatim quote) rather than a line number, so it stays greppable
+across the next insertion instead of drifting again. Citations into these
+same three files elsewhere in this document (§5, §7) were re-verified
+against the current tree for this follow-up but are left as line numbers
+where they already were — converting every citation in the whole document
+is out of this follow-up's footprint; a plain line number is kept there
+only because it was re-checked as still accurate, not because the file has
+stopped moving (see the top-of-document stamp for the files this document
+actually judges to not be actively growing).
+
 ### What is stored, and where
 
 Two distinct additions:
@@ -302,9 +324,13 @@ Two distinct additions:
 2. **`playtime_forever` and `rtime_last_played` (Steam's own "last played"
    timestamp), relayed per WP 4h.1.** `playtime_forever` was already
    relayed and validated before WP 4h.1 (`api/vault_api/steam_relay.py:52`,
-   `routers/steam.py:83`); WP 4h.1 added `rtime_last_played`
-   (`routers/steam.py:100`, `steam_relay.py:536`). Both are returned by
-   `GET /v1/steam/owned-games` (`routers/steam.py:245-247`) — **this is
+   `api/vault_api/routers/steam.py::OwnedGameOut.playtime_forever` — the
+   field declared `playtime_forever: int = 0`); WP 4h.1 added
+   `rtime_last_played` (`api/vault_api/routers/steam.py::
+   OwnedGameOut.rtime_last_played` — declared `rtime_last_played: int |
+   None = None`, `steam_relay.py:536`). Both are returned by `GET
+   /v1/steam/owned-games` (`api/vault_api/routers/steam.py::get_owned_games`,
+   the route decorated with path `"/v1/steam/owned-games"`) — **this is
    genuine behaviour data about a specific named Steam identity**, exactly
    the "who played what, and when" fact a household vault should be careful
    with.
@@ -319,16 +345,19 @@ configured the relay against (§3).
 
 **Landed (WP 4h.0, ADR-0010): two independent, env-only, off-by-default
 gates.** `VAULT_RELAY_EXPOSE_PLAYTIME`/`VAULT_RELAY_EXPOSE_LAST_PLAYED`
-(`api/vault_api/config.py:799,804` — the `DEFAULT_RELAY_EXPOSE_PLAYTIME`/
-`_LAST_PLAYED` constants, both `False`) each gate one field, independently
-— an operator can allow the aggregate hour count while still refusing to
-ever surface the timestamp, or vice versa. `Settings.relay_expose_playtime`/
-`relay_expose_last_played` (`config.py:930-931`) are read in
-`routers/steam.py`'s `get_owned_games` (`routers/steam.py:289-292`) and
-passed into `OwnedGameOut` construction ONLY when their setting is on
-(`routers/steam.py:287-293, 299-322`); the route's
-`response_model_exclude_unset=True` (`routers/steam.py:254`) then omits the
-JSON key **entirely** when the corresponding constructor argument was never
+(`api/vault_api/config.py::DEFAULT_RELAY_EXPOSE_PLAYTIME`/
+`DEFAULT_RELAY_EXPOSE_LAST_PLAYED` — both `False`) each gate one field,
+independently — an operator can allow the aggregate hour count while still
+refusing to ever surface the timestamp, or vice versa.
+`Settings.relay_expose_playtime`/`relay_expose_last_played`
+(`api/vault_api/config.py::Settings`, the two fields of that name) are read
+in `api/vault_api/routers/steam.py::get_owned_games` (the line
+`expose_playtime=settings.relay_expose_playtime,`) and passed into
+`OwnedGameOut` construction ONLY when their setting is on
+(`api/vault_api/routers/steam.py::_build_owned_game_out`); that same route's
+`response_model_exclude_unset=True` decorator argument
+(`api/vault_api/routers/steam.py::get_owned_games`) then omits the JSON key
+**entirely** when the corresponding constructor argument was never
 passed — not `0`/`null`, which a client could still read as a claim about
 the account. Verified at the wire level, not just by reading the code:
 `api/tests/test_relay_privacy.py::test_both_fields_are_absent_by_default`
@@ -340,7 +369,8 @@ combinations.
 
 **Deliberately NOT persistable, and this is itself a documented trade-off
 (ADR-0010), not an oversight.** Both keys join the `PATCH /v1/settings`
-env-only allowlist (`api/vault_api/settings_store.py:330-331`) rather than
+env-only allowlist (`api/vault_api/settings_store.py::ENV_ONLY_INFO_KEYS`,
+the `relay_expose_playtime`/`relay_expose_last_played` entries) rather than
 becoming DB-overridable like `sweep_include_cached`/`auto_gc` — the
 `settings` table lives in the `vault-db` Docker volume, which can be lost
 independently of the environment (`docker compose down -v`, a rebuild), and
@@ -364,7 +394,17 @@ gate on a request the server never sees. This is not a live contradiction
 today — no Android UI code renders `playtimeForever` anywhere (verified by
 search, zero matches under `app/app/src/main/java/dev/steamvault/app/ui/`)
 — but a reader must not conclude the server-side switch reaches that path
-if a future Android screen ever displays it.
+if a future Android screen ever displays it. **As of the tree this section
+was re-verified against, WP 4h.4 is in review (not yet merged, and not
+described here as landed) and is scoped to remove exactly this direct
+library-call path** (`SteamIdentityRepositoryImpl`'s `SteamWebApiClient`
+wiring, §5 below) **so the relay's server-side gate becomes the only path
+for these two fields once it lands.** What WP 4h.4 does NOT touch, and
+what §5 states separately: the OpenID `check_authentication` round trip
+against Valve (`SteamOpenIdClient.checkAuthentication`) establishes this
+device's Steam identity regardless of whether the library-fetch path
+exists at all, so that outbound flow to Valve remains even after WP 4h.4 —
+identity, not library data, is what it carries.
 
 ### For how long
 
@@ -379,9 +419,11 @@ persisted, in `depot_manifests` (schema v14).
 ### The operator's stated requirement, checked against shipped code
 
 The operator's privacy stance for this feature (`docs/PROJECT_PLAN.md` §7
-Phase 4h, "Privacy stance") is explicit: "off by default or dismissible at
-any time, no nagging, and no number that gets held up to somebody else [in
-the living room]." Checking this against what actually shipped:
+Phase 4h, "Privacy stance") is explicit — a household vault "has more than
+one person in the living room," so the rule that follows one sentence
+later is: "off by default or dismissible at any time, no nagging, and no
+number that gets held up to somebody else." Checking this against what
+actually shipped:
 
 - **The playtime/last-played consuming UI does not exist yet — but a
   different personal-data field from the same relay already renders.**
@@ -398,9 +440,13 @@ the living room]." Checking this against what actually shipped:
   (`web/js/views/settings.js:376-384`), sourced from a second relay call the
   lookup makes alongside `owned-games` —
   `api.steamPlayerSummaries(steamid)` (`web/js/views/settings.js:489`) hits
-  `GET /v1/steam/player-summaries` (`api/vault_api/routers/steam.py:254`),
-  which returns `personaname` plus three avatar image URLs
-  (`api/vault_api/routers/steam.py:111-114`) for the configured identity.
+  `GET /v1/steam/player-summaries`
+  (`api/vault_api/routers/steam.py::get_player_summaries`, the route
+  decorated with path `"/v1/steam/player-summaries"`), which returns
+  `personaname` plus three avatar image URLs
+  (`api/vault_api/routers/steam.py::PlayerSummaryOut`, the
+  `personaname`/`avatar`/`avatarmedium`/`avatarfull` fields) for the
+  configured identity.
   A persona name and a SteamID64 are themselves personal data — a real
   name in many Steam accounts, and a stable identifier that resolves back
   to a public Steam profile — so "no UI renders personal data from this
@@ -474,26 +520,30 @@ privacy section stakes out a claim worth checking precisely because it is
 stated as exhaustive: "Every other component talks only to the LAN, to
 Steam's CDN through vault-core, or to Valve through SteamPrefill" — i.e.
 nothing else should leave. As of commit `234f16c`, that claim has exactly
-three exceptions, all opt-in or narrowly scoped, none of them Steam
-credentials (§3):
+**five** exceptions — this section previously listed three; the two
+Android items below were already named individually in §3/§4 but had been
+left out of this outbound-flows inventory, which is corrected here — some
+opt-in, some structural design decisions, none of them Steam credentials
+(§3):
 
 1. **The Steam Web API relay (§3, §4).** ADR-0004's addendum states the
    obligation directly: "SECURITY.md documents the added data path: with
    the relay configured, library queries originate from the SERVER (they
    leave the LAN toward Valve), not from the browser"
    (`docs/adr/0004-steam-credentials-never-touch-steamvault.md:57-59`).
-   `steam_relay.py`'s own module docstring says the same thing in the same
-   words and names this exact document by name as the place that should
-   say it: "this is one of the few things in SteamVault that leaves the
-   LAN — and here it leaves it carrying the operator's own Steam Web API
-   key and the SteamID64 being looked up… see api/README.md's 'Steam Web
-   API relay' section for the full note WP 5.3's threat model is expected
-   to read" (`api/vault_api/steam_relay.py:94-100, 109-110`). Off by
-   default (no row in `steam_relay_key` until the operator enters one, §3);
-   once configured, every `GET /v1/steam/owned-games` or
-   `GET /v1/steam/player-summaries` call sends the relay key and a
-   SteamID64 to `api.steampowered.com` over HTTPS
-   (`api/vault_api/steam_relay.py:136-137`, `STEAM_API_HOST`/`STEAM_API_BASE`
+   `steam_relay.py`'s own module docstring, "## Privacy" section, says the
+   same thing in the same words and names this exact document by name as
+   the place that should say it: "this is one of the few things in
+   SteamVault that leaves the LAN — and here it leaves it carrying the
+   operator's own Steam Web API key and the SteamID64 being looked up…
+   see api/README.md's 'Steam Web API relay' section for the full note
+   WP 5.3's threat model is expected to read"
+   (`api/vault_api/steam_relay.py:94-100, 109-111` — the quoted sentence's
+   own tail sits on :111, not :110). Off by default (no row in
+   `steam_relay_key` until the operator enters one, §3); once configured,
+   every `GET /v1/steam/owned-games` or `GET /v1/steam/player-summaries`
+   call sends the relay key and a SteamID64 to `api.steampowered.com` over
+   HTTPS (`api/vault_api/steam_relay.py::STEAM_API_HOST`/`STEAM_API_BASE`
    — pinned as a literal host, not derived from any setting).
 2. **The optional manifest oracle.** `VAULT_MANIFEST_ORACLE` is off by
    default (`api/vault_api/config.py:92-93`: "the default"); when an
@@ -528,8 +578,40 @@ credentials (§3):
    is currently viewing" to that CDN the same way any hotlinked image would
    to any host, at ordinary web scale — named here for completeness, not
    because it is a sharp risk.
+4. **The Android app's own direct Steam Web API calls (§3, §4) — the same
+   two endpoints as item 1, but from the DEVICE, never through vault-api.**
+   `SteamIdentityRepositoryImpl` wires a `SteamWebApiClient` as its
+   `libraryFetcher` by default
+   (`app/app/src/main/java/dev/steamvault/app/repo/SteamIdentityRepository.kt::
+   SteamIdentityRepositoryImpl`, the constructor's `libraryFetcher`
+   default, currently at :93-98), which calls `IPlayerService/GetOwnedGames/v1` and
+   `ISteamUser/GetPlayerSummaries/v2` against `api.steampowered.com`
+   directly, using the device-local, user-owned key ADR-0004 decision 2
+   specifies — never the relay's key, and never proxied through vault-api
+   (`SteamWebApiClient.STEAM_API_HOST`/`STEAM_API_BASE`, already cited in
+   §4). There is no separate on/off switch for this one: it is off in
+   practice only until the operator pastes a Web API key into the app.
+   **As of the tree this section was verified against, WP 4h.4 is in
+   review — not merged, and not described here as landed — scoped to
+   remove exactly this direct path** so the server-side relay (item 1)
+   becomes the only route for these two calls once it lands; see §4's own
+   note on the same package.
+5. **The Android app's OpenID identity verification, to Valve (§3) —
+   unaffected by WP 4h.4.** Completing "Sign in with Steam" POSTs the
+   callback's `openid.*` parameters back to Valve's login endpoint with
+   `openid.mode=check_authentication`
+   (`app/app/src/main/java/dev/steamvault/app/net/steam/SteamOpenIdClient.kt::
+   SteamOpenIdClient.checkAuthentication`, currently at :81-89) — the step
+   that actually proves
+   the deep-link callback was not forged, per OpenID 2.0. This call carries
+   no Steam Web API key and no vault-api secret, only the OpenID assertion
+   Valve itself issued, and it establishes *identity* (a SteamID64), never
+   library data — a materially different flow from item 4, which is why
+   WP 4h.4 removing item 4 does not remove this one: the app still has to
+   establish who is signing in against Valve regardless of how (or
+   whether) it later fetches library data.
 
-Beyond the two core flows named above and the three exceptions just listed,
+Beyond the two core flows named above and the five exceptions just listed,
 nothing else in this repository makes an outbound network call as shipped:
 agent reports and Android/web-to-API traffic stay LAN-internal by design
 (§1), and webhooks (`docs/PROJECT_PLAN.md` §7 Phase 3/Phase 6, out of this
@@ -593,7 +675,9 @@ brute-force lockout on repeated wrong guesses — this repository's `auth.py`
 and `main.py` were read in full and contain no such mechanism. Nor is any
 minimum length or complexity enforced on the key itself: `config.py`
 requires only that `VAULT_API_KEY` be non-empty after stripping whitespace
-(`api/vault_api/config.py:948-955`) — an operator who sets it to a short or
+(`api/vault_api/config.py::Settings.from_env`, the check that raises
+"VAULT_API_KEY is required and must not be empty.") — an operator who sets
+it to a short or
 guessable string is not stopped by any code path, only by the `.env.example`
 comment recommending `python -c "import secrets;
 print(secrets.token_urlsafe(36))"` (`deploy/.env.example:33-36`). Every

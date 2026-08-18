@@ -3,11 +3,12 @@
 ## Supported versions
 
 SteamVault has no tagged releases yet (see `docs/PROJECT_PLAN.md` §7 Phase 5 —
-publishing to a registry with version tags is still gated on the operator's
-own end-to-end test). Until the first tagged release, security reports are
-accepted against the current state of the `main` branch, and fixes land
-there. Once tagged releases exist, only the most recent tag will receive
-security fixes — this is a single-maintainer project (see
+publishing to a registry with version tags is still gated on the user's
+go-ahead (docs/PROJECT_PLAN.md §11, WP 5.5). Until the first tagged release,
+security reports are accepted against the current state of the `main`
+branch, and fixes land there. Once tagged releases exist, only the most
+recent tag will receive security fixes — this is a single-maintainer
+project (see
 `docs/PROJECT_PLAN.md` §9 "Risks & Open Questions") and cannot commit to
 backporting.
 
@@ -18,6 +19,14 @@ vulnerability reporting** for this repository: open the repository's
 **Security** tab and select **"Report a vulnerability"** to start a private
 advisory. This opens a private conversation with the maintainer that is not
 visible to the public until a fix is ready.
+
+This channel depends on GitHub's private vulnerability reporting being
+**enabled** for this repository (a repository setting, not a GitHub-wide
+guarantee). If the **Security** tab has no **"Report a vulnerability"**
+option when you look, please open a minimal public GitHub issue that asks
+only for a private contact channel — **no vulnerability details and no
+email address** in that issue — and the maintainer will follow up privately
+from there.
 
 Do not open a public GitHub issue for a security report — see
 `docs/security/threat-model.md` for the design assumptions and known,
