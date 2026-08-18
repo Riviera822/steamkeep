@@ -108,6 +108,17 @@ field; the display-side privacy controls (off-by-default/dismissible, no
 nagging) are WP 4h.2's responsibility, not this package's — see
 api/README.md's "Steam Web API relay" section for the full note WP 5.3's
 threat model is expected to read.
+
+**WP 4h.0 addendum (ADR-0010):** the SERVER-side half of that same privacy
+stance — as opposed to WP 4h.2's still-pending display-side half — now
+exists too, and it lives in ``routers/steam.py``, not here: two env-only
+settings (``Settings.relay_expose_playtime`` / ``relay_expose_last_played``)
+decide whether ``playtime_forever``/``rtime_last_played`` may leave the
+whitelist boundary at all. This module keeps parsing and caching BOTH fields
+unconditionally regardless of that gate — the gate is applied only at the
+outermost conversion to the wire response, never here, so the cache's
+contents are not what it protects and a settings change takes effect on the
+very next request.
 """
 
 from __future__ import annotations

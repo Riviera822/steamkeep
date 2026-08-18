@@ -56,6 +56,10 @@ chosen over env-only).
    before a restart or a privilege escalation. Everything else (vault name,
    schedule window/cadence and numeric tunables, webhook URL + event
    filter, auto-GC flag, future sweep-mode flag) becomes overridable.
+   **Update (WP 4h.0):** `relay_expose_playtime` and
+   `relay_expose_last_played` (the Steam relay's privacy gate) joined this
+   allowlist too, for a DIFFERENT rationale than the bootstrap/security one
+   above — see ADR-0010, which is the actual amendment to this decision.
 6. **Read model:** settings are read through one accessor that resolves
    precedence at call time. Components that cache a value (scheduler
    cadence) re-read on their existing wake-up cadence — documented per

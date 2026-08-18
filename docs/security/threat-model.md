@@ -1,13 +1,16 @@
 # SteamVault — Threat Model
 
-**Verified against commit `234f16c`, 2026-08-18.** Every citation below was
-opened and read at that commit. `docs/PROJECT_PLAN.md` in particular grows
-under active editing — including this very package's own tick — so
-citations into it are given as section-plus-quote anchors, never line
-numbers, precisely because a line number into a file that grows is a claim
-with a short shelf life. Citations into files that are not actively growing
-(source code, other docs) are given as line numbers/ranges, each verified at
-the stated commit; re-open them if reading this well after that date.
+**Verified against commit `234f16c`, 2026-08-18**, with §4 re-verified
+against the code as of **WP 4h.0** (not yet its own commit at the time of
+this update — see that section for file/line citations into the current
+tree instead of a hash). Every other citation below was opened and read at
+`234f16c`. `docs/PROJECT_PLAN.md` in particular grows under active editing
+— including this very package's own tick — so citations into it are given
+as section-plus-quote anchors, never line numbers, precisely because a line
+number into a file that grows is a claim with a short shelf life. Citations
+into files that are not actively growing (source code, other docs) are
+given as line numbers/ranges, each verified at the stated commit; re-open
+them if reading this well after that date.
 
 This document describes the security posture of SteamVault *as shipped*, not
 as designed or aspired to. Every claim about behaviour below is followed by
@@ -21,12 +24,14 @@ review agents rather than a professional security audit. Treat this
 document as an honest description of a hobby project's attack surface, not
 as a certification.
 
-**A privacy control is currently in flight and will date this document's §4
-the moment it lands** (see §4's own forward pointer): an env-only,
-non-persistable opt-out for the Steam relay's playtime/last-played fields,
-enforced at the relay boundary with `PATCH` rejecting attempts to persist it
-via the settings table. Until it ships, §4 describes the code as it stands
-today.
+**The privacy control §4 previously described as "in flight" has landed
+(WP 4h.0, ADR-0010).** §4 below now describes the shipped gate: two
+env-only, non-persistable, independent opt-outs for the Steam relay's
+`playtime_forever`/`rtime_last_played` fields, both off by default, each
+enforced at the relay boundary by omitting the JSON key entirely (not
+sending `0`/`null`), with `PATCH /v1/settings` rejecting attempts to set
+either. What has NOT changed, and is still worth flagging plainly: the gate
+covers `vault-api`'s relay only — see §4's own note on the Android app.
 
 ---
 
@@ -307,24 +312,59 @@ Two distinct additions:
 ### Who can read it via the API
 
 Anyone holding the single `VAULT_API_KEY` (§7 — there is exactly one key,
-with no per-endpoint scoping) can call `GET /v1/steam/owned-games` and
-receive playtime and last-played for whichever single Steam identity the
-operator configured the relay against (§3). **As of commit `234f16c`**
-(the intro's as-of stamp) there is no per-field suppression flag, no
-separate permission tier, and no server-side setting that hides these two
-fields from an authenticated caller — verified by reading `config.py` in
-full: no `VAULT_*` flag related to playtime, privacy, or hiding fields
-exists there. This is stated as a point-in-time fact, not a durable one: a
-work package now in flight is expected to add exactly such a control —
-described as env-only (not persisted to, or settable through, the
-`settings`/`PATCH /v1/settings` machinery ADR-0009 built for everything
-else — `PATCH` is expected to reject attempts to set it there) and split
-into two independent keys enforced at the relay boundary itself, in
-`vault_api/steam_relay.py`/`routers/steam.py`, rather than one flag gating
-the whole feature. That work was not in this repository at the commit this
-document was verified against, so it is described here without file/line
-citations — re-check `config.py` and `routers/steam.py` for it before
-trusting this paragraph.
+with no per-endpoint scoping) can call `GET /v1/steam/owned-games` and, IF
+both fields are turned on (see below — they are OFF by default), receive
+playtime and last-played for whichever single Steam identity the operator
+configured the relay against (§3).
+
+**Landed (WP 4h.0, ADR-0010): two independent, env-only, off-by-default
+gates.** `VAULT_RELAY_EXPOSE_PLAYTIME`/`VAULT_RELAY_EXPOSE_LAST_PLAYED`
+(`api/vault_api/config.py:799,804` — the `DEFAULT_RELAY_EXPOSE_PLAYTIME`/
+`_LAST_PLAYED` constants, both `False`) each gate one field, independently
+— an operator can allow the aggregate hour count while still refusing to
+ever surface the timestamp, or vice versa. `Settings.relay_expose_playtime`/
+`relay_expose_last_played` (`config.py:930-931`) are read in
+`routers/steam.py`'s `get_owned_games` (`routers/steam.py:289-292`) and
+passed into `OwnedGameOut` construction ONLY when their setting is on
+(`routers/steam.py:287-293, 299-322`); the route's
+`response_model_exclude_unset=True` (`routers/steam.py:254`) then omits the
+JSON key **entirely** when the corresponding constructor argument was never
+passed — not `0`/`null`, which a client could still read as a claim about
+the account. Verified at the wire level, not just by reading the code:
+`api/tests/test_relay_privacy.py::test_both_fields_are_absent_by_default`
+asserts `"playtime_forever" not in game` and `"rtime_last_played" not in
+game` against a real HTTP response body, and
+`test_response_key_sets_match_the_models_exactly` asserts the full response
+key set against the Pydantic models' own field set in all four gate-state
+combinations.
+
+**Deliberately NOT persistable, and this is itself a documented trade-off
+(ADR-0010), not an oversight.** Both keys join the `PATCH /v1/settings`
+env-only allowlist (`api/vault_api/settings_store.py:330-331`) rather than
+becoming DB-overridable like `sweep_include_cached`/`auto_gc` — the
+`settings` table lives in the `vault-db` Docker volume, which can be lost
+independently of the environment (`docker compose down -v`, a rebuild), and
+a privacy opt-out whose failure mode is "silently resumes collecting
+personal data with the loss of a volume, no notification to anyone" was
+judged worse than the real cost this choice accepts: **there is no runtime
+opt-out.** Changing either value means editing `deploy/compose.yaml`/`.env`
+and restarting the `vault-api` container. `GET /v1/settings` still reports
+both as informational, env-only rows so an operator (or a future settings
+UI) can see the current state without a switch that would `422`.
+
+**What this gate does NOT cover: the Android app fetches playtime directly
+from Valve, with its own device-local key, never through this relay.**
+`SteamWebApiClient`'s own `STEAM_API_HOST`/`STEAM_API_BASE` constants
+(`app/app/src/main/java/dev/steamvault/app/net/steam/SteamWebApiClient.kt:
+129-131`) show the app talking to `api.steampowered.com` directly — the
+device-local-key design ADR-0004 always specified (§3) — so
+`VAULT_RELAY_EXPOSE_PLAYTIME`/`_LAST_PLAYED` have no effect on that path by
+construction, not by omission: there is nothing in `vault-api` for them to
+gate on a request the server never sees. This is not a live contradiction
+today — no Android UI code renders `playtimeForever` anywhere (verified by
+search, zero matches under `app/app/src/main/java/dev/steamvault/app/ui/`)
+— but a reader must not conclude the server-side switch reaches that path
+if a future Android screen ever displays it.
 
 ### For how long
 
@@ -372,19 +412,26 @@ the living room]." Checking this against what actually shipped:
   references it (verified by search — zero matches); Android does not call
   the web relay at all (device-local Steam Web API access per ADR-0004),
   so this particular persona/SteamID64 exposure is web-only.
-- **So, honestly: there is currently no "off by default or dismissible"
-  control, because there is also currently no display to turn off or
-  dismiss.** The requirement cannot yet be said to be *met*, because the
-  feature it applies to (the panel) has not shipped; it also cannot be said
-  to be *violated* in the visible UI, because nothing shows the number
-  today. What *is* true **as of commit `234f16c`**, and is the actual gap
-  worth flagging: **the API answers with the data unconditionally to
-  anyone with the key**, before the display-side privacy control WP 4h.2 is
-  supposed to add has been written — and before the in-flight relay
-  opt-out described above under "Who can read it via the API" lands. Any
-  direct API consumer (a curl script, a future integration, a household
-  member who has the key and knows the endpoint exists) can read this data
-  today with no gate beyond the one shared key. Whoever implements WP 4h.2
+- **Updated (WP 4h.0): the API-level half of "off by default" has now
+  landed, ahead of the display-side half.** The "API answers with the data
+  unconditionally to anyone with the key" gap this section used to flag
+  (as of `234f16c`) is closed for the two fields the operator's privacy
+  stance names: `playtime_forever`/`rtime_last_played` are both off by
+  default and independently gated (§4's "Who can read it via the API"
+  above). This is a genuinely different, and stronger, guarantee than "no
+  display exists yet" — it is enforced at the API itself, so it holds even
+  against a direct API consumer (a curl script, a future integration, a
+  household member who has the key and knows the endpoint exists), not
+  only against a UI that happens not to render the field. What is still
+  true, and still worth stating plainly: there is currently no display to
+  turn off or dismiss either (WP 4h.2/4h.3 remain unticked), so the
+  "dismissible at any time, no nagging" half of the stance has no UI to
+  apply to yet — that half of the requirement is `docs/PROJECT_PLAN.md`'s
+  own "in flight" item, not this document's to close. **The persona
+  name/SteamID64 exposure described in the paragraph above this one is
+  UNCHANGED by WP 4h.0** — that data flows through a different endpoint
+  (`GET /v1/steam/player-summaries`) which WP 4h.0's gate does not touch,
+  and still has no suppression control of any kind. Whoever implements WP 4h.2
   should treat this document's framing as the requirement to design
   against: the "dismissible/no nagging" property belongs to a *display*
   concern, but "who can retrieve it at all" is an

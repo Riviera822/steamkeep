@@ -36,7 +36,9 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import TEST_API_KEY
 from vault_api import steam_relay
+from vault_api.config import Settings
 from vault_api.db import get_connection, init_db
+from vault_api.main import create_app
 
 HEADERS = {"X-Api-Key": TEST_API_KEY}
 
@@ -68,6 +70,29 @@ def failing_fetcher(message: str = "boom") -> Callable[[str, dict], bytes]:
         raise steam_relay.SteamRelayError(message)
 
     return fetch
+
+
+def client_with_relay_exposure_on(tmp_path) -> TestClient:
+    """A client whose WP 4h.0 privacy gate is fully OPEN for both keys.
+
+    Every test in THIS file that asserts on ``playtime_forever``/
+    ``rtime_last_played`` in an HTTP response body is pinning the underlying
+    whitelisting/absence-handling pipeline (WP 4a.6r/4h.1), not the WP 4h.0
+    default -- that default (both off) has its own dedicated tests in
+    ``tests/test_relay_privacy.py``. Using the default ``client`` fixture
+    here would make those fields silently disappear from every response and
+    turn this whole file's assertions into ``KeyError``s that have nothing to
+    do with what each test actually means to prove.
+    """
+    settings = Settings(
+        vault_api_key=TEST_API_KEY,
+        db_path=str(tmp_path / "vault.db"),
+        cache_root=str(tmp_path / "cache"),
+        log_level="INFO",
+        relay_expose_playtime=True,
+        relay_expose_last_played=True,
+    )
+    return TestClient(create_app(settings))
 
 
 RECORDED_OWNED_GAMES = {
@@ -729,8 +754,9 @@ def test_a_bad_steamid_is_a_422_even_with_a_key_configured(client: TestClient, s
 
 
 def test_owned_games_end_to_end_with_a_recorded_fixture(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    client = client_with_relay_exposure_on(tmp_path)
     client.put("/v1/steam/key", headers=HEADERS, json={"key": VALID_KEY})
     monkeypatch.setattr(steam_relay, "http_fetch", fetcher(encode(RECORDED_OWNED_GAMES)))
 
@@ -752,11 +778,17 @@ def test_owned_games_end_to_end_with_a_recorded_fixture(
 
 
 def test_owned_games_rtime_last_played_round_trips_over_http(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End-to-end pin against the REAL Pydantic response model
     (``routers.steam.OwnedGameOut``), not a hand-written dict: a present
-    value survives, an absent one is null -- both in the SAME response."""
+    value survives, an absent one is null -- both in the SAME response.
+
+    Uses ``client_with_relay_exposure_on`` (WP 4h.0's gate defaults both
+    keys off) so this stays a pin on the absence-handling pipeline, not on
+    the privacy default -- see that helper's docstring.
+    """
+    client = client_with_relay_exposure_on(tmp_path)
     client.put("/v1/steam/key", headers=HEADERS, json={"key": VALID_KEY})
     doc = {
         "response": {

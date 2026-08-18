@@ -203,6 +203,25 @@ services:
       # reach it. Default matches config.py's own built-in default
       # byte-for-byte.
       VAULT_WEBHOOK_TIMEOUT_SECONDS: ${VAULT_WEBHOOK_TIMEOUT_SECONDS:-5.0}
+      # WP 4h.0 (ADR-0010): the privacy gate for the Steam relay's
+      # playtime_forever / rtime_last_played fields (api/README.md "Steam
+      # Web API relay"). Env-only, on purpose and UNLIKE VAULT_AUTO_GC/
+      # VAULT_SWEEP_INCLUDE_CACHED above (which ARE DB-overridable): the
+      # settings table lives in the vault-db volume below, and a setting
+      # whose only failure mode is "silently resumes collecting personal
+      # data after the volume is lost" cannot be backed by that volume
+      # (docs/adr/0010-*.md has the full argument). Forwarded HERE, not left
+      # to a compose.override.yaml recipe, because this project has three
+      # times now shipped a README sentence telling an operator to set a
+      # variable that the stack never actually forwarded
+      # (docs/LEARNINGS.md "Containers") -- see
+      # tests/test_p1_compose_env_defaults.py, which fails if either line
+      # below is ever removed. Off by default (config.py's
+      # DEFAULT_RELAY_EXPOSE_PLAYTIME/_LAST_PLAYED) -- turning either on
+      # requires editing this file (or deploy/.env) and restarting the
+      # container; there is no runtime switch.
+      VAULT_RELAY_EXPOSE_PLAYTIME: ${VAULT_RELAY_EXPOSE_PLAYTIME:-false}
+      VAULT_RELAY_EXPOSE_LAST_PLAYED: ${VAULT_RELAY_EXPOSE_LAST_PLAYED:-false}
       # VAULT_DB_PATH, VAULT_CACHE_ROOT, VAULT_STEAMPREFILL_PATH and
       # VAULT_WEB_DIR are baked into the image (they describe the image's own
       # layout, not a deployment choice) -- see api/Dockerfile. VAULT_NAME,
@@ -214,14 +233,18 @@ services:
       # supported way to set them -- see api/README.md "Settings" and the
       # web UI / app settings screens. VAULT_SETTINGS_READONLY is
       # deliberately env-only BY DEFINITION (a settings-API lock cannot be
-      # unlockable through that same API). VAULT_MANIFEST_ARCHIVE_DIR and
-      # VAULT_STEAMPREFILL_CACHE_DIR are genuine path overrides tied to
-      # volume layout, not general-purpose tuning knobs -- left env-only and
-      # documented via the compose.override.yaml recipe in
-      # deploy/examples/tuned-setup.md rather than a bare .env line, because
-      # a wrong value here silently loses persistence with no volume backing
-      # it, unlike the numeric knobs above where a wrong value at worst picks
-      # a different (still valid) number.
+      # unlockable through that same API) -- like VAULT_RELAY_EXPOSE_PLAYTIME/
+      # _LAST_PLAYED above it has no DB-override counterpart at all, but
+      # (unlike those two) it is NOT forwarded here today, out of scope for
+      # this work package to change.
+      # VAULT_MANIFEST_ARCHIVE_DIR and VAULT_STEAMPREFILL_CACHE_DIR are
+      # genuine path overrides tied to volume layout, not general-purpose
+      # tuning knobs -- left env-only and documented via the
+      # compose.override.yaml recipe in deploy/examples/tuned-setup.md
+      # rather than a bare .env line, because a wrong value here silently
+      # loses persistence with no volume backing it, unlike the numeric
+      # knobs above where a wrong value at worst picks a different (still
+      # valid) number.
     ports:
       # LAN-only, like everything else here. This is the interface the Android
       # app and vault-agent talk to. For access from outside the LAN do NOT

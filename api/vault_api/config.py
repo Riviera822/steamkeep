@@ -756,6 +756,54 @@ def parse_strict_float(raw: str) -> float:
     return value
 
 
+# --------------------------------------------------------------------------
+# WP 4h.0 (ADR-0010). Server-side privacy gate for the Steam relay's
+# ``playtime_forever`` / ``rtime_last_played`` fields
+# (``vault_api/routers/steam.py``). Both are ENV-ONLY, deliberately outside
+# ``settings_store.OVERRIDABLE_SPECS`` even though they are booleans exactly
+# like ``sweep_include_cached``/``auto_gc``, which ARE DB-overridable.
+#
+# **Why no runtime toggle, argued in full in docs/adr/0010-*.md:** the
+# ``settings`` table (ADR-0009) lives in the ``vault-db`` Docker volume.
+# ``docker compose down -v``, a lost volume, or a rebuild on new hardware
+# erases every override row, and the value then falls back to whatever the
+# ENVIRONMENT says. For an ordinary tuning knob that is a harmless "reverts
+# to a sane default, someone notices". For a privacy opt-out the direction
+# of that fallback is the whole question: an operator who deliberately set
+# a DB override to turn exposure OFF while the environment still says "on"
+# would have that override silently erased by a lost volume, and collection
+# would resume with no notification and nothing in the log. A control whose
+# failure mode is "quietly starts collecting personal data again" is not a
+# control, so these two keys have exactly one source of truth -- the
+# environment, which lives in the operator's own compose file/`.env`,
+# covered by whatever backs THAT up, not the database volume.
+# --------------------------------------------------------------------------
+
+#: Off by default. The Phase 4h privacy stance (docs/PROJECT_PLAN.md, user
+#: decision 2026-08-18) already treats playtime itself -- not only
+#: rtime_last_played -- as something a shared-household vault must not
+#: surface without an explicit opt-in: "playtime makes the UI judgemental
+#: ... off by default or dismissible at any time, no nagging, and no number
+#: that gets held up to somebody else." That is the same house style
+#: DEFAULT_SWEEP_INCLUDE_CACHED and the WP 3.11 event sweep already follow
+#: for every privacy/cost-sensitive switch in this file: ship off, let an
+#: operator who wants it read the README and turn it on. "The
+#: decision-support panel needs it" (docs/PROJECT_PLAN.md Phase 4h) is
+#: explicitly NOT treated as a sufficient reason to default this on --
+#: WP 4h.0's own brief asks for a stronger argument than that, and the
+#: privacy stance above is the one actually used. With no runtime override
+#: for either key (see the section note above), this default is also the
+#: ONLY value most installs will ever see unless an operator edits the
+#: environment, which makes getting it right here more consequential than
+#: an ordinary DEFAULT_*, not less.
+DEFAULT_RELAY_EXPOSE_PLAYTIME = False
+
+#: Off by default, for the same reason, and doubly so: WP 4h.1's own note
+#: calls this "the sharper fact of the two" -- "when did this person last
+#: play" reads as surveillance in a way an aggregate hour count does not.
+DEFAULT_RELAY_EXPOSE_LAST_PLAYED = False
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable snapshot of the environment at startup."""
@@ -873,6 +921,14 @@ class Settings:
     # the README, and a GitOps/headless deployment opts into the pre-ADR-0009
     # pure-env posture explicitly.
     settings_readonly: bool = False
+    # WP 4h.0 (ADR-0010). Whether the Steam relay (routers/steam.py) may
+    # include playtime_forever / rtime_last_played in its response at all.
+    # Env-only -- see this file's own "WP 4h.0 (ADR-0010)" section above for
+    # why these two are NOT in settings_store.OVERRIDABLE_SPECS despite
+    # being ordinary booleans. Off by default (DEFAULT_RELAY_EXPOSE_PLAYTIME/
+    # _LAST_PLAYED above).
+    relay_expose_playtime: bool = DEFAULT_RELAY_EXPOSE_PLAYTIME
+    relay_expose_last_played: bool = DEFAULT_RELAY_EXPOSE_LAST_PLAYED
 
     @property
     def webhook_enabled(self) -> bool:
@@ -1128,4 +1184,15 @@ class Settings:
             # Settings-API work package. Env-only (see the field's own
             # docstring); False (read-write) unless explicitly turned on.
             settings_readonly=_env_bool("VAULT_SETTINGS_READONLY", False),
+            # WP 4h.0 (ADR-0010). Env-only privacy gate for the Steam relay's
+            # playtime_forever / rtime_last_played fields -- see this
+            # module's own "WP 4h.0 (ADR-0010)" section above for why these
+            # two have no DB-override counterpart at all. Off unless the
+            # operator explicitly turns either on.
+            relay_expose_playtime=_env_bool(
+                "VAULT_RELAY_EXPOSE_PLAYTIME", DEFAULT_RELAY_EXPOSE_PLAYTIME
+            ),
+            relay_expose_last_played=_env_bool(
+                "VAULT_RELAY_EXPOSE_LAST_PLAYED", DEFAULT_RELAY_EXPOSE_LAST_PLAYED
+            ),
         )

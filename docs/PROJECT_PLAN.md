@@ -1756,6 +1756,21 @@ posture §7 Phase 6 already takes toward client addresses in webhook payloads,
 for the same reason. WP 5.3's threat model must cover the new personal-data
 surface (playtime and last-played now flow through the API response).
 
+- [x] **4h.0 (api)** — the API-level half of the privacy stance above:
+      two independent, off-by-default settings
+      (`VAULT_RELAY_EXPOSE_PLAYTIME`/`VAULT_RELAY_EXPOSE_LAST_PLAYED`) gate
+      whether `playtime_forever`/`rtime_last_played` may leave the Steam
+      relay's response AT ALL, enforced by omitting the JSON key entirely
+      (not `0`/`null`) when off. Deliberately environment-only — no
+      `PATCH /v1/settings` override — because the `settings` table lives in
+      a Docker volume that can be lost independently of the environment,
+      and a privacy opt-out must not have "silently starts collecting
+      again" as its failure mode; see
+      [ADR-0010](adr/0010-relay-privacy-gate-env-only.md) for the full
+      argument, including the runtime-toggle design considered and
+      rejected. This is the API-only half of the stance: the display-side
+      "dismissible at any time, no nagging" half remains 4h.2/4h.3's to
+      build. `docs/security/threat-model.md` §4 updated accordingly.
 - [x] **4h.1 (api)** — two small additions that make the panel sharp:
       `rtime_last_played` carried through the Steam relay (Steam returns it,
       we simply never asked; `playtime_forever` is ALREADY relayed and

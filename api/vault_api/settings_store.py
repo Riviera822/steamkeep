@@ -41,6 +41,20 @@ all — ``PATCH`` rejects them by name with a distinct ``422`` detail
 (``ENV_ONLY_KEYS``), never the generic "unknown key" one, so an operator (or
 the web UI) can tell "this key exists but is locked to the environment" from
 "this key does not exist".
+
+**WP 4h.0 addendum (ADR-0010).** ``relay_expose_playtime`` and
+``relay_expose_last_played`` (the Steam relay's privacy gate,
+``vault_api/routers/steam.py``) join ``ENV_ONLY_INFO_KEYS`` for a DIFFERENT
+reason than the bootstrap/security keys ADR-0009 §5 already lists there:
+they are not about how the process finds its world or who may talk to it.
+ADR-0010 records the actual rationale — the ``settings`` table lives in a
+Docker volume that can be lost (``docker compose down -v``, a rebuild), and a
+setting whose loss silently RE-ENABLES a privacy-sensitive data flow with no
+notification cannot be backed by that volume. Both are still ordinary
+booleans reported by ``describe_settings`` exactly like every other
+``ENV_ONLY_INFO_KEYS`` row (``source``/``effective`` from the environment,
+``applies="restart-required"``) — the only thing missing, compared to
+``sweep_include_cached``/``auto_gc``, is a ``PATCH`` path.
 """
 
 from __future__ import annotations
@@ -310,6 +324,11 @@ ENV_ONLY_INFO_KEYS: tuple[EnvOnlySpec, ...] = (
     EnvOnlySpec("manifest_archive_dir", "VAULT_MANIFEST_ARCHIVE_DIR"),
     EnvOnlySpec("web_dir", "VAULT_WEB_DIR"),
     EnvOnlySpec("settings_readonly", "VAULT_SETTINGS_READONLY"),
+    # WP 4h.0 (ADR-0010) — see this module's own docstring addendum above
+    # for why these two are env-only for a DIFFERENT reason than every
+    # other row in this tuple.
+    EnvOnlySpec("relay_expose_playtime", "VAULT_RELAY_EXPOSE_PLAYTIME"),
+    EnvOnlySpec("relay_expose_last_played", "VAULT_RELAY_EXPOSE_LAST_PLAYED"),
 )
 
 #: Every key name PATCH refuses with the distinct "environment-only" 422 —

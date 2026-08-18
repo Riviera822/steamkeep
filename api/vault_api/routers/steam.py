@@ -26,17 +26,41 @@ question.
 ``key_last4`` only (``vault_api.steam_relay.mask_key``); no route, error
 detail, or log line in this module or ``vault_api/steam_relay.py`` ever
 carries the full key or a URL containing it (see that module's docstring).
+
+**WP 4h.0 (ADR-0010): the privacy gate for ``playtime_forever`` /
+``rtime_last_played``.** Two independent, env-only settings
+(``Settings.relay_expose_playtime`` / ``relay_expose_last_played``,
+``vault_api/config.py``) decide whether each field may leave this process at
+all. The gate is applied HERE, in ``get_owned_games``, at the outermost
+conversion from the internal ``steam_relay.OwnedGame`` record (which always
+carries both fields, cached or not — the cache's contents are not what this
+gate protects) to the wire-format ``OwnedGameOut``: when a key is off, that
+field's constructor argument is simply never passed, and the route's
+``response_model_exclude_unset=True`` then drops the JSON key entirely from
+the response body — not a `null`/`0` a client could still observe, an
+ABSENT key, exactly as the work package requires ("a switch that only hides
+the number in the UI is defeated by opening the browser's dev tools"). Both
+default OFF (``config.DEFAULT_RELAY_EXPOSE_PLAYTIME``/
+``_LAST_PLAYED`` — see their own docstrings for the privacy argument) and
+are deliberately NOT overridable via ``PATCH /v1/settings`` — ADR-0010
+explains why, in short: the settings database lives in a Docker volume that
+can be lost, and a privacy opt-out must not have "silently starts collecting
+again" as its failure mode. ``GET /v1/settings`` still reports both keys as
+informational, env-only rows (``settings_store.ENV_ONLY_INFO_KEYS``) so a UI
+can show their state without offering a switch that would 422.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
 from vault_api import steam_relay
 from vault_api.auth import require_api_key
+from vault_api.config import Settings
 from vault_api.deps import DbOpener, db_opener, get_steam_relay_cache
 from vault_api.steam_relay import RelayCache
 
@@ -80,7 +104,12 @@ class OwnedGameOut(BaseModel):
     #: this field's TYPE is a cross-frontend contract this work package must
     #: not touch, even though its sibling ``rtime_last_played`` below gets
     #: the fully honest nullable treatment because it is a brand-new field.
-    playtime_forever: int
+    #: Defaults to ``0`` only so this field CAN be omitted from construction
+    #: (WP 4h.0): when ``Settings.relay_expose_playtime`` is off, the router
+    #: never passes this kwarg at all, and ``response_model_exclude_unset``
+    #: then drops the JSON key entirely rather than sending a `0` a client
+    #: could mistake for a real "never played" claim.
+    playtime_forever: int = 0
     img_icon_url: str
     #: Unix-epoch seconds of this account's last recorded play session for
     #: this app, or ``null`` (WP 4h.1). ``null`` covers two DIFFERENT
@@ -96,8 +125,14 @@ class OwnedGameOut(BaseModel):
     #: coerced the OTHER way (absence -> a manufactured ``0``) -- that would
     #: be inventing "never played" from data that never said so.
     #: api/README.md documents this field's full semantics and its privacy
-    #: note.
-    rtime_last_played: int | None
+    #: note. Defaults to ``None`` for the same WP 4h.0 "must be omittable"
+    #: reason ``playtime_forever`` above defaults to ``0`` -- when
+    #: ``Settings.relay_expose_last_played`` is off, this kwarg is never
+    #: passed and the key disappears from the response body entirely,
+    #: rather than merely rendering as ``null`` (which would already be
+    #: indistinguishable from the honest "Steam gave us nothing" case, but
+    #: the work package asks for the key itself to be absent).
+    rtime_last_played: int | None = None
 
 
 class OwnedGamesOut(BaseModel):
@@ -207,8 +242,19 @@ def delete_key(
 # --------------------------------------------------------------------------
 
 
-@router.get("/v1/steam/owned-games", response_model=OwnedGamesOut)
+@router.get(
+    "/v1/steam/owned-games",
+    response_model=OwnedGamesOut,
+    # WP 4h.0: lets a game entry OMIT playtime_forever/rtime_last_played
+    # entirely (see OwnedGameOut's field docstrings and _build_owned_game_out
+    # below) instead of sending them as 0/null. `configured`/`game_count`/
+    # `games` are always passed explicitly in the return below, so this never
+    # drops THEM -- exclude_unset only omits a field that genuinely was never
+    # set on the specific model instance being serialised.
+    response_model_exclude_unset=True,
+)
 def get_owned_games(
+    request: Request,
     steamid: str = SteamIdQuery,
     open_db: DbOpener = Depends(db_opener),
     cache: RelayCache = Depends(get_steam_relay_cache),
@@ -218,7 +264,9 @@ def get_owned_games(
     ``409`` when no key is configured, ``422`` for an unusable ``steamid``,
     ``502`` for any upstream failure (unreachable, timeout, garbage
     response) — never a crash, and never a response containing more than the
-    whitelisted fields the library grid needs.
+    whitelisted fields the library grid needs, further narrowed by the
+    WP 4h.0 privacy gate (see this module's own docstring addendum) for
+    ``playtime_forever``/``rtime_last_played`` specifically.
     """
     parsed_steamid = _parse_steamid(steamid)
     key = _require_configured_key(open_db)
@@ -236,19 +284,42 @@ def get_owned_games(
             ) from exc
         cache.set("owned-games", parsed_steamid, result)
 
-    return OwnedGamesOut(
-        game_count=result.game_count,
-        games=[
-            OwnedGameOut(
-                appid=game.appid,
-                name=game.name,
-                playtime_forever=game.playtime_forever,
-                img_icon_url=game.img_icon_url,
-                rtime_last_played=game.rtime_last_played,
-            )
-            for game in result.games
-        ],
-    )
+    settings: Settings = request.app.state.settings
+    games_out = [
+        _build_owned_game_out(
+            game,
+            expose_playtime=settings.relay_expose_playtime,
+            expose_last_played=settings.relay_expose_last_played,
+        )
+        for game in result.games
+    ]
+    return OwnedGamesOut(configured=True, game_count=result.game_count, games=games_out)
+
+
+def _build_owned_game_out(
+    game: steam_relay.OwnedGame, *, expose_playtime: bool, expose_last_played: bool
+) -> OwnedGameOut:
+    """One ``steam_relay.OwnedGame`` -> the wire-format ``OwnedGameOut``,
+    applying the WP 4h.0 privacy gate.
+
+    ``appid``/``name``/``img_icon_url`` are always passed. ``playtime_forever``
+    and ``rtime_last_played`` are passed ONLY when their respective setting is
+    on — omitting the keyword argument (rather than passing the value and
+    relying on a filter afterwards) is what makes each field genuinely UNSET
+    on the model instance, which is what
+    ``get_owned_games``'s ``response_model_exclude_unset=True`` needs to see
+    to drop the JSON key entirely instead of rendering ``0``/``null``.
+    """
+    fields: dict[str, Any] = {
+        "appid": game.appid,
+        "name": game.name,
+        "img_icon_url": game.img_icon_url,
+    }
+    if expose_playtime:
+        fields["playtime_forever"] = game.playtime_forever
+    if expose_last_played:
+        fields["rtime_last_played"] = game.rtime_last_played
+    return OwnedGameOut(**fields)
 
 
 @router.get("/v1/steam/player-summaries", response_model=PlayerSummariesOut)

@@ -1007,6 +1007,118 @@ def test_env_bool_error_names_the_original_unstripped_value_and_the_default(
 
 
 # ==========================================================================
+# WP 4h.0 (ADR-0010): VAULT_RELAY_EXPOSE_PLAYTIME / _LAST_PLAYED
+#
+# Env-only privacy gate for the Steam relay's playtime_forever /
+# rtime_last_played fields (vault_api/routers/steam.py) -- see
+# tests/test_relay_privacy.py for the router-level pins (field genuinely
+# absent from the response, independence between the two keys, PATCH
+# rejection). These are the config.py-layer pins one level below: the
+# grammar and the DEFAULT_* constants each key falls back to.
+# ==========================================================================
+
+
+def test_relay_expose_playtime_defaults_to_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mutation pin: flip ``DEFAULT_RELAY_EXPOSE_PLAYTIME`` to ``True`` and
+    this test dies -- see that constant's own docstring in config.py for the
+    privacy argument (docs/PROJECT_PLAN.md Phase 4h's stance, echoing
+    DEFAULT_SWEEP_INCLUDE_CACHED's house style)."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.delenv("VAULT_RELAY_EXPOSE_PLAYTIME", raising=False)
+
+    assert Settings.from_env().relay_expose_playtime is False
+
+
+def test_relay_expose_last_played_defaults_to_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same pin as above for the sibling key -- doubly justified per WP 4h.1's
+    own note ("the sharper fact of the two")."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.delenv("VAULT_RELAY_EXPOSE_LAST_PLAYED", raising=False)
+
+    assert Settings.from_env().relay_expose_last_played is False
+
+
+@pytest.mark.parametrize("truthy", ["1", "true", "True", "YES", "on", " on "])
+def test_relay_expose_playtime_accepts_true_spellings(
+    monkeypatch: pytest.MonkeyPatch, truthy: str
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_RELAY_EXPOSE_PLAYTIME", truthy)
+
+    assert Settings.from_env().relay_expose_playtime is True
+
+
+@pytest.mark.parametrize("falsy", ["0", "false", "False", "NO", "off", ""])
+def test_relay_expose_playtime_accepts_false_spellings(
+    monkeypatch: pytest.MonkeyPatch, falsy: str
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_RELAY_EXPOSE_PLAYTIME", falsy)
+
+    assert Settings.from_env().relay_expose_playtime is False
+
+
+@pytest.mark.parametrize("bad", ["yeah", "1.0", "enabled", "2"])
+def test_relay_expose_playtime_rejects_anything_else(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_RELAY_EXPOSE_PLAYTIME", bad)
+
+    with pytest.raises(RuntimeError, match="VAULT_RELAY_EXPOSE_PLAYTIME"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize("truthy", ["1", "true", "True", "YES", "on", " on "])
+def test_relay_expose_last_played_accepts_true_spellings(
+    monkeypatch: pytest.MonkeyPatch, truthy: str
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_RELAY_EXPOSE_LAST_PLAYED", truthy)
+
+    assert Settings.from_env().relay_expose_last_played is True
+
+
+@pytest.mark.parametrize("falsy", ["0", "false", "False", "NO", "off", ""])
+def test_relay_expose_last_played_accepts_false_spellings(
+    monkeypatch: pytest.MonkeyPatch, falsy: str
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_RELAY_EXPOSE_LAST_PLAYED", falsy)
+
+    assert Settings.from_env().relay_expose_last_played is False
+
+
+@pytest.mark.parametrize("bad", ["yeah", "1.0", "enabled", "2"])
+def test_relay_expose_last_played_rejects_anything_else(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_RELAY_EXPOSE_LAST_PLAYED", bad)
+
+    with pytest.raises(RuntimeError, match="VAULT_RELAY_EXPOSE_LAST_PLAYED"):
+        Settings.from_env()
+
+
+def test_relay_expose_playtime_and_last_played_read_independent_env_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wiring swap (e.g. ``relay_expose_last_played`` accidentally reading
+    ``VAULT_RELAY_EXPOSE_PLAYTIME``, or both fields reading the SAME env var)
+    would still pass every test above in isolation -- this moves ONLY the
+    playtime var and checks BOTH fields in the same assertion, which a test
+    that only ever set one var and checked its own field would not catch.
+    """
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_RELAY_EXPOSE_PLAYTIME", "true")
+    monkeypatch.delenv("VAULT_RELAY_EXPOSE_LAST_PLAYED", raising=False)
+
+    settings = Settings.from_env()
+    assert settings.relay_expose_playtime is True
+    assert settings.relay_expose_last_played is False
+
+
+# ==========================================================================
 # Settings-API work package: validate_webhook_url (used only by
 # PATCH /v1/settings, NOT by Settings.from_env — see the function's own
 # docstring for why no startup grammar exists for this field to reuse).

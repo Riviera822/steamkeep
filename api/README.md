@@ -521,7 +521,7 @@ clients, schedule and stats rows are implemented so far.
 | GET    | `/v1/steam/key`                    | Opt-in Steam Web API relay (WP 4a.6r): key status only — `{configured, key_last4}`. `key_last4` is `null` when unconfigured; the full key is never returned |
 | PUT    | `/v1/steam/key`                    | Body `{"key": str}` — set (or replace) the relay's Web API key. `200` with the same shape `GET` returns; `422` unless `key` is exactly 32 hexadecimal characters |
 | DELETE | `/v1/steam/key`                    | Clear the configured key. `204` whether or not one was set |
-| GET    | `/v1/steam/owned-games`            | `?steamid=<SteamID64>` — relay `GetOwnedGames`. `200` with `{configured: true, game_count, games: [{appid, name, playtime_forever, img_icon_url, rtime_last_played}]}` (`rtime_last_played` added WP 4h.1: Unix-epoch seconds or `null` — see "rtime_last_played — absence is not zero" below); `409` if no key is configured; `422` for an unusable `steamid`; `502` for any upstream failure. See "Steam Web API relay" below |
+| GET    | `/v1/steam/owned-games`            | `?steamid=<SteamID64>` — relay `GetOwnedGames`. `200` with `{configured: true, game_count, games: [{appid, name, playtime_forever, img_icon_url, rtime_last_played}]}` (`rtime_last_played` added WP 4h.1: Unix-epoch seconds or `null` — see "rtime_last_played — absence is not zero" below); `409` if no key is configured; `422` for an unusable `steamid`; `502` for any upstream failure. **`playtime_forever`/`rtime_last_played` are each independently OMITTED from the JSON body entirely** (not sent as `0`/`null`) unless `VAULT_RELAY_EXPOSE_PLAYTIME`/`VAULT_RELAY_EXPOSE_LAST_PLAYED` are set — WP 4h.0, ADR-0010, see "The privacy gate" below. See "Steam Web API relay" below |
 | GET    | `/v1/steam/player-summaries`       | `?steamid=<SteamID64>` — relay `GetPlayerSummaries`. `200` with `{configured: true, players: [{steamid, personaname, avatar, avatarmedium, avatarfull, personastate}]}`; same `409`/`422`/`502` shape as `owned-games`. See "Steam Web API relay" below |
 | GET    | `/v1/settings`                     | Settings-API work package (ADR-0009): `{readonly, settings: [{key, effective, source, fallback, applies, env_only}, ...]}` — every overridable key plus informational env-only ones. `source` is `db`/`env`/`default`; `applies` is `immediately`/`next_sweep`/`restart-required`. See "Persisted settings" below |
 | PATCH  | `/v1/settings`                     | Partial update: `null` clears an override (revert to env/default), any other value sets it, validated with the SAME grammar `config.py` applies at startup. `200` with the same shape `GET` returns. `422` for an invalid value, an unknown key, or a recognised-but-environment-only key (distinct detail); `403` if `VAULT_SETTINGS_READONLY` is set. See "Persisted settings" below |
@@ -4304,6 +4304,73 @@ one's. **No new endpoint aggregates these fields across clients or accounts**
 — both fields stay scoped to the one `steamid` a caller explicitly requested,
 exactly like every other field this relay already returns.
 
+### The privacy gate: `VAULT_RELAY_EXPOSE_PLAYTIME` / `VAULT_RELAY_EXPOSE_LAST_PLAYED` (WP 4h.0, ADR-0010)
+
+Two independent, **environment-only** settings decide whether
+`playtime_forever` and `rtime_last_played` may ever appear in
+`GET /v1/steam/owned-games`'s response at all — separately, because "when
+did this person last play" (per the WP 4h.1 addendum above) is the sharper
+of the two facts; an operator may want the decision-support panel's
+aggregate hour count while still refusing to ever surface the date.
+
+**Both default OFF.** Phase 4h's own privacy stance
+(`docs/PROJECT_PLAN.md`, user decision 2026-08-18) already treats playtime
+itself — not only `rtime_last_played` — as something a shared-household
+vault must not surface without an explicit opt-in ("off by default or
+dismissible at any time, no nagging, and no number that gets held up to
+somebody else"). That is the same house style `VAULT_SWEEP_INCLUDE_CACHED`
+and the WP 3.11 event sweep already follow for every privacy/cost-sensitive
+switch in this project: ship off, let an operator who wants the data read
+this section and turn it on. "The decision-support panel needs it" is
+explicitly not treated as a sufficient reason to default either of these
+on — the privacy stance above is.
+
+```bash
+VAULT_RELAY_EXPOSE_PLAYTIME=true       # off by default
+VAULT_RELAY_EXPOSE_LAST_PLAYED=true    # off by default
+```
+
+**When a key is off, the field is genuinely ABSENT from the JSON body** —
+not sent as `0` or `null`, which a client (or anyone with the browser's dev
+tools open) could still read. The gate is applied at the outermost
+conversion from the relay's internal, fully-populated record to the wire
+response (`routers/steam.py`'s `get_owned_games`), never earlier: the
+in-memory `RelayCache` still stores the complete, validated answer either
+way, so flipping either variable and restarting takes effect on the very
+next request without needing to wait out or clear the cache.
+
+**Why environment-only, with no `PATCH /v1/settings` override at all
+(ADR-0010) — this is a deliberate, narrow exception to ADR-0009's db >
+env > default precedence, not an oversight.** ADR-0009's settings table is
+stored in the `vault-db` Docker volume; `deploy/compose.yaml` (and
+`deploy/.env`) are not — they live in the operator's own persistent config,
+covered by whatever backs that up. For an ordinary tuning knob, losing an
+override and reverting to a built-in default (a lost volume, a
+`docker compose down -v`) is a harmless, noticed event. For a privacy
+opt-out the direction of that fallback is the whole question: a database
+override that turned exposure OFF would be erased by a lost volume just
+like any other row, silently reverting to whatever the environment says —
+and if the environment was left at its default (unset, meaning off but not
+LOCKED off under a design that let the database win), that reversion could
+mean collection quietly resumes with no notification to anyone. These two
+keys have exactly one source of truth, kept in the one place that survives
+that failure mode. `docs/adr/0010-relay-privacy-gate-env-only.md` has the
+full argument, including the alternative design (an env "ceiling" over a
+runtime toggle) this project considered and rejected, and the real cost of
+this choice: **there is no runtime opt-out** — changing either value means
+editing `deploy/compose.yaml` (or `.env`) and restarting the `vault-api`
+container.
+
+**`GET /v1/settings` still reports both**, as ordinary informational,
+env-only rows (`settings_store.ENV_ONLY_INFO_KEYS`, ADR-0009 §5's
+allowlist mechanism) — `{"key": "relay_expose_playtime", "effective":
+false, "source": "default", "applies": "restart-required", "env_only":
+true}` on a fresh install — so a settings UI can show an operator the
+current state and explain why there is no switch, instead of either hiding
+the fact entirely or offering a toggle that would `422`. `PATCH
+/v1/settings` refuses either key by name with the same distinct
+"environment-only" `422` detail every other row in that allowlist gets.
+
 ### What this work package deliberately did NOT do
 
 - **No new `VAULT_*` environment variable.** The key is runtime-set through
@@ -5486,6 +5553,17 @@ environment controls it" instead of silently omitting the key.
 **`vault_api_key` never appears in any `GET /v1/settings` response at all —
 not even redacted** — it is the authentication secret itself, a strictly
 higher bar than the webhook URL's userinfo.
+
+**`relay_expose_playtime` / `relay_expose_last_played` (WP 4h.0, ADR-0010)
+share the same allowlist mechanism for a DIFFERENT reason.** They are not
+bootstrap or security settings — see "The privacy gate" under "Steam Web
+API relay" above and `docs/adr/0010-relay-privacy-gate-env-only.md` for the
+actual rationale (a privacy opt-out must not be backed by a store, the
+`vault-db` Docker volume, that can be lost independently of the environment
+that is meant to govern it). They still behave exactly like every other row
+in this section for the purposes of `GET`/`PATCH /v1/settings`: reported as
+informational, env-only rows; `PATCH` refuses them with the same distinct
+detail.
 
 ### Validation reuses the exact startup grammars — no duplicated parsing
 

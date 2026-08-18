@@ -58,6 +58,15 @@ EXPECTED_DEFAULTS: dict[str, str] = {
     "VAULT_MANIFEST_ORACLE_URL": config.DEFAULT_MANIFEST_ORACLE_URL,
     "VAULT_MANIFEST_ORACLE_TIMEOUT": str(config.DEFAULT_MANIFEST_ORACLE_TIMEOUT),
     "VAULT_WEBHOOK_TIMEOUT_SECONDS": str(config.DEFAULT_WEBHOOK_TIMEOUT_SECONDS),
+    # WP 4h.0 (ADR-0010): env-only privacy gate, forwarded directly (unlike
+    # VAULT_SWEEP_INCLUDE_CACHED/VAULT_SETTINGS_READONLY, which are
+    # deliberately absent from this dict because compose never forwards
+    # them) -- see deploy/compose.yaml's own comment for why these two are
+    # the exception.
+    "VAULT_RELAY_EXPOSE_PLAYTIME": "true" if config.DEFAULT_RELAY_EXPOSE_PLAYTIME else "false",
+    "VAULT_RELAY_EXPOSE_LAST_PLAYED": (
+        "true" if config.DEFAULT_RELAY_EXPOSE_LAST_PLAYED else "false"
+    ),
 }
 
 

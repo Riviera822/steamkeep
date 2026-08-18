@@ -619,6 +619,11 @@ def test_patch_unknown_key_is_422(client: TestClient) -> None:
         "manifest_archive_dir",
         "web_dir",
         "settings_readonly",
+        # WP 4h.0 (ADR-0010) -- see tests/test_relay_privacy.py for the full
+        # pin (both defaults, both directions of independence); this just
+        # keeps them in the one canonical list of every env-only key.
+        "relay_expose_playtime",
+        "relay_expose_last_played",
     ],
 )
 def test_patch_env_only_key_is_422_with_a_distinct_detail(
