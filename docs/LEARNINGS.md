@@ -561,3 +561,15 @@ These are not style preferences; each entry cost a review round to learn.
   recovery was byte-exact from the served stylesheets, luck that should
   never be load-bearing). Mutations happen in a scratch copy, never in
   any working tree.
+- A mutation report's STATED MECHANISM is a claim of its own and drifts
+  independently of the result: WP 4h.4 shipped four in one package (a
+  compile failure described as a parse error; a JsonDecodingException
+  described as a timeout; a fixture pin described as behaviour-testing
+  production; a Gradle-input theory the review measured and refuted).
+  All four errors ran in different directions — two overstated
+  protection, two over-warned — so the fix is procedural, not
+  directional: when documenting a mutation, quote the actual failure
+  output, name the failing assertion, and let the reviewer re-run the
+  exact form documented. "Pin the mechanism that actually kills the
+  mutation" (WP 4a.6) extends to the prose describing it (WP 4h.4
+  rounds 1-3, 2026-08-19).
