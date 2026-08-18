@@ -318,7 +318,17 @@ These are not style preferences; each entry cost a review round to learn.
   `docker compose exec` alone can exceed 5 s and the step passes. Do not
   record it as deterministic, or a later green 5i reads as a regression.
   Pre-existing, and independently reproduced on the untouched baseline
-  during the P1 review.
+  during the P1 review. **CLOSED in WP 4g** (2026-08-18): step 5i now polls
+  for the line — bounded at 10 polls, each preceded by a
+  `docker compose exec` round trip, so the effective window is 2-4x the
+  flush and widens on exactly the slow hosts that need it. Two details worth
+  copying into any future write-then-read check against this log: a flat
+  sleep was rejected because it keeps the race with better odds while hiding
+  the failure mode, and on timeout the step reports the log's line COUNT plus
+  its tail instead of a diagnosis — the wait predicate greps the chunk id, so
+  a format regression that dropped field 6 writes a line the grep cannot
+  match and would otherwise be misreported as "nothing was written". Suite
+  109/109, verified twice.
 
 ## Docs / community release
 - Entry-point docs describe SHIPPED behavior, not ADR designs: an ADR
