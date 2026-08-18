@@ -6,9 +6,17 @@ gaming machine most recently reported as installed and enqueue a normal
 prefill job for each one.
 
 Plan A7 ("prefill updates automatically during the day") + A8 ("the criterion
-is: games actually installed on the gaming machines"). The target set is the
-agent reports and **nothing else** in v1 — no popularity heuristic, no
+is: games actually installed on the gaming machines"). The target set was the
+agent reports and nothing else through Phase 3 — no popularity heuristic, no
 size budget, no manual include/exclude list. Installed *is* the prefill set.
+
+Phase 4d adds exactly one more source, opt-in and off by default: every app
+with cache content on disk, regardless of whether anything currently reports
+it installed (``VAULT_SWEEP_INCLUDE_CACHED`` / ``sweep_include_cached``,
+``compute_targets``'s ``include_cached`` parameter). See that function's
+docstring and api/README.md's "Sweep target set" section for the rationale,
+the cost model, and the auto-GC coupling this couples with
+(``cached_sweep_gc_risk``).
 
 Why enqueuing everything is already the rate limiting
 -----------------------------------------------------
@@ -96,7 +104,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from vault_api import agent_reports, event_sweep, jobs, settings_store, webhooks
+from vault_api import (
+    agent_reports,
+    deletion,
+    event_sweep,
+    jobs,
+    settings_store,
+    sizes,
+    webhooks,
+)
 from vault_api.config import Settings
 from vault_api.db import get_connection
 
@@ -297,17 +313,136 @@ class ExcludedClient:
 
 @dataclass(frozen=True)
 class TargetSet:
-    """The union of every fresh client's latest installed list."""
+    """The union of every fresh client's latest installed list, plus
+    (WP 4d, opt-in) every app with cache content on disk."""
 
     appids: list[int]
     included_clients: list[str]
     excluded_clients: list[ExcludedClient]
+    #: WP 4d. Apps present ONLY because ``include_cached`` was set — i.e. NOT
+    #: already reachable through the installed-clients union above. Always
+    #: ``()`` when the mode is off (default-constructed, never touched), and
+    #: also ``()`` when every cached app happens to already be installed
+    #: somewhere. Exists for the sweep's log line and for tests to pin the
+    #: union+dedupe behaviour directly — ``appids`` already contains every
+    #: one of these, this field is purely "which ones, and why".
+    cached_only_appids: tuple[int, ...] = ()
+
+
+def cached_appids(conn: sqlite3.Connection, cache_root: str) -> set[int]:
+    """Every appid with content on disk in a depot it does NOT share with
+    another tracked app, right now.
+
+    **Deliberately NARROWER than ``sizes.app_size_bytes``'s "cached" — and
+    that is the point, not a bug.** ``app_size_bytes`` (``GET /v1/games``'s
+    per-app ``size_bytes``) answers "how much would deleting this app free",
+    and correctly counts a shared depot's bytes into every co-owner's total
+    (plan §4). That is the wrong question for the SWEEP target set: reviewer
+    testing against a real ``DELETE /v1/cache/{appid}`` found that under the
+    generous definition, an app whose only surviving mapped depot is a
+    SHARED one another app still has content in (ADR-0003's "shared and
+    protected" outcome — never deleted) keeps reporting as "cached" forever,
+    so a mode-ON sweep silently re-downloads a game the operator just
+    deleted. Mapping rows survive deletion by design (ADR-0003), but that
+    survivorship must not, on its own, make an app a re-download target.
+
+    So this asks a different, narrower question: does ``appid`` hold
+    anything of its **own** — a depot mapped to it and to no other tracked
+    app — that has bytes on disk? ``deletion.plan_deletion`` already computes
+    exactly that split (``DeletionPlan.exclusive``) for the delete endpoint;
+    reused here via ``deletion.load_mapping_rows`` rather than re-deriving
+    "exclusive vs. shared" a second time, so the two can never quietly
+    disagree about what counts as this app's own content. ``co_owner_states``
+    is intentionally omitted (``None``): the remnant/shared distinction it
+    drives is a DELETION nuance ("is this shared depot safe to delete right
+    now") that does not matter here — a still-shared depot is not exclusive
+    either way, remnant-eligible or not.
+
+    **The conservative edge this creates, stated plainly:** an app whose
+    cache content lives ENTIRELY in depots shared with other tracked apps is
+    now never a cached-mode sweep target, even though bytes attributable to
+    it are genuinely on disk. That is the deliberate direction — this mode
+    is meant to do LESS than the generous definition would, never more (see
+    api/README.md "Sweep target set"). ``sizes.app_size_bytes`` itself is
+    UNCHANGED — its generous, double-counting-on-purpose definition remains
+    exactly correct for the sizing question it answers.
+
+    One query per candidate appid (``load_mapping_rows``'s own family
+    subquery), not one for the whole table — see api/README.md's cost-model
+    note for why that is still cheap at this cadence. A raw, uncached
+    filesystem walk (``sizes.scan_depot_dir_bytes``), not the process-wide
+    ``SizeCache`` — WP 4d's sweep runs at most once per
+    ``VAULT_SCHEDULE_INTERVAL_MINUTES`` (default 3 h), so the walk's own cost
+    is negligible next to that cadence, and threading the request-scoped
+    ``SizeCache`` into this background thread would add a second dependency
+    (and a second TTL policy to reason about) for a call site that already
+    only fires a few times a day.
+
+    **Three things about that walk worth stating plainly (reviewer
+    should-fix S5, 2026-08-18 review round) — see api/README.md "Sweep
+    target set" for the full write-up:**
+
+    1. **Order of magnitude.** A warm-cache directory walk runs at roughly
+       microseconds per file (``sizes.walk_file_stats``'s own measured
+       17x-over-``os.walk`` figure implies low-single-digit microseconds per
+       entry on NVMe) — a few hundred thousand chunk files is sub-second.
+       Cold-cache / spinning-disk is a different story: each depot directory
+       is a separate seek-bound `readdir`, so tens of seconds to low minutes
+       is plausible on a large HDD-backed library that has not been walked
+       recently. Either way it is bounded and read-only, never a download.
+    2. **No coalescing with concurrent request-path scans.** Deliberately
+       NOT using ``SizeCache`` (see above) means this walk and an unrelated
+       ``GET /v1/cache/summary`` cache miss can walk the SAME depot tree at
+       the same time, doing the work twice. This is not a rare coincidence:
+       ``worker.py`` calls ``SizeCache.invalidate()`` after every successful
+       prefill, so a miss is common in exactly the window a sweep is also
+       enqueueing work — the two are correlated, not independent.
+    3. **Not interruptible mid-walk.** ``PrefillScheduler``'s ``should_abort``
+       is only checked inside the PER-APP enqueue loop in ``maybe_sweep``,
+       never inside this walk. A ``stop()`` that lands while this function is
+       mid-scan can make shutdown take longer than
+       ``SHUTDOWN_JOIN_TIMEOUT_SECONDS`` (30 s) and log the "did not stop
+       within 30s" warning during e.g. ``docker compose down`` — harmless
+       (a read-only walk left to finish on its own, nothing corrupted, no
+       lock held), but it will read as a fault in the log if this isn't
+       said up front.
+
+    Candidate app ids come from ``depot_app_map`` directly, the same source
+    the pre-B1-fix version used — NOT from the ``apps`` table. A mapping row
+    with no corresponding ``apps`` row is not rejected by any foreign-key
+    constraint (verified), so this can enqueue an appid the library UI never
+    shows a card for. Narrow, documented behaviour, not a new hole: the
+    installed-based half of this same sweep has always been able to target
+    an appid with no ``apps`` row either, via a bare agent report.
+    """
+    depot_bytes = sizes.scan_depot_dir_bytes(cache_root)
+    if not depot_bytes:  # empty/missing cache — no error, just nothing found
+        return set()
+
+    candidate_appids = {
+        int(row["appid"])
+        for row in conn.execute("SELECT DISTINCT appid FROM depot_app_map").fetchall()
+    }
+
+    cached: set[int] = set()
+    for appid in candidate_appids:
+        rows = deletion.load_mapping_rows(conn, appid)
+        plan = deletion.plan_deletion(rows, appid)
+        if any(depotid in depot_bytes for depotid in plan.exclusive):
+            cached.add(appid)
+    return cached
 
 
 def compute_targets(
-    conn: sqlite3.Connection, now: datetime, stale_after_days: int
+    conn: sqlite3.Connection,
+    now: datetime,
+    stale_after_days: int,
+    *,
+    include_cached: bool = False,
+    cache_root: str | None = None,
 ) -> TargetSet:
-    """Union the app ids from every client's LATEST agent report.
+    """Union the app ids from every client's LATEST agent report, optionally
+    widened with every app that has cache content on disk (WP 4d).
 
     "Latest" is ``agent_reports.latest_snapshot`` — newest by **rowid**, i.e.
     insertion order, not by ``reported_at`` (WP 2.4's rule: second-precision
@@ -332,8 +467,31 @@ def compute_targets(
     diagnosable from ``GET /v1/schedule`` plus the log, not from reading this
     source file.
 
-    Intersected with nothing else: plan A8 makes the installed list the whole
-    criterion in v1.
+    Through Phase 3, intersected with nothing else: plan A8 made the
+    installed list the whole criterion. ``include_cached`` (WP 4d,
+    ``Settings.sweep_include_cached``, default ``False``) is the one
+    exception, and it is deliberately ADDITIVE rather than a replacement:
+
+    * it is computed **independently** of the client-freshness logic above —
+      a cached app is swept even if the client that installed it is
+      ``stale``-excluded, or if no client has ever reported it at all (an
+      orphaned-by-agents-but-still-cached game). That is the exact case this
+      mode exists for (plan §7 Phase 4d): "or whose PC has been quiet longer
+      than VAULT_SCHEDULE_CLIENT_STALE_DAYS — is never refreshed and
+      silently rots";
+    * with ``include_cached=False`` (the default), this function's behaviour
+      — including its return type and every existing caller's result — is
+      BYTE-IDENTICAL to the pre-WP-4d implementation: the cached-apps branch
+      below is skipped entirely, nothing about the client loop above changes.
+
+    ``cache_root`` has NO usable default (reviewer should-fix S1, 2026-08-18
+    review round): a blank/missing value used to mean "scanned an empty
+    directory, found nothing" — indistinguishable from "the cache genuinely
+    has nothing cached", which is exactly the shape that once masked one of
+    this module's own mutation-kill tests during review. ``include_cached=True``
+    with no real ``cache_root`` now raises ``ValueError`` immediately rather
+    than silently returning an empty cached set — a caller (production or
+    test) that forgot to pass it gets a loud failure, not a quiet no-op.
     """
     cutoff = now.astimezone(timezone.utc) - timedelta(days=stale_after_days)
 
@@ -375,10 +533,27 @@ def compute_targets(
         included.append(client_id)
         appids.update(snapshot.appids)
 
+    cached_only: tuple[int, ...] = ()
+    if include_cached:
+        if not cache_root:
+            # S1: a falsy cache_root used to mean "silently scan nothing" --
+            # indistinguishable from a genuinely empty cache. Loud failure
+            # instead (see this function's docstring).
+            raise ValueError(
+                "compute_targets(include_cached=True) requires a real "
+                f"cache_root, got {cache_root!r}. Pass settings.cache_root "
+                "explicitly -- a missing/blank value must not silently "
+                "resolve to 'nothing is cached'."
+            )
+        cached = cached_appids(conn, cache_root)
+        cached_only = tuple(sorted(cached - appids))
+        appids.update(cached)
+
     return TargetSet(
         appids=sorted(appids),
         included_clients=included,
         excluded_clients=excluded,
+        cached_only_appids=cached_only,
     )
 
 
@@ -404,6 +579,11 @@ class SweepResult:
     #: True when shutdown interrupted the enqueue loop.
     aborted: bool = False
     swept_at: str | None = None
+    #: WP 4d. Mirrors ``TargetSet.cached_only_appids`` — apps in ``targets``
+    #: ONLY because ``sweep_include_cached`` was on, i.e. not reachable
+    #: through any client's installed list this sweep. ``()`` when the mode
+    #: is off (default-constructed, untouched) or when it added nothing new.
+    cached_only_appids: tuple[int, ...] = ()
 
 
 def _never() -> bool:
@@ -438,7 +618,13 @@ def maybe_sweep(
         return SweepResult(swept=False, skipped_reason="interval-not-elapsed")
 
     swept_at = to_utc_iso(now)
-    target_set = compute_targets(conn, now, settings.schedule_client_stale_days)
+    target_set = compute_targets(
+        conn,
+        now,
+        settings.schedule_client_stale_days,
+        include_cached=settings.sweep_include_cached,
+        cache_root=settings.cache_root,
+    )
 
     enqueued: list[int] = []
     already_active: list[int] = []
@@ -458,7 +644,7 @@ def maybe_sweep(
 
     logger.info(
         "scheduler: sweep at %s enqueued %d new job(s), %d app(s) already "
-        "queued/running, from %d target app(s) across %d client(s)%s%s",
+        "queued/running, from %d target app(s) across %d client(s)%s%s%s",
         swept_at, len(enqueued), len(already_active), len(target_set.appids),
         len(target_set.included_clients),
         (
@@ -468,6 +654,22 @@ def maybe_sweep(
             )
             + ")"
             if target_set.excluded_clients
+            else ""
+        ),
+        (
+            # S1 (reviewer should-fix, 2026-08-18 review round): this fragment
+            # must appear whenever the mode is ON, INCLUDING the zero case --
+            # gating it on "cached_only_appids is non-empty" made a live-but-
+            # inert mode (missing cache volume, empty depot_app_map, a typo'd
+            # root that still resolves to a real-but-wrong directory) produce
+            # a log line byte-identical to the mode being off, while
+            # GET /v1/schedule kept reporting sweep_include_cached: true.
+            # Naming the scanned root turns "why did nothing get added" into
+            # a one-line diagnosis instead of a silent non-event.
+            f" (cached-apps sweep mode ON, root={settings.cache_root!r}: "
+            f"{len(target_set.cached_only_appids)} target(s) added that were "
+            "not already installed)"
+            if settings.sweep_include_cached
             else ""
         ),
         " [ABORTED by shutdown]" if aborted else "",
@@ -481,6 +683,7 @@ def maybe_sweep(
         excluded_clients=tuple(target_set.excluded_clients),
         aborted=aborted,
         swept_at=swept_at,
+        cached_only_appids=target_set.cached_only_appids,
     )
 
 
@@ -517,6 +720,103 @@ def next_eligible_at(
 
 
 # --------------------------------------------------------------------------
+# WP 4d — the auto-GC coupling, stated honestly
+# --------------------------------------------------------------------------
+
+
+def cached_sweep_gc_risk(settings: Settings) -> bool:
+    """True iff the cached-apps sweep mode is on while auto-GC is NOT
+    ``execute`` — i.e. ``dry-run`` counts as risky too (B2, user decision
+    "nothing is being reclaimed", 2026-08-18 review round).
+
+    Named and exported as its own function — rather than inlined at each of
+    its two call sites — so ``PrefillScheduler``'s one-time log warning and
+    ``GET /v1/schedule``'s ``sweep_cached_gc_risk`` field can never quietly
+    disagree about what "at risk" means: one boolean expression, computed
+    once, read twice.
+
+    **Why this is a risk worth naming (plan §7 Phase 4d):** every kept-current
+    game the cached-apps mode refreshes adds fresh chunks for the new manifest
+    while the old manifest's chunks become orphans — that is what a game
+    *update* is, on disk. A vault that keeps itself current without
+    collecting garbage keeps itself current straight into a full disk.
+
+    **Why ``dry-run`` does not clear the risk.** The risk this flag names is
+    "orphans are accumulating, unreclaimed" — a fact about the DISK, not
+    about whether anyone is watching. ``VAULT_AUTO_GC=dry-run`` queues a
+    REPORTING-only GC job after every updating prefill: it tells the operator
+    exactly what could be freed, and frees NOTHING (see ``worker.py``'s
+    ``_maybe_queue_auto_gc`` / api/README.md "Auto-GC"). A vault swept in
+    ``dry-run`` mode grows at IDENTICAL speed to one with auto-GC fully off —
+    the only difference is a log line describing the growth on the way past.
+    Reporting the condition as resolved once dry-run is on would be exactly
+    the "doc sentence telling an operator X works when it does not" class
+    docs/LEARNINGS.md warns about, just moved from a doc sentence into a
+    boolean API field. Only ``execute`` (``settings.auto_gc_executes``)
+    actually reclaims, so only ``execute`` clears this flag.
+
+    This function does not act on the fact it names (WP 4d's brief is
+    explicit: "do not silently enable auto-GC, and do not refuse to run — the
+    operator decides"); it only names the condition so something else can
+    warn.
+    """
+    return settings.sweep_include_cached and not settings.auto_gc_executes
+
+
+def warn_once_if_cached_sweep_without_gc(settings: Settings, already_warned: bool) -> bool:
+    """Log the auto-GC coupling warning on a transition INTO the risky state,
+    and a matching all-clear ``INFO`` line on the transition back OUT of it.
+
+    ``already_warned`` is the caller's own memory of the last decision (an
+    instance attribute on ``PrefillScheduler`` in production); this function
+    is pure so the transition logic is unit-testable without a thread or a
+    clock. Returns the new value for the caller to store.
+
+    Fires **once per transition**, not once per tick and not once per
+    process — the same "state changes in both directions" shape WP 3.13's
+    bypass-detection transitions use (docs/LEARNINGS.md "Testing discipline"):
+    if the operator fixes it (sets ``VAULT_AUTO_GC=execute``, or turns the
+    cached mode back off) and later re-creates the same risky combination,
+    that is worth a fresh warning, not silence because a boolean was set once
+    at boot. The all-clear is an ``INFO``, not a second ``WARNING`` — without
+    it, "why did that warning stop appearing?" was unanswerable from the log
+    alone (reviewer nitpick N1): the state IS persisted correctly in both
+    directions, but silently is not the same as visibly.
+    """
+    risk = cached_sweep_gc_risk(settings)
+    if risk and not already_warned:
+        logger.warning(
+            "scheduler: VAULT_SWEEP_INCLUDE_CACHED is on while VAULT_AUTO_GC "
+            "is %r, not 'execute'. Every kept-current game this sweep mode "
+            "refreshes adds fresh chunks for the new manifest while the "
+            "superseded ones become orphans -- a vault that keeps itself "
+            "current without ACTUALLY collecting garbage keeps itself "
+            "current straight into a full disk. 'dry-run' only REPORTS what "
+            "could be reclaimed, it reclaims nothing -- this warning stays "
+            "active in dry-run mode for exactly that reason. This is not a "
+            "failure and nothing is refused: set VAULT_AUTO_GC=execute to "
+            "actually close the loop, or run POST /v1/cache/{appid}/gc "
+            "yourself. GET /v1/schedule also reports this condition as "
+            "'sweep_cached_gc_risk' for a UI to surface. This warning is "
+            "logged once per time the condition becomes true, not on every "
+            "sweep.",
+            settings.auto_gc,
+        )
+        return True
+    if not risk:
+        if already_warned:
+            logger.info(
+                "scheduler: the VAULT_SWEEP_INCLUDE_CACHED / VAULT_AUTO_GC "
+                "risk condition cleared (auto_gc=%r now actually reclaims, "
+                "or the cached-apps sweep mode was turned back off) -- the "
+                "previous WARNING no longer applies.",
+                settings.auto_gc,
+            )
+        return False
+    return already_warned
+
+
+# --------------------------------------------------------------------------
 # The thread
 # --------------------------------------------------------------------------
 
@@ -547,6 +847,11 @@ class PrefillScheduler:
         self._webhook_notifier = webhook_notifier
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        #: WP 4d. This thread's own memory for
+        #: ``warn_once_if_cached_sweep_without_gc`` — mutated only from
+        #: ``_tick``, i.e. only ever touched by this one thread, same as
+        #: every other plain attribute on this class.
+        self._warned_cached_sweep_gc_risk = False
 
     # -- accessors ---------------------------------------------------------
 
@@ -679,6 +984,22 @@ class PrefillScheduler:
                 "applied) for one cycle."
             )
             effective = self._settings
+
+        # WP 4d: a config-risk warning, not a sweep — evaluated every tick
+        # (cheap, no I/O) regardless of whether a sweep is actually due this
+        # minute, so the operator hears about it as soon as the combination
+        # exists rather than only once a sweep happens to run. Its own try:
+        # this method's contract is "never raises", and a warning must not
+        # become a new way to violate that.
+        try:
+            self._warned_cached_sweep_gc_risk = warn_once_if_cached_sweep_without_gc(
+                effective, self._warned_cached_sweep_gc_risk
+            )
+        except Exception:
+            logger.exception(
+                "Could not evaluate the sweep/auto-GC risk warning this tick; "
+                "not fatal, retried next tick."
+            )
 
         try:
             event_sweep.maybe_sweep(conn, effective, now, self._webhook_notifier)

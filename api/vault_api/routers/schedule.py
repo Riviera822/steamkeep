@@ -1,16 +1,23 @@
 """Scheduler endpoint (WP 3.5): ``GET /v1/schedule``.
 
-Read-only on purpose. There is **no POST/PUT** to change the window, the
-interval or the staleness bound at runtime: every setting in vault-api comes
-from the environment and is read once at startup (plan §9's simplicity
-stance, ``vault_api/config.py``). A config-write API would need persistence,
-precedence rules against the env, and a validation path separate from the
-startup one — three moving parts to save an operator one ``docker compose up
--d`` after editing ``.env``.
+**This module itself has no write verb — that claim used to be stronger and
+is now corrected (reviewer should-fix S3, 2026-08-18 review round).** Through
+WP 3.5 there really was no way to change the window, interval, staleness
+bound or (later, WP 4d) the cached-apps sweep mode at runtime short of
+editing the environment and restarting. Since the settings-API work package
+(ADR-0009), ``PATCH /v1/settings`` IS that write path for every field this
+endpoint reports except the bookkeeping ones (``last_sweep_at``,
+``last_sweep_targets``, ``last_sweep_enqueued``, ``next_eligible_at``) — see
+``vault_api/settings_store.py`` and api/README.md "Persisted settings". This
+router stays read-only, but "vault-api has no config-write API" is no longer
+true of the system as a whole, and this docstring must not be the one place
+that still says otherwise.
 
-What it answers is "what will the scheduler do, and what did it last do",
-which is the question you actually have when a game did not get updated
-overnight.
+What ``GET /v1/schedule`` answers is "what WILL the scheduler do, and what
+did it last do", which is the question you actually have when a game did not
+get updated overnight — always the EFFECTIVE, override-resolved
+configuration (``settings_store.effective_settings``), never the raw
+env/default snapshot, so a recent ``PATCH`` is reflected here immediately.
 
 Auth is attached at the router level (secure-by-default pattern, see
 api/README.md "Auth").
@@ -71,6 +78,21 @@ class ScheduleOut(BaseModel):
     #: can be an hour off across a DST transition, and it is null when the
     #: scheduler is disabled. Nothing decides anything from this value.
     next_eligible_at: str | None
+    #: WP 4d. Effective value of ``sweep_include_cached``/
+    #: ``VAULT_SWEEP_INCLUDE_CACHED`` — true iff the NEXT sweep will also
+    #: target every app that holds content of its own on disk, not only the
+    #: installed union. Off by default; see api/README.md "Sweep target set".
+    sweep_include_cached: bool
+    #: WP 4d. True iff ``sweep_include_cached`` is on while ``VAULT_AUTO_GC``
+    #: is anything OTHER than ``execute`` — the exact condition
+    #: ``scheduler.cached_sweep_gc_risk`` names and the scheduler's own
+    #: one-time log warning fires on. ``dry-run`` counts as risky too (B2,
+    #: 2026-08-18 review round): it reports what could be reclaimed and
+    #: reclaims nothing, so it does not change the growth this flag is about.
+    #: ``False`` asserts "orphans created by refreshes are actually being
+    #: reclaimed", not merely "someone configured GC". A UI can render this
+    #: as a banner without re-deriving the two settings' interaction itself.
+    sweep_cached_gc_risk: bool
 
 
 @router.get("/v1/schedule", response_model=ScheduleOut)
@@ -108,4 +130,6 @@ def get_schedule(
         last_sweep_targets=state.last_sweep_targets,
         last_sweep_enqueued=state.last_sweep_enqueued,
         next_eligible_at=scheduler_module.next_eligible_at(settings, state, now),
+        sweep_include_cached=settings.sweep_include_cached,
+        sweep_cached_gc_risk=scheduler_module.cached_sweep_gc_risk(settings),
     )

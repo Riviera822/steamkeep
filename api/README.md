@@ -1271,6 +1271,23 @@ also in the current manifest, so GC would keep them anyway — the window is the
 belt to that suspenders. It matters for the *other* content in those depots:
 beta-branch and store-on-miss chunks keep their fortnight.)
 
+**Coupling with the WP 4d cached-apps sweep mode.** `VAULT_SWEEP_INCLUDE_CACHED`
+(see the scheduler section's "Sweep target set — installed PLUS cached")
+widens the nightly sweep to every app with content of its own on disk, and
+every one it refreshes can leave its superseded chunks as fresh orphans.
+`VAULT_AUTO_GC=execute` is what actually collects those orphans — `dry-run`
+only reports what could be reclaimed and reclaims nothing, so it does NOT
+close this loop either (B2, user decision "nothing is being reclaimed") — the
+two settings are designed to be turned on together, with `execute` being the
+half that matters for this specific coupling. Turning the sweep mode on
+while `VAULT_AUTO_GC` is anything other than `execute` is not refused (the
+operator may have a reason: manual `POST /v1/cache/{appid}/gc` runs, say),
+but it is never silent: `scheduler.cached_sweep_gc_risk` names the condition,
+the scheduler logs a one-time `WARNING` on the transition into it (and a
+matching `INFO` all-clear on the transition back out), and
+`GET /v1/schedule`'s `sweep_cached_gc_risk` field exposes the identical
+condition to a UI too.
+
 ## Per-game size calculation and cache summary (WP 1.5)
 
 `vault_api/sizes.py` implements plan §3's "per-game size calculation (du over
@@ -2344,6 +2361,171 @@ reported in the log (with the client id and the reason):
   makes the staleness question unanswerable. Excluded rather than assumed
   fresh: never prefill on the strength of a value that could not be read.
 
+### Sweep target set — installed PLUS cached (WP 4d, opt-in)
+
+Plan §7 Phase 4d. Through Phase 3, the section above was the *whole*
+criterion: "intersected with nothing else". WP 4d adds exactly one more
+source, and it is additive by construction — everything above this line is
+completely unchanged when the new setting is off (the default), which is
+pinned by a test asserting `compute_targets` returns a BYTE-IDENTICAL result
+with the mode off, cache content or not.
+
+**What it does.** `VAULT_SWEEP_INCLUDE_CACHED` / `sweep_include_cached`
+(overridable via `PATCH /v1/settings`, ADR-0009) widens the target set to
+every app that holds content of its OWN on disk right now (`scheduler.
+cached_appids`), union `compute_targets`'s installed set. Dedupe is
+automatic: both sets are plain `set[int]`s, so an app that is both installed
+and cached appears exactly once, and the sweep enqueues it through the SAME
+`jobs.enqueue_prefill` path as everything else — an app already
+`queued`/`running` is absorbed by that function's own dedupe, never a second
+mechanism.
+
+**"Holds content of its own" is DELIBERATELY NARROWER than `GET /v1/games`'s
+per-app `size_bytes` (B1, reviewer blocker, real-`DELETE`-rig measurement,
+user decision "Plan A: narrow the definition").** `sizes.app_size_bytes`
+correctly counts a SHARED depot's bytes into every co-owning app's total
+(plan §4 — "how much would deleting this app free"), and mapping rows
+deliberately survive a `DELETE` (ADR-0003). Combined, those two correct
+facts produce a wrong answer for THIS question: an app whose only surviving
+mapped depot is one it shares with another app that still has content
+(ADR-0003's "shared and protected" outcome, never deleted) kept reporting as
+"cached" forever under the generous definition — so a mode-ON sweep would
+silently re-download a game the operator had just deleted. Measured against
+the real endpoint:
+
+```
+DELETE /v1/cache/440 -> deleted depot 441, skipped_shared depot 300 (shared_with [730])
+on disk after delete: [300]
+generous definition:  cached_appids after delete -> {440, 730}   -- 440 WRONG
+this mode's definition: cached_appids after delete -> {730}      -- correct
+```
+
+`scheduler.cached_appids` therefore asks "does this app map at least one
+depot that NO OTHER tracked app also maps, and does THAT depot have bytes on
+disk" — reusing `deletion.plan_deletion`'s existing exclusive/shared split
+(`DeletionPlan.exclusive`) via `deletion.load_mapping_rows`, rather than
+inventing a second "is this app cached" predicate that could quietly drift
+from the one the delete endpoint already uses. `co_owner_states` (the
+remnant-vs-shared nuance `plan_deletion` also computes) is not needed here —
+a still-shared depot is not exclusive either way.
+
+**The conservative edge this creates, on purpose:** an app whose cache
+content lives ENTIRELY in depots shared with other tracked apps is now
+NEVER a cached-mode sweep target, even though bytes attributable to it are
+genuinely on disk. This mode is meant to do LESS than the generous
+definition would, never more — losing a rare shared-only app from the sweep
+is the acceptable side of that trade, silently re-downloading a deleted game
+is not. `sizes.app_size_bytes` itself is completely UNCHANGED by this —
+its generous, double-counting-on-purpose definition remains exactly correct
+for the sizing question it answers; only the sweep's OWN notion of "cached"
+is narrower.
+
+**Why this is the exact fix for the problem it names (plan §7 Phase 4d):** a
+game that sits in the cache but is currently installed nowhere — or whose
+only client has gone quiet longer than `VAULT_SCHEDULE_CLIENT_STALE_DAYS` — is
+invisible to the installed-only union above and therefore never refreshed.
+The cached-apps source is computed **independently of client freshness
+entirely**: it does not consult `agent_reports` at all, so a stale-excluded
+client's cached games are swept anyway. `TargetSet.cached_only_appids` (and
+the matching field on `SweepResult`) names exactly which apps were added
+*only* because of this mode — i.e. not already reachable through any
+included client — purely for the sweep's log line and for tests; the apps
+themselves are already in `appids`, counted once.
+
+**Cost model, stated plainly (why opt-in is safe to turn on, not just safe to
+leave off):** a non-forced SteamPrefill run against an already-current app is
+a ~3 s no-op that transfers zero bytes (ADR-0006 decision 1 — the same fact
+Phase 4c's manual-check feature rests on). Real bandwidth is spent only on
+apps that actually have an update. The filesystem side of the cost is one
+extra `sizes.scan_depot_dir_bytes` walk of the whole `depot/` tree, PLUS one
+small indexed SQL query per candidate app (`deletion.load_mapping_rows`'s own
+family subquery, used to compute exclusivity — see above), per sweep — not
+per tick — because it only runs inside an already-claimed sweep
+(`VAULT_SCHEDULE_INTERVAL_MINUTES`, default 3 h). Three things about that
+cost worth stating plainly rather than leaving to be discovered (reviewer
+should-fix S5):
+
+1. **Order of magnitude.** Warm-cache (NVMe/SSD, OS page cache populated) is
+   low-single-digit microseconds per file — a few hundred thousand chunk
+   files walks in well under a second. Cold-cache on a spinning disk is a
+   different story: every depot directory is a separate seek-bound
+   `readdir`, so tens of seconds to low minutes is plausible on a large
+   HDD-backed library that has not been walked recently. Either way it is
+   bounded, read-only, and never triggers a download by itself.
+2. **No coalescing with concurrent request-path scans.** This walk
+   deliberately does NOT use the process-wide `SizeCache` (see "The TTL
+   cache" above) — threading a request-scoped, TTL-bearing cache into a
+   background thread that fires a few times a day was judged not worth the
+   second dependency. Consequence: this walk and an unrelated
+   `GET /v1/cache/summary` cache miss CAN walk the same `depot/` tree at the
+   same time, doing the work twice. This is not a rare coincidence:
+   `worker.py` calls `SizeCache.invalidate()` after every successful
+   prefill, so a size-cache miss is common in exactly the window a sweep is
+   also enqueueing work — the two are correlated, not independent events.
+3. **Not interruptible mid-walk.** `PrefillScheduler.stop()`'s abort signal
+   (`should_abort`) is only checked inside the PER-APP enqueue loop in
+   `maybe_sweep`, never inside the depot walk itself. A shutdown that lands
+   while this walk is in flight can make the scheduler thread take longer
+   than `SHUTDOWN_JOIN_TIMEOUT_SECONDS` (30 s) to stop, logging the "did not
+   stop within 30s, leaving it as a daemon thread" warning during e.g.
+   `docker compose down`. Harmless (a read-only walk left to finish on its
+   own; nothing is corrupted and no lock is held across the join), but it
+   will read as a fault in the log if this isn't said up front.
+
+**Off by default, and it must stay an explicit choice** (ADR-0009 decision 5
+does not apply here — this key IS overridable, but its *default* is the
+safety mechanism): the mode spends bandwidth and, on real updates, disk on
+games nobody currently asked to have refreshed. Pinned three ways: a test
+that omits the `include_cached` keyword entirely and asserts nothing cached
+leaks in; a second test that never sets `sweep_include_cached` on `Settings`
+and asserts the same through the full `maybe_sweep` call; and
+`config.DEFAULT_SWEEP_INCLUDE_CACHED` itself, mutation-killed by both.
+
+**The auto-GC coupling, stated honestly — this mode does not collect
+garbage, it only refreshes it.** Every kept-current game this mode refreshes
+adds fresh chunks for the new manifest while the *old* manifest's chunks
+become orphans — that is what a game update is, on disk. A vault that keeps
+itself current without collecting garbage keeps itself current straight into
+a full disk. WP 4d does **not** silently enable auto-GC and does **not**
+refuse to run when the coupling is unresolved — the operator decides (plan's
+own words). Instead:
+
+- `scheduler.cached_sweep_gc_risk(settings)` names the condition in exactly
+  one place, so the warning below and the API field further down can never
+  quietly disagree about what "at risk" means: `sweep_include_cached` on AND
+  `VAULT_AUTO_GC` is **anything other than `execute`** (B2, user decision
+  "nothing is being reclaimed", 2026-08-18 review round — see below for why
+  `dry-run` counts).
+- **`dry-run` does NOT clear the risk.** The condition this flag names is
+  "orphans are accumulating, unreclaimed" — a fact about the disk, not about
+  whether anyone is watching. `VAULT_AUTO_GC=dry-run` queues a REPORTING-only
+  GC job that tells the operator exactly what could be freed and frees
+  NOTHING (see "Auto-GC" above); a vault swept in `dry-run` mode grows at
+  IDENTICAL speed to one with auto-GC fully off. Reporting the risk as
+  cleared once `dry-run` is on would be a doc-and-API version of exactly the
+  "a sentence telling an operator X works when it does not" class
+  `docs/LEARNINGS.md` warns about. Only `execute` (`settings.
+  auto_gc_executes`) actually reclaims, so only `execute` clears
+  `sweep_cached_gc_risk` — **that field asserts "orphans created by refreshes
+  are actually being reclaimed", not merely "someone configured GC".**
+- `PrefillScheduler` logs a `WARNING` **once per transition into the risky
+  state** — not once per tick, not once per process — and a matching `INFO`
+  **once per transition back out of it** (reviewer nitpick N1: without the
+  all-clear line, "why did that warning stop?" was unanswerable from the log
+  alone, even though the underlying state was already tracked correctly in
+  both directions). If the operator fixes it (sets `VAULT_AUTO_GC=execute`,
+  or turns the cached mode back off) and the same risky combination
+  reappears later via another `PATCH`, that is a fresh transition and gets a
+  fresh warning. This is the same "state changes in both directions" shape
+  WP 3.13's bypass-detection transitions already use.
+- `GET /v1/schedule` exposes the SAME condition as `sweep_cached_gc_risk`
+  (see below) so a UI can render a banner without re-deriving the interaction
+  between two independent settings itself.
+- Nothing is forced. `VAULT_AUTO_GC=execute` actually closes the loop; a
+  `dry-run` step first to preview what would be reclaimed is recommended but
+  does not, on its own, resolve this condition. `POST /v1/cache/{appid}/gc`
+  by hand is the third option — see "Auto-GC" above.
+
 ### Spacing: why enqueue-everything *is* the rate limiting
 
 ADR-0006's honest-limits section: each per-app check costs a Steam login
@@ -2448,16 +2630,21 @@ exists for). It shares nothing with the worker but the database file; WAL plus
   "last_sweep_at": "2026-08-06T08:00:00Z",   // when it STARTED
   "last_sweep_targets": 12,       // null while a sweep is in flight
   "last_sweep_enqueued": 3,       // NEW jobs only (dedupe hits not counted)
-  "next_eligible_at": "2026-08-06T11:00:00Z" // estimate; interval then window
+  "next_eligible_at": "2026-08-06T11:00:00Z", // estimate; interval then window
+  "sweep_include_cached": false,  // WP 4d — effective value, additive field
+  "sweep_cached_gc_risk": false   // WP 4d — cached mode on AND auto_gc != 'execute'
 }
 ```
 
-**Read-only, and there is deliberately no write endpoint.** Every setting in
-vault-api comes from the environment and is read once at startup (plan §9). A
-config-write API would need persistence, precedence rules against the
-environment, and a validation path separate from the startup one — three
-moving parts to save one `docker compose up -d` after editing `.env`. Change
-the window in `.env` and restart.
+**This endpoint itself has no write verb — `PATCH /v1/settings` is the write
+path.** That was true unconditionally through WP 3.5; since the settings-API
+work package (ADR-0009) every field above except the four `last_sweep_*`/
+`next_eligible_at` bookkeeping values is overridable at runtime via
+`PATCH /v1/settings` (`window`/`interval_minutes`/`client_stale_days`/
+`sweep_include_cached`, applying `next_sweep`) — see "Persisted settings"
+below for the full precedence/validation story. `GET /v1/schedule` always
+reports the EFFECTIVE, override-resolved configuration, never the raw env
+snapshot.
 
 When the scheduler is disabled the endpoint still reports the configured
 interval and staleness bound, so an operator can see what enabling the window
@@ -4794,6 +4981,7 @@ exist" is a plain row-presence check, not a `NULL` check.
 | `schedule_interval_minutes` | `VAULT_SCHEDULE_INTERVAL_MINUTES` | `next_sweep` | Same tick-loop resolution as `schedule_window` |
 | `schedule_client_stale_days` | `VAULT_SCHEDULE_CLIENT_STALE_DAYS` | `next_sweep` | Same tick-loop resolution |
 | `auto_gc` | `VAULT_AUTO_GC` | `immediately` | `worker.py`'s `_maybe_queue_auto_gc` resolves `effective_settings` using the connection the just-finished job is already on, so the very next completed prefill sees a changed value |
+| `sweep_include_cached` | `VAULT_SWEEP_INCLUDE_CACHED` | `next_sweep` | Same tick-loop resolution as the other `schedule_*` keys — see "Sweep target set — installed PLUS cached" above (WP 4d) |
 | `webhook_url` | `VAULT_WEBHOOK_URL` | `restart-required` | See "The honest gap" below |
 | `webhook_events` | `VAULT_WEBHOOK_EVENTS` | `restart-required` | Same as `webhook_url` |
 
@@ -4842,11 +5030,18 @@ the corresponding env var at startup (ADR-0009 decision 4):
 `schedule_window` uses `schedule_window.parse_window`; `schedule_interval_minutes`/
 `schedule_client_stale_days` use `config.parse_strict_int` (ASCII-digits-only,
 `nan`/signs/underscores rejected — the WP 3.12 grammar); `auto_gc` uses
-`config.parse_auto_gc` (must be exactly `off`/`dry-run`/`execute`).
-`config._env_int`/`_env_float`/`_env_auto_gc`/`_env_webhook_events` were each
-split into a pure `parse_*` half (no env-var name, no `os.environ` access)
-plus a thin env-reading wrapper, specifically so both the startup path and
-this module call the identical function — a bad value cannot reach the
+`config.parse_auto_gc` (must be exactly `off`/`dry-run`/`execute`);
+`sweep_include_cached` (WP 4d) uses `config.parse_strict_bool` (the same
+`1`/`true`/`yes`/`on` / `0`/`false`/`no`/`off` word set `VAULT_SETTINGS_READONLY`
+already validates against at startup). A JSON `true`/`false` literal in the
+PATCH body never even reaches this grammar — `routers/settings.py` rejects a
+JSON boolean outright (docs/LEARNINGS.md "Parsers": a bool must not be
+silently stringified into `"True"`/`"False"`), so `sweep_include_cached` must
+be sent as the STRING `"true"`/`"false"` like every other value here.
+`config._env_int`/`_env_float`/`_env_auto_gc`/`_env_bool`/`_env_webhook_events`
+were each split into a pure `parse_*` half (no env-var name, no `os.environ`
+access) plus a thin env-reading wrapper, specifically so both the startup path
+and this module call the identical function — a bad value cannot reach the
 `settings` table with a grammar even slightly looser than the one the
 scheduler/worker would apply hours later.
 
@@ -4918,7 +5113,9 @@ scheduler tick.
 - **No UI.** Phase 4a's settings screen is expected to build on this
   endpoint instead of "set this env var" hints, but no web UI changes are
   part of this work package.
-- **No sweep-mode flag yet.** ADR-0009's consequences section names the
-  Phase 4d "keep the cache current" sweep-mode switch as "one more
-  overridable key when it lands" — it does not exist yet, and neither
-  `OVERRIDABLE_SPECS` nor this section mention it ahead of that work.
+- **No sweep-mode flag yet, at the time this WP shipped.** ADR-0009's
+  consequences section named the Phase 4d "keep the cache current" sweep-mode
+  switch as "one more overridable key when it lands". **Landed since:**
+  `sweep_include_cached` (`VAULT_SWEEP_INCLUDE_CACHED`) is now in
+  `OVERRIDABLE_SPECS` — see "Sweep target set — installed PLUS cached" in the
+  Scheduler section above and the table entry earlier in this section.

@@ -18,6 +18,7 @@ import json
 import sqlite3
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -31,11 +32,14 @@ from vault_api import scheduler as scheduler_module
 from vault_api.config import Settings
 from vault_api.db import get_connection, init_db
 from vault_api.main import create_app
+from vault_api.mapping import upsert_mapping
 from vault_api.schedule_window import parse_window
 from vault_api.scheduler import (
     EMPTY_STATE,
     PrefillScheduler,
     ScheduleState,
+    cached_appids,
+    cached_sweep_gc_risk,
     claim_sweep,
     compute_targets,
     finish_sweep,
@@ -43,6 +47,7 @@ from vault_api.scheduler import (
     maybe_sweep,
     next_eligible_at,
     read_state,
+    warn_once_if_cached_sweep_without_gc,
 )
 
 AUTH = {"X-Api-Key": TEST_API_KEY}
@@ -123,6 +128,15 @@ def insert_report(
         (client_id, reported_at, payload),
     )
     conn.commit()
+
+
+def write_cached_depot(cache_root: Path, depotid: int, content: bytes = b"x") -> None:
+    """A minimal on-disk depot: one non-empty chunk file, which is all
+    ``sizes.scan_depot_dir_bytes`` needs to consider a depot 'cached'
+    (WP 4d's ``cached_appids``)."""
+    path = cache_root / "depot" / str(depotid) / "chunk" / "a.bin"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
 
 
 # ==========================================================================
@@ -318,6 +332,433 @@ def test_no_clients_means_no_targets(conn: sqlite3.Connection) -> None:
         [],
         [],
     )
+
+
+# ==========================================================================
+# WP 4d — sweep target-set mode: installed PLUS cached (opt-in)
+# ==========================================================================
+
+
+def test_cached_appids_finds_apps_with_disk_content(tmp_path: Path, conn: sqlite3.Connection) -> None:
+    cache_root = tmp_path / "cache"
+    write_cached_depot(cache_root, 441)
+    upsert_mapping(conn, depotid=441, appid=440, name="TF2")
+    # Mapped but never written to disk -- must NOT count as cached.
+    upsert_mapping(conn, depotid=999, appid=730, name="CS")
+
+    assert cached_appids(conn, str(cache_root)) == {440}
+
+
+def test_cached_appids_on_an_empty_or_missing_cache_root_is_empty_not_an_error(
+    tmp_path: Path, conn: sqlite3.Connection
+) -> None:
+    upsert_mapping(conn, depotid=441, appid=440, name="TF2")
+
+    assert cached_appids(conn, str(tmp_path / "does-not-exist")) == set()
+
+
+def test_cached_appids_excludes_an_app_whose_only_surviving_content_is_shared(
+    tmp_path: Path,
+) -> None:
+    """B1 (reviewer blocker, real-rig measurement, user decision "Plan A:
+    narrow the definition"): after a REAL ``DELETE /v1/cache/{appid}`` that
+    frees an app's own depot but keeps a shared depot protected (ADR-0003 —
+    the other co-owner still has content), the deleted app must NOT count as
+    'cached' just because its surviving mapping row points at a depot that
+    happens to have bytes on disk.
+
+    Fixture is the reviewer's own: app 440 has exclusive depot 441 plus depot
+    300 shared with app 730; app 730 also has its own exclusive depot 731 and
+    is marked prefilled so depot 300 stays SHARED/protected (not a deletable
+    remnant) throughout. After deleting 440:
+
+        DELETE /v1/cache/440 -> deleted depot 441, skipped_shared depot 300
+        on disk after delete: depot 300 (shared), depot 731 (730's own)
+        cached_appids after delete: {730}      -- NOT 440
+
+    This is a real end-to-end HTTP delete against a real filesystem, exactly
+    like the reviewer's own rig, not a synthetic ``cached_appids`` call
+    against hand-planted disk state — the bug is specifically about what
+    survives a REAL deletion.
+    """
+    cache_root = tmp_path / "cache"
+    settings = Settings(
+        vault_api_key=TEST_API_KEY,
+        db_path=str(tmp_path / "vault.db"),
+        cache_root=str(cache_root),
+        log_level="INFO",
+    )
+    client = TestClient(create_app(settings))
+
+    def seed_mapping(depotid: int, appid: int, name: str | None = None) -> None:
+        response = client.put(
+            f"/v1/mapping/{depotid}",
+            json={"appid": appid, "app_name": name},
+            headers=AUTH,
+        )
+        assert response.status_code == 200, response.text
+
+    seed_mapping(441, 440, "TF2 (exclusive)")
+    seed_mapping(300, 440)
+    seed_mapping(300, 730, "CS2 (shares depot 300)")
+    seed_mapping(731, 730)
+    write_cached_depot(cache_root, 441)
+    write_cached_depot(cache_root, 300)
+    write_cached_depot(cache_root, 731)
+
+    conn = get_connection(settings.db_path)
+    try:
+        conn.execute(
+            "UPDATE apps SET status = 'done', last_prefill_at = ? WHERE appid = 730",
+            ("2026-08-05T10:00:00Z",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    delete_response = client.delete("/v1/cache/440", headers=AUTH).json()
+    assert delete_response["deleted_depots"] == [
+        {"depotid": 441, "size_bytes_freed": 1, "shared_with_uncached": []}
+    ]
+    assert delete_response["skipped_shared"] == [
+        {"depotid": 300, "shared_with": [730]}
+    ]
+    assert (cache_root / "depot" / "441").exists() is False
+    assert (cache_root / "depot" / "300").exists()  # shared, protected, survives
+    assert (cache_root / "depot" / "731").exists()
+
+    conn = get_connection(settings.db_path)
+    try:
+        result = cached_appids(conn, str(cache_root))
+    finally:
+        conn.close()
+
+    assert result == {730}
+    assert 440 not in result
+
+
+def test_include_cached_defaults_to_off(
+    tmp_path: Path, conn: sqlite3.Connection
+) -> None:
+    """Mutation pin: flip ``compute_targets``'s ``include_cached`` default to
+    ``True`` (or ``cached_only_appids``'s dataclass default away from ``()``)
+    and this test dies -- no agent report exists at all, so a cached-but-
+    uninstalled app must never appear unless the caller explicitly opts in.
+
+    ``cache_root`` IS passed (pointing at real cache content) so the pin
+    actually exercises the ``include_cached`` default rather than being
+    masked by ``cache_root``'s own default of ``""`` (which would make ANY
+    value of ``include_cached`` a no-op, since there would be nothing to
+    scan) -- caught in review by running this exact mutation.
+    """
+    cache_root = tmp_path / "cache"
+    write_cached_depot(cache_root, 441)
+    upsert_mapping(conn, depotid=441, appid=440, name="TF2")
+
+    result = compute_targets(  # no include_cached kwarg -- must default to off
+        conn, local(10), stale_after_days=7, cache_root=str(cache_root)
+    )
+
+    assert result.appids == []
+    assert result.cached_only_appids == ()
+
+
+def test_include_cached_mode_off_is_byte_identical_to_pre_wp4d_behaviour(
+    tmp_path: Path, conn: sqlite3.Connection
+) -> None:
+    """Same fixture as the union test below, but with the mode explicitly
+    OFF: the presence of cache content and a depot mapping must not change
+    a single field of the result relative to what compute_targets returned
+    before WP 4d existed (agent-report union only)."""
+    cache_root = tmp_path / "cache"
+    write_cached_depot(cache_root, 441)  # app 440, cached
+    write_cached_depot(cache_root, 731)  # app 730, cached
+    upsert_mapping(conn, depotid=441, appid=440, name="TF2")
+    upsert_mapping(conn, depotid=731, appid=730, name="CS")
+    insert_report(conn, "gaming-pc", [440], utc_iso(9))  # 440 also installed
+
+    result = compute_targets(
+        conn, local(10), stale_after_days=7,
+        include_cached=False, cache_root=str(cache_root),
+    )
+
+    assert result.appids == [440]  # exactly the pre-WP-4d union, no 730
+    assert result.cached_only_appids == ()
+    assert result.included_clients == ["gaming-pc"]
+    assert result.excluded_clients == []
+
+
+def test_cached_apps_join_the_target_set_when_enabled(
+    tmp_path: Path, conn: sqlite3.Connection
+) -> None:
+    cache_root = tmp_path / "cache"
+    write_cached_depot(cache_root, 441)
+    upsert_mapping(conn, depotid=441, appid=440, name="TF2")
+
+    result = compute_targets(
+        conn, local(10), stale_after_days=7,
+        include_cached=True, cache_root=str(cache_root),
+    )
+
+    assert result.appids == [440]
+    assert result.cached_only_appids == (440,)
+
+
+def test_an_app_both_installed_and_cached_appears_exactly_once(
+    tmp_path: Path, conn: sqlite3.Connection
+) -> None:
+    """Dedupe: overlap between the installed union and the cached set must
+    not duplicate the appid, and it must not be reported as 'cached-only'
+    (it was already reachable through the installed union)."""
+    cache_root = tmp_path / "cache"
+    write_cached_depot(cache_root, 441)  # 440: installed AND cached
+    write_cached_depot(cache_root, 731)  # 730: cached only
+    upsert_mapping(conn, depotid=441, appid=440, name="TF2")
+    upsert_mapping(conn, depotid=731, appid=730, name="CS")
+    insert_report(conn, "gaming-pc", [440], utc_iso(9))
+
+    result = compute_targets(
+        conn, local(10), stale_after_days=7,
+        include_cached=True, cache_root=str(cache_root),
+    )
+
+    assert result.appids == [440, 730]  # each exactly once
+    assert result.cached_only_appids == (730,)  # NOT 440 -- already installed
+
+
+def test_an_empty_cache_with_the_mode_enabled_adds_nothing_and_errors_never(
+    tmp_path: Path, conn: sqlite3.Connection
+) -> None:
+    insert_report(conn, "gaming-pc", [440], utc_iso(9))
+
+    result = compute_targets(
+        conn, local(10), stale_after_days=7,
+        include_cached=True, cache_root=str(tmp_path / "cache"),  # never created
+    )
+
+    assert result.appids == [440]
+    assert result.cached_only_appids == ()
+
+
+def test_a_cached_app_survives_its_only_clients_staleness(
+    tmp_path: Path, conn: sqlite3.Connection
+) -> None:
+    """The case WP 4d exists for (plan §7 Phase 4d): a PC that has gone quiet
+    beyond VAULT_SCHEDULE_CLIENT_STALE_DAYS must not stop its cached games
+    from being kept current, even though its INSTALLED contribution is
+    excluded exactly as before."""
+    cache_root = tmp_path / "cache"
+    write_cached_depot(cache_root, 441)
+    upsert_mapping(conn, depotid=441, appid=440, name="TF2")
+    insert_report(
+        conn, "retired-pc", [440], utc_iso_of(local(9) - timedelta(days=30))
+    )
+
+    off = compute_targets(
+        conn, local(10), stale_after_days=7,
+        include_cached=False, cache_root=str(cache_root),
+    )
+    assert off.appids == []  # unchanged: the only client is stale-excluded
+    assert [c.reason for c in off.excluded_clients] == ["stale"]
+
+    on = compute_targets(
+        conn, local(10), stale_after_days=7,
+        include_cached=True, cache_root=str(cache_root),
+    )
+    assert on.appids == [440]  # cached mode reaches it anyway
+    assert on.cached_only_appids == (440,)
+    assert [c.reason for c in on.excluded_clients] == ["stale"]  # unrelated, unchanged
+
+
+def test_maybe_sweep_enqueues_cached_apps_when_the_setting_is_on(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    cache_root = tmp_path / "cache"
+    write_cached_depot(cache_root, 441)
+    upsert_mapping(conn, depotid=441, appid=440, name="TF2")
+    settings = make_settings(tmp_path, cache_root=cache_root)
+    settings = replace(settings, sweep_include_cached=True)
+
+    result = maybe_sweep(conn, settings, local(10))
+
+    assert result.swept is True
+    assert result.targets == (440,)
+    assert result.cached_only_appids == (440,)
+    assert [job["appid"] for job in jobs_queue.list_jobs(conn, 10)] == [440]
+
+
+def test_maybe_sweep_ignores_cache_content_when_the_setting_is_off(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """Mutation pin on the wiring (not just compute_targets' own default):
+    make_settings' Settings never sets sweep_include_cached, so this relies
+    on Settings' OWN dataclass default -- flip DEFAULT_SWEEP_INCLUDE_CACHED
+    to True and this test dies too."""
+    cache_root = tmp_path / "cache"
+    write_cached_depot(cache_root, 441)
+    upsert_mapping(conn, depotid=441, appid=440, name="TF2")
+    settings = make_settings(tmp_path, cache_root=cache_root)
+
+    result = maybe_sweep(conn, settings, local(10))
+
+    assert result.swept is True
+    assert result.targets == ()
+    assert jobs_queue.list_jobs(conn, 10) == []
+
+
+def test_maybe_sweep_logs_the_cached_mode_even_when_it_adds_nothing(
+    conn: sqlite3.Connection, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """S1 (reviewer should-fix, 2026-08-18 review round): a mode that is ON
+    but happens to add zero targets this sweep (nothing cached yet, an empty
+    ``depot_app_map``, ...) must still be VISIBLE in the log, naming the root
+    that was scanned -- otherwise this case is byte-identical to the mode
+    being off, and "why isn't this doing anything" is undiagnosable from the
+    log alone. Deliberately no cache content seeded at all: this is exactly
+    the zero-target case the fix targets.
+    """
+    cache_root = tmp_path / "cache"
+    settings = make_settings(tmp_path, cache_root=cache_root)
+    settings = replace(settings, sweep_include_cached=True)
+
+    with caplog.at_level("INFO", logger=scheduler_module.__name__):
+        result = maybe_sweep(conn, settings, local(10))
+
+    assert result.swept is True
+    assert result.targets == ()
+    assert result.cached_only_appids == ()
+
+    sweep_lines = [r.getMessage() for r in caplog.records if "sweep at" in r.getMessage()]
+    assert len(sweep_lines) == 1
+    assert "cached-apps sweep mode ON" in sweep_lines[0]
+    assert repr(str(cache_root)) in sweep_lines[0]  # settings.cache_root is %r-logged
+    assert "0 target(s) added" in sweep_lines[0]
+
+
+def test_compute_targets_requires_a_real_cache_root_when_the_mode_is_on(
+    conn: sqlite3.Connection,
+) -> None:
+    """S1: the old ``cache_root: str = ""`` default let a caller (production
+    code or a test) forget to pass the root and get a silent, indistinguishable
+    'nothing cached' result -- this is exactly the shape that once masked one
+    of this module's own mutation-kill tests. Now it is a loud, immediate
+    ``ValueError`` for both spellings of 'nothing was given'."""
+    for missing in (None, ""):
+        with pytest.raises(ValueError, match="cache_root"):
+            compute_targets(
+                conn, local(10), stale_after_days=7,
+                include_cached=True, cache_root=missing,
+            )
+
+    # The default (no cache_root kwarg at all) is exactly the same failure --
+    # there is no usable default left to fall back on.
+    with pytest.raises(ValueError, match="cache_root"):
+        compute_targets(conn, local(10), stale_after_days=7, include_cached=True)
+
+
+# ==========================================================================
+# WP 4d — the auto-GC coupling
+# ==========================================================================
+
+
+@pytest.mark.parametrize(
+    "sweep_include_cached, auto_gc, expected_risk",
+    [
+        (False, "off", False),
+        (True, "off", True),
+        # B2 (user decision "nothing is being reclaimed"): dry-run REPORTS
+        # what could be freed but frees nothing, so it stays risky -- only
+        # 'execute' actually reclaims and clears the flag.
+        (True, "dry-run", True),
+        (True, "execute", False),
+        (False, "execute", False),
+        (False, "dry-run", False),  # mode off: no orphans are being CREATED
+    ],
+)
+def test_cached_sweep_gc_risk_table(
+    tmp_path: Path, sweep_include_cached: bool, auto_gc: str, expected_risk: bool
+) -> None:
+    base = make_settings(tmp_path)
+    settings = replace(
+        base, sweep_include_cached=sweep_include_cached, auto_gc=auto_gc
+    )
+
+    assert cached_sweep_gc_risk(settings) is expected_risk
+
+
+def test_warn_once_fires_only_on_the_off_to_on_transition(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """B2: 'safe' here means ``auto_gc='execute'`` — the only mode that
+    actually reclaims — not ``dry-run``, which stays risky (see the table
+    test above)."""
+    base = make_settings(tmp_path)
+    risky = replace(base, sweep_include_cached=True, auto_gc="off")
+    still_risky_dry_run = replace(base, sweep_include_cached=True, auto_gc="dry-run")
+    safe = replace(base, sweep_include_cached=True, auto_gc="execute")
+
+    with caplog.at_level("INFO", logger=scheduler_module.__name__):
+        warned = False
+        # Risky, three ticks in a row: exactly one warning, not three.
+        for _ in range(3):
+            warned = warn_once_if_cached_sweep_without_gc(risky, warned)
+        assert warned is True
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+
+        # dry-run: STILL risky (B2) -- no new warning (already warned), and
+        # emphatically no all-clear either, since nothing was actually fixed.
+        warned = warn_once_if_cached_sweep_without_gc(still_risky_dry_run, warned)
+        assert warned is True
+        assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
+        assert len([r for r in caplog.records if r.levelname == "INFO"]) == 0
+
+        # The operator ACTUALLY fixes it (execute): the flag resets, and the
+        # all-clear is INFO-logged exactly once (reviewer nitpick N1) -- not
+        # a second WARNING.
+        warned = warn_once_if_cached_sweep_without_gc(safe, warned)
+        assert warned is False
+        assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
+        all_clears = [r for r in caplog.records if r.levelname == "INFO"]
+        assert len(all_clears) == 1
+
+        # Already safe: calling again must not repeat the all-clear.
+        warned = warn_once_if_cached_sweep_without_gc(safe, warned)
+        assert warned is False
+        assert len([r for r in caplog.records if r.levelname == "INFO"]) == 1
+
+        # Risky again: a FRESH warning, because it is a new transition.
+        warned = warn_once_if_cached_sweep_without_gc(risky, warned)
+        assert warned is True
+        assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 2
+
+
+def test_the_warning_is_not_a_hard_failure_across_real_ticks(tmp_path: Path) -> None:
+    """Integration-level pin: a real PrefillScheduler thread, ticking for
+    real, with the risky combination configured from boot, never raises and
+    never stops sweeping -- 'not a hard failure' proven by the thread staying
+    alive and continuing to do its job, not merely by the pure function
+    above never raising."""
+    cache_root = tmp_path / "cache"
+    write_cached_depot(cache_root, 441)
+    settings = make_settings(tmp_path, cache_root=cache_root)
+    settings = replace(settings, sweep_include_cached=True, auto_gc="off")
+
+    scheduler = PrefillScheduler(settings, clock=lambda: local(10), tick_seconds=0.01)
+    init_db(settings.db_path)
+    conn = get_connection(settings.db_path)
+    try:
+        upsert_mapping(conn, depotid=441, appid=440, name="TF2")
+    finally:
+        conn.close()
+
+    scheduler.start()
+    try:
+        wait_for(lambda: scheduler._warned_cached_sweep_gc_risk is True)
+        time.sleep(0.2)  # several more ticks
+        assert scheduler._thread is not None and scheduler._thread.is_alive()
+    finally:
+        scheduler.stop()
 
 
 # ==========================================================================
@@ -560,6 +1001,8 @@ def test_schedule_endpoint_reports_config_and_last_sweep(tmp_path: Path) -> None
         "last_sweep_targets": 2,
         "last_sweep_enqueued": 2,
         "next_eligible_at": utc_iso(13),
+        "sweep_include_cached": False,
+        "sweep_cached_gc_risk": False,
     }
 
 
@@ -586,6 +1029,56 @@ def test_schedule_endpoint_marks_an_overnight_window(tmp_path: Path) -> None:
     body = TestClient(app).get("/v1/schedule", headers=AUTH).json()
 
     assert (body["window"], body["overnight"]) == ("22:00-06:00", True)
+
+
+def test_schedule_endpoint_reports_the_cached_sweep_mode_and_its_gc_risk(
+    tmp_path: Path,
+) -> None:
+    """WP 4d: the mode itself, plus the auto-GC risk flag it is coupled
+    with, additively -- every other field stays exactly as documented above."""
+    settings = replace(
+        make_settings(tmp_path), sweep_include_cached=True, auto_gc="off"
+    )
+    app = create_app(settings)
+    app.state.scheduler = PrefillScheduler(settings, clock=lambda: local(10))
+
+    body = TestClient(app).get("/v1/schedule", headers=AUTH).json()
+
+    assert body["sweep_include_cached"] is True
+    assert body["sweep_cached_gc_risk"] is True
+
+
+def test_schedule_endpoint_still_reports_gc_risk_under_dry_run(
+    tmp_path: Path,
+) -> None:
+    """B2: dry-run REPORTS what could be reclaimed but reclaims nothing, so
+    the field asserted here means "orphans created by refreshes are actually
+    being reclaimed" -- dry-run does not make that true."""
+    settings = replace(
+        make_settings(tmp_path), sweep_include_cached=True, auto_gc="dry-run"
+    )
+    app = create_app(settings)
+    app.state.scheduler = PrefillScheduler(settings, clock=lambda: local(10))
+
+    body = TestClient(app).get("/v1/schedule", headers=AUTH).json()
+
+    assert body["sweep_include_cached"] is True
+    assert body["sweep_cached_gc_risk"] is True
+
+
+def test_schedule_endpoint_reports_no_gc_risk_once_auto_gc_executes(
+    tmp_path: Path,
+) -> None:
+    settings = replace(
+        make_settings(tmp_path), sweep_include_cached=True, auto_gc="execute"
+    )
+    app = create_app(settings)
+    app.state.scheduler = PrefillScheduler(settings, clock=lambda: local(10))
+
+    body = TestClient(app).get("/v1/schedule", headers=AUTH).json()
+
+    assert body["sweep_include_cached"] is True
+    assert body["sweep_cached_gc_risk"] is False
 
 
 # ==========================================================================

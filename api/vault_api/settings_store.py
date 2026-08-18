@@ -162,6 +162,22 @@ def _parse_auto_gc_override(raw: str) -> str:
         raise SettingValidationError(str(exc)) from exc
 
 
+def _parse_sweep_include_cached_override(raw: str) -> bool:
+    """WP 4d. Same "blank is not a value" rule as every other non-blank enum
+    key here (``auto_gc``, the two ``schedule_*`` ints): a settings override
+    that clears to blank is meaningless — clearing is spelled ``null``.
+    """
+    if not raw.strip():
+        raise SettingValidationError(
+            "must be one of true/false/yes/no/on/off/1/0; use null to clear "
+            "the override instead of an empty string"
+        )
+    try:
+        return config.parse_strict_bool(raw)
+    except ValueError as exc:
+        raise SettingValidationError(str(exc)) from exc
+
+
 def _parse_webhook_url_override(raw: str) -> str:
     try:
         return config.validate_webhook_url(raw)
@@ -184,7 +200,9 @@ def _events_to_json(events: frozenset[str]) -> list[str]:
     return sorted(events)
 
 
-#: The seven keys ADR-0009 names as overridable, in the order they are
+#: The eight keys overridable today (ADR-0009 named the first seven; WP 4d
+#: added ``sweep_include_cached`` as "one more overridable key when it
+#: lands", per the ADR's own consequences section), in the order they are
 #: documented in api/README.md and returned by GET /v1/settings. Keyed by
 #: ``Settings`` attribute name, which is also the JSON key both endpoints use.
 OVERRIDABLE_SPECS: dict[str, SettingSpec] = {
@@ -231,6 +249,20 @@ OVERRIDABLE_SPECS: dict[str, SettingSpec] = {
         secret=False,
         default=config.DEFAULT_AUTO_GC,
         parse=_parse_auto_gc_override,
+        to_json=lambda v: v,
+    ),
+    "sweep_include_cached": SettingSpec(
+        key="sweep_include_cached",
+        env_var="VAULT_SWEEP_INCLUDE_CACHED",
+        # Same tick-loop resolution as the other scheduler keys above:
+        # scheduler.PrefillScheduler._tick resolves effective_settings fresh
+        # every ~60s tick and hands the result to maybe_sweep/compute_targets,
+        # so a PATCH is visible to the very next sweep, not only after a
+        # restart.
+        applies="next_sweep",
+        secret=False,
+        default=config.DEFAULT_SWEEP_INCLUDE_CACHED,
+        parse=_parse_sweep_include_cached_override,
         to_json=lambda v: v,
     ),
     "webhook_url": SettingSpec(

@@ -156,6 +156,30 @@ AUTO_GC_MODES = (AUTO_GC_OFF, AUTO_GC_DRY_RUN, AUTO_GC_EXECUTE)
 
 DEFAULT_AUTO_GC = AUTO_GC_OFF
 
+#: WP 4d (plan §7 Phase 4d, "Sweep target set — installed PLUS cached").
+#: ``VAULT_SWEEP_INCLUDE_CACHED`` — should ``scheduler.compute_targets`` widen
+#: its target set to every app with SOME cache content on disk, not only the
+#: union of installed apps from fresh agent reports?
+#:
+#: **Off by default, deliberately.** The installed-based set (plan A8) is
+#: "what somebody asked to have on their machine"; the cached set is "what is
+#: already sitting on this vault's disk" — a much larger, operator-unbounded
+#: set that spends bandwidth (checking) and, on real updates, disk (fresh
+#: chunks) on games nobody currently asked for. That must be an explicit
+#: operator opt-in, not a byte-for-byte-free upgrade to the existing sweep.
+#:
+#: **Why turning it on is still cheap** (the reasoning that makes it worth
+#: having at all): a non-forced SteamPrefill run against an already-current
+#: app is a ~3 s no-op that transfers zero bytes (ADR-0006 decision 1, the
+#: same fact Phase 4c's manual-check feature rests on) — real traffic only
+#: happens for apps that actually have an update. See
+#: ``scheduler.cached_appids``/``compute_targets`` for the mechanics and
+#: api/README.md's "Sweep target set" section for the full cost model and the
+#: auto-GC coupling (every kept-current game leaves its superseded chunks as
+#: fresh orphans — ``scheduler.cached_sweep_gc_risk`` names that condition and
+#: ``GET /v1/schedule`` surfaces it).
+DEFAULT_SWEEP_INCLUDE_CACHED = False
+
 
 # --------------------------------------------------------------------------
 # WP 3.11 — the cache-event sweep (ADR-0008). OFF by default: the whole
@@ -360,27 +384,58 @@ _BOOL_TRUE_VALUES = ("1", "true", "yes", "on")
 _BOOL_FALSE_VALUES = ("0", "false", "no", "off")
 
 
+def parse_strict_bool(raw: str) -> bool:
+    """Pure grammar half of :func:`_env_bool` — see ``parse_strict_int``'s
+    note (ADR-0009 decision 4: the exact same function backs both the
+    startup path and ``PATCH /v1/settings``'s validation, first needed here
+    by ``VAULT_SWEEP_INCLUDE_CACHED``, WP 4d). Case- and whitespace-
+    insensitive; anything outside the two named word sets is refused. ``raw``
+    must already be known non-blank — same contract as ``parse_strict_int``/
+    ``parse_strict_float``, since blank means something different to each
+    caller ("unset" at startup, "invalid" at PATCH time).
+    """
+    text = raw.strip().lower()
+    if text in _BOOL_TRUE_VALUES:
+        return True
+    if text in _BOOL_FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"must be one of {', '.join(_BOOL_TRUE_VALUES)} (true) or "
+        f"{', '.join(_BOOL_FALSE_VALUES)} (false), case-insensitive. "
+        f"Got {raw!r}."
+    )
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     """Read a strict boolean env var. Blank/unset = ``default``.
 
     Same house rule as every other enum-shaped setting in this module: a
     typo must not silently mean the wrong thing, which matters more than
     usual for ``VAULT_SETTINGS_READONLY`` — the flag that decides whether
-    the settings-write API is locked. Case- and whitespace-insensitive;
-    anything outside the two named word sets is refused loudly at startup.
+    the settings-write API is locked.
+
+    ``raw`` is deliberately passed to :func:`parse_strict_bool` UNSTRIPPED —
+    same as every sibling wrapper (``_env_int``/``_env_float``/
+    ``_env_auto_gc``) hands its OWN unstripped value to its ``parse_*``
+    counterpart, which does its own internal stripping for comparison but
+    keeps the original in its error message. Reviewer nitpick N4
+    (2026-08-18 review round): an earlier version of this function stripped
+    ``raw`` itself before the call, so a value like ``" 7 "`` reported as
+    ``'7'`` in the error rather than the actual ``' 7 '`` that was typed —
+    behaviourally identical (both are rejected), but a worse error message
+    than every other wrapper in this file gives.
     """
-    raw = os.environ.get(name, "").strip().lower()
-    if not raw:
+    raw = os.environ.get(name, "")
+    if not raw.strip():
         return default
-    if raw in _BOOL_TRUE_VALUES:
-        return True
-    if raw in _BOOL_FALSE_VALUES:
-        return False
-    raise RuntimeError(
-        f"{name} must be one of {', '.join(_BOOL_TRUE_VALUES)} (true) or "
-        f"{', '.join(_BOOL_FALSE_VALUES)} (false), case-insensitive, or blank "
-        f"for the default ({default!r}). Got {os.environ.get(name, '')!r}."
-    )
+    try:
+        return parse_strict_bool(raw)
+    except ValueError as exc:
+        # N4: restore the "or leave it blank for the default" hint the
+        # pre-refactor message had, which the shared parse_strict_bool
+        # (deliberately generic — see its own docstring) cannot phrase
+        # itself, since it has no notion of "this caller has a default".
+        raise RuntimeError(f"{name} {exc} Blank/unset uses the default ({default!r}).") from exc
 
 
 def _default_steamprefill_cache_dir() -> str:
@@ -753,6 +808,13 @@ class Settings:
     schedule_client_stale_days: int = DEFAULT_SCHEDULE_CLIENT_STALE_DAYS
     # WP 3.12. 'off' | 'dry-run' | 'execute' — see AUTO_GC_MODES above.
     auto_gc: str = DEFAULT_AUTO_GC
+    # WP 4d (plan §7 Phase 4d). Additive sweep target-set mode: every app with
+    # SOME cache content on disk joins the installed-based union
+    # `scheduler.compute_targets` already sweeps. OFF by default — see
+    # DEFAULT_SWEEP_INCLUDE_CACHED above for the cost model and api/README.md
+    # "Sweep target set" for the full write-up, including the auto-GC
+    # coupling this setting deliberately does not hide.
+    sweep_include_cached: bool = DEFAULT_SWEEP_INCLUDE_CACHED
     # WP 3.11 (ADR-0008). Path to vault-core's structured cache-event log.
     # EMPTY = the whole feature is off: no sweeping, no statistics tables
     # growing, no miss trigger. This is the one enable switch.
@@ -954,6 +1016,11 @@ class Settings:
                 "VAULT_SCHEDULE_CLIENT_STALE_DAYS", DEFAULT_SCHEDULE_CLIENT_STALE_DAYS
             ),
             auto_gc=_env_auto_gc(),
+            # WP 4d. Blank/unset = off, the safe default (see
+            # DEFAULT_SWEEP_INCLUDE_CACHED above for why).
+            sweep_include_cached=_env_bool(
+                "VAULT_SWEEP_INCLUDE_CACHED", DEFAULT_SWEEP_INCLUDE_CACHED
+            ),
             # WP 3.11 (ADR-0008). Blank/unset = the whole cache-event feature
             # stays off. The path itself is NOT validated here beyond
             # stripping: vault-api may legitimately start before vault-core has

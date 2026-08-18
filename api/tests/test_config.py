@@ -909,6 +909,78 @@ def test_settings_readonly_rejects_anything_else(
 
 
 # ==========================================================================
+# WP 4d (plan §7 Phase 4d): VAULT_SWEEP_INCLUDE_CACHED
+# ==========================================================================
+
+
+def test_sweep_include_cached_defaults_to_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation pin: flip ``DEFAULT_SWEEP_INCLUDE_CACHED`` to ``True`` and
+    this test dies -- a feature that spends bandwidth/disk on games nobody
+    asked for must be an explicit opt-in (plan §7 Phase 4d), never the
+    out-of-the-box behaviour of a fresh install."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.delenv("VAULT_SWEEP_INCLUDE_CACHED", raising=False)
+
+    assert Settings.from_env().sweep_include_cached is False
+
+
+@pytest.mark.parametrize("truthy", ["1", "true", "True", "YES", "on", " on "])
+def test_sweep_include_cached_accepts_true_spellings(
+    monkeypatch: pytest.MonkeyPatch, truthy: str
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_SWEEP_INCLUDE_CACHED", truthy)
+
+    assert Settings.from_env().sweep_include_cached is True
+
+
+@pytest.mark.parametrize("falsy", ["0", "false", "False", "NO", "off", ""])
+def test_sweep_include_cached_accepts_false_spellings(
+    monkeypatch: pytest.MonkeyPatch, falsy: str
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_SWEEP_INCLUDE_CACHED", falsy)
+
+    assert Settings.from_env().sweep_include_cached is False
+
+
+@pytest.mark.parametrize("bad", ["yeah", "1.0", "enabled", "2"])
+def test_sweep_include_cached_rejects_anything_else(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_SWEEP_INCLUDE_CACHED", bad)
+
+    with pytest.raises(RuntimeError, match="VAULT_SWEEP_INCLUDE_CACHED"):
+        Settings.from_env()
+
+
+def test_env_bool_error_names_the_original_unstripped_value_and_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N4 (reviewer nitpick, 2026-08-18 review round): the refactored
+    ``_env_bool`` had started reporting the STRIPPED value in its error
+    (losing the surrounding whitespace that made the typo visible) and had
+    dropped the "or leave it blank for the default" hint every earlier
+    version had. Both restored -- pinned here via
+    ``VAULT_SETTINGS_READONLY`` (default ``False``), the field this helper
+    backs, exactly as the reviewer measured it.
+    """
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_SETTINGS_READONLY", " bogus ")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        Settings.from_env()
+
+    message = str(excinfo.value)
+    assert "' bogus '" in message  # the ORIGINAL value, whitespace and all
+    assert "blank" in message.lower()
+    assert "False" in message  # the default it falls back to
+
+
+# ==========================================================================
 # Settings-API work package: validate_webhook_url (used only by
 # PATCH /v1/settings, NOT by Settings.from_env — see the function's own
 # docstring for why no startup grammar exists for this field to reuse).

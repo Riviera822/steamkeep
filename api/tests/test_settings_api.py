@@ -101,6 +101,17 @@ def test_get_reports_defaults_on_a_fresh_install(client: TestClient) -> None:
     assert window["effective"] is None
     assert window["applies"] == "next_sweep"
 
+    # WP 4d.
+    sweep_include_cached = find(body, "sweep_include_cached")
+    assert sweep_include_cached == {
+        "key": "sweep_include_cached",
+        "effective": False,
+        "source": "default",
+        "fallback": False,
+        "applies": "next_sweep",
+        "env_only": False,
+    }
+
 
 def test_get_includes_informational_env_only_rows(client: TestClient) -> None:
     body = client.get("/v1/settings", headers=AUTH).json()
@@ -186,6 +197,51 @@ def test_precedence_db_wins_over_env(tmp_path: Path) -> None:
     assert row["fallback"] == "dry-run"
 
 
+def test_precedence_env_wins_over_default_for_sweep_include_cached(
+    tmp_path: Path,
+) -> None:
+    """WP 4d's own precedence pin, same shape as ``auto_gc``'s above --
+    a boolean-typed override needs its own test since ``_source_without_override``
+    compares TYPED values and ``True != False`` must resolve the same way
+    ``"dry-run" != "off"`` already does.
+    """
+    settings = Settings(
+        vault_api_key=TEST_API_KEY,
+        db_path=str(tmp_path / "vault.db"),
+        cache_root=str(tmp_path / "cache"),
+        log_level="INFO",
+        sweep_include_cached=True,
+    )
+    with TestClient(create_app(settings)) as client:
+        body = client.get("/v1/settings", headers=AUTH).json()
+
+    row = find(body, "sweep_include_cached")
+    assert row["effective"] is True
+    assert row["source"] == "env"
+    assert row["fallback"] is True
+
+
+def test_precedence_db_wins_over_env_for_sweep_include_cached(tmp_path: Path) -> None:
+    settings = Settings(
+        vault_api_key=TEST_API_KEY,
+        db_path=str(tmp_path / "vault.db"),
+        cache_root=str(tmp_path / "cache"),
+        log_level="INFO",
+        sweep_include_cached=True,
+    )
+    with TestClient(create_app(settings)) as client:
+        patch_response = client.patch(
+            "/v1/settings", json={"sweep_include_cached": "false"}, headers=AUTH
+        )
+        assert patch_response.status_code == 200
+        body = client.get("/v1/settings", headers=AUTH).json()
+
+    row = find(body, "sweep_include_cached")
+    assert row["effective"] is False
+    assert row["source"] == "db"
+    assert row["fallback"] is True  # clearing reverts to the env value, not False
+
+
 # ==========================================================================
 # null clears the override (ADR-0009 decision 2)
 # ==========================================================================
@@ -265,6 +321,80 @@ def test_patch_bad_auto_gc_is_422_and_not_persisted(
     conn = get_connection(client.app.state.settings.db_path)
     try:
         assert settings_store.get_override(conn, "auto_gc") is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("bad", ["yeah", "1.0", "enabled", "2", ""])
+def test_patch_bad_sweep_include_cached_is_422_and_not_persisted(
+    client: TestClient, bad: str
+) -> None:
+    """Same strictness ``config.py`` applies at startup (ADR-0009 decision 4):
+    ``config.parse_strict_bool`` backs both ``VAULT_SWEEP_INCLUDE_CACHED`` at
+    startup and this PATCH path -- one grammar, not two."""
+    response = client.patch(
+        "/v1/settings", json={"sweep_include_cached": bad}, headers=AUTH
+    )
+    assert response.status_code == 422
+
+    conn = get_connection(client.app.state.settings.db_path)
+    try:
+        assert settings_store.get_override(conn, "sweep_include_cached") is None
+    finally:
+        conn.close()
+
+
+def test_patch_rejects_a_json_boolean_for_sweep_include_cached(
+    client: TestClient,
+) -> None:
+    """The exact trap this key exists to demonstrate: a UI toggle naively
+    sending a JSON ``true`` (not the string ``"true"``) must be a clear 422,
+    never silently stored as the Python-str "True" (docs/LEARNINGS.md
+    "Parsers")."""
+    response = client.patch(
+        "/v1/settings", json={"sweep_include_cached": True}, headers=AUTH
+    )
+    assert response.status_code == 422
+
+    conn = get_connection(client.app.state.settings.db_path)
+    try:
+        assert settings_store.get_override(conn, "sweep_include_cached") is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [("true", True), ("YES", True), ("on", True), ("false", False), ("0", False)],
+)
+def test_patch_sweep_include_cached_accepts_every_bool_spelling(
+    client: TestClient, raw: str, expected: bool
+) -> None:
+    response = client.patch(
+        "/v1/settings", json={"sweep_include_cached": raw}, headers=AUTH
+    )
+    assert response.status_code == 200
+    assert find(response.json(), "sweep_include_cached")["effective"] is expected
+
+
+def test_patch_null_clears_the_sweep_include_cached_override(
+    client: TestClient,
+) -> None:
+    set_response = client.patch(
+        "/v1/settings", json={"sweep_include_cached": "true"}, headers=AUTH
+    )
+    assert find(set_response.json(), "sweep_include_cached")["effective"] is True
+
+    clear_response = client.patch(
+        "/v1/settings", json={"sweep_include_cached": None}, headers=AUTH
+    )
+    row = find(clear_response.json(), "sweep_include_cached")
+    assert row["effective"] is False
+    assert row["source"] == "default"
+
+    conn = get_connection(client.app.state.settings.db_path)
+    try:
+        assert settings_store.get_override(conn, "sweep_include_cached") is None
     finally:
         conn.close()
 
@@ -736,6 +866,118 @@ def test_scheduler_tick_picks_up_an_interval_override_next_sweep(
         assert overridden.swept is True
     finally:
         conn.close()
+
+
+def test_scheduler_tick_picks_up_a_sweep_include_cached_override_next_sweep(
+    tmp_path: Path,
+) -> None:
+    """WP 4d's own version of the test above: a cached-but-uninstalled app is
+    invisible to the first sweep (mode off, the default) and picked up by the
+    very next sweep once a ``PATCH`` turns the mode on -- ``next_sweep``, not
+    ``restart-required``.
+    """
+    from datetime import timedelta, timezone
+
+    from vault_api.mapping import upsert_mapping
+
+    db_path = str(tmp_path / "vault.db")
+    cache_root = tmp_path / "cache"
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        depot_dir = cache_root / "depot" / "441" / "chunk"
+        depot_dir.mkdir(parents=True)
+        (depot_dir / "a.bin").write_bytes(b"x")
+        upsert_mapping(conn, depotid=441, appid=440, name="TF2")
+
+        base = Settings(
+            vault_api_key=TEST_API_KEY,
+            db_path=db_path,
+            cache_root=str(cache_root),
+            log_level="INFO",
+            schedule_window=parse_window("00:00-24:00"),
+            schedule_interval_minutes=1,
+        )
+        now = scheduler_module.local_now().astimezone(timezone.utc)
+
+        first = scheduler_module.maybe_sweep(conn, base, now)
+        assert first.swept is True
+        assert first.targets == ()  # mode off (default): cache content ignored
+
+        settings_store.set_override(conn, "sweep_include_cached", "true")
+        effective = settings_store.effective_settings(conn, base)
+        assert effective.sweep_include_cached is True
+
+        one_minute_later = now + timedelta(minutes=1)
+        overridden = scheduler_module.maybe_sweep(conn, effective, one_minute_later)
+        assert overridden.swept is True
+        assert overridden.targets == (440,)
+        assert overridden.cached_only_appids == (440,)
+    finally:
+        conn.close()
+
+
+def test_b2_bare_boot_patch_enables_cached_mode_and_a_real_sweep_enqueues_it(
+    tmp_path: Path,
+) -> None:
+    """S2 (reviewer should-fix, 2026-08-18 review round): the unit-level test
+    above proves ``effective_settings`` resolves the override; this proves
+    the actual PROMISE behind ``applies: "next_sweep"`` (as opposed to
+    ``"restart-required"``) end to end -- bare boot (no window, cached mode
+    off, the stock/default shape ADR-0009's B1 finding is about), a single
+    ``PATCH`` turns the window AND the cached-apps mode on together, and a
+    REAL background sweep thread enqueues the cached-only app with no
+    restart in between.
+    """
+    from vault_api.mapping import upsert_mapping
+
+    cache_root = tmp_path / "cache"
+    depot_dir = cache_root / "depot" / "441" / "chunk"
+    depot_dir.mkdir(parents=True)
+    (depot_dir / "a.bin").write_bytes(b"x")
+
+    settings = Settings(
+        vault_api_key=TEST_API_KEY,
+        db_path=str(tmp_path / "vault.db"),
+        cache_root=str(cache_root),
+        log_level="INFO",
+        # Deliberately bare: no window, cached mode off -- the exact boot
+        # shape a stock install has.
+    )
+    app = create_app(settings)
+    app.state.scheduler = scheduler_module.PrefillScheduler(settings, tick_seconds=0.05)
+
+    conn = get_connection(settings.db_path)
+    try:
+        upsert_mapping(conn, depotid=441, appid=440, name="TF2")
+    finally:
+        conn.close()
+
+    with TestClient(app) as client:
+        patch_response = client.patch(
+            "/v1/settings",
+            json={
+                "schedule_window": "00:00-24:00",
+                "sweep_include_cached": "true",
+            },
+            headers=AUTH,
+        )
+        assert patch_response.status_code == 200
+        body = patch_response.json()
+        assert find(body, "schedule_window")["effective"] == "00:00-24:00"
+        assert find(body, "sweep_include_cached")["effective"] is True
+
+        deadline = time.monotonic() + 10.0
+        jobs_seen: list = []
+        while time.monotonic() < deadline:
+            jobs_seen = client.get("/v1/jobs", headers=AUTH).json()
+            if any(job["appid"] == 440 for job in jobs_seen):
+                break
+            time.sleep(0.05)
+
+        assert any(job["appid"] == 440 for job in jobs_seen), (
+            f"the cached-only app was never enqueued by a real sweep: {jobs_seen}"
+        )
 
 
 def test_worker_auto_gc_override_applies_to_the_next_completed_job(

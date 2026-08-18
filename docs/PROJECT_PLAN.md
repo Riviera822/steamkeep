@@ -959,18 +959,82 @@ game that sits in the cache but is currently installed nowhere — or whose
 PC has been quiet longer than `VAULT_SCHEDULE_CLIENT_STALE_DAYS` — is never
 refreshed and silently rots.
 
-- [ ] New target-set mode adding every cached app to the sweep. Cheap by
+- [x] New target-set mode adding every cached app to the sweep. Cheap by
       construction: ~3 s and zero bytes per app that is already current
       (see 4c), real traffic only for actual deltas
-- [ ] Opt-in, and off by default — it spends bandwidth on games nobody has
+      *(WP 4d-backend done: `scheduler.compute_targets(..., include_cached=,
+      cache_root=)` unions `scheduler.cached_appids` with the installed set,
+      deduped by construction (`set[int]`); enqueued through the existing
+      `jobs.enqueue_prefill` dedupe path, no second mechanism. Computed
+      independently of client freshness, so a cached app whose only client is
+      `VAULT_SCHEDULE_CLIENT_STALE_DAYS`-stale is still swept — tested
+      explicitly. Review-round fix (blocker B1, real-`DELETE`-rig
+      measurement, user decision "narrow the definition"): "cached" for THIS
+      purpose is narrower than `GET /v1/games`'s `size_bytes` — an app counts
+      only if it holds a depot NO OTHER tracked app also maps (reusing
+      `deletion.plan_deletion`'s existing exclusive/shared split, not a
+      second definition), because the generous definition kept an app
+      "cached" via a shared/protected depot even after its own content was
+      deleted, silently re-downloading it. `sizes.app_size_bytes` itself is
+      unchanged)*
+- [x] Opt-in, and off by default — it spends bandwidth on games nobody has
       asked for, which must be the operator's explicit choice
-- [ ] The backend half (an env var + the widened target set) can land
+      *(`VAULT_SWEEP_INCLUDE_CACHED` / `Settings.sweep_include_cached`,
+      default `False`; pinned by mutation at both the `compute_targets`
+      parameter default and the `Settings` field default, each with its own
+      named test)*
+- [x] The backend half (an env var + the widened target set) can land
       independently of the settings layer; only the UI switch depends on it
-- [ ] **Pair with auto-GC** (still open in Phase 3): every kept-current game
+      *(landed on top of ADR-0009: `sweep_include_cached` is in
+      `settings_store.OVERRIDABLE_SPECS`, `applies: "next_sweep"`,
+      PATCH-validated with `config.parse_strict_bool` — reused, not
+      reinvented, and shared with `VAULT_SETTINGS_READONLY`'s startup
+      grammar; `GET /v1/schedule` reports the effective value additively,
+      end-to-end-pinned through a real bare-boot lifespan + PATCH + a real
+      background sweep (review-round should-fix S2, same shape as ADR-0009's
+      own B1 pin). The Phase 4a UI switch remains open)*
+- [x] **Pair with auto-GC** (still open in Phase 3): every kept-current game
       adds fresh chunks while the old manifest's chunks become orphans. A
       vault that keeps itself current without collecting garbage keeps
       itself current straight into a full disk. These two ship together or
       the growth must at least be surfaced
+      *(surfaced, not auto-paired, per the backend brief: auto-GC is never
+      silently enabled and the sweep is never refused when unresolved — the
+      operator decides. `scheduler.cached_sweep_gc_risk` names the condition
+      once; `PrefillScheduler` logs a one-time `WARNING` on the transition
+      into it and a matching `INFO` all-clear on the way back out (not per
+      tick, not per process — re-fires on a fresh transition, mutation-
+      tested); `GET /v1/schedule`'s new `sweep_cached_gc_risk` field exposes
+      the identical condition for a future UI banner. Review-round fix
+      (blocker B2, user decision "nothing is being reclaimed"): `dry-run`
+      counts as risky too — it reports what could be freed and frees
+      nothing, so only `VAULT_AUTO_GC=execute` actually clears the flag.
+      api/README.md's "Auto-GC" section documents the coupling)*
+
+  Evidence (WP 4d-backend, 2026-08-17, fix round 2026-08-18):
+  `api/vault_api/scheduler.py` (`cached_appids` now built on
+  `deletion.plan_deletion`/`load_mapping_rows`, `compute_targets
+  (include_cached=, cache_root=)` — `cache_root` now REQUIRED when the mode
+  is on, `cached_sweep_gc_risk`, `warn_once_if_cached_sweep_without_gc` with
+  its INFO all-clear), `api/vault_api/config.py` (`VAULT_SWEEP_INCLUDE_CACHED`,
+  `config.parse_strict_bool`), `api/vault_api/settings_store.py`
+  (`sweep_include_cached` in `OVERRIDABLE_SPECS`, now eight overridable
+  keys), `api/vault_api/routers/schedule.py` (`sweep_include_cached`,
+  `sweep_cached_gc_risk` on `GET /v1/schedule`, additive; module docstring
+  corrected — should-fix S3). Suite 1554 green. Mutations run and killed by
+  name across both rounds: default-off ×2, mode-off-byte-identical,
+  auto-GC-risk logic (both the off/execute boundary and the dry-run-is-risky
+  B2 fix), warn-once-not-every-tick, union-dedupe ×2,
+  cached-app-survives-staleness, the B1 exclusive-vs-shared regression
+  (reviewer's own real-`DELETE` fixture), the S1 always-log-when-on line, and
+  the S1 required-`cache_root` guard. Not done: the Phase 4a settings-screen
+  switch (UI, out of scope per the brief); forwarding
+  `VAULT_SWEEP_INCLUDE_CACHED` through `deploy/compose.yaml` is now a
+  deliberate non-goal, not a pending handoff — WP P1 (`da79aca`) established
+  that DB-overridable settings (this one, `VAULT_SCHEDULE_*`,
+  `VAULT_WEBHOOK_URL`/`EVENTS`) are NOT env-forwarded by design, `PATCH
+  /v1/settings` being the one supported path; `deploy/.env.example` documents
+  the key with that framing instead of a commented assignment line.
 
 ### Phase 5 — Community Release
 - [x] README with architecture diagram, quickstart (compose up in 5 minutes),
