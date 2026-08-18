@@ -228,6 +228,62 @@ def test_response_shape_matches_the_real_prefill_job_ref_model(
 
 
 # --------------------------------------------------------------------------
+# WP 4f, S1 (reviewer should-fix, 2026-08-18 review round): the user-visible
+# behaviour the whole package exists for, pinned at the HTTP layer where the
+# original bug actually lived. The structural pin
+# (tests/test_wp4f_shared_cache_content_definition.py) and the unit tests on
+# deletion.appids_with_cache_content (tests/test_cache_delete.py) both catch
+# a regression in the SHARED function, but neither exercises a real DELETE
+# against a real filesystem through this route -- and reverting this route
+# to its pre-WP-4f generous predicate left the rest of THIS file fully green
+# (its own ADR-0003 fixture is a remnant case, which passes under both the
+# old and the new rule). This is the test that would have caught the
+# original divergence.
+# --------------------------------------------------------------------------
+
+
+def test_a_deleted_app_whose_only_surviving_content_is_a_shared_protected_depot_is_not_reselected(
+    client: TestClient,
+) -> None:
+    """Real ``DELETE /v1/cache/440`` against a real filesystem: app 440 has
+    its own exclusive depot 441 plus a depot 300 shared with app 730; app 730
+    has its own exclusive depot 731 and currently has content, so depot 300
+    stays SHARED/protected (never a deletable remnant) throughout. After the
+    delete, 440's only surviving mapped depot is that protected depot 300 —
+    ``POST /v1/prefill/cached`` must NOT re-select 440 for it."""
+    _seed_mapping(client, depotid=441, appid=440)
+    _seed_cache_bytes(client, depotid=441)
+    _seed_mapping(client, depotid=300, appid=440)
+    _seed_mapping(client, depotid=300, appid=730)
+    _seed_cache_bytes(client, depotid=300)
+    _seed_mapping(client, depotid=731, appid=730)
+    _seed_cache_bytes(client, depotid=731)
+
+    # 730 currently has content -> depot 300 stays SHARED/protected, not a
+    # deletable remnant, through the delete below (ADR-0003).
+    _sql(
+        client,
+        "UPDATE apps SET status = 'done', last_prefill_at = ? WHERE appid = 730",
+        ("2026-08-05T10:00:00Z",),
+    )
+
+    delete_response = client.delete("/v1/cache/440", headers=AUTH)
+    assert delete_response.status_code == 200, delete_response.text
+    body = delete_response.json()
+    assert body["deleted_depots"] == [
+        {"depotid": 441, "size_bytes_freed": 32, "shared_with_uncached": []}
+    ]
+    assert body["skipped_shared"] == [{"depotid": 300, "shared_with": [730]}]
+
+    response = client.post("/v1/prefill/cached", headers=AUTH)
+    assert response.status_code == 202, response.text
+    appids = [entry["appid"] for entry in response.json()]
+
+    assert 440 not in appids
+    assert appids == [730]
+
+
+# --------------------------------------------------------------------------
 # Dedupe -- reuses jobs.enqueue_prefill, so this is the SAME rule
 # POST /v1/prefill has, not a second implementation.
 # --------------------------------------------------------------------------

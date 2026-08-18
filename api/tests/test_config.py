@@ -31,6 +31,32 @@ def test_from_env_uses_defaults_when_optional_vars_unset(monkeypatch: pytest.Mon
     assert settings.log_level == "INFO"
 
 
+@pytest.mark.parametrize("blank_value", ["", "   ", "\t"])
+def test_from_env_raises_when_cache_root_is_blank(
+    monkeypatch: pytest.MonkeyPatch, blank_value: str
+) -> None:
+    """WP 4f: an explicitly blank ``VAULT_CACHE_ROOT`` must refuse to boot
+    rather than silently falling through to `os.getcwd()`-adjacent behaviour
+    later (`deletion.resolve_depot_root`) or a `ValueError` deep inside a
+    background sweep thread (`scheduler.compute_targets`). Unlike
+    `VAULT_API_KEY`, there IS a usable default here (`./cache`) -- it only
+    applies when the key is ABSENT, never when it is present-but-blank
+    (`os.environ.get`'s own contract), which is the gap this guards.
+
+    S3 (reviewer correction, 2026-08-18 review round): the realistic source
+    of a present-but-blank value is NOT an unforwarded compose key -- an
+    unforwarded key is simply absent from `os.environ` in the container, and
+    the `./cache` default applies fine. It is a key that IS forwarded via
+    `${VAULT_CACHE_ROOT}` interpolation with nothing set in `.env` (compose
+    then renders `VAULT_CACHE_ROOT=` in the container's environment), or a
+    bare `KEY:`/`ENV KEY=` in a derived image."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_CACHE_ROOT", blank_value)
+
+    with pytest.raises(RuntimeError, match="VAULT_CACHE_ROOT"):
+        Settings.from_env()
+
+
 def test_from_env_reads_all_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VAULT_API_KEY", "some-key")
     monkeypatch.setenv("VAULT_DB_PATH", "/tmp/custom.db")

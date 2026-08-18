@@ -330,47 +330,37 @@ class TargetSet:
 
 
 def cached_appids(conn: sqlite3.Connection, cache_root: str) -> set[int]:
-    """Every appid with content on disk in a depot it does NOT share with
-    another tracked app, right now.
+    """Every appid that currently holds cache content on disk — **exclusive
+    OR last-cached-remnant** — right now.
+
+    **WP 4f: this is now a thin wrapper around
+    ``deletion.appids_with_cache_content``, the ONE shared definition of
+    "which apps hold cache content" also used by ``routers/jobs.py``'s
+    ``POST /v1/prefill/cached`` selection.** Before WP 4f this function
+    computed its own, narrower answer (``exclusive`` only) independently of
+    that route's own, more generous one — and the two disagreed on exactly
+    the case that matters most: a game the operator just deleted whose only
+    surviving content is a shared, still-protected depot. The sweep
+    correctly excluded it; the button re-queued it — one press away from the
+    exact re-download-after-delete behaviour Plan A exists to prevent
+    (2026-08-18 user decision: "the user's decision applies to both paths").
+    See ``deletion.appids_with_cache_content``'s docstring for the full "why
+    exclusive + remnant, why one shared bulk read" write-up, and
+    api/README.md's "Sweep target set" section for the cost-model numbers.
 
     **Deliberately NARROWER than ``sizes.app_size_bytes``'s "cached" — and
-    that is the point, not a bug.** ``app_size_bytes`` (``GET /v1/games``'s
+    that is still the point.** ``app_size_bytes`` (``GET /v1/games``'s
     per-app ``size_bytes``) answers "how much would deleting this app free",
-    and correctly counts a shared depot's bytes into every co-owner's total
-    (plan §4). That is the wrong question for the SWEEP target set: reviewer
-    testing against a real ``DELETE /v1/cache/{appid}`` found that under the
-    generous definition, an app whose only surviving mapped depot is a
-    SHARED one another app still has content in (ADR-0003's "shared and
-    protected" outcome — never deleted) keeps reporting as "cached" forever,
-    so a mode-ON sweep silently re-downloads a game the operator just
-    deleted. Mapping rows survive deletion by design (ADR-0003), but that
-    survivorship must not, on its own, make an app a re-download target.
+    and correctly counts a shared depot's bytes into EVERY co-owner's total
+    (plan §4) regardless of whether any of them still has other content.
+    That double-counting is exactly right for a sizing question and exactly
+    wrong for a sweep target-set question — the shared helper only counts a
+    shared depot toward an app when no OTHER co-owner currently has content
+    (ADR-0003's remnant rule), which is what stops a "shared and protected"
+    depot from making a fully-deleted app look cached forever.
+    ``sizes.app_size_bytes`` itself is UNCHANGED by this package.
 
-    So this asks a different, narrower question: does ``appid`` hold
-    anything of its **own** — a depot mapped to it and to no other tracked
-    app — that has bytes on disk? ``deletion.plan_deletion`` already computes
-    exactly that split (``DeletionPlan.exclusive``) for the delete endpoint;
-    reused here via ``deletion.load_mapping_rows`` rather than re-deriving
-    "exclusive vs. shared" a second time, so the two can never quietly
-    disagree about what counts as this app's own content. ``co_owner_states``
-    is intentionally omitted (``None``): the remnant/shared distinction it
-    drives is a DELETION nuance ("is this shared depot safe to delete right
-    now") that does not matter here — a still-shared depot is not exclusive
-    either way, remnant-eligible or not.
-
-    **The conservative edge this creates, stated plainly:** an app whose
-    cache content lives ENTIRELY in depots shared with other tracked apps is
-    now never a cached-mode sweep target, even though bytes attributable to
-    it are genuinely on disk. That is the deliberate direction — this mode
-    is meant to do LESS than the generous definition would, never more (see
-    api/README.md "Sweep target set"). ``sizes.app_size_bytes`` itself is
-    UNCHANGED — its generous, double-counting-on-purpose definition remains
-    exactly correct for the sizing question it answers.
-
-    One query per candidate appid (``load_mapping_rows``'s own family
-    subquery), not one for the whole table — see api/README.md's cost-model
-    note for why that is still cheap at this cadence. A raw, uncached
-    filesystem walk (``sizes.scan_depot_dir_bytes``), not the process-wide
+    A raw, uncached filesystem walk (``sizes.scan_depot_dir_bytes``), not the process-wide
     ``SizeCache`` — WP 4d's sweep runs at most once per
     ``VAULT_SCHEDULE_INTERVAL_MINUTES`` (default 3 h), so the walk's own cost
     is negligible next to that cadence, and threading the request-scoped
@@ -396,7 +386,13 @@ def cached_appids(conn: sqlite3.Connection, cache_root: str) -> set[int]:
        the same time, doing the work twice. This is not a rare coincidence:
        ``worker.py`` calls ``SizeCache.invalidate()`` after every successful
        prefill, so a miss is common in exactly the window a sweep is also
-       enqueueing work — the two are correlated, not independent.
+       enqueueing work — the two are correlated, not independent. The same
+       caveat now applies the other way too (WP 4f): ``POST
+       /v1/prefill/cached`` DOES use the shared ``SizeCache``, so its own
+       cold-cache walk and a concurrent sweep's raw walk can likewise
+       duplicate the same directory tree — see api/README.md's "Check &
+       update all cached games" section, which cross-references this
+       paragraph instead of leaving the interaction sweep-only documented.
     3. **Not interruptible mid-walk.** ``PrefillScheduler``'s ``should_abort``
        is only checked inside the PER-APP enqueue loop in ``maybe_sweep``,
        never inside this walk. A ``stop()`` that lands while this function is
@@ -407,30 +403,19 @@ def cached_appids(conn: sqlite3.Connection, cache_root: str) -> set[int]:
        lock held), but it will read as a fault in the log if this isn't
        said up front.
 
-    Candidate app ids come from ``depot_app_map`` directly, the same source
-    the pre-B1-fix version used — NOT from the ``apps`` table. A mapping row
-    with no corresponding ``apps`` row is not rejected by any foreign-key
-    constraint (verified), so this can enqueue an appid the library UI never
-    shows a card for. Narrow, documented behaviour, not a new hole: the
-    installed-based half of this same sweep has always been able to target
-    an appid with no ``apps`` row either, via a bare agent report.
+    Candidate app ids come from ``depot_app_map`` directly (inside the shared
+    helper), the same source the pre-WP-4f version used — NOT from the
+    ``apps`` table. A mapping row with no corresponding ``apps`` row is not
+    rejected by any foreign-key constraint (verified), so this can enqueue an
+    appid the library UI never shows a card for. Narrow, documented
+    behaviour, not a new hole: the installed-based half of this same sweep
+    has always been able to target an appid with no ``apps`` row either, via
+    a bare agent report.
     """
     depot_bytes = sizes.scan_depot_dir_bytes(cache_root)
     if not depot_bytes:  # empty/missing cache — no error, just nothing found
         return set()
-
-    candidate_appids = {
-        int(row["appid"])
-        for row in conn.execute("SELECT DISTINCT appid FROM depot_app_map").fetchall()
-    }
-
-    cached: set[int] = set()
-    for appid in candidate_appids:
-        rows = deletion.load_mapping_rows(conn, appid)
-        plan = deletion.plan_deletion(rows, appid)
-        if any(depotid in depot_bytes for depotid in plan.exclusive):
-            cached.add(appid)
-    return cached
+    return deletion.appids_with_cache_content(conn, depot_bytes)
 
 
 def compute_targets(
@@ -535,7 +520,15 @@ def compute_targets(
 
     cached_only: tuple[int, ...] = ()
     if include_cached:
-        if not cache_root:
+        # N4 (reviewer nitpick, 2026-08-18 review round, WP 4f): `.strip()`
+        # too, not just falsy -- `config.py`'s own boot-time guard (WP 4f)
+        # rejects a present-but-BLANK VAULT_CACHE_ROOT the same way, and a
+        # direct call here (bypassing that boot check, as tests do) with a
+        # whitespace-only value must not silently pass this assertion and
+        # then scan nothing, the exact "indistinguishable from a genuinely
+        # empty cache" failure mode S1 already closed for the empty-string
+        # case.
+        if not cache_root or not cache_root.strip():
             # S1: a falsy cache_root used to mean "silently scan nothing" --
             # indistinguishable from a genuinely empty cache. Loud failure
             # instead (see this function's docstring).

@@ -478,3 +478,23 @@ merged first, and 4a.7 wants 3.11.
 Post-v1 backlog (documented, undispatched): embedded tailscale (tsnet),
 iOS app, queue reordering, drag-to-reorder, server-side notification
 cursor, per-depot grace windows.
+
+## Carry-overs (post-2026-08-09)
+
+This file predates Phase 4c/4d/4e/4f dispatch (all landed after this file's
+last edit) and has no register for them elsewhere — this section is the
+first entry, added on request (N6, WP 4f review round) rather than backfilling
+every later phase's history.
+
+1. **WP 4f (api/, done) — web-side carry-over (B2, reviewer 2026-08-18),
+   blocked on WP 4e.1 (`web/`, in flight).** `web/js/demo-data.js`'s
+   `selectCachedAppids()` still implements the pre-WP-4f generous "any
+   mapped depot with bytes" rule, and its docstring cites it as the CURRENT
+   real rule via a README heading WP 4f renamed. `web/tests/README.md`
+   repeats the stale framing. Fix shape (docs/PROJECT_PLAN.md's WP 4f entry
+   has the full detail): hoist the DELETE handler's local
+   `otherOwners`/`hasCacheContent` helpers to module scope and change
+   `selectCachedAppids()`'s filter to "exclusive or last-cached-remnant",
+   matching `deletion.appids_with_cache_content`'s real predicate. Not
+   fixed by WP 4f itself — `web/` was occupied by WP 4e.1 at review time, and
+   the reviewer is closing this once 4e.1 merges.

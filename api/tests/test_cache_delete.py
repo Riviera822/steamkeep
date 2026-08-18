@@ -840,6 +840,242 @@ def test_load_co_owners_protects_for_a_queued_or_running_job(
 
 
 # --------------------------------------------------------------------------
+# appids_with_cache_content (WP 4f): the one shared "which apps hold cache
+# content" definition, reused by scheduler.cached_appids and
+# routers/jobs.py's POST /v1/prefill/cached selection.
+# --------------------------------------------------------------------------
+
+
+def test_appids_with_cache_content_includes_an_exclusive_owner(tmp_path: Path) -> None:
+    from vault_api.db import get_connection, init_db
+    from vault_api.mapping import upsert_mapping
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        upsert_mapping(conn, depotid=441, appid=440, name=None)
+
+        assert deletion.appids_with_cache_content(conn, {441: 100}) == {440}
+        # A depot with no bytes on disk right now contributes nothing, even
+        # though the mapping row exists.
+        assert deletion.appids_with_cache_content(conn, {}) == set()
+        assert deletion.appids_with_cache_content(conn, {999: 100}) == set()
+    finally:
+        conn.close()
+
+
+def test_appids_with_cache_content_mutual_sharing_pair_becomes_visible(
+    tmp_path: Path,
+) -> None:
+    """WP 4f: two apps sharing ALL their depots with each other and NOTHING
+    else, with neither one recorded as having content anywhere, are the hole
+    ``exclusive``-alone (WP 4d's original rule) left open FOREVER — neither
+    app ever becomes the sole owner of anything, so under that narrower rule
+    this depot's bytes could never make either one a sweep/check-and-update
+    target again, no matter how long they sit on disk. ADR-0003's remnant
+    rule closes it: since every OTHER co-owner (there is exactly one) is
+    verifiably uncached, the shared depot is a ``remnant`` for BOTH apps
+    symmetrically, and both become visible.
+    """
+    from vault_api.db import get_connection, init_db
+    from vault_api.mapping import upsert_mapping
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        upsert_mapping(conn, depotid=900, appid=10, name=None)
+        upsert_mapping(conn, depotid=900, appid=20, name=None)
+        # Both rows were just created by upsert_mapping -> status='idle', no
+        # last_prefill_at, no job -> has_content=False for both (ADR-0003
+        # addendum's default state for a brand-new app).
+
+        assert deletion.appids_with_cache_content(conn, {900: 4096}) == {10, 20}
+    finally:
+        conn.close()
+
+
+def test_appids_with_cache_content_excludes_when_a_co_owner_has_content(
+    tmp_path: Path,
+) -> None:
+    """The B1 direction, at the unit level (the end-to-end real-``DELETE``
+    fixture lives in ``tests/test_scheduler.py``): a shared depot with at
+    least one co-owner that currently HAS content protects it for every
+    OTHER owner — that other owner is never counted as holding cache content
+    through this depot, matching ``plan_deletion``'s ``shared`` outcome."""
+    from vault_api.db import get_connection, init_db
+    from vault_api.mapping import upsert_mapping
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        upsert_mapping(conn, depotid=300, appid=440, name=None)
+        upsert_mapping(conn, depotid=300, appid=730, name=None)
+        conn.execute(
+            "UPDATE apps SET status = 'done', last_prefill_at = ? WHERE appid = 730",
+            ("2026-08-05T10:00:00Z",),
+        )
+        conn.commit()
+
+        result = deletion.appids_with_cache_content(conn, {300: 4096})
+
+        assert result == {730}
+        assert 440 not in result
+    finally:
+        conn.close()
+
+
+def test_appids_with_cache_content_is_one_statement_regardless_of_app_count(
+    tmp_path: Path,
+) -> None:
+    """Same guarantee as ``tests/test_prefill_cached.py``'s route-level pin,
+    exercised directly against the shared function itself (the route is now
+    a thin wrapper around this one) — mutating either the join query or the
+    per-app reconstruction loop back into a per-app query fails this by
+    name.
+
+    N5 (reviewer nitpick, 2026-08-18 review round): includes ONE small shared
+    cluster (two apps mutually sharing one depot) alongside the 200 exclusive
+    apps, so this pin also exercises the per-app reconstruction loop it
+    claims to protect — a fixture with zero sharing would stay at one
+    statement even if that loop were deleted entirely and replaced with
+    something that only ever produced ``exclusive`` results.
+    """
+    from vault_api.db import get_connection, init_db
+    from vault_api.mapping import upsert_mapping
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        depot_bytes: dict[int, int] = {}
+        for i in range(200):
+            appid = 5000 + i
+            depotid = 700_000 + i
+            upsert_mapping(conn, depotid=depotid, appid=appid, name=None)
+            depot_bytes[depotid] = 4096
+
+        # A shared cluster: apps 5900/5901 mutually share depot 800000, both
+        # freshly idle/uncached -> both remnant-visible (WP 4f widening).
+        upsert_mapping(conn, depotid=800_000, appid=5900, name=None)
+        upsert_mapping(conn, depotid=800_000, appid=5901, name=None)
+        depot_bytes[800_000] = 4096
+
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        try:
+            result = deletion.appids_with_cache_content(conn, depot_bytes)
+        finally:
+            conn.set_trace_callback(None)
+
+        assert result == {5000 + i for i in range(200)} | {5900, 5901}
+        assert len(statements) == 1, statements
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------
+# WP 4f, B1 (reviewer blocker, 2026-08-18 review round): two fail-closed arms
+# of the shared predicate were unpinned -- flipping either one left the
+# WHOLE suite green. docs/LEARNINGS.md's standing rule (WP 3.6): "fail-closed
+# defaults need tests that pin the DEFAULT direction". Both mutations are
+# re-applied and confirmed to fail these tests, then reverted, as part of
+# this package's verification.
+# --------------------------------------------------------------------------
+
+
+def test_appids_with_cache_content_a_co_owner_with_no_apps_row_protects_the_depot(
+    tmp_path: Path,
+) -> None:
+    """Mutation pin: ``LEFT JOIN apps`` -> ``JOIN apps`` in
+    ``load_all_mapping_rows_with_owner_state``. Under a plain ``JOIN``, a
+    mapping row whose appid has NO ``apps`` row at all is dropped from the
+    result set ENTIRELY, not merely reported with ``status IS NULL`` -- so
+    the depot's OTHER owner never sees it as shared at all and is wrongly
+    classified as exclusive.
+
+    Fixture: depot 900 is mapped to app 440 (a real, idle/uncached ``apps``
+    row) and to app 730, which maps the depot but has NO ``apps`` row
+    (``depot_app_map`` has no foreign key to ``apps`` -- a real, reachable
+    state, same fixture shape as
+    ``test_load_co_owners_protects_for_a_co_owner_with_no_apps_row_at_all``
+    above). ``_has_cache_content(status=None, ...)`` already returns
+    ``True`` (protected) for exactly this case, which is what makes 440
+    correctly EXCLUDED here -- but that rule only fires if the row survives
+    the join in the first place. 730 itself IS a valid candidate (its own
+    appid coerces fine; only its ``apps`` row is missing) and is correctly
+    INCLUDED via the remnant rule (its only co-owner, 440, is uncached).
+
+    Measured effect of the mutation (reviewer, real rig): selection flips
+    from ``{730}`` to ``{440}`` -- the exact re-download-after-delete
+    divergence this package exists to make impossible, reintroduced.
+    """
+    from vault_api.db import get_connection, init_db
+    from vault_api.mapping import upsert_mapping
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        upsert_mapping(conn, depotid=900, appid=440, name=None)  # idle/uncached
+        # 730 maps depot 900 but never gets an `apps` row of its own.
+        conn.execute("INSERT INTO depot_app_map (depotid, appid) VALUES (900, 730)")
+        conn.commit()
+        assert conn.execute(
+            "SELECT 1 FROM apps WHERE appid = 730"
+        ).fetchone() is None, "precondition: 730 has no apps row"
+
+        result = deletion.appids_with_cache_content(conn, {900: 4096})
+
+        assert result == {730}
+        assert 440 not in result
+    finally:
+        conn.close()
+
+
+def test_appids_with_cache_content_a_poisoned_co_owner_appid_protects_the_depot(
+    tmp_path: Path,
+) -> None:
+    """Mutation pin: moving ``depot_groups.setdefault(...).append(...)``
+    below the ``if owner is None: continue`` guard in
+    ``appids_with_cache_content``. Today a poisoned (non-coercible) co-owner
+    appid still gets its row added to ``depot_groups`` BEFORE the coercion
+    check short-circuits the rest of that iteration -- which is what lets
+    ``plan_deletion`` see the row and classify the depot as protected
+    (``unreadable_owner``). Move the append below the guard and the poisoned
+    row never reaches ``depot_groups`` at all, so the depot's readable owner
+    is wrongly reconstructed as exclusive.
+
+    Fixture: depot 900 mapped to app 440 (real, idle/uncached) and to a
+    poisoned appid ``'abc'`` (``depot_app_map`` has no type-enforcing
+    constraint on ``appid`` — SQLite affinity does not reject it, same class
+    of fixture ``tests/test_cache_delete.py``'s
+    ``test_plan_deletion_treats_an_unreadable_co_owner_as_shared`` already
+    uses one level down). The correct answer is ``set()``: 440 is protected
+    by the unreadable co-owner, and the poisoned appid names no candidate of
+    its own.
+    """
+    from vault_api.db import get_connection, init_db
+    from vault_api.mapping import upsert_mapping
+
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        upsert_mapping(conn, depotid=900, appid=440, name=None)  # idle/uncached
+        conn.execute("INSERT INTO depot_app_map (depotid, appid) VALUES (900, 'abc')")
+        conn.commit()
+
+        result = deletion.appids_with_cache_content(conn, {900: 4096})
+
+        assert result == set()
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------
 # the endpoint
 # --------------------------------------------------------------------------
 

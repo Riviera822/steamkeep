@@ -958,6 +958,48 @@ class Settings:
             )
 
         db_path = os.environ.get("VAULT_DB_PATH", "./vault.db")
+
+        # WP 4f. `.get(..., "./cache")` only supplies that default when the
+        # key is ABSENT from the environment. A key that is simply not
+        # forwarded by a compose file/derived image is exactly that -- absent
+        # -- and the default applies fine; that is NOT the failure mode this
+        # guards (S3, reviewer correction, 2026-08-18 review round: an
+        # earlier draft of this comment named the wrong mechanism). The real
+        # blank case is a key that IS present with an EMPTY value: a compose
+        # `environment:` entry that forwards it via `${VAULT_CACHE_ROOT}`
+        # interpolation with nothing set in `.env` renders as
+        # `VAULT_CACHE_ROOT=` in the container's environment, and a bare
+        # `KEY:` (compose) or `ENV KEY=` (a derived Dockerfile) does the same
+        # thing explicitly. Either way `os.environ.get` returns `""`, not the
+        # default, and that bypasses the default entirely -- `cache_root=""`
+        # used to sail straight through. That is not a cosmetic gap: with
+        # VAULT_SWEEP_INCLUDE_CACHED on, every sweep then calls
+        # `scheduler.compute_targets(include_cached=True, cache_root="")`,
+        # which raises `ValueError` (WP 4d's own S1 loud-failure guard) —
+        # inside a background thread that catches every exception and
+        # retries next tick (`PrefillScheduler._tick`), so the INSTALLED-based
+        # half of the sweep silently stops too, forever, once per interval,
+        # with nothing but a repeating traceback in the log. Refusing to boot
+        # is what turns `compute_targets`' `ValueError` back into what it was
+        # meant to be: an internal-contract assertion that can only fire on a
+        # programming mistake, never on operator misconfiguration reaching it
+        # live. Same strict-grammar house style as every other startup check
+        # in this function: fail loudly now, not hours later in a thread.
+        raw_cache_root = os.environ.get("VAULT_CACHE_ROOT", "./cache")
+        if not raw_cache_root.strip():
+            raise RuntimeError(
+                "VAULT_CACHE_ROOT must not be blank. An absent variable falls "
+                "back to './cache'; a present-but-empty one (e.g. a compose "
+                "key forwarded via ${VAULT_CACHE_ROOT} interpolation with "
+                "nothing set in .env, or a bare 'KEY:'/'ENV KEY=' in a "
+                "derived image) does not, and would let vault-api boot "
+                "pointed at no cache directory at all -- every deletion, "
+                "size calculation and (with VAULT_SWEEP_INCLUDE_CACHED on) "
+                "sweep would then fail or silently do nothing. Set "
+                "VAULT_CACHE_ROOT to a real path, or unset it entirely to "
+                "accept the './cache' default (see api/.env.example)."
+            )
+
         manifest_archive_dir = os.environ.get("VAULT_MANIFEST_ARCHIVE_DIR", "").strip()
         steamprefill_cache_dir = os.environ.get("VAULT_STEAMPREFILL_CACHE_DIR", "").strip()
 
@@ -978,7 +1020,7 @@ class Settings:
         return Settings(
             vault_api_key=api_key,
             db_path=db_path,
-            cache_root=os.environ.get("VAULT_CACHE_ROOT", "./cache"),
+            cache_root=raw_cache_root,
             log_level=os.environ.get("VAULT_LOG_LEVEL", "INFO"),
             steamprefill_path=os.environ.get("VAULT_STEAMPREFILL_PATH", "").strip(),
             prefill_timeout_seconds=_env_int(

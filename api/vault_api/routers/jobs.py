@@ -27,6 +27,7 @@ import sqlite3
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from vault_api import deletion
 from vault_api import jobs as jobs_queue
 from vault_api.auth import require_api_key
 from vault_api.deps import DbOpener, db_opener, get_cache_root, get_size_cache
@@ -136,31 +137,49 @@ def create_prefill_jobs(
 def _select_appids_with_cache_content(
     conn: sqlite3.Connection, depot_bytes: dict[int, int]
 ) -> list[int]:
-    """Every app id currently mapped to at least one depot with bytes on disk
-    right now (Phase 4c, WP 4c-api). Sorted, for a deterministic response order.
+    """Every app id that currently holds cache content (Phase 4c, WP 4c-api;
+    redefined by WP 4f). Sorted, for a deterministic response order.
 
-    **One query, regardless of how many apps or depots exist** — the whole
-    point of this helper existing separately from a per-app loop. ``depot_bytes``
-    (the disk truth, see the caller) is already in memory; this reads the
-    *entire* ``depot_app_map`` table in a single ``SELECT`` and intersects it in
-    Python, rather than running one query per app ("does app X have a cached
-    depot?") or one query per depot ("who owns depot Y?"). A homelab library is
-    hundreds of app rows and thousands of mapping rows — both comfortably small
-    to read in full — and reading them all once is the only way to avoid an
-    N+1 explosion when N is "every tracked app" (`tests/test_prefill_cached.py`'s
+    **WP 4f: a thin wrapper around `deletion.appids_with_cache_content` —
+    the ONE shared definition of "which apps hold cache content" this route
+    and `scheduler.cached_appids` (the WP 4d keep-current sweep) both call.**
+    Before WP 4f this function had its OWN, more generous rule ("mapped to
+    ANY depot with bytes on disk, exclusive or shared") that disagreed with
+    the sweep's narrower one on exactly the case that matters: a game the
+    operator just deleted whose only surviving content is a shared, still-
+    protected depot. This route used to re-queue it; the sweep correctly
+    skipped it. See `deletion.appids_with_cache_content`'s docstring for the
+    full "why exclusive + remnant, why one shared bulk read" write-up, and
+    api/README.md's "Check & update all cached games" / "Sweep target set"
+    sections (each cross-references the other) for the measured cost numbers.
+
+    **One SQL statement, regardless of how many apps or depots exist** — the
+    whole point of the shared helper existing separately from a per-app loop.
+    ``depot_bytes`` (the disk truth, see the caller) is already in memory;
+    the shared helper reads the *entire* ``depot_app_map`` table (joined with
+    every owner's lifecycle state) in a single ``SELECT`` and classifies it
+    in Python, rather than running one query per app or one query per depot.
+    A homelab library is hundreds of app rows and thousands of mapping rows —
+    both comfortably small to read in full — and reading them all once is
+    the only way to avoid an N+1 explosion when N is "every tracked app"
+    (`tests/test_prefill_cached.py`'s
     ``test_selecting_cached_apps_is_not_a_per_app_query`` pins the exact
     statement count with a large synthetic library).
 
-    **Selection is disk-and-mapping truth, not `apps.status`.** A depot with
-    zero files was never omitted from `depot_bytes` in the first place (see
-    `sizes.scan_depot_signatures`), so a fresh/never-prefilled app that maps
-    only empty directories is correctly never selected. An app stuck at
+    **Selection is disk-and-mapping truth, not bare `apps.status`.** A depot
+    with zero files was never omitted from `depot_bytes` in the first place
+    (see `sizes.scan_depot_signatures`), so a fresh/never-prefilled app that
+    maps only empty directories is correctly never selected. An app stuck at
     `status='error'` after a partially-failed `DELETE /v1/cache/{appid}` (WP
     1.6: `shutil.rmtree` can leave a depot half-deleted) is STILL selected here
     if any of its depots still have bytes on disk — which is the honest and
     useful answer: "check & update" is exactly the repair action such an app
     needs (the leftover `needs_force=1` from the failed deletion makes that
-    run forced automatically, see `jobs.get_app_needs_force`).
+    run forced automatically, see `jobs.get_app_needs_force`). Note that
+    `status`/`last_prefill_at` DO feed into the shared/remnant classification
+    of a depot this app merely *shares* with another app (ADR-0003's
+    addendum) — but never into whether this app's own exclusive/remnant
+    depots count, which stays purely disk-and-mapping truth as before.
 
     **Cache content with no mapping contributes to no app.** A depot directory
     on disk that no `depot_app_map` row claims (see `GET /v1/cache/summary`'s
@@ -171,14 +190,7 @@ def _select_appids_with_cache_content(
     orphaned or not-yet-attributed content, and `POST /v1/prefill/cached`
     only ever acts on apps it can name.
     """
-    if not depot_bytes:
-        return []
-    cached_depotids = set(depot_bytes)
-    rows = conn.execute("SELECT appid, depotid FROM depot_app_map").fetchall()
-    selected = {
-        int(row["appid"]) for row in rows if int(row["depotid"]) in cached_depotids
-    }
-    return sorted(selected)
+    return sorted(deletion.appids_with_cache_content(conn, depot_bytes))
 
 
 @router.post(

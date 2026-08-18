@@ -104,7 +104,7 @@ Copy `.env.example` to `.env` and adjust:
 |---------------------------------|----------|--------------|--------------------------------------------------------------------|
 | `VAULT_API_KEY`                 | yes      | *(none)*     | Shared secret for the `X-Api-Key` header                           |
 | `VAULT_DB_PATH`                 | no       | `./vault.db` | SQLite database file                                               |
-| `VAULT_CACHE_ROOT`              | no       | `./cache`    | Depot cache root — diffed before/after a prefill, and the **deletion base** (guarded, see below) |
+| `VAULT_CACHE_ROOT`              | no       | `./cache`    | Depot cache root — diffed before/after a prefill, and the **deletion base** (guarded, see below). **Exception to the blank-means-default rule below (WP 4f):** an ABSENT variable falls back to `./cache`, but a PRESENT-and-empty one refuses to boot — see "Path safety" |
 | `VAULT_LOG_LEVEL`               | no       | `INFO`       | Log level                                                          |
 | `VAULT_STEAMPREFILL_PATH`       | no*      | *(empty)*    | Path to the SteamPrefill executable; *required to run prefill jobs* |
 | `VAULT_PREFILL_TIMEOUT_SECONDS` | no       | `14400`      | Hard time budget for one SteamPrefill run (hang backstop)           |
@@ -168,7 +168,10 @@ rule below exists to prevent, reintroduced through the back door; a `nan`
 A grammatically valid but absurdly long digit string (400 digits) also
 overflows to `inf` in `float()` and is refused explicitly.
 
-A **blank** value still means "not configured" and falls back to the default (a
+**For these sixteen numeric settings** (and every other blank-means-off switch
+in the table above — `VAULT_SCHEDULE_WINDOW`, `VAULT_EVENT_LOG_PATH`,
+`VAULT_WEBHOOK_URL`, `VAULT_MANIFEST_ORACLE`, `VAULT_STEAMPREFILL_PATH`), a
+**blank** value still means "not configured" and falls back to the default (a
 stray space after `=` in a `.env` file must not stop the service). Consequence
 worth knowing: a negative value is now reported as a *syntax* error rather than
 a range error — still loud, still at startup, and the message names the
@@ -176,6 +179,18 @@ smallest accepted value. Range rules are unchanged and still apply after the
 grammar check (`VAULT_SIZE_CACHE_TTL=0` is still refused).
 `tests/test_config.py` parses the shipped `.env.example` and asserts every
 documented value still passes.
+
+**`VAULT_CACHE_ROOT` is the one NAMED EXCEPTION to "blank still means
+default" (WP 4f).** Every setting above has a value that means "feature off"
+or a value that means "unset, use the default" — blank is safe to treat as
+either because there is always a safe *something* behind it. There is no safe
+"cache root off": it is the deletion base, the size-scan root, and (with
+`VAULT_SWEEP_INCLUDE_CACHED` on) the sweep's own scan target, so a present-but-
+blank value is refused at startup rather than silently accepted as "use the
+default" — see "Path safety" below for the mechanism (a present-but-blank
+value bypasses `os.environ.get`'s own default, which only ever applies to an
+ABSENT key) and for why an *unforwarded* compose key is not the case this
+guards (it is simply absent, and the default applies fine).
 
 `VAULT_API_KEY` has no default. Starting the app without it raises
 `RuntimeError` immediately (`Settings.from_env`) — this is the "fail loudly"
@@ -534,15 +549,28 @@ calls — same dedupe against `queued`/`running`/`paused` jobs, same
 There is deliberately no second queue-writing code path; this endpoint is a
 *selection* convenience layered on top of the one that already existed.
 
-**Selection: disk-and-mapping truth, one query.** "Currently has cache
-content" is decided from the same `SizeCache`-backed disk snapshot
-`GET /v1/cache/summary` and `GET /v1/games` already share (so a request right
-after either of those costs nothing extra within the TTL), intersected
-against a single bulk read of the entire `depot_app_map` table — never a
-per-app or per-depot query
-(`vault_api/routers/jobs.py::_select_appids_with_cache_content`,
-statement-count-pinned in `tests/test_prefill_cached.py`). Consequences,
-each deliberate:
+**Selection: disk-and-mapping truth, one query, and (WP 4f) the SAME
+definition the sweep uses.** "Currently has cache content" is decided by
+`deletion.appids_with_cache_content` — the one shared predicate
+`scheduler.cached_appids` (see "Sweep target set — installed PLUS cached"
+below) also calls, so this route and the background sweep can no longer
+answer "is this app cached" differently. It counts a depot toward an app
+when the depot is either **exclusive** (mapped to no other tracked app) or a
+**last cached remnant** (ADR-0003 addendum: every OTHER co-owner is
+verifiably uncached right now) — NOT merely "mapped to any depot with
+bytes", which was this route's rule before WP 4f and is what let it re-queue
+a game the sweep correctly treated as deleted (see the cross-referenced
+section for the measured before/after). Disk truth comes from the same
+`SizeCache`-backed snapshot `GET /v1/cache/summary` and `GET /v1/games`
+already share (so a request right after either of those costs nothing extra
+within the TTL); mapping/sharing truth comes from a single bulk read of the
+entire `depot_app_map` table, joined with every owner's lifecycle state in
+one statement — never a per-app or per-depot query
+(`vault_api/routers/jobs.py::_select_appids_with_cache_content` delegates to
+`deletion.appids_with_cache_content`, statement-count-pinned at 500 apps in
+`tests/test_prefill_cached.py`; see "Sweep target set" for the measured
+statement-count and timing numbers at 300 apps, which apply identically
+here since it is the same function). Consequences, each deliberate:
 
 - A depot with bytes on disk but **no mapping row** (an unmapped depot, same
   concept `GET /v1/cache/summary`'s `unmapped_depots` reports) contributes to
@@ -555,6 +583,11 @@ each deliberate:
   failed deletion) makes the resulting run forced automatically — see
   "needs_force" below.
 - **No cached apps ⇒ `[]` with a normal `202`**, never an error.
+- **No coalescing with a concurrent sweep's raw filesystem walk** — see
+  "Sweep target set"'s cost-model note (point 2): this route's `SizeCache`
+  read and the sweep's own uncached `sizes.scan_depot_dir_bytes` walk can
+  duplicate the same `depot/` tree walk in the same window, most often right
+  after a successful prefill invalidates `SizeCache` (`worker.py`).
 
 **"Non-forced" describes what happens by construction, not a flag this route
 sets.** `jobs.enqueue_prefill` has no per-job force parameter — whether a
@@ -620,6 +653,19 @@ of thousands of files (measured 1.76 µs/file); cold and seek-bound on a
 spinning-disk target it is plausibly tens of seconds. A client calling this
 endpoint should use the same timeout it already uses for
 `GET /v1/cache/summary`.
+
+**On top of that filesystem walk, the classification step
+(`deletion.appids_with_cache_content`, WP 4f) adds its own, separately
+measured cost — and unlike the walk, it is genuinely quadratic in
+owners-per-depot, not "negligible" (S4, reviewer correction, 2026-08-18
+review round).** Still exactly ONE SQL statement at every size, but the
+in-memory reconstruction measured **up to ~3.6 s** on a library with a large
+shared depot (see "Sweep target set"'s cost-model table above for the full
+numbers) — and this route's documented "`202` immediately" contract does NOT
+cover this cost, because selection runs synchronously before that response is
+sent. A big redistributable depot mapped to every tracked game is the
+realistic shape that triggers this, not a contrived one. Not (yet) bounded
+or made asynchronous; recorded here as a known cost.
 
 **Any request body is silently accepted and ignored.** The route declares no
 body parameter, and FastAPI does not reject an unexpected one by default —
@@ -1634,10 +1680,30 @@ Consequences, stated plainly:
 
 ### Path safety
 
-The deletion target is built from the **integer** depot id only (`int` → `str`),
-joined under the resolved cache root, and verified before anything is removed.
-Both inputs come from outside the code, so both are guarded — as small pure
-functions with direct unit tests (`tests/test_cache_delete.py`):
+**Two layers, boot-time and request-time (WP 4f added the first).**
+`config.py`'s `Settings.from_env()` now refuses to **boot** at all on a
+present-but-blank `VAULT_CACHE_ROOT`: `os.environ.get("VAULT_CACHE_ROOT",
+"./cache")` only supplies that default for an ABSENT key — an unforwarded
+compose key is exactly that (absent), and the default applies fine. The
+actual blank case is a key that IS present with an empty value: a compose
+`environment:` entry that forwards it via `${VAULT_CACHE_ROOT}`
+interpolation with nothing set in `.env` renders as `VAULT_CACHE_ROOT=` in
+the container, and a bare `KEY:` (compose) or `ENV KEY=` (a derived
+Dockerfile) does the same explicitly. Before this guard, that case sailed
+through as `cache_root=""` and only failed later — either inside
+`resolve_depot_root` below (a 500 on every delete) or, with
+`VAULT_SWEEP_INCLUDE_CACHED` on, as a `ValueError` inside the background
+sweep thread every tick, forever, silencing the installed-based half of the
+sweep along with it. Failing at boot turns that `ValueError` back into what
+it was meant to be: an internal-contract assertion that should only ever
+fire on a programming mistake, not on operator misconfiguration reaching it
+live. See "Configuration"'s `VAULT_CACHE_ROOT` row for the one-line summary.
+
+The deletion target itself is built from the **integer** depot id only
+(`int` → `str`), joined under the resolved cache root, and verified before
+anything is removed. Both inputs come from outside the code, so both are
+guarded — as small pure functions with direct unit tests
+(`tests/test_cache_delete.py`):
 
 - `deletion.resolve_depot_root(cache_root)` refuses, deleting nothing, when
   `VAULT_CACHE_ROOT` is **empty** (measured: `os.path.abspath("")` is the current
@@ -2400,25 +2466,39 @@ generous definition:  cached_appids after delete -> {440, 730}   -- 440 WRONG
 this mode's definition: cached_appids after delete -> {730}      -- correct
 ```
 
-`scheduler.cached_appids` therefore asks "does this app map at least one
-depot that NO OTHER tracked app also maps, and does THAT depot have bytes on
-disk" — reusing `deletion.plan_deletion`'s existing exclusive/shared split
-(`DeletionPlan.exclusive`) via `deletion.load_mapping_rows`, rather than
-inventing a second "is this app cached" predicate that could quietly drift
-from the one the delete endpoint already uses. `co_owner_states` (the
-remnant-vs-shared nuance `plan_deletion` also computes) is not needed here —
-a still-shared depot is not exclusive either way.
+**WP 4f: `scheduler.cached_appids` and `POST /v1/prefill/cached`'s own
+selection (see "Check & update all cached games" above) now share ONE
+definition, `deletion.appids_with_cache_content`, instead of computing this
+predicate twice.** Before WP 4f they disagreed — this section described an
+`exclusive`-only rule while the route above used a separate, more generous
+"any mapped depot with bytes" rule — and the disagreement was exactly the
+gap named in the measurement above: a real, deployed pair of packages from
+the same night answered "is 440 cached" differently depending on which
+button was pressed. The shared function asks "does this app map at least one
+depot that is either **exclusive** (no other tracked app maps it) or a
+**last cached remnant** (ADR-0003 addendum: every OTHER co-owner is
+verifiably uncached right now), and does that depot have bytes on disk" —
+reusing `deletion.plan_deletion`, the exact pure function
+`DELETE /v1/cache/{appid}` itself calls, rather than a second predicate that
+could quietly drift from it. This is a **widening** from the WP 4d-only
+`exclusive` rule: two apps that share ALL their depots with each other and
+nothing else, with neither one otherwise recorded as having content, are
+`remnant`-eligible for each other and are now correctly swept — under
+`exclusive` alone they were invisible to this mode forever, since neither
+ever becomes the sole owner of anything. `DeletionPlan.shared` (at least one
+co-owner DOES currently have content, i.e. the B1 case above) is the one
+outcome still excluded — the B1 measurement's outcome (`{730}`, not `{440,
+730}`) is unchanged by this widening, and is pinned by name in
+`tests/test_scheduler.py::test_cached_appids_excludes_an_app_whose_only_
+surviving_content_is_shared`.
 
-**The conservative edge this creates, on purpose:** an app whose cache
-content lives ENTIRELY in depots shared with other tracked apps is now
-NEVER a cached-mode sweep target, even though bytes attributable to it are
-genuinely on disk. This mode is meant to do LESS than the generous
-definition would, never more — losing a rare shared-only app from the sweep
-is the acceptable side of that trade, silently re-downloading a deleted game
-is not. `sizes.app_size_bytes` itself is completely UNCHANGED by this —
-its generous, double-counting-on-purpose definition remains exactly correct
-for the sizing question it answers; only the sweep's OWN notion of "cached"
-is narrower.
+**The remaining conservative edge, stated on purpose:** an app whose cache
+content lives ENTIRELY in depots shared with other tracked apps that DO
+currently have content elsewhere is still never a target through this
+predicate — `sizes.app_size_bytes` itself remains completely UNCHANGED by
+any of this; its generous, double-counting-on-purpose definition remains
+exactly correct for the sizing question it answers, and only the sweep's
+(and the route's) shared notion of "holds cache content" is narrower than it.
 
 **Why this is the exact fix for the problem it names (plan §7 Phase 4d):** a
 game that sits in the cache but is currently installed nowhere — or whose
@@ -2437,13 +2517,64 @@ leave off):** a non-forced SteamPrefill run against an already-current app is
 a ~3 s no-op that transfers zero bytes (ADR-0006 decision 1 — the same fact
 Phase 4c's manual-check feature rests on). Real bandwidth is spent only on
 apps that actually have an update. The filesystem side of the cost is one
-extra `sizes.scan_depot_dir_bytes` walk of the whole `depot/` tree, PLUS one
-small indexed SQL query per candidate app (`deletion.load_mapping_rows`'s own
-family subquery, used to compute exclusivity — see above), per sweep — not
-per tick — because it only runs inside an already-claimed sweep
-(`VAULT_SCHEDULE_INTERVAL_MINUTES`, default 3 h). Three things about that
-cost worth stating plainly rather than leaving to be discovered (reviewer
-should-fix S5):
+extra `sizes.scan_depot_dir_bytes` walk of the whole `depot/` tree, PLUS
+exactly **one** SQL statement regardless of library size
+(`deletion.load_all_mapping_rows_with_owner_state`, WP 4f — see "Sweep target
+set" cross-reference in "Check & update all cached games" above), per sweep —
+not per tick — because it only runs inside an already-claimed sweep
+(`VAULT_SCHEDULE_INTERVAL_MINUTES`, default 3 h).
+
+**Query count, measured on a synthetic 300-app / 260-depot library (250
+exclusively-owned apps + 10 clusters of 5 apps mutually sharing one depot
+each — NOT the same fixture as WP 4d's original "301 statements / 143 ms"
+number below, which used a different topology that was not preserved in the
+repo; both are cited here for what each one actually shows, not as
+before/after on identical inputs):**
+
+| Shape | Statements | Wall time | Apps found |
+|---|---|---|---|
+| WP 4d (`exclusive`-only, one `load_mapping_rows` call per candidate app, PLUS the initial `SELECT DISTINCT appid` needed to build the candidate list) | 301 | ~6 ms | 250 (the 50 mutually-shared apps are invisible — the bug WP 4f fixes) |
+| WP 4f (`appids_with_cache_content`, one bulk read) | **1** | ~2 ms | 300 (all 50 mutually-shared apps now correctly included as `remnant`) |
+
+The query-count fix (301 → 1, matching WP 4d's own "301 statements" figure
+exactly once the same initial candidate-list query is counted on both sides)
+is real and library-size-independent. It is NOT the whole cost story, below.
+
+**The reconstruction cost is genuinely quadratic in owners-per-depot, and
+that number belongs in front of an operator, not buried as "negligible"
+(S4, reviewer correction, 2026-08-18 review round — an earlier draft of this
+section understated this).** Measured directly against
+`deletion.appids_with_cache_content` (still exactly **one** SQL statement at
+every size below — the cost is 100% in-memory Python, zero extra DB round
+trips):
+
+| Shape | Wall time |
+|---|---|
+| 300 apps, all sharing ONE depot | ~34 ms |
+| 600 apps, all sharing ONE depot | ~145 ms |
+| 1000 apps, all sharing ONE depot | ~363 ms |
+| 2000 apps, all sharing ONE depot | ~1.4 s |
+| 1000 apps, each mapping ALL of 10 independently-shared depots (1000 owners per depot) | **~3.6 s** |
+
+A large, all-tracked-games redistributable depot (a shared runtime, a
+language pack) is the realistic shape that produces owner counts in the
+hundreds-to-low-thousands on a big library — not a contrived adversarial
+input. **Where this actually lands matters more than the number itself:**
+inside the background sweep (`scheduler.cached_appids`, this section) a few
+seconds is genuinely negligible against the `VAULT_SCHEDULE_INTERVAL_MINUTES`
+cadence (default 3 h). Inside **`POST /v1/prefill/cached`** (see "Check &
+update all cached games" above) it is NOT free in the same way: that route's
+documented contract is "returns `202` immediately, progress happens on the
+worker" — but the *selection* step, including this reconstruction, runs
+synchronously inside the request handler, before the `202` is sent. A
+library with a large shared depot can therefore make that specific request
+take seconds to respond, independent of and in addition to the filesystem
+walk's own cost described below. Neither call site aborts or bounds this
+work today; it is documented here as a known, measured cost, not (yet) a
+mitigated one.
+
+Three things about the filesystem-walk half of that cost worth stating
+plainly rather than leaving to be discovered (reviewer should-fix S5, WP 4d):
 
 1. **Order of magnitude.** Warm-cache (NVMe/SSD, OS page cache populated) is
    low-single-digit microseconds per file — a few hundred thousand chunk
@@ -2462,6 +2593,12 @@ should-fix S5):
    `worker.py` calls `SizeCache.invalidate()` after every successful
    prefill, so a size-cache miss is common in exactly the window a sweep is
    also enqueueing work — the two are correlated, not independent events.
+   **This interaction is not sweep-only (WP 4f):** `POST /v1/prefill/cached`
+   above DOES read through the shared `SizeCache`, so the same correlated-miss
+   window can make the ROUTE'S selection pay for a cold walk at the same
+   moment a background sweep pays for its own uncached one — see "Check &
+   update all cached games"'s own cost-model paragraph above, which
+   cross-references this one instead of repeating it.
 3. **Not interruptible mid-walk.** `PrefillScheduler.stop()`'s abort signal
    (`should_abort`) is only checked inside the PER-APP enqueue loop in
    `maybe_sweep`, never inside the depot walk itself. A shutdown that lands

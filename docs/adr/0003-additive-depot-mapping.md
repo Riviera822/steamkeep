@@ -78,3 +78,24 @@ Consequences:
 - Phase-3 GC implementation note: for consistency, an uncached mapped app
   should not pin chunks in a shared depot's keep set; decide when GC is
   built.
+
+## Addendum (2026-08-18, WP 4f): the remnant predicate is also "which apps hold cache content"
+
+The exclusive/remnant split above answers "may this depot be deleted" for
+one specific app. WP 4d (the "keep the cache current" sweep) and WP 4c
+(`POST /v1/prefill/cached`) each separately needed a DIFFERENT question
+about the same rows — "does this app hold cache content, at all" — and
+built it independently: the sweep as `exclusive`-only, the route as any
+mapped depot with bytes on disk regardless of sharing. They disagreed on a
+real deleted-app case (user decision, 2026-08-18: "the user's decision
+applies to both paths" — a delete stays a delete regardless of which surface
+asks). **Decision: `deletion.appids_with_cache_content` is the one shared
+answer, reusing `plan_deletion` unchanged, and both callers are now thin
+wrappers around it** (`api/vault_api/scheduler.py::cached_appids`,
+`api/vault_api/routers/jobs.py::_select_appids_with_cache_content`) — an app
+"holds cache content" iff it has bytes on disk in a depot that is
+`exclusive` OR `remnant` for it, i.e. exactly the set of depots this ADR
+already says are safe to delete for that app. See api/README.md's "Sweep
+target set" and "Check & update all cached games" sections for the cost
+model this additionally required (one bulk read replacing a per-app query
+loop).

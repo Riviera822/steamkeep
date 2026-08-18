@@ -42,6 +42,17 @@ Mapping rows are still kept either way — that part of ADR-0003 is unchanged.
 What deliberately does NOT happen here: the depot→app **mapping rows are
 kept**. See ``routers/cache.py`` and api/README.md for that decision and its
 consequence.
+
+5. **Cross-module reuse (WP 4f)** — ``appids_with_cache_content``, fed by the
+   bulk ``load_all_mapping_rows_with_owner_state``. Deletion owns the
+   exclusive/shared/remnant sharing semantics via ``plan_deletion``, so the
+   one shared answer to a DIFFERENT question — "which apps hold cache
+   content right now", asked by both ``scheduler.cached_appids`` (WP 4d's
+   keep-current sweep) and ``routers/jobs.py``'s ``POST /v1/prefill/cached``
+   selection — lives here too, reusing ``plan_deletion`` rather than growing
+   a second, quieter definition elsewhere. ``sizes.py`` still owns the BYTE
+   truth (``depot_bytes``); this module only classifies which of those bytes
+   belong to which app.
 """
 
 from __future__ import annotations
@@ -1125,6 +1136,194 @@ def load_co_owner_states(
         )
         for row in rows
     }
+
+
+def load_all_mapping_rows_with_owner_state(
+    conn: sqlite3.Connection,
+) -> list[tuple[object, object, object, object, object]]:
+    """Every ``depot_app_map`` row, joined with that row's OWN owner's
+    lifecycle state — ONE statement, regardless of how many apps or depots
+    exist (WP 4f).
+
+    Returns raw ``(depotid, appid, status, last_prefill_at, has_active_job)``
+    tuples, deliberately **uncoerced**: ``appids_with_cache_content`` below
+    does its own per-row coercion while reconstructing each app's slice of
+    this result, the same way ``plan_deletion`` already coerces every row it
+    is handed — a poisoned depot or owner id must reach that one, already-
+    reviewed coercion path, not a second one invented here.
+
+    This is the bulk counterpart of ``load_co_owners``'s per-depot query and
+    ``load_co_owner_states``'s per-owner-list query: identical join shape
+    (``apps`` served by its primary key, the correlated ``EXISTS`` served by
+    ``idx_jobs_appid_status``), read **once for the whole table** instead of
+    once per depot or once per candidate app's co-owner list. A ``LEFT
+    JOIN`` (not an ``INNER JOIN``) is required so a mapping row whose appid
+    has no ``apps`` row at all still comes back — with ``status IS NULL``,
+    which ``_has_cache_content`` already treats as ``has_content=True``
+    (protects), exactly like ``load_co_owner_states`` does for the same case.
+
+    A homelab-scale ``depot_app_map`` (hundreds to low thousands of rows) is
+    cheap to read in full — see api/README.md's "Sweep target set" cost-model
+    note for the measured numbers — and reading it exactly once, rather than
+    once per app (WP 4d's original shape) or once per depot, is what turns an
+    O(N) *query* cost into a single round trip. The bounded, in-memory
+    reconstruction that takes its place lives in ``appids_with_cache_content``.
+    """
+    rows = conn.execute(
+        f"""
+        SELECT
+            dam.depotid AS depotid,
+            dam.appid AS appid,
+            ap.status AS status,
+            ap.last_prefill_at AS last_prefill_at,
+            EXISTS (
+                SELECT 1 FROM jobs j
+                WHERE j.appid = dam.appid AND j.status IN ({_ACTIVE_JOB_PLACEHOLDERS})
+            ) AS has_active_job
+        FROM depot_app_map dam
+        LEFT JOIN apps ap ON ap.appid = dam.appid
+        """,
+        (*jobs.ACTIVE_STATUSES,),
+    ).fetchall()
+    return [
+        (
+            row["depotid"],
+            row["appid"],
+            row["status"],
+            row["last_prefill_at"],
+            row["has_active_job"],
+        )
+        for row in rows
+    ]
+
+
+def appids_with_cache_content(
+    conn: sqlite3.Connection, depot_bytes: Mapping[int, int]
+) -> set[int]:
+    """The ONE definition of "which apps currently hold cache content" (WP
+    4f) — the shared predicate ``scheduler.cached_appids`` (the keep-current
+    sweep's target-set widening, WP 4d) and ``routers/jobs.py``'s ``POST
+    /v1/prefill/cached`` selection helper both call, so the two surfaces can
+    never quietly answer this question differently again. See
+    api/README.md's "Sweep target set" and "Check & update all cached games"
+    sections for the full write-up neither caller repeats.
+
+    **Why this exists.** Before WP 4f the two callers disagreed: the sweep
+    asked "does this app hold an EXCLUSIVE depot with bytes on disk" (WP 4d's
+    narrow ``cached_appids``, the B1 fix), while the route asked "is this app
+    mapped to ANY depot with bytes on disk, exclusive or shared" (WP 4c-api's
+    generous ``_select_appids_with_cache_content``). Measured on one
+    post-delete state: the sweep correctly excluded a game the operator had
+    just deleted (its only surviving content was a shared depot another app
+    still holds), and the "Check & update all cached games" button
+    re-queued it — one button press away from the exact re-download-after-
+    delete behaviour Plan A exists to prevent (2026-08-18 user decision:
+    "the user's decision applies to both paths"). Two call sites computing
+    the same predicate two different ways is precisely the class of bug a
+    single shared definition removes by construction: change this function
+    and BOTH callers change together, or neither does.
+
+    **``exclusive + remnant``, not ``exclusive`` alone (WP 4f, widening WP
+    4d's rule).** ``plan_deletion``'s ``exclusive`` (a depot mapped to no
+    other tracked app) undercounts on its own: two apps that share ALL their
+    depots with each other and NOTHING else, with neither otherwise recorded
+    as having content, are invisible to a sweep built on ``exclusive`` alone
+    — forever, since neither app ever becomes the sole owner of anything and
+    nothing else ever reclaims that depot's bytes. ADR-0003's addendum
+    already has a name and a rule for this: such a depot is a ``remnant`` —
+    "no co-owner currently has cache content" (``load_co_owner_states``'s own
+    predicate) — and a remnant depot's bytes are exactly as real, and
+    exactly as deserving of a keep-current sweep or a check-and-update
+    button, as an exclusive one. ``DeletionPlan.shared`` (at least one
+    co-owner DOES have content) is the one outcome this function still does
+    NOT count — that is the B1 case, and the fixture that proved it
+    (``tests/test_scheduler.py::test_cached_appids_excludes_an_app_whose_
+    only_surviving_content_is_shared``) still passes unchanged: its co-owner
+    has content, so the deleted app stays excluded.
+
+    **How the single bulk read replaces per-app queries.**
+    ``load_all_mapping_rows_with_owner_state`` above is the ONLY SQL
+    statement this function issues, regardless of how many apps or depots
+    exist. WP 4d's original per-app shape (``load_mapping_rows`` called once
+    per candidate app, plus the initial ``SELECT DISTINCT appid`` to build
+    the candidate list) cost 301 statements / 143 ms / a measured 100.7x row-
+    amplification on ITS OWN 300-app fixture (a different topology from
+    api/README.md's WP 4f re-measurement below — see that section's own note
+    on why the two numbers are not directly comparable) — each app's own
+    query re-fetched every co-owner's rows again. Here, every mapping row is
+    read ONCE and grouped in memory by depotid; ``plan_deletion`` — the
+    exact, already-reviewed pure function ``DELETE /v1/cache/{appid}`` itself
+    calls — is then invoked once per candidate app against an in-memory
+    slice of that one result set, so the *predicate* is never re-derived,
+    only its inputs are assembled differently per app.
+
+    **The reconstruction cost is genuinely quadratic in owners-per-depot —
+    NOT negligible at realistic library sizes, and this is stated plainly
+    rather than downplayed (S4, reviewer correction, 2026-08-18 review
+    round).** It is bounded by the sum, over every shared depot, of its
+    owner count squared, done entirely in Python with zero additional SQL —
+    measured up to ~3.6 s on a library with a large shared depot (a single
+    redistributable mapped to hundreds/thousands of tracked apps is a
+    realistic shape, not a contrived one). See api/README.md's "Sweep target
+    set" cost-model table for the full scaling numbers and, critically, the
+    difference between where this cost is genuinely negligible (inside the
+    background sweep, against a multi-hour cadence) and where it is NOT
+    (inside ``POST /v1/prefill/cached``'s request-time selection step, which
+    this function also backs).
+
+    ``depot_bytes`` is the caller's own disk-truth snapshot — this function
+    does no filesystem scanning itself (``sizes.py`` owns that truth). The
+    scheduler passes a fresh, uncached walk (WP 4d's documented "no
+    coalescing with request-path scans" caveat, unchanged by this package)
+    and the route passes the shared, TTL-cached ``SizeCache`` snapshot the
+    other read routes already use — each caller keeps its own existing
+    scanning strategy, only the classification of the result is now shared.
+    Membership in ``depot_bytes``, not a ``> 0`` check, decides "has bytes on
+    disk" — the same convention both pre-existing callers used.
+    """
+    if not depot_bytes:
+        return set()
+
+    raw_rows = load_all_mapping_rows_with_owner_state(conn)
+    if not raw_rows:
+        return set()
+
+    # Group every row by its RAW depotid value (not the coerced int):
+    # plan_deletion does its own coercion per row when it is handed this
+    # slice, exactly as it does for a real load_mapping_rows() result, so a
+    # poisoned depotid is reported by plan_deletion's own `unusable` branch
+    # rather than silently dropped a step earlier here.
+    depot_groups: dict[object, list[tuple[object, object]]] = {}
+    #: {appid: has_content}, fed to plan_deletion as co_owner_states -- built
+    #: from the SAME rows, since every row already carries its own owner's
+    #: state via the LEFT JOIN. A property of the appid, not the depot, so a
+    #: later row for the same owner simply overwrites with an identical value.
+    owner_state: dict[int, bool] = {}
+    #: {appid: {raw depotid values that appid owns}} -- the candidates to
+    #: evaluate, and exactly the depot keys needed to rebuild each one's
+    #: load_mapping_rows()-equivalent slice below.
+    own_depot_keys: dict[int, set[object]] = {}
+
+    for raw_depotid, raw_appid, status, last_prefill_at, has_active_job in raw_rows:
+        depot_groups.setdefault(raw_depotid, []).append((raw_depotid, raw_appid))
+
+        owner = coerce_positive_id(raw_appid)
+        if owner is None:
+            continue
+        owner_state[owner] = _has_cache_content(status, last_prefill_at, has_active_job)
+        own_depot_keys.setdefault(owner, set()).add(raw_depotid)
+
+    result: set[int] = set()
+    for appid, depot_keys in own_depot_keys.items():
+        rows_for_appid = [
+            row for depotid_key in depot_keys for row in depot_groups[depotid_key]
+        ]
+        plan = plan_deletion(rows_for_appid, appid, owner_state)
+        candidate_depotids = set(plan.exclusive) | {r.depotid for r in plan.remnant}
+        if any(depotid in depot_bytes for depotid in candidate_depotids):
+            result.add(appid)
+
+    return result
 
 
 def set_needs_force_for_remnant_co_owners(

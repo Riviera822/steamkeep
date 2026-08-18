@@ -1076,6 +1076,123 @@ refreshed and silently rots.
   /v1/settings` being the one supported path; `deploy/.env.example` documents
   the key with that framing instead of a commented assignment line.
 
+- [x] **WP 4f — one definition of "which apps hold cache content"** (gap
+      measured by the WP 4d reviewer on one post-delete state, 2026-08-18: the
+      sweep's `cached_appids` said `[730]`, the "Check & update all cached
+      games" button's own selection said `[440, 730]` — a game the operator
+      just deleted, one button press away from the re-download-after-delete
+      behaviour Plan A exists to prevent. User decision, 2026-08-18: "the
+      user's decision applies to both paths")
+      *(WP 4f done, api/-side, two review rounds — Opus FAIL → fix → PASS:
+      one shared bulk function, `deletion.appids_with_cache_content`, fed by
+      a new single-statement join query
+      (`deletion.load_all_mapping_rows_with_owner_state`);
+      `scheduler.cached_appids` and `routers/jobs.py`'s `POST
+      /v1/prefill/cached` selection are now both thin wrappers around it — no
+      duplicated predicate, structurally pinned by
+      `tests/test_wp4f_shared_cache_content_definition.py` (swap the shared
+      function for a fake, both callers return exactly its result) and by
+      mutation (breaking the shared function fails tests in BOTH
+      `tests/test_scheduler.py` and `tests/test_prefill_cached.py`, verified
+      by re-applying the mutation and watching it fail, then reverting).
+      Adopted `exclusive + remnant` (ADR-0003 addendum, now with its own
+      2026-08-18 note recording this reuse), widening WP 4d's
+      `exclusive`-only rule: two apps sharing ALL their depots with each
+      other and nothing else, both otherwise uncached, are now visible
+      (`tests/test_cache_delete.py::test_appids_with_cache_content_mutual_
+      sharing_pair_becomes_visible`) while the B1 fixture (a co-owner that
+      DOES have content) still excludes the deleted app, pinned unchanged.
+      Fix round closed two unpinned fail-closed arms (B1, docs/LEARNINGS.md's
+      standing WP-3.6 rule): `LEFT JOIN apps` -> `JOIN apps` silently dropped
+      a co-owner with no `apps` row entirely instead of protecting via it
+      (`test_appids_with_cache_content_a_co_owner_with_no_apps_row_
+      protects_the_depot`), and moving the `depot_groups` append below the
+      owner-coercion guard dropped a poisoned co-owner row the same way
+      (`test_appids_with_cache_content_a_poisoned_co_owner_appid_protects_
+      the_depot`) — both mutations re-applied and confirmed to fail these
+      tests by name, then reverted. Also added the HTTP-level regression
+      test the divergence actually needs (S1): a real
+      `DELETE /v1/cache/{appid}` with a cached co-owner, then
+      `POST /v1/prefill/cached` must not reselect the deleted app
+      (`test_a_deleted_app_whose_only_surviving_content_is_a_shared_
+      protected_depot_is_not_reselected` — reverting the route to its
+      pre-WP-4f generous rule left every OTHER test in that file green,
+      confirmed by re-running against the reverted route). Cost: measured on
+      a synthetic 300-app/260-depot mixed-sharing library, the old
+      per-app-query shape (301 statements, including the initial candidate
+      query — matching WP 4d's own historical figure once counted the same
+      way) became ONE statement; separately measured, the in-memory
+      reconstruction is genuinely quadratic in owners-per-depot, NOT
+      negligible (fix round correction, S4) — up to ~3.6 s on a library with
+      a large shared depot (1000 apps × 10 fully-shared depots), which
+      matters most inside `POST /v1/prefill/cached`'s synchronous selection
+      step (its own "202 immediately" contract does not cover this cost);
+      inside the 3-hour-cadence background sweep the same cost is genuinely
+      negligible. Both existing statement-count pins
+      (`test_selecting_cached_apps_is_not_a_per_app_query` at 500 apps,
+      route-level; still 500 exclusively-owned apps, no sharing) plus a new one
+      directly on the shared function
+      (`test_appids_with_cache_content_is_one_statement_regardless_of_app_
+      count`, same N5 fix) stay green. `api/README.md`'s "Sweep target set"
+      and "Check & update all cached games" sections cross-reference each
+      other, state the narrowing edge once, and carry the corrected measured
+      numbers (the WP 4d text's "one small indexed SQL query per candidate
+      app" claim is corrected, and the S2/S3 fix round corrected the env
+      table's blank-means-default rule to name `VAULT_CACHE_ROOT` as the
+      exception plus the actual mechanism for a present-but-blank value: a
+      FORWARDED compose key with empty `.env` interpolation, or a bare
+      `KEY:`/`ENV KEY=` in a derived image — NOT an unforwarded key, which is
+      simply absent and gets the default fine); the "no coalescing with
+      request-path scans" caveat is documented in both directions, since the
+      route also reads through `SizeCache`. `config.py`'s
+      `Settings.from_env()` now refuses to boot on a present-but-blank
+      `VAULT_CACHE_ROOT` (previously silent, and fatal to the sweep every
+      tick with `VAULT_SWEEP_INCLUDE_CACHED` on) — mutation-verified, comment
+      and test docstring corrected to the real mechanism in the fix round.
+      Renamed
+      `test_b2_bare_boot_patch_enables_cached_mode_and_a_real_sweep_
+      enqueues_it` to `test_s2_...` (it was already documented as the S2 pin;
+      the name just hadn't caught up). `docs/adr/0003-additive-depot-
+      mapping.md` gained a short 2026-08-18 addendum recording this reuse
+      (N3). Suite 1566 passed, 1 skipped (1554 pre-WP-4f baseline + 12 new
+      tests across both review rounds). Footprint: `api/`, `docs/PROJECT_PLAN.md`, `docs/WORKPACKAGES.md` +
+      `docs/adr/0003-additive-depot-mapping.md`, no commit/push per the
+      work-package brief.
+      **Explicit carry-over, NOT done here (B2, reviewer 2026-08-18): the web
+      demo mode still implements the pre-WP-4f generous rule and its
+      docstring states that rule as the current one.**
+      `web/js/demo-data.js`'s `selectCachedAppids()` (lines ~701–717)
+      selects every game whose `depots` array is non-empty; after a demo
+      `DELETE` that correctly moves a shared, still-protected depot into
+      `skipped_shared` (the handler at line ~997 keeps that depot in BOTH
+      the deleted app's and its co-owner's `depots` arrays by design — only
+      exclusively-deleted depot ids are filtered out, line 1078-1081), the
+      just-deleted app's `depots` array is still non-empty, so
+      `selectCachedAppids()` — and therefore the demo's
+      `POST /v1/prefill/cached` — reselects it. The function's own docstring
+      compounds this: it cites `api/README.md`'s "Selection: disk-and-mapping
+      truth, one query" heading (renamed by this package to "...and (WP 4f)
+      the SAME definition the sweep uses") as describing the CURRENT real
+      rule, when the real rule is now `exclusive + remnant`, not "any mapped
+      depot with bytes". `web/tests/README.md` (lines ~592–596,
+      `demo-data-cached-prefill.test.js`'s coverage description) repeats the
+      same stale framing verbatim ("selects every game whose `depots` array
+      is non-empty ... this demo model's stand-in for 'has cache content on
+      disk'"). Per docs/LEARNINGS.md ("Web UI" section, WP 4a.2 blocker):
+      demo fixtures are a shipped surface and must demonstrate the product's
+      invariants, not violate them — this is that same bug class. **Not
+      fixed here**: `web/` is occupied by WP 4e.1, which is actively editing
+      `demo-data.js`; the reviewer will close this once 4e.1 merges. The
+      shape of the fix: hoist the DELETE handler's local `otherOwners`/
+      `hasCacheContent` helpers (currently function-scoped inside the
+      `DELETE` branch, lines ~1039–1051) to module scope so
+      `selectCachedAppids()` can reuse them, then change its filter
+      predicate from `g.depots.length > 0` to "has at least one depot that is
+      exclusive to this game OR a last-cached-remnant (every other current
+      owner uncached)" — the same `exclusive + remnant` predicate this
+      package's real backend now applies, expressed against the demo's
+      depots-array model instead of `deletion.plan_deletion`. Also recorded
+      in `docs/WORKPACKAGES.md` (N6).)*
 #### Phase 4e — Web UI desktop layout (track: web)
 
 The web UI (Phase 4a) has no responsive layer at all: the frozen round-7

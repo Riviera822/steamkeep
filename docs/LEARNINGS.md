@@ -241,7 +241,32 @@ These are not style preferences; each entry cost a review round to learn.
   explicitly (forward it, or say in the docs that it needs a
   compose.override.yaml). Key-presence preconditions in the verify suite
   are what actually catch this — a value-only assertion passes happily on
-  the empty string an unforwarded key renders as.
+  the empty string an unforwarded key renders as. (Scope note, WP 4f: that
+  is true of a SHELL assertion, where `printenv` prints nothing for absent
+  and for empty alike. In Python it is not: `os.environ.get(key, default)`
+  supplies `default` only for an ABSENT key, so an unforwarded key gets the
+  default fine and only a forwarded-but-empty one arrives as `""`. Do not
+  carry the shell framing into config code — see the entry below.)
+- `os.environ.get(key, default)` supplies `default` only when the key is
+  **absent**; a key that is present-but-blank sails through as `""`. The
+  realistic source is a *forwarded* key with empty interpolation
+  (`KEY: ${KEY}` with nothing in `.env`) or a bare `KEY:` / `ENV KEY=` in a
+  derived image — **not** an unforwarded key, which is simply absent. Any
+  path-ish setting with a usable default therefore needs an explicit
+  `not value.strip()` refusal at boot, or a blank value defers the failure
+  into a background thread that catches everything and retries forever
+  (WP 4f: a blank `VAULT_CACHE_ROOT` plus the cached-sweep mode silently
+  killed the installed half of every sweep, once per interval, forever).
+- Two call sites computing the same domain predicate WILL diverge, and
+  behavioural fixtures will not notice. WP 4c-api's route and WP 4d's sweep
+  disagreed on one real post-delete state (`[440, 730]` vs `[730]`), which
+  let a button re-queue a game the sweep correctly treated as deleted. The
+  durable fix is a **structural** pin: monkeypatch the shared function to a
+  sentinel-returning fake and assert every caller returns *exactly* its
+  result — not a superset or subset, which also catches a caller layering an
+  extra filter on top. Measured after unification: reverting either caller
+  to its own predicate leaves 1540 behavioural tests green and kills only
+  the structural test (WP 4f).
 
 ## Subprocess output handling
 - SteamPrefill writes its summary table in the OS OEM codepage (cp850

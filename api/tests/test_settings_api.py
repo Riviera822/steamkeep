@@ -917,7 +917,7 @@ def test_scheduler_tick_picks_up_a_sweep_include_cached_override_next_sweep(
         conn.close()
 
 
-def test_b2_bare_boot_patch_enables_cached_mode_and_a_real_sweep_enqueues_it(
+def test_s2_bare_boot_patch_enables_cached_mode_and_a_real_sweep_enqueues_it(
     tmp_path: Path,
 ) -> None:
     """S2 (reviewer should-fix, 2026-08-18 review round): the unit-level test

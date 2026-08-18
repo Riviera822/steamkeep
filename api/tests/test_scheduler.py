@@ -642,8 +642,11 @@ def test_compute_targets_requires_a_real_cache_root_when_the_mode_is_on(
     code or a test) forget to pass the root and get a silent, indistinguishable
     'nothing cached' result -- this is exactly the shape that once masked one
     of this module's own mutation-kill tests. Now it is a loud, immediate
-    ``ValueError`` for both spellings of 'nothing was given'."""
-    for missing in (None, ""):
+    ``ValueError`` for every spelling of 'nothing was given', including
+    whitespace-only (N4, reviewer nitpick, 2026-08-18 review round, WP 4f:
+    consistency with ``config.py``'s own boot-time ``.strip()`` guard for the
+    same value)."""
+    for missing in (None, "", "   "):
         with pytest.raises(ValueError, match="cache_root"):
             compute_targets(
                 conn, local(10), stale_after_days=7,
