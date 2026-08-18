@@ -226,6 +226,77 @@ cross-frontend wording-contract test
 (`CachedPrefillOutcomeWordingContractTest`) in addition to the ported
 functional suite (`CachedPrefillOutcomeTest`, including both BLOCKER
 REGRESSION cases by name).
+Recorded divergences (WP 4e.1, 2026-08-18, orchestrator decision — **user
+approved the full desktop-layout proposal, all divergences included, on
+2026-08-18** — "setze alles so um"; implemented as designed, not narrowed):
+the frozen round-7 mockup is a single 390×844 phone frame with no responsive
+layer at all, and Phase 4e is the first package to deliberately diverge from
+it above phone width. Three divergences land in this foundation package:
+
+- **D-1 (bottom nav → left rail).** At BP-L (`min-width:1024px`) the
+  mockup's 3-item bottom nav (`web/css/app.css`'s base `.nav`, unchanged
+  below BP-L) becomes a sticky, full-height LEFT rail — `#app` turns into a
+  `var(--rail-w) 1fr` grid (`grid-template-areas: "rail top" "rail banner"
+  "rail main"`), and each `.nav-btn` switches from icon-above-label
+  (mockup shape) to icon-beside-label rows. The mockup has no concept of a
+  rail at all (it is phone-only chrome); `aria-current`, the queue pip and
+  every click/keyboard handler carry over unchanged (`app.js` reads nav
+  buttons by `data-view`, never by layout shape).
+- **D-4 (derived column count — no auto-fill grid yet).** The brief's own
+  measured motivation (a 173×260 cover tile rendering at a fixed 458×687
+  from 1280 to 2560px, identically, because nothing before this WP capped
+  `.view-root` at anything narrower than 960px) is **not resolved** by this
+  package — deliberately out of scope, and this WP does not widen
+  `.view-root` past that same 960px baseline either, on purpose. A first
+  version of this package DID widen it (`--w-wall:1440px`/`1720px` at BP-L/
+  BP-XL), and an orchestrator review measured live that this made the
+  problem WORSE, not better, before the auto-fill grid exists to use the
+  room (~815×1222 at 1920px, ~838×1257 at 2560px) — a foundation package
+  regressing the exact problem its phase exists to fix, on its own, is not
+  independently shippable. Fixed by sequencing: `--w-wall` now stays 960px
+  in every breakpoint block (base/BP-L/BP-XL all say so explicitly), so the
+  tile is IDENTICAL to the pre-WP baseline at 1280–2560px, not merely
+  no-worse — re-measured live and pinned headlessly (mutation-verified:
+  restoring 1440px/1720px kills two named tests in
+  `web/tests/css-layout-foundation.test.js`). `--tile-min` is declared in
+  `theme.css` as the future `minmax()` floor but wired to no
+  `grid-template-columns` yet. The next package (auto-fill grid) is what
+  actually derives the column count from viewport width AND raises
+  `--w-wall` past 960px in the SAME change — this one only gives it the
+  breakpoint/token plumbing to do so without re-litigating it, deliberately
+  holding the width cap flat until then.
+- **D-11 (nav DOM order).** `web/index.html`'s `<nav>` now precedes
+  `<main id="view-root">` — reading/focus order matches the rail being
+  visually first once BP-L applies, even though the mockup (phone-only,
+  bottom nav) never had this ordering question. Visual order below BP-L is
+  unchanged: `css/app.css`'s `.nav{ order:1 }` keeps it pinned at the
+  bottom exactly as the frozen mockup shows, byte-for-byte in the rendered
+  output (see `web/tests/css-layout-foundation.test.js`'s "base is
+  untouched" pins). `app.js` finds nav buttons via `data-view`, not DOM
+  position, so no script changed.
+
+  **Phone-side consequence, recorded honestly (Opus review should-fix S2,
+  WP 4e.1 fix round) — this register's original wording only claimed
+  VISUAL order is unchanged below BP-L, which is true but incomplete.**
+  `order` is a purely VISUAL/paint-order property; it does not affect tab
+  order or DOM/accessibility-tree reading order, both of which follow
+  source order regardless of `order`. Below BP-L (phone/tablet, the same
+  surface WP 4a.8's a11y pass signed off on), a keyboard/screen-reader user
+  now reaches the bottom nav's three buttons BEFORE the page's actual
+  content on every view — the same phone experience 4a.8 verified now tabs
+  "nav, then content" instead of "content, then nav". This is a defensible,
+  conventional trade-off (most responsive sites with a DOM-first nav/rail
+  make the same call, and a skip-link-style pattern is the usual mitigation
+  if it proves to matter) — but it is a real, user-facing change to a
+  surface a PRIOR work package already signed off on, not a no-op. Recorded
+  here for the phone-side a11y record; revisit if real use surfaces it as a
+  problem (a "skip to content" link is the natural fix if so). User veto
+  welcome, same as every other entry in this register.
+
+The remaining Phase 4e divergences (auto-fill grid density, overlay
+geometry at BP-L, Downloads/Settings-specific layout, the pointer/keyboard
+model) belong to later packages in this phase and are deliberately NOT
+recorded here — this entry covers only what WP 4e.1 itself shipped.
 
 ### WP 4a.1 — Static serving + app shell (api/ + web/) — **first, serial**
 - vault-api mounts `web/` (StaticFiles, SPA fallback, sane CSP/security

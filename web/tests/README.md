@@ -618,3 +618,115 @@ for what changed and how each fix was mutation-verified.
   moment); demo selection keys on `depots.length > 0` while the real grid
   keys on `size_bytes > 0` (agree on every current fixture, but are not the
   same predicate).
+
+### WP 4e.1 — Desktop layout foundation (Phase 4e)
+
+Different posture from every WP above: this package's product is mostly
+CSS/breakpoint plumbing, not JS decision logic, so its tests are not
+"pull the logic into `lib/`" ports — they are (a) structural static analysis
+of the CSS/JS source text itself, and (b) fixture-generation logic that
+genuinely is pure and DOM-free.
+
+- `css-hygiene.test.js` — two general-purpose lints, real static analysis
+  (re-derived from source on every run, not a hand-typed list):
+  1. every CSS class carrying an author `display` rule that is ALSO
+     hidden-toggled somewhere in `web/js/` must have a matching
+     `SELECTOR[hidden]{display:none}` guard — closes the `.btn`/`h4.sec`/
+     `.onbnav` bug class (docs/LEARNINGS.md, "Web UI") permanently, catching
+     a NEW instance built the same way, not just re-verifying the three
+     known ones. Recognizes `.hidden = ...`, `setAttribute("hidden", ...)`
+     and `removeAttribute("hidden")` as toggle sites (the first version of
+     this lint only recognized the property form — an Opus review nitpick,
+     N1, found and closed in the fix round: a `setAttribute`-based toggle on
+     an unguarded class survived undetected until then). Documented
+     limitations (same review, same header): a multi-class compound selector
+     (`.jobcard.active`) or a descendant selector (`.grid.list .cap`) is
+     invisible to the display-rule side even if JS hidden-toggles a matching
+     element; the JS-side scan is per-FILE and flat, not block/function
+     scoped, so two same-named identifiers in different functions of one
+     file share one tracked class set. Neither is exploited by real code as
+     of this WP.
+  2. no `!important` anywhere except theme.css's `prefers-reduced-motion`
+     block — in particular, none inside a NEW `@media (min-width...)`
+     breakpoint block, which is exactly the kind of specificity workaround
+     that makes later overrides unpredictable.
+  Both mutation-verified in the fix round: removing a guard, adding an
+  `!important` to a breakpoint block, and (new in the fix round) a
+  `setAttribute`-based toggle with no guard at all — each kills its named
+  test; reverted afterward.
+- `css-layout-foundation.test.js` — structural pins for the spatial tokens,
+  breakpoints (BP-M/BP-L/BP-XL) and the nav-to-rail conversion. Two
+  anti-regression pins added in the Opus review fix round, both mutation-
+  verified: `--w-wall` must equal `960px` in EVERY breakpoint block (a first
+  version of this package widened it, which measurably made the mockup's
+  already-oversized cover tile BIGGER — see docs/PROJECT_PLAN.md's Phase 4e
+  section for the full story); every `--nav-h` assignment must carry an
+  explicit `px` unit (blocker B1: a bare `--nav-h:0` makes `.bulk`'s
+  `bottom:calc(var(--nav-h) + 14px)` a calc() type mismatch, invalid at
+  computed-value time, silently falling back to `bottom:auto` — the bulk
+  action bar landed off screen at every width >=1024px until this was
+  caught). Also pins the BP-L `.nav-pip` `order:1` fix (blocker B2: DOM-first
+  no longer means visually-first once the pip becomes `position:static` in
+  a row-direction flex container) and `.banner-wrap` picking up `--w-wall`
+  (not `--w-text`) at BP-L so it aligns with `.view-root` in the same visual
+  column (should-fix S4). **Correction (Opus review blocker B3):** this
+  file's own header used to claim "physically impossible for this WP to
+  change anything below BP-M" — false: `.banner-wrap{width:100%}` (the
+  shrink-to-fit bug fix) is a deliberate TOP-LEVEL rule change that alters
+  real rendering from ~430px up to 719px (measured against a pre-WP
+  baseline — see the header for the numbers). Only the mockup's own 390px is
+  genuinely byte-identical end to end; "base is untouched" in this file's
+  test names means the SHELL/RAIL/BREAKPOINT machinery is correctly gated,
+  not that literally nothing renders differently below 720px.
+- `demo-data-large-library.test.js` — `web/js/demo-data.js`'s
+  `generateSyntheticGames`/`resetDemoData({librarySize})`: deterministic
+  (same count -> same shape, modulo the one wall-clock-derived field,
+  `last_prefill_at`, whose exact ISO string a millisecond apart is expected
+  to differ and is stripped before the determinism comparison — its SHAPE
+  is pinned separately: a real ISO string for "done" games, exactly `null`
+  for "idle" ones, per N4), appid ranges clear of every other fixture,
+  mixed cached/idle shape, and (Opus review should-fix S1) `needs_force`
+  is the exact inverse of "cached" — an idle/never-filled row is
+  `needs_force=true` and a done row is `false`, matching api/README.md's
+  real lifecycle exactly (the pre-fix default produced `idle` +
+  `needs_force=false`, a shape the real API can never emit).
+
+#### Honest list of what WP 4e.1's pass did NOT catch on its own — and what closed the gap
+
+**This is the load-bearing lesson of this package's review round, not a
+footnote.** The first live-verification pass measured exactly three
+selectors — the cover tile, `.view-root`, and the nav rail's own box — and
+concluded the shell conversion was safe. It was not: `#app` becoming a CSS
+grid changes nothing about `position:fixed` containing blocks by itself
+(that theory, floated during review, turned out not to be the actual
+mechanism), but two REAL bugs existed anyway and were invisible to that
+narrow a check:
+
+- **B1** — the bulk action bar (`.bulk`, `position:fixed`) computed to
+  `bottom:-143782px` (off screen) at every width >=1024px, because
+  `--nav-h:0` (unitless) made `.bulk`'s `calc(var(--nav-h) + 14px)` invalid
+  at computed-value time. Caught only by explicitly measuring `.bulk` itself,
+  in multi-select mode, at desktop widths — not implied by checking the tile
+  or the nav.
+- **B2** — the Downloads nav button's queue-count pip visually preceded its
+  own icon at BP-L (DOM order, not visual order, once the pip became
+  `position:static`), throwing the whole row ~88px out of line with
+  Library/Settings. Caught only by measuring icon/label x-position with an
+  ACTIVE JOB running — a library at rest never shows the pip at all.
+
+**The fix, going forward:** any package that changes the app shell's
+layout mode (flex<->grid, adding/removing a rail/sidebar, repositioning the
+nav) must explicitly re-check every OTHER `position:fixed`/overlay surface
+for "does it still land on screen" — `.bulk`, `.sheet-backdrop` (the
+notifications panel, the clients sheet, the game detail sheet all share
+this), `.dialog-backdrop` (delete/GC-execute confirms), and `#toast` — not
+just the surfaces the package's own diff obviously touches. Not their
+GEOMETRY/sizing at the new breakpoints (that is later, narrower Phase 4e
+work) — just "is it reachable and visible at all". WP 4e.1's fix round did
+this for all four listed surfaces at 1024/1280/1920px in multi-select with
+an active job (the exact conditions that exposed B1/B2) and found no
+further issues; see the coder's report for the live measurements. This
+check has no headless equivalent in this suite (it is fundamentally a
+real-rendering/layout-engine question, same posture as every other item in
+WP 4a.8's "Honest list" above) — it must be repeated by hand for every
+future shell-layout-changing package, not assumed safe from CSS pins alone.

@@ -42,6 +42,26 @@
   --mono: "Roboto Mono","Cascadia Mono",ui-monospace,SFMono-Regular,Consolas,monospace;
 
   --r-s:8px; --r-m:12px; --r-l:18px; --r-xl:26px;
+
+  /* ---------- spatial tokens (WP 4e.1 — desktop layout foundation) ----------
+     Purely dimensional; NOT colour/font/radius (those hexes above are the
+     single source of truth for the Android side's VaultColors, literal-pinned
+     there — untouched by this WP). Base (unprefixed) values here are exactly
+     what app.css's `.view-root`/`.onb`/`.banner-wrap`/`.bulk` already
+     hard-coded (960 / 928 / 78) before this WP, so referencing a token
+     instead of the literal changes NOTHING about what renders below the
+     BP-M breakpoint — see app.css's `@media (min-width:720px)` block for
+     where these get redefined, which is the only place any of them change.
+     `--nav-h`/`--w-text`/`--w-wall` are redefined inside breakpoint blocks
+     (never here a second time) so there is exactly one place each token's
+     value changes per breakpoint. */
+  --gutter:16px;    /* horizontal inset — matches .view-root's existing 16px side padding */
+  --nav-h:64px;     /* bottom-nav rendered height (7px+9px vertical padding + ~48px content); 0 once BP-L turns it into a side rail */
+  --rail-w:232px;   /* BP-L left-rail width */
+  --w-text:960px;   /* single-column content width (.view-root/.onb/.banner-wrap) — replaces the four hand-copied "960"/"928"/"78" numbers below BP-M; narrows to 760px at BP-M for a comfortable reading column. NOT exhaustive (Opus review nitpick N5, WP 4e.1 fix round): .view-root's own "20px 16px 32px" padding and .bulk's "left/right:12px" insets are still separate, untouched literals — this token replaces the FOUR that were copies of the SAME number, not every dimensional literal in app.css */
+  --w-wall:960px;   /* ceiling for the tile "wall" (library grid) — .view-root picks this up at BP-L instead of --w-text (app.css), but its VALUE is deliberately still 960px in every breakpoint block right now (the pre-WP baseline, matching --w-text exactly): widening it before a later WP's auto-fill grid exists to use the room would grow the mockup's still-fixed 2/3/list tiles even further past their already-oversized baseline, which is a regression this foundation package must not ship (see app.css's BP-L block for the measured numbers). A later WP raises this ONE value alongside landing that grid */
+  --tile-min:150px; /* floor for a future `repeat(auto-fill,minmax(var(--tile-min),1fr))` library grid — declared here, not wired to any grid yet (WP 4e.1 report: "the auto-fill grid itself" is a later package) */
+  --w-sheet:480px;  /* existing .sheet max-width, tokenized (WP 4a.7's hard-coded 480px) */
 }
 
 *, *::before, *::after{ box-sizing:border-box; }

@@ -403,6 +403,20 @@ function renderEmptyState() {
   return p;
 }
 
+// **DOM node count is independent of column count (WP 4e.1 finding, worth
+// pinning here in a comment rather than re-discovering it in Phase 4e's next
+// package).** `renderGrid` below builds one `buildCard(...)` node per VISIBLE
+// game regardless of `state.layout` — 2 columns, 3 columns and list all run
+// the exact same loop over the exact same `list`; only `els.grid.className`
+// changes, which is a CSS `grid-template-columns` concern, not a DOM-size
+// one. Concretely: a library of 400 already-visible games builds 400 card
+// nodes TODAY, in every layout, on every desktop-viewport width — the
+// desktop-layout phase (docs/PROJECT_PLAN.md §7 Phase 4e) that eventually
+// raises the on-screen COLUMN count via an `auto-fill` grid (`--tile-min`,
+// css/theme.css) does not change this function's node count at all, only
+// how those existing 400 nodes are arranged. No virtualization/windowing
+// exists here regardless of column count — see the coder's WP 4e.1 report
+// for the measured cost of a full rebuild at N=400 (~30ms synchronous).
 function renderGrid() {
   const list = visibleGames(state.games, {
     query: state.query,

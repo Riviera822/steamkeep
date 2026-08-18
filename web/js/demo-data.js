@@ -40,6 +40,15 @@
  * data's already-`running` job (900001, Driftwood Signal) is left in place
  * on purpose — it means a fresh call to the new route exercises the
  * "already running" dedupe branch with zero extra setup.
+ *
+ * WP 4e.1 extends this with a large-library fixture — `generateSyntheticGames`
+ * appends up to 394 deterministic synthetic games on top of the 6 curated
+ * ones below, gated behind a `localStorage`-read library-size preference (or
+ * an explicit `resetDemoData({ librarySize })` argument for headless tests)
+ * — see that function's own header for what it can and cannot measure, and
+ * `web/tests/demo-data-large-library.test.js` for its coverage. Every
+ * existing test in this suite that calls `resetDemoData()` with no argument
+ * is unaffected: the default library size is still exactly 6.
  */
 
 import { ApiError, ERROR_KINDS } from "./errors.js";
@@ -108,7 +117,10 @@ function makeGame({
   };
 }
 
-function buildGames() {
+/** The 6 curated, hand-named seed games every existing demo test asserts
+ * exact appids/fields against — unchanged by WP 4e.1. `buildGames()` below
+ * appends the large-library fixture on top of exactly this list. */
+function buildCuratedGames() {
   return [
     makeGame({
       appid: 2010010,
@@ -178,6 +190,125 @@ function buildGames() {
       gcHeldBackBytes: 15_000_000,
     }),
   ];
+}
+
+// ---------------------------------------------------------------------
+// Large-library fixture (WP 4e.1) — a gate for the whole desktop-layout
+// phase, not a nicety: the round-7 mockup's grid/poll-diff machinery
+// (render-plan.js's patch-vs-rebuild decisions, the games/jobs poll loops
+// in store.js) has only ever been exercised against the 6 curated games
+// above. Appended ON TOP of them (never replacing), so every existing demo
+// test that names an exact appid/count above is completely unaffected —
+// the default library size is still exactly DEFAULT_LIBRARY_SIZE (6).
+// ---------------------------------------------------------------------
+
+const DEFAULT_LIBRARY_SIZE = 6;
+const MAX_LIBRARY_SIZE = 400;
+const LARGE_LIBRARY_STORAGE_KEY = "steamvault.demoLibrarySize";
+// Chosen well clear of every other fixture's appid range in this file (the
+// curated seed games above: 2010010-2010070; the Steam-relay fixture below:
+// 3300100-3300300) so a large-library run can never collide with either.
+const SYNTHETIC_APPID_BASE = 5_000_000;
+
+const SYNTHETIC_ADJECTIVES = [
+  "Aurora", "Ember", "Frost", "Iron", "Glass", "Nova", "Cobalt", "Amber",
+  "Cinder", "Quartz", "Umber", "Verdant", "Solace", "Rift", "Hollow",
+  "Marrow", "Gale", "Onyx", "Pale", "Wraith",
+];
+const SYNTHETIC_NOUNS = [
+  "Cascade", "Horizon", "Meridian", "Hollow", "Drift", "Protocol", "Foundry",
+  "Undertow", "Signal", "Vale", "Bastion", "Convoy", "Reach", "Warden",
+  "Circuit", "Ledger", "Thicket", "Anchor", "Passage", "Ember",
+];
+
+/**
+ * Build `count` synthetic games — plausible name, size and depot count,
+ * deterministic (no `Math.random()`) so the same `count` always produces
+ * the same fixture and a headless test can assert on it directly. Exported
+ * for exactly that reason (WP 4e.1 brief: "reachable both from a headless
+ * test and from the running app").
+ *
+ * **What this fixture can, and cannot, measure — say so plainly (WP 4e.1
+ * brief).** These games carry no cover art URL of their own; `game-card.js`/
+ * `lib/cover-art.js` still derive a real Steam CDN cover URL from `appid` +
+ * `name` unconditionally (there is no per-game opt-out), so the grid DOES
+ * attempt a real image request per card and falls back to the procedural
+ * tile on a 404/network error the same as any never-matched appid would.
+ * That exercises DOM node count, poll-diff cost and render-plan patch/
+ * rebuild decisions at scale — but NOT the "400 real images landing inside
+ * the CSP allowance" half of the phase's own concern, since none of these
+ * appids correspond to a real Steam depot with real artwork. Only the
+ * operator's own real Steam library (fetched via the on-device/relay path,
+ * never this module) exercises that half.
+ * @param {number} count
+ */
+export function generateSyntheticGames(count) {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const appid = SYNTHETIC_APPID_BASE + i * 10;
+    const name =
+      `${SYNTHETIC_ADJECTIVES[i % SYNTHETIC_ADJECTIVES.length]} ` +
+      `${SYNTHETIC_NOUNS[(i * 7 + 3) % SYNTHETIC_NOUNS.length]} ${i + 1}`;
+    // Roughly 2/3 "on the cache" (done, with depot content), 1/3 not yet
+    // downloaded (idle, no depots) — a plausible mixed-library shape, not a
+    // degenerate all-cached or all-empty one. Deliberately no "running"/
+    // "error" statuses here: those would need a matching job row to stay
+    // honest (game-status.js's dispKind can be overridden by a live job),
+    // and this fixture is about library-grid scale, not job-polling scale.
+    const cached = i % 3 !== 0;
+    const depotCount = cached ? 1 + (i % 4) : 0;
+    const depots = [];
+    for (let d = 0; d < depotCount; d++) {
+      // Deterministic pseudo-variety (200 MB .. ~20 GB per depot) instead of
+      // one repeated number, so aggregate byte totals differ per game the
+      // way a real library's would.
+      const sizeBytes = 200_000_000 + ((i * 97 + d * 613) % 40) * 500_000_000;
+      depots.push({ depotid: appid + d + 1, shared: false, size_bytes: sizeBytes });
+    }
+    // needsForce: !cached (Opus review should-fix S1, WP 4e.1 fix round) —
+    // makeGame()'s default (false) is wrong for the "idle" half of this
+    // fixture: per api/README.md's needs_force lifecycle, a never-filled
+    // app is needs_force=1 (nothing has confirmed it current yet); `0`/false
+    // is only reached through a successful `done` job (which is exactly
+    // what makes THIS game "cached" here). A demo fixture claiming a shape
+    // the real API cannot produce (idle + needs_force=false) is a real bug,
+    // not a cosmetic one — demo data is a shipped surface with a 1:1 claim.
+    out.push(makeGame({ appid, name, status: cached ? "done" : "idle", depots, needsForce: !cached }));
+  }
+  return out;
+}
+
+/** Human-driven toggle (WP 4e.1 brief: "reachable ... from the running app
+ * so a human can look at it"). In a browser with demo mode on, run:
+ * `localStorage.setItem("steamvault.demoLibrarySize", "400")` then reload —
+ * this module's state is built once at import time (see `let games = ...`
+ * below), so the preference is read at that moment, not polled on an
+ * interval. Any other/missing/non-numeric/too-small value is the ordinary
+ * DEFAULT_LIBRARY_SIZE-game demo library, byte-identical to before this WP.
+ * Returns DEFAULT_LIBRARY_SIZE unconditionally outside a browser (`window`
+ * undefined, e.g. every headless test in web/tests/) — tests that want the
+ * large fixture pass an explicit `librarySize` to `resetDemoData()` instead
+ * (see its own header). */
+function readLibrarySizePreference() {
+  try {
+    if (typeof window === "undefined" || !window.localStorage) return DEFAULT_LIBRARY_SIZE;
+    const raw = window.localStorage.getItem(LARGE_LIBRARY_STORAGE_KEY);
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > DEFAULT_LIBRARY_SIZE) return Math.min(n, MAX_LIBRARY_SIZE);
+    return DEFAULT_LIBRARY_SIZE;
+  } catch {
+    return DEFAULT_LIBRARY_SIZE; // same fail-closed posture as library.js's readStoredLayout
+  }
+}
+
+/** The curated 6-game seed list, plus `librarySize - DEFAULT_LIBRARY_SIZE`
+ * synthetic games appended on top (0 more when `librarySize` is at or below
+ * the default — every existing demo test, which never passes an argument
+ * here, sees exactly the unmodified 6-game list it always has). */
+function buildGames(librarySize = DEFAULT_LIBRARY_SIZE) {
+  return buildCuratedGames().concat(
+    generateSyntheticGames(Math.max(0, librarySize - DEFAULT_LIBRARY_SIZE)),
+  );
 }
 
 function buildJobs() {
@@ -268,17 +399,27 @@ function buildClients() {
   ];
 }
 
-let games = buildGames();
+let games = buildGames(readLibrarySizePreference());
 let jobs = buildJobs();
 let clients = buildClients();
 let nextJobId = 900002;
 
 /** Restore all demo state to a fresh copy of the seed data. Exported for
- * tests (web/tests/demo-data.test.js) so scenarios don't leak between
- * cases; the real app never calls this — a page reload does the same
- * thing by re-importing the module. */
-export function resetDemoData() {
-  games = buildGames();
+ * tests (web/tests/demo-data.test.js and friends) so scenarios don't leak
+ * between cases; the real app never calls this — a page reload does the
+ * same thing by re-importing the module.
+ *
+ * WP 4e.1: accepts an optional `librarySize` so the large-library fixture
+ * is reachable from a headless test too (`resetDemoData({ librarySize: 400
+ * })`), without needing a fake `window`/`localStorage` — every existing
+ * call site (`resetDemoData()`, no argument) is completely unaffected:
+ * `librarySize` falls back to `readLibrarySizePreference()`, which itself
+ * always returns `DEFAULT_LIBRARY_SIZE` outside a browser (`window` is
+ * undefined in every bare-Node test in web/tests/).
+ * @param {{ librarySize?: number }} [options]
+ */
+export function resetDemoData({ librarySize } = {}) {
+  games = buildGames(librarySize ?? readLibrarySizePreference());
   jobs = buildJobs();
   clients = buildClients();
   nextJobId = 900002;

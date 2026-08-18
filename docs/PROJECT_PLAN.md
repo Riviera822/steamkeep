@@ -1076,6 +1076,259 @@ refreshed and silently rots.
   /v1/settings` being the one supported path; `deploy/.env.example` documents
   the key with that framing instead of a commented assignment line.
 
+#### Phase 4e — Web UI desktop layout (track: web)
+
+The web UI (Phase 4a) has no responsive layer at all: the frozen round-7
+mockup is a single 390×844 phone frame ported into a `max-width:960px`
+column, so a 173×260 cover tile renders at a fixed 458×687 from 1280 to
+2560px, the bottom nav's three items stretch to 631–844px around a 21px
+glyph, and roughly half of a 1920px viewport carries nothing. **User
+decision (2026-08-18): approved the full desktop-layout proposal, all
+divergences included** ("setze alles so um") — implemented as designed,
+not narrowed. See `docs/WORKPACKAGES.md`'s divergence register (D-1, D-4,
+D-11) for what each package diverges from the mockup and why.
+
+- [x] Spatial tokens, breakpoints (BP-M ≥720px / BP-L ≥1024px / BP-XL
+      ≥1800px, width-keyed; pointer affordances in a separate
+      `(hover:hover) and (pointer:fine)` query), and the bottom-nav-to-
+      left-rail shell conversion; the large-library demo fixture the rest
+      of the phase measures against
+      *(WP 4e.1 done 2026-08-18: `--gutter`/`--nav-h`/`--rail-w`/
+      `--w-text`/`--w-wall`/`--tile-min`/`--w-sheet` tokens in theme.css
+      (no colour/font/radius value touched — Android's VaultColors literal-
+      pins stay valid); `.view-root`/`.onb`/`.banner-wrap`'s four
+      hand-copied 960/928/78 numbers replaced with token references/`calc()`
+      derivations (correction, Opus review nitpick N5: this is four numbers
+      that were COPIES of each other, not every dimensional literal in
+      app.css — `.view-root`'s own `20px 16px 32px` padding and `.bulk`'s
+      `left/right:12px` insets are untouched, independent literals, not
+      claimed otherwise); `.banner-wrap`'s shrink-to-fit bug fixed (`width:100%`,
+      no `display` declaration added — would have been a fourth `[hidden]`-
+      vs-author-`display` instance); `<nav>` moved before `<main>` in
+      index.html (D-11) with a compensating `.nav{ order:1 }` so VISUAL
+      order below BP-L is unchanged (`order` is paint-order only — see S2
+      below for the READING/focus-order consequence this claim does not
+      cover); the shell/rail/breakpoint machinery verified to live only
+      inside `min-width` blocks via a structural headless pin, plus a live
+      six-width measurement (390/768/1280/1440/1920/2560) — reported in the
+      coder's response (superseded by the corrected, extended table below —
+      see blocker B3).
+      Two general-purpose CSS lints added per the brief's request: (1) every
+      class with an author `display` rule that is ALSO hidden-toggled
+      somewhere in `web/js/` must have a matching `[hidden]` guard rule —
+      a real cross-reference derived from the CSS/JS source each run, not a
+      hand-typed list of the three previously-found offenders (`.btn`,
+      `h4.sec`, `.onbnav`), mutation-verified by removing a guard and
+      watching the named test die; (2) no `!important` outside the
+      `prefers-reduced-motion` block, mutation-verified by adding one to a
+      new breakpoint. `web/js/demo-data.js` gained
+      `generateSyntheticGames`/a `localStorage["steamvault.demoLibrarySize"]`
+      toggle (400 selectable, default unchanged at 6) reachable from both a
+      headless test and the running app; documented in its own header what
+      it can measure (DOM/poll-diff cost at scale) and cannot (no real cover
+      art, so it does not exercise the CSP image-allowance half of a real
+      400-game library).
+
+      **Sequencing fix (orchestrator review, same day):** a first version of
+      this package widened `--w-wall` to 1440px at BP-L and 1720px at BP-XL,
+      on the reasoning that the rail frees up horizontal room the library
+      grid should get to use. Measuring it live instead of assuming it
+      exposed the opposite: because the Library grid is STILL the mockup's
+      fixed 2/3/list column switch, not an `auto-fill` density grid,
+      widening `.view-root`'s cap only grew the ALREADY-oversized cover tile
+      further — 458×687 (the pre-WP baseline, unchanged from 1280–2560px)
+      became ~815×1222 at 1920px and ~838×1257 at 2560px. Shipping that
+      would have made the phase's own motivating problem measurably worse
+      the moment this "foundation" package landed on its own, which is not
+      independently shippable. **Fixed by sequencing, not scope creep:**
+      `--w-wall` stays equal to the pre-WP effective cap (960px, `theme.css`)
+      in EVERY breakpoint block (`:root` base, BP-L, BP-XL all say 960px
+      explicitly — restated rather than omitted, so a later reader sees a
+      deliberate decision, not a forgotten override) until a later package's
+      auto-fill grid can actually use the room; that package changes this
+      ONE value. `--w-text` (Settings/Downloads/onboarding/banner — text-
+      first views sharing the same `.view-root`) still narrows to 760px at
+      BP-M as designed; only the library-grid-specific widening at BP-L/XL
+      was deferred. Two headless pins added
+      (`web/tests/css-layout-foundation.test.js`): every `--w-wall:`
+      assignment anywhere in theme.css/app.css must equal `960px`, and
+      `.view-root`'s BP-L override must resolve to the SAME 960px as its
+      base/BP-M cap — both mutation-verified (temporarily restoring
+      1440px/1720px kills each by name). Re-measured live after the fix (see
+      the corrected six-width table below): the tile is now IDENTICAL to the
+      pre-WP baseline at every width from 1280–2560px, not merely "no
+      worse". **Honest status, not silently narrowed:** the tile-oversize
+      problem itself remains genuinely unfixed — that is explicitly D-4's
+      scope, landing with the auto-fill grid below — this package now
+      simply does not regress it in the meantime.
+
+      **Opus review round 1: FAIL — three blockers, five should-fixes, six
+      nitpicks, all fixed same day.** The reviewer's framing: the shell
+      change (bottom nav -> left rail, `#app` flex -> grid) re-parents every
+      `position:fixed` surface, and the first live-verification pass only
+      measured three selectors (the tile, `.view-root`, the nav) — it should
+      have swept every fixed/overlay surface. Two real bugs existed that a
+      3-selector check could not see:
+      - **B1** — `--nav-h:0` (BP-L) is UNITLESS; `.bulk`'s
+        `bottom:calc(var(--nav-h) + 14px)` mixes it with a `14px` length,
+        which is a calc() type mismatch, invalid at computed-value time,
+        silently falling back to `bottom:auto`. Measured: the bulk action
+        bar's `bottom` computed to -143782px (off screen) at every width
+        >=1024px — multi-select (enter select mode, pick games, Download or
+        Delete) was **unusable on desktop**. Fix: `--nav-h:0px`, plus a pin
+        requiring every `--nav-h:` assignment anywhere to match `/^\d+px$/`
+        (the CLASS of bug, not just the instance) — mutation-verified.
+      - **B2** — `index.html` puts `.nav-pip` FIRST inside the Downloads
+        button (harmless while `position:absolute`); BP-L's
+        `position:static; margin-left:auto` override then rendered it BEFORE
+        the icon in plain DOM/flex order, pushing icon+label right instead —
+        measured live with a job running: the whole Downloads row sat ~88px
+        out of line with Library/Settings. Fix: `order:1` on the BP-L
+        `.nav-pip` rule (no DOM move — `aria-current`/click/keyboard/the
+        `.on` toggle are all untouched), pinned and mutation-verified;
+        re-measured at 1024/1280/1920px with an active job — Downloads'
+        icon (x=22) and label (x=55) now match Library/Settings exactly.
+      - **B3** — the plan and the test-file header both claimed "base
+        (<720px) is byte-identical", which is false from ~430px up:
+        `.banner-wrap{width:100%}` (the shrink-to-fit fix) is a deliberate
+        TOP-LEVEL rule, not gated by any media query, so it changes real
+        rendering wherever the bug it fixes existed. Measured against a
+        `git archive HEAD` baseline: 430px viewport, 398.3px-wide banner @
+        x=8.3 -> 415px @ x=0; 719px viewport, 398.3px @ x=152.8 -> 704px @
+        x=0. **Fixed the CLAIM, not the behaviour** (the behaviour is the
+        correct fix and was already disclosed elsewhere): only the mockup's
+        own 390px is genuinely byte-identical end to end; "base is
+        untouched" now means specifically "the shell/rail/breakpoint
+        machinery is gated correctly", stated exactly that way in both this
+        section and the test file's header, with `.banner-wrap{width:100%}`
+        pinned as the one rule that must never silently revert.
+
+      Should-fixes, all closed: **S1** `generateSyntheticGames` now sets
+      `needsForce: !cached` (an idle/never-filled synthetic row was
+      `needs_force=false`, a shape the real API can never produce per
+      api/README.md's lifecycle — a demo fixture is a shipped 1:1 surface).
+      **S2** `docs/WORKPACKAGES.md`'s D-11 entry now records the phone-side
+      consequence honestly: `order` is visual-only, so below BP-L a
+      keyboard/screen-reader user now tabs the nav BEFORE the content on
+      every view — a real change to the exact surface WP 4a.8's a11y pass
+      signed off on, defensible but not previously stated. **S3**
+      `web/tests/README.md` gained a WP 4e.1 section (three new test files)
+      and an honest "what this pass did not catch on its own" note naming
+      B1/B2's category (any shell-layout-changing package must re-check
+      every fixed/overlay surface, not just the ones its diff touches — no
+      headless equivalent exists for this, same posture as WP 4a.8's list).
+      **S4** `.banner-wrap` now picks up `--w-wall` (not `--w-text`) at
+      BP-L, matching `.view-root` exactly — they share one visual column and
+      a mismatched cap was a measured 100px seam (left edges 688.5 vs
+      588.5 at 1920px); tying both to one token also keeps a later
+      `--w-wall` raise aligned for free. **S5 — the process fix.** Widened
+      this package's own regression pass to the surfaces B1/B2 fell into:
+      `.bulk`, `.sheet-backdrop` (notifications panel, verified directly),
+      `.dialog-backdrop` (delete confirm, verified directly) and `#toast`
+      (verified directly) all confirmed on screen at 1024/1280/1920px in
+      multi-select with an active job. The 1023–1279px transition band
+      (below) was added to the measurement table per this same finding — the
+      rail visibly taking 232px out of the available column is the widest-
+      changing band in the whole spec and the first draft skipped it.
+
+      Nitpicks, all closed: **N1** `css-hygiene.test.js`'s display/hidden
+      lint now also recognizes `setAttribute("hidden", ...)`/
+      `removeAttribute("hidden")` as toggle sites (not just the `.hidden =`
+      property form — the reviewer's own probe of this hole survived the
+      first version and now dies by name), and its header states the
+      multi-class/descendant-selector limitation explicitly. **N2**
+      `sectionHeadingFactory`'s hardcoded `["sec"]` mapping is now asserted
+      against the real `sectionHeading()` source, so drift fails loudly.
+      **N3** the six-width table below now says which scrollbar mode
+      produced which row: viewports <768px trigger this Browser pane's
+      mobile/touch emulation (overlay scrollbar, 0px reserved — confirmed:
+      `innerWidth === clientWidth` at 390px), 768px and up use a classic
+      scrollbar (15px reserved whenever content actually overflows, which
+      the 400-game fixture guarantees) — not an inconsistency, a real
+      platform difference the numbers now name. **N4** a dedicated pin now
+      checks the exact shape of `last_prefill_at` (real ISO string for
+      "done", exactly `null` for "idle") separately from the determinism
+      check that strips it. **N5** the "four hand-copied numbers" claim
+      above is corrected to name what it does NOT cover (`.view-root`'s own
+      `20px 16px 32px` padding, `.bulk`'s `left/right:12px`, both still
+      independent literals). **N6** `--tile-min`'s existence is now asserted
+      inside the SAME test as the `--w-wall` anti-widening pin, so an
+      automated "remove this, nothing references it" sweep cannot silently
+      delete a token a later WP needs.
+
+      Suite 450 green (36 new relative to the pre-WP-4e.1 baseline of 414:
+      30 from the first pass, plus 6 new named tests in this fix round — one
+      each for the B1 `--nav-h` unit pin, the B2 `.nav-pip order:1` pin, the
+      S4 `.banner-wrap`/`--w-wall` alignment pin, the S1 `needs_force`
+      inverse-of-cached pin, the N2 `sectionHeadingFactory` mapping pin, and
+      the N4 `last_prefill_at` shape pin. B3's fix and N5/N6 extended
+      EXISTING tests/comments in place rather than adding new ones; N1's
+      `setAttribute`/`removeAttribute` recognition extends the existing
+      lint's own scan, covered by the existing display/hidden-guard test
+      re-passing plus the mutation check below, not a new test file entry).
+
+      **Six-width table, final (re-measured after every fix above, live
+      against a running vault-api + the 400-game demo fixture; scrollbar
+      mode noted per N3):**
+
+      | width | cover tile | `.view-root` | nav | scrollbar |
+      |---|---|---|---|---|
+      | 390 | 173.0×259.5 (byte-identical to pre-WP) | — (base) | bottom, 3-col | overlay (mobile emulation) |
+      | 768 | 354.5×531.8 | 760px cap (BP-M) | bottom, 3-col, chips wrap | classic, 15px |
+      | 1023 | 358.0×537.0 | 760px cap (still BP-M) | bottom, 3-col | classic, 15px |
+      | 1024 | 366.5×549.8 | 777px (rail takes 232px out of the column) | rail, 232px | classic, 15px |
+      | 1200 | 454.5×681.8 | 953px (approaching the 960px cap) | rail | classic, 15px |
+      | 1279 | **458.0×687.0** (cap reached) | 960px cap | rail | classic, 15px |
+      | 1280 | **458.0×687.0** (pre-WP baseline, exact) | 960px cap | rail, 232px | classic, 15px |
+      | 1440 | **458.0×687.0** | 960px cap | rail | classic, 15px |
+      | 1920 | **458.0×687.0** | 960px cap | rail | classic, 15px |
+      | 2560 | **458.0×687.0** | 960px cap | rail | classic, 15px |
+
+      The 1023→1279 band (added per should-fix S5) is the widest-changing
+      one in the whole table: crossing BP-L subtracts the rail's 232px from
+      the available column before `.view-root` can reach its 960px cap, so
+      the tile visibly SHRINKS relative to where it would have landed
+      without a rail, then grows back to the steady 458×687 by ~1279px —
+      correct, expected behaviour, not a bug, but worth seeing in the table
+      rather than jumping straight from 1023 to 1280.
+
+      Re-verified separately, live, at 1024/1280/1920px in multi-select
+      with an active synthetic job (the exact conditions B1/B2 needed to
+      surface): `.bulk` on screen at all three (`bottom` computed to the
+      intended `14px`, `rect.bottom` inside the viewport with the .22s
+      slide-up transition settled); the Downloads nav-pip `on`, showing
+      "1", at the row's trailing edge with icon/label x matching Library/
+      Settings exactly; the notifications sheet-backdrop, the bulk-delete
+      `.dialog-backdrop`, and `#toast` all independently confirmed on
+      screen at 1920px.
+
+      **DOM node count vs. column count — a framing correction (orchestrator
+      review), pinned in a code comment so it is not re-litigated in a later
+      package.** `web/js/views/library.js`'s `renderGrid` builds one card
+      node per VISIBLE game regardless of `state.layout` (2/3/list all run
+      the identical loop; only `els.grid.className` — a CSS concern —
+      changes). A 400-game library already builds 400 card nodes TODAY, in
+      every layout, on every viewport width; there is no virtualization
+      either before or after this package. The auto-fill grid Phase 4e
+      eventually ships changes how those 400 nodes are ARRANGED (more
+      columns at wider viewports), never how many exist. The measured
+      ~29–33ms cost of a full 400-card rebuild (see WP 4e.1's coder report)
+      is therefore the number that actually matters for scaling, not a
+      column-count framing — the gate this fixture exists to clear is
+      already cleared)*
+- [ ] Auto-fill library grid using `--tile-min` (`repeat(auto-fill,
+      minmax(var(--tile-min),1fr))`), replacing the fixed 2/3/list switch at
+      BP-L/BP-XL, and raising `--w-wall` past its currently-deferred 960px
+      alongside it (in the SAME package — see the sequencing note above,
+      widening one without the other is exactly the regression already
+      caught and fixed once) — the D-4 fix
+- [ ] Overlay geometry at BP-L (detail sheet / notifications / clients sheet
+      sizing and placement once the shell is no longer phone-width)
+- [ ] Downloads/Settings-specific desktop layout (both currently just
+      inherit `.view-root`'s width from WP 4e.1's foundation, unreviewed for
+      their own content shape at desktop widths)
+- [ ] Pointer/keyboard interaction model pass (hover states, focus order)
+      beyond the one rail hover affordance WP 4e.1 added
 #### Phase 4h — Decision support in the reclaimed desktop width (user decision 2026-08-18)
 
 The desktop portering (Phase 4e) frees width that today carries nothing. The

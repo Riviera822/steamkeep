@@ -51,8 +51,13 @@
     </div>
   </div>
 
-  <main id="view-root" class="view-root" aria-live="polite"></main>
-
+  <!-- D-11 (WP 4e.1): <nav> now precedes <main> in DOM/reading/focus order
+       — the rail is visually first once BP-L (css/app.css) turns this into
+       a sticky left rail, so reading/focus order should be too. Visual
+       order at every width BELOW BP-L is unaffected: css/app.css's `.nav{
+       order:1 }` keeps it pinned at the bottom exactly as before this
+       change. app.js finds nav buttons via `data-view`, not DOM position,
+       so no JS changed. -->
   <nav class="nav" aria-label="Primary">
     <button type="button" class="nav-btn" data-view="library">
       <span class="nav-ic" aria-hidden="true">
@@ -83,6 +88,8 @@
       <span class="nav-lb">Settings</span>
     </button>
   </nav>
+
+  <main id="view-root" class="view-root" aria-live="polite"></main>
 </div>
 
 <div id="toast" class="toast" role="status" aria-live="polite">

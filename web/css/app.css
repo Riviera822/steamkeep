@@ -31,7 +31,7 @@
 .view-root{
   flex:1 1 auto;
   width:100%;
-  max-width:960px;
+  max-width:var(--w-text);
   margin:0 auto;
   padding:20px 16px 32px;
 }
@@ -49,8 +49,19 @@
 }
 
 /* ---------- bottom nav ---------- */
+/* `order:1` (D-11, WP 4e.1): index.html now lists <nav> BEFORE <main> in DOM/
+   reading/focus order (the rail is visually first once BP-L turns this into
+   a side rail — see that breakpoint below), but `.app`'s flex layout would
+   otherwise render children in DOM order, which would put the nav ABOVE the
+   view content at every width below BP-L. `order` decouples the two: visual
+   position stays exactly where it was (last, pinned to the bottom) while
+   DOM/reading/focus order changes. Every other child keeps the default
+   `order:0`, so this alone reproduces the pre-WP-4e.1 visual order
+   byte-for-byte. app.js reads nav buttons by `data-view`, not DOM position,
+   so it needed no change (WP 4e.1 brief). */
 .nav{
   position:sticky; bottom:0; z-index:20;
+  order:1;
   display:grid;
   grid-template-columns:repeat(3, 1fr);
   background:rgba(13,21,27,.96);
@@ -277,8 +288,16 @@ body.selecting .card .pick{ display:grid; }
    `position:fixed` (not the mockup's phone-frame-relative `absolute`) —
    this app has no phone-frame ancestor to anchor to. */
 .bulk{
-  position:fixed; left:12px; right:12px; bottom:78px; z-index:20;
-  max-width:928px; margin:0 auto;
+  position:fixed; left:12px; right:12px; z-index:20;
+  /* was a hand-derived 78px (WP 4e.1: tokenized) — the bar sits one 14px gap
+     above wherever the nav currently ends; at BP-L (side rail) --nav-h
+     becomes 0 so the bar simply settles 14px above the viewport bottom. */
+  bottom:calc(var(--nav-h) + 14px);
+  /* was a hand-derived 928px = 960 - 32 (WP 4e.1: tokenized) — derived from
+     --w-text rather than repeated as a second independent number ("four
+     copies of one number is why a fifth would appear otherwise"). */
+  max-width:calc(var(--w-text) - (var(--gutter) * 2));
+  margin:0 auto;
   display:flex; flex-direction:column; gap:8px;
   padding:10px 10px 10px 14px; border-radius:var(--r-l);
   background:rgba(23,37,47,.97);
@@ -540,7 +559,7 @@ input.inp.txt:disabled{ opacity:.55; }
   position:fixed; inset:0; z-index:50; background:var(--bg);
   display:flex; flex-direction:column; padding:16px 20px calc(16px + env(safe-area-inset-bottom));
   transition:opacity .3s, transform .3s;
-  max-width:960px; margin:0 auto;
+  max-width:var(--w-text); margin:0 auto;
 }
 .onb.gone{ opacity:0; transform:scale(1.04); pointer-events:none; }
 body.onboarding .nav{ display:none; }
@@ -620,7 +639,26 @@ body.onboarding .nav{ display:none; }
 .npip.on{ display:grid; }
 
 /* ---------- bypass banner ---------- */
-.banner-wrap{ max-width:960px; margin:0 auto; padding:12px 16px 0; }
+/* `width:100%` is the load-bearing fix (WP 4e.1): `.banner-wrap` is a flex
+   ITEM of `.app` (flex-direction:column, so the CROSS axis is horizontal).
+   The old rule left `width` at its default `auto` and centred purely via
+   `margin:0 auto` — but an `auto` CROSS-axis margin on a flex item
+   overrides the default `align-items:stretch` sizing (per the flexbox spec,
+   auto margins absorb free space instead of letting stretch run), so the
+   box fell back to shrink-to-fit its content (measured: 366px at every
+   width from ~430px up). `.view-root` right above never had this bug
+   because it already specifies `width:100%` explicitly — copying that here
+   gives the item a definite cross size again (100%, capped by `max-width`),
+   which `margin:0 auto` then correctly centres once `max-width` clamps it
+   below the container's full width — same working pattern, no new
+   technique. Deliberately NO `display` declaration is added here (or
+   anywhere in this rule) — this element is `[hidden]`-toggled by
+   components/bypass-banner.js's `wrap.hidden = ...`, and an author
+   `display` value would be the fourth instance of the `[hidden]`-vs-
+   author-`display` bug class (docs/LEARNINGS.md, "Web UI"); the UA default
+   `[hidden]{display:none}` already works correctly here precisely because
+   no rule below ever overrides it. */
+.banner-wrap{ width:100%; max-width:var(--w-text); margin:0 auto; padding:12px 16px 0; }
 .banner{
   display:flex; gap:10px; align-items:flex-start;
   padding:11px 12px;
@@ -647,7 +685,7 @@ body.onboarding .nav{ display:none; }
 }
 .sheet-backdrop.on{ display:flex; }
 .sheet{
-  width:100%; max-width:480px; max-height:88vh;
+  width:100%; max-width:var(--w-sheet); max-height:88vh;
   display:flex; flex-direction:column;
   background:var(--surface);
   border-top-left-radius:var(--r-xl); border-top-right-radius:var(--r-xl);
@@ -739,4 +777,186 @@ body.onboarding .nav{ display:none; }
 .detail-log{
   font-family:var(--mono); font-size:10.5px; line-height:1.65; color:var(--dim);
   white-space:pre-wrap; word-break:break-word; margin-top:2px;
+}
+
+/* ============================================================
+   Desktop layout foundation (WP 4e.1)
+   ------------------------------------------------------------
+   Everything below lives in `min-width` blocks ONLY — that is what keeps
+   `base` (< 720px, the phone/Android-parity surface every WP through 4a.8
+   was measured against) unable to regress: nothing above this comment
+   changed in a way that alters what renders below BP-M (token
+   substitutions resolve to the exact same pixel values there; see
+   theme.css's spatial-tokens comment and web/tests/css-hygiene.test.js's
+   "base is untouched" pin).
+
+   Layout is keyed on WIDTH only in every block below. Pointer-only
+   affordances (anything that only makes sense with a mouse) are kept in
+   their OWN separate `(hover:hover) and (pointer:fine)` query rather than
+   folded into the width breakpoints — a maximized browser window at 200%
+   zoom reports a narrow layout viewport and must still get the width-
+   appropriate layout, and a touchscreen laptop at a wide viewport must
+   still get every control reachable by tap (nothing added below is
+   reachable ONLY via :hover).
+
+   Not in this package (WP 4e.1 brief): the auto-fill tile grid itself
+   (`--tile-min` above is declared, not wired to any `grid-template-columns`
+   yet), overlay geometry, Downloads/Settings-specific layout, the
+   pointer/keyboard interaction model. This is the structural foundation —
+   spatial tokens, breakpoints, and the nav-to-rail shell conversion — that
+   makes those later, narrower packages mechanical.
+   ============================================================ */
+
+/* ---------- BP-M (>= 720px) — comfortable single-column reading width ----
+   Below this, `--w-text` stays at its :root default (960px), which the
+   phone/tablet-portrait viewports this rule doesn't reach never exceed
+   anyway (max-width has no visible effect below its own value). From here
+   up, the single-column shell content (Library/Downloads/Settings views,
+   the onboarding overlay, the bypass banner) narrows to a fixed, centred
+   760px column instead of stretching uncomfortably wide, and the filter
+   chip row gets enough width to wrap onto a second line instead of
+   requiring horizontal scroll. */
+@media (min-width:720px){
+  :root{ --w-text:760px; }
+  .chips{ flex-wrap:wrap; overflow-x:visible; padding-bottom:0; }
+}
+
+/* ---------- BP-L (>= 1024px) — bottom nav becomes a left rail -----------
+   `#app` becomes a two-column grid: a fixed-width sticky rail and a
+   flexible main column carrying the topbar, the bypass banner and the
+   active view, top to bottom. `--nav-h` drops to 0 here (there is no
+   bottom nav taking up vertical space any more), which is also why
+   `.bulk`'s `bottom:calc(var(--nav-h) + 14px)` above needs no BP-L override
+   of its own — the token already carries the change through. */
+@media (min-width:1024px){
+  :root{
+    /* MUST carry a unit (`0px`, never the unitless `0`): `.bulk`'s
+       `bottom:calc(var(--nav-h) + 14px)` mixes this token with a `14px`
+       length inside `calc()` — a bare `0` is a <number>, not a <length>, so
+       `calc(0 + 14px)` is a type mismatch and INVALID at computed-value
+       time. Per spec that makes the whole `bottom` declaration invalid,
+       which falls back to `bottom:auto` — with no `top` set either,
+       `position:fixed` then uses the element's static-flow position (deep
+       inside the Library section), which is far down a tall document.
+       Measured live (Opus review, WP 4e.1 fix round): with the unitless
+       `--nav-h:0` this shipped with, the bulk action bar's computed
+       `bottom` was -143782px (off screen) at 1920px in multi-select; with
+       `--nav-h:0px` it computes to the intended 14px, on screen. Every
+       `--nav-h:` assignment anywhere in this codebase must match
+       `/^\d+px$/` — see web/tests/css-layout-foundation.test.js's named pin
+       for this exact CLASS of bug, not just this one instance. */
+    --nav-h:0px;
+    /* `--w-wall` is DELIBERATELY still 960px here — the same value as
+       `:root`'s base default, restated rather than omitted so this reads as
+       an intentional decision, not a forgotten override (orchestrator
+       review finding, WP 4e.1: a coder measured the naive version of this
+       package — `--w-wall:1440px` here — and found it made the EXISTING
+       tile-oversize problem WORSE, not better: `.view-root`'s cap grew past
+       960px while `.grid` is still the mockup's fixed 2/3/list column
+       switch, not an auto-fill density grid, so the same two oversized
+       tiles rendered even bigger (measured ~815x1222 at 1920px, ~838x1257
+       at 2560px, versus 458x687 before this WP). The library column must
+       keep its CURRENT effective width until a later package's auto-fill
+       grid can actually use the extra space — sequencing, not scope creep.
+       WP 4e.2 (the auto-fill grid) changes this ONE value when it lands;
+       see web/tests/css-layout-foundation.test.js's
+       "`--w-wall` never widens past the pre-4e.2 baseline" pin, and
+       docs/PROJECT_PLAN.md's Phase 4e section. */
+    --w-wall:960px;
+  }
+
+  .app{
+    display:grid;
+    grid-template-columns:var(--rail-w) 1fr;
+    grid-template-rows:auto auto 1fr;
+    grid-template-areas:
+      "rail top"
+      "rail banner"
+      "rail main";
+    min-height:100vh;
+  }
+  .topbar{ grid-area:top; }
+  /* `max-width:var(--w-wall)` here — the SAME token `.view-root` uses right
+     below, deliberately, not `--w-text` (Opus review should-fix S4, WP 4e.1
+     fix round): `.banner-wrap` and `.view-root` sit in the same visual
+     column (grid areas "banner" then "main", stacked), so a mismatched cap
+     is a visible seam — measured live at 1920px with the banner still on
+     `--w-text` (760px) and the view on `--w-wall` (960px), each centred
+     independently, the banner's left edge sat at x 688.5 against the
+     view's x 588.5, a 100px stair-step the first bypass warning would have
+     made obvious. Tying both to one token also keeps them aligned for free
+     once a later WP raises `--w-wall` alongside the auto-fill grid. */
+  .banner-wrap{ grid-area:banner; max-width:var(--w-wall); }
+  .view-root{ grid-area:main; max-width:var(--w-wall); }
+
+  /* The rail. Overrides every base `.nav` property that assumed a
+     horizontal, bottom-pinned, 3-column bar — `bottom`/`border-top`/
+     `grid-template-columns`/`padding` are all reset explicitly rather than
+     relying on the base values happening to still make sense rotated 90°. */
+  .nav{
+    grid-area:rail;
+    position:sticky; top:0; bottom:auto; align-self:start;
+    height:100vh; width:var(--rail-w);
+    z-index:1; /* no longer needs to float above scrolled content like the bottom bar did */
+    display:flex; flex-direction:column; gap:2px;
+    grid-template-columns:none;
+    padding:18px 10px;
+    border-top:0; border-right:1px solid var(--line-soft);
+    background:var(--bg);
+  }
+  /* icon+label ROWS (brief: "keeping aria-current and the queue pip") —
+     the base rule stacks icon above label for a narrow bottom-bar cell;
+     the rail has the opposite constraint (plenty of width, limited height
+     per row), so icon and label sit side by side instead. */
+  .nav-btn{
+    flex-direction:row; justify-content:flex-start; align-items:center;
+    gap:12px; width:100%; padding:11px 12px; border-radius:10px;
+  }
+  .nav-btn .nav-lb{ font-size:12.5px; }
+  /* Was `position:absolute` pinned to the icon's top-right corner in the
+     3-column bottom bar (`right:calc(50% - 20px)` assumes a 1/3-viewport-
+     wide cell); in a full-width row the pip simply sits at the row's own
+     trailing edge. `order:1` is the load-bearing part of that, not
+     `margin-left:auto` alone: `index.html` puts `.nav-pip` FIRST inside the
+     Downloads button (before the icon), because in the base/BP-M layout it
+     is `position:absolute` and DOM order there is irrelevant. Once BP-L
+     makes it `position:static`, plain flex layout in row direction renders
+     children in DOM order — so without `order`, the pip would render BEFORE
+     the icon and `margin-left:auto` would push the ICON+LABEL PAIR to the
+     right instead, leaving the whole Downloads row visibly offset from
+     Library/Settings (measured live, Opus review, WP 4e.1 fix round: pip at
+     x 83.5, icon at x 110.5 — before the glyph, row ~88px out of line with
+     its siblings). `order:1` reorders the pip to the VISUAL end of the row
+     without touching the DOM (`aria-current`/click/keyboard handling stay
+     exactly as `app.js` wired them — nothing here is DOM position). */
+  .nav-pip{ position:static; top:auto; right:auto; order:1; margin-left:auto; box-shadow:none; }
+
+  /* `.onb` (the onboarding overlay) deliberately keeps `--w-text` instead of
+     `--w-wall` (see the `.banner-wrap` rule above, in this same block, for
+     why THAT one picks up `--w-wall` — Opus review should-fix S4) — `.onb`
+     is a full-screen `position:fixed` wizard with no other grid-area
+     sibling to visually stack against, so there is no seam to align, and a
+     narrower reading column suits its step-by-step content better than the
+     tile-wall width would. */
+}
+
+@media (min-width:1024px) and (hover:hover) and (pointer:fine){
+  /* Purely decorative hover affordance on the rail — gated separately from
+     the width breakpoint above per this file's "layout keyed on width,
+     pointer affordances keyed on hover+pointer" rule. Every rail control is
+     already reachable and operable without hover (it is a plain button
+     with the same click/keyboard handling as the base bottom nav); this
+     only adds a highlight a mouse user sees on the way to clicking. */
+  .nav-btn:hover{ background:var(--raised); color:var(--text); }
+}
+
+/* ---------- BP-XL (>= 1800px) — reserved, deliberately a no-op for now --
+   Structurally present (so the breakpoint plumbing lands in this package,
+   per the brief), but `--w-wall` stays at the SAME 960px as BP-L above —
+   see that block's comment for why widening it now would regress the
+   tile-oversize problem this phase exists to fix. WP 4e.2 (the auto-fill
+   grid) is expected to give this block a real, wider value once the grid
+   can use the room; until then this is intentionally inert. */
+@media (min-width:1800px){
+  :root{ --w-wall:960px; }
 }
