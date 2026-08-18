@@ -205,6 +205,27 @@ test("summarizeCachedPrefillOutcome: no `games` argument at all never throws and
 // whole games snapshot (review round 1 blocker fix).
 // ---------------------------------------------------------------------
 
+// MUTATION PIN — the COMPOSITION, not the helper. countForcedCachedGames has
+// its own scoping test below, but nothing pinned that summarize() passes the
+// `queued` bucket rather than the whole games snapshot: swapping the argument
+// for `games` passed the entire suite, which is the surviving half of the
+// round-1 blocker (the gate on a non-empty queued bucket masks it). The
+// Android twin found this in review (WP 4c-app) and pinned it there; this is
+// the same pin on this side, so the two frontends cannot drift apart again.
+// Redundant defence layers cannot be pinned by one end-to-end test — see
+// docs/LEARNINGS.md.
+test("summarizeCachedPrefillOutcome: the forced note counts ONLY freshly queued apps, never the whole snapshot", () => {
+  const summary = summarizeCachedPrefillOutcome(
+    [{ appid: 1, job_id: 11, status: "queued", deduplicated: false }],
+    [
+      { appid: 1, size_bytes: 5_000_000, needs_force: false },
+      { appid: 2, size_bytes: 9_000_000, needs_force: true },
+    ],
+  );
+  assert.equal(summary.message, "1 queued for check & update");
+  assert.ok(!/forced/i.test(summary.message), "an unrelated forced app in the snapshot must not be credited to this press");
+});
+
 test("countForcedCachedGames counts only appids present in queuedRefs AND needs_force in games", () => {
   const queuedRefs = [
     { appid: 1, job_id: 1, status: "queued", deduplicated: false },
