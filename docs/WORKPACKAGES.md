@@ -869,7 +869,10 @@ entry in this register): one new divergence lands in this package.
     `"hidden"` and calling `.focus()` directly on its Cancel button (whose
     `tabIndex` attribute is still the native `0`) does NOT move
     `document.activeElement` — confirming `visibility:hidden` genuinely
-    removes it from the reachable set, not merely from paint.
+    removes it from the reachable set, not merely from paint. Round 2
+    verified the opposite direction too: with `.up` set, all three bulk
+    buttons are reachable and operable in DOM order — the half a
+    `visibility` regression would hide.
   - **Scroll affordances.** `.sheet .body` (notifications/clients/detail
     drawer or centred card), `.cflist` (delete-confirm shared-depot list)
     and `.onb .rest` (onboarding wizard) all hide their scrollbar

@@ -1663,7 +1663,15 @@ D-4, D-11, D-12) for what each package diverges from the mockup and why.
 - [ ] Downloads/Settings-specific desktop layout (both currently just
       inherit `.view-root`'s width from WP 4e.1's foundation, unreviewed for
       their own content shape at desktop widths)
-- [ ] Pointer/keyboard interaction model pass (hover states, focus order)
+- [x] Pointer/keyboard interaction model pass (hover states, focus order)
+      — WP 4e.4, 2026-08-19: 11 hover rules gated in place behind
+      (hover:hover) and (pointer:fine), clipped focus rings fixed via
+      outline-offset, desktop scrollbar affordances, bulk bar removed from
+      the hidden tab order. Opus round 1 FAIL (relocating the hover rules
+      inverted the cascade for five equal-specificity state rules, found by
+      live measurement), round 2 PASS (all five re-measured as holding).
+      Roving tabindex deferred with honest costs — D-14 in
+      docs/WORKPACKAGES.md
       beyond the one rail hover affordance WP 4e.1 added
 - [x] **4e.7 (api)** — the server's own version, reported once (`GET
       /v1/settings`) and pinned against drift, so the new left rail can show
