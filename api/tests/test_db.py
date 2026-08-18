@@ -256,6 +256,11 @@ def test_depot_manifests_has_the_expected_columns_and_depotid_index(tmp_path) ->
         "total_bytes",
         "recorded_at",
         "source",
+        # v14 (WP 4h.1): change-frequency bookkeeping, see
+        # vault_api/depot_manifests.py's "Change frequency" section.
+        "first_seen_at",
+        "manifest_changed_at",
+        "observation_count",
     }
     assert "idx_depot_manifests_depotid" in index_names
 
@@ -278,8 +283,10 @@ def test_depot_manifests_primary_key_is_appid_depotid(tmp_path) -> None:
             """
             INSERT INTO depot_manifests
                 (appid, containing_appid, depotid, manifestid, chunk_count,
-                 total_bytes, recorded_at, source)
-            VALUES (440, NULL, 441, '123', 1, 100, '2026-08-06T00:00:00Z', 'prefill_bin')
+                 total_bytes, recorded_at, source,
+                 first_seen_at, manifest_changed_at, observation_count)
+            VALUES (440, NULL, 441, '123', 1, 100, '2026-08-06T00:00:00Z', 'prefill_bin',
+                    '2026-08-06T00:00:00Z', '2026-08-06T00:00:00Z', 1)
             """
         )
         conn.commit()
@@ -288,8 +295,10 @@ def test_depot_manifests_primary_key_is_appid_depotid(tmp_path) -> None:
                 """
                 INSERT INTO depot_manifests
                     (appid, containing_appid, depotid, manifestid, chunk_count,
-                     total_bytes, recorded_at, source)
-                VALUES (440, NULL, 441, '999', 2, 200, '2026-08-06T01:00:00Z', 'prefill_bin')
+                     total_bytes, recorded_at, source,
+                     first_seen_at, manifest_changed_at, observation_count)
+                VALUES (440, NULL, 441, '999', 2, 200, '2026-08-06T01:00:00Z', 'prefill_bin',
+                        '2026-08-06T01:00:00Z', '2026-08-06T01:00:00Z', 1)
                 """
             )
     finally:
@@ -634,6 +643,124 @@ def test_init_db_upgrade_to_v12_is_idempotent_if_called_twice(tmp_path) -> None:
 
     assert len(versions) == 1
     assert versions[0]["version"] == SCHEMA_VERSION
+
+
+def test_init_db_upgrades_a_v13_database_to_v14_in_place(tmp_path) -> None:
+    """v13 -> v14 (WP 4h.1) adds three ``depot_manifests`` columns
+    (``first_seen_at``, ``manifest_changed_at``, ``observation_count``) --
+    an EXISTING v3-v13 ``depot_manifests`` table lacks them, so unlike the
+    brand-new-table bumps (v6/v9/v10/v11/v12) this one needs an explicit
+    ``ALTER`` step (the v4/v5/v9 situation), PLUS a backfill: simulate a
+    pre-v14 row by inserting one WITHOUT the three columns (dropping them
+    first, matching how a real pre-v14 ``depot_manifests`` table looks), then
+    assert the upgrade backfills first_seen_at/manifest_changed_at from that
+    row's own recorded_at and observation_count to 1 -- the conservative
+    defaults, never a guessed value invented from nothing."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("ALTER TABLE depot_manifests DROP COLUMN first_seen_at")
+        conn.execute("ALTER TABLE depot_manifests DROP COLUMN manifest_changed_at")
+        conn.execute("ALTER TABLE depot_manifests DROP COLUMN observation_count")
+        conn.execute(
+            """
+            INSERT INTO depot_manifests
+                (appid, containing_appid, depotid, manifestid, chunk_count,
+                 total_bytes, recorded_at, source)
+            VALUES (440, NULL, 441, '123', 1, 100, '2026-08-06T00:00:00Z', 'prefill_bin')
+            """
+        )
+        conn.execute("UPDATE schema_version SET version = 13")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        (version,) = conn.execute("SELECT version FROM schema_version").fetchone()
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(depot_manifests)")}
+        row = conn.execute(
+            "SELECT * FROM depot_manifests WHERE appid = 440 AND depotid = 441"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert version == SCHEMA_VERSION
+    assert {"first_seen_at", "manifest_changed_at", "observation_count"} <= columns
+    # Backfilled from the row's own recorded_at -- never guessed as something
+    # earlier, and never left NULL.
+    assert row["first_seen_at"] == "2026-08-06T00:00:00Z"
+    assert row["manifest_changed_at"] == "2026-08-06T00:00:00Z"
+    assert row["observation_count"] == 1
+
+
+def test_init_db_upgrade_to_v14_is_idempotent_if_called_twice(tmp_path) -> None:
+    """Same guarantee the other bumps carry: running the upgrade again against
+    an already-upgraded file must not raise (the per-column ADD COLUMN guard)
+    and must not re-run the backfill UPDATE destructively (it is itself
+    idempotent, gated on ``WHERE ... IS NULL``)."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("ALTER TABLE depot_manifests DROP COLUMN first_seen_at")
+        conn.execute("ALTER TABLE depot_manifests DROP COLUMN manifest_changed_at")
+        conn.execute("ALTER TABLE depot_manifests DROP COLUMN observation_count")
+        conn.execute("UPDATE schema_version SET version = 13")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+    init_db(db_path)  # must not raise
+
+    conn = get_connection(db_path)
+    try:
+        versions = conn.execute("SELECT version FROM schema_version").fetchall()
+    finally:
+        conn.close()
+
+    assert len(versions) == 1
+    assert versions[0]["version"] == SCHEMA_VERSION
+
+
+def test_init_db_upgrade_to_v14_skips_the_alter_when_the_table_is_entirely_absent(
+    tmp_path,
+) -> None:
+    """A v1/v2 database (before v3 introduced ``depot_manifests`` at all) has
+    no such table to ALTER -- ``PRAGMA table_info`` on a missing table
+    quietly returns nothing rather than raising, so the guard must be an
+    explicit existence check, not just the per-column loop. Regression pin
+    for exactly the failure this migration step's first version hit: dropping
+    the whole table to simulate "never existed" and upgrading from v2 must
+    still succeed, with a freshly created, fully-columned table at the end."""
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("DROP TABLE depot_manifests")
+        conn.execute("UPDATE schema_version SET version = 2")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)  # must not raise "no such table: depot_manifests"
+
+    conn = get_connection(db_path)
+    try:
+        (version,) = conn.execute("SELECT version FROM schema_version").fetchone()
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(depot_manifests)")}
+    finally:
+        conn.close()
+
+    assert version == SCHEMA_VERSION
+    assert {"first_seen_at", "manifest_changed_at", "observation_count"} <= columns
 
 
 def test_init_db_upgrades_a_v12_database_to_v13_in_place(tmp_path) -> None:

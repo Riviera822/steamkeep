@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from tests.conftest import TEST_API_KEY
+from vault_api import depot_manifests
 from vault_api.config import Settings
+from vault_api.db import get_connection
 from vault_api.main import create_app
 
 AUTH = {"X-Api-Key": TEST_API_KEY}
@@ -21,6 +24,34 @@ def _seed_mapping(client: TestClient, depotid: int, appid: int, app_name: str | 
 def _write(path: Path, content: bytes = b"x") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _seed_manifest(
+    settings: Settings, *, appid: int, depotid: int, manifestid: str, recorded_at: str
+) -> None:
+    """Write one depot_manifests row directly, bypassing HTTP -- these tests
+    are about GET /v1/games'/{appid}'s change-frequency FIELDS, not about the
+    ingestion path that normally populates this table (covered elsewhere,
+    tests/test_manifest_ingest.py)."""
+    conn = get_connection(settings.db_path)
+    try:
+        depot_manifests.upsert_depot_manifest(
+            conn,
+            appid=appid,
+            containing_appid=appid,
+            depotid=depotid,
+            manifestid=manifestid,
+            chunk_count=1,
+            total_bytes=10,
+            recorded_at=recorded_at,
+            source="prefill_bin",
+        )
+    finally:
+        conn.close()
 
 
 def test_list_games_without_key_is_rejected(client: TestClient) -> None:
@@ -221,3 +252,141 @@ def test_shared_depot_counts_fully_into_both_apps(tmp_path: Path) -> None:
     # total_bytes for the "counted once" figure.
     assert tf2["size_bytes"] == 60
     assert cs2["size_bytes"] == 50
+
+
+# -- Change frequency (WP 4h.1, review B1/B2) --------------------------------
+#
+# The deliverable WP 4h.2 (the web panel) actually consumes: field presence
+# and all four states over the REAL HTTP routes, for both GameSummary and
+# GameDetail, plus the B2 regression (a poisoned depot_manifests.appid row
+# must not 500 the whole listing).
+
+
+def test_list_games_reports_null_change_frequency_when_no_manifest_data(
+    client: TestClient,
+) -> None:
+    _seed_mapping(client, depotid=441, appid=440, app_name="Team Fortress 2")
+
+    game = client.get("/v1/games", headers=AUTH).json()[0]
+
+    assert game["manifest_change_frequency"] is None
+    assert game["manifest_observation_days"] is None
+    assert game["manifest_days_since_last_change"] is None
+
+
+def test_get_game_detail_reports_null_change_frequency_when_no_manifest_data(
+    client: TestClient,
+) -> None:
+    _seed_mapping(client, depotid=441, appid=440, app_name="Team Fortress 2")
+
+    body = client.get("/v1/games/440", headers=AUTH).json()
+
+    assert body["manifest_change_frequency"] is None
+    assert body["manifest_observation_days"] is None
+    assert body["manifest_days_since_last_change"] is None
+
+
+def test_list_games_reports_insufficient_data_with_a_non_null_observation_days(
+    client: TestClient, settings: Settings
+) -> None:
+    """pin 2's whole point: 'insufficient_data' still carries a REAL day
+    count, not a bare label with nothing behind it."""
+    _seed_mapping(client, depotid=441, appid=440, app_name="Team Fortress 2")
+    now = datetime.now(timezone.utc)
+    _seed_manifest(
+        settings, appid=440, depotid=441, manifestid="1",
+        recorded_at=_iso(now - timedelta(days=1)),
+    )
+
+    game = client.get("/v1/games", headers=AUTH).json()[0]
+    detail = client.get("/v1/games/440", headers=AUTH).json()
+
+    for body in (game, detail):
+        assert body["manifest_change_frequency"] == "insufficient_data"
+        assert body["manifest_observation_days"] == 1  # non-null, exact
+        assert body["manifest_days_since_last_change"] is None
+
+
+def test_list_games_reports_stable_change_frequency(
+    client: TestClient, settings: Settings
+) -> None:
+    _seed_mapping(client, depotid=441, appid=440, app_name="Team Fortress 2")
+    now = datetime.now(timezone.utc)
+    _seed_manifest(
+        settings, appid=440, depotid=441, manifestid="1",
+        recorded_at=_iso(now - timedelta(days=30)),
+    )
+    _seed_manifest(  # second observation, SAME manifestid -> no change
+        settings, appid=440, depotid=441, manifestid="1",
+        recorded_at=_iso(now - timedelta(days=1)),
+    )
+
+    game = client.get("/v1/games", headers=AUTH).json()[0]
+    detail = client.get("/v1/games/440", headers=AUTH).json()
+
+    for body in (game, detail):
+        assert body["manifest_change_frequency"] == "stable"
+        assert body["manifest_observation_days"] == 30
+        assert body["manifest_days_since_last_change"] is None
+
+
+def test_get_game_detail_reports_changed_with_days_since_last_change(
+    client: TestClient, settings: Settings
+) -> None:
+    _seed_mapping(client, depotid=441, appid=440, app_name="Team Fortress 2")
+    now = datetime.now(timezone.utc)
+    _seed_manifest(
+        settings, appid=440, depotid=441, manifestid="1",
+        recorded_at=_iso(now - timedelta(days=30)),
+    )
+    _seed_manifest(  # different manifestid -> a real, observed change
+        settings, appid=440, depotid=441, manifestid="2",
+        recorded_at=_iso(now - timedelta(days=3)),
+    )
+
+    game = client.get("/v1/games", headers=AUTH).json()[0]
+    detail = client.get("/v1/games/440", headers=AUTH).json()
+
+    for body in (game, detail):
+        assert body["manifest_change_frequency"] == "changed"
+        assert body["manifest_observation_days"] == 30
+        assert body["manifest_days_since_last_change"] == 3
+
+
+def test_list_games_survives_a_poisoned_depot_manifests_appid_row(
+    client: TestClient, settings: Settings
+) -> None:
+    """Review B2 regression: a hand-edited/corrupted database can hold a
+    non-numeric appid in depot_manifests (SQLite enforces column affinity,
+    not type) -- the exact poison tests/test_gc.py already seeds against this
+    same table. Before the fix, this 500'd the WHOLE library listing; now it
+    degrades the poisoned row out and leaves every real app's listing intact."""
+    _seed_mapping(client, depotid=441, appid=440, app_name="Team Fortress 2")
+    now = datetime.now(timezone.utc)
+    _seed_manifest(
+        settings, appid=440, depotid=441, manifestid="1",
+        recorded_at=_iso(now - timedelta(days=30)),
+    )
+
+    conn = get_connection(settings.db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO depot_manifests
+                (appid, containing_appid, depotid, manifestid, chunk_count,
+                 total_bytes, recorded_at, source,
+                 first_seen_at, manifest_changed_at, observation_count)
+            VALUES ('not-an-appid', NULL, 900, '1', 1, 10, 'now', 'x', 'now', 'now', 1)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    response = client.get("/v1/games", headers=AUTH)
+
+    assert response.status_code == 200
+    game = response.json()[0]
+    assert game["appid"] == 440
+    assert game["manifest_change_frequency"] == "insufficient_data"
+    assert game["manifest_observation_days"] == 30

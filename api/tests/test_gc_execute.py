@@ -48,7 +48,7 @@ from tests.test_gc import (
     write_cache_manifest,
     write_chunks,
 )
-from vault_api import deletion, gc, gc_execute, jobs
+from vault_api import deletion, depot_manifests, gc, gc_execute, jobs
 from vault_api.config import MANIFEST_ORACLE_STEAMCMD_API, Settings
 from vault_api.db import get_connection, init_db
 from vault_api.main import create_app
@@ -131,17 +131,22 @@ def seed_mapping(conn: sqlite3.Connection, depotid: int, appid: int) -> None:
 def seed_recorded_manifest(
     conn: sqlite3.Connection, *, appid: int, depotid: int, manifestid: str
 ) -> None:
-    conn.execute(
-        """
-        INSERT INTO depot_manifests
-            (appid, containing_appid, depotid, manifestid, chunk_count,
-             total_bytes, recorded_at, source)
-        VALUES (?, NULL, ?, ?, 0, 0, '2026-08-09T00:00:00Z', 'steamprefill_bin')
-        ON CONFLICT(appid, depotid) DO UPDATE SET manifestid = excluded.manifestid
-        """,
-        (appid, depotid, manifestid),
+    # Goes through the real vault_api.depot_manifests.upsert_depot_manifest
+    # rather than a hand-written INSERT (WP 4h.1): that function is now the
+    # one place that knows how to populate the schema-v14 change-frequency
+    # columns (first_seen_at/manifest_changed_at/observation_count), and this
+    # helper has no test-relevant reason to duplicate that logic.
+    depot_manifests.upsert_depot_manifest(
+        conn,
+        appid=appid,
+        containing_appid=None,
+        depotid=depotid,
+        manifestid=manifestid,
+        chunk_count=0,
+        total_bytes=0,
+        recorded_at="2026-08-09T00:00:00Z",
+        source="steamprefill_bin",
     )
-    conn.commit()
 
 
 def needs_force_of(conn: sqlite3.Connection, appid: int) -> int | None:

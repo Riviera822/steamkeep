@@ -236,7 +236,7 @@ an operator asks for *off*, so a non-empty value is an explicit request for a
 feature, and a typo in it must not quietly look like it worked. Once the
 oracle is running, every failure it can have is soft — see below.
 
-## Database schema (v13)
+## Database schema (v14)
 
 Created idempotently at startup by `vault_api/db.py::init_db` (safe to call
 on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
@@ -249,7 +249,7 @@ on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
 | `depot_app_map`  | `depotid`, `appid`, PK `(depotid, appid)`                                                   | Depot→app mapping; a depot can map to multiple apps (shared depots, plan §4) |
 | `jobs`           | `id` (PK autoincrement), `appid`, `type`, `status`, `created_at`, `started_at`, `finished_at`, `log_excerpt`, `updated`, `up_to_date`, `summary_parse_ok`, `gc_execute`, `paused_at`, `stop_request` | Prefill/GC job queue (plan §3, §6). `updated`/`up_to_date`/`summary_parse_ok` (**v4**, WP 3.3) are SteamPrefill's own summary-table counters — see "Job outcome honesty" above. `gc_execute` (**v7**, WP 3.8) is the GC dry-run/execute bit: `NULL` for every non-GC job, `0` = report only, `1` = delete — see "Garbage collection" below. `paused_at`/`stop_request` (**v8**, WP 3.12) are job control: when the job was last suspended, and the operator's pending `cancel`/`pause` request against a *running* job — see "Job control" below |
 | `agent_reports`  | `client_id`, `reported_at`, `appids` (JSON array of ints), `source_addr`                     | One row per agent report — a full installed-app-ID snapshot at that timestamp (ADR-0002: the agent is stateless/dumb, always reports the complete list). vault-api derives additions/removals by diffing the two most recent rows per `client_id`. `source_addr` (**v9**, WP 3.11) is the address the report arrived FROM — the only key correlating a `client_id` with the event log's addresses; `NULL` for pre-v9 rows, which is why such a client is never `bypass_suspected` |
-| `depot_manifests` | `appid`, `containing_appid`, `depotid`, `manifestid` (TEXT), `chunk_count`, `total_bytes`, `recorded_at`, `source`, PK `(appid, depotid)` | **Latest**-known manifest state per (app, depot) — WP 3.2, ADR-0006 decision 3. See "Manifest ingestion" below |
+| `depot_manifests` | `appid`, `containing_appid`, `depotid`, `manifestid` (TEXT), `chunk_count`, `total_bytes`, `recorded_at`, `source`, `first_seen_at`, `manifest_changed_at`, `observation_count`, PK `(appid, depotid)` | **Latest**-known manifest state per (app, depot) — WP 3.2, ADR-0006 decision 3. `first_seen_at`/`manifest_changed_at`/`observation_count` (**v14**, WP 4h.1) are the change-frequency bookkeeping — see "Manifest ingestion" and "Change frequency" below |
 | `oracle_app_state` | `appid` (PK), `buildid`, `checked_at`, `source`, `depot_count`, `branch_count` | **v10**, WP 3.9. One row per app the opt-in oracle has been asked about: when, by which oracle (`source` provenance), and what it said the public build id is. See "Manifest oracle" below |
 | `oracle_branch_manifests` | `appid`, `depotid`, `branch`, `manifestid` (TEXT), `recorded_at`, `source`, PK `(appid, depotid, branch)` | **v10**, WP 3.9. One row per (app, depot, **open** branch) → manifest gid. Password-protected branches are never inserted at all. Written with snapshot semantics (a refresh replaces the app's rows in one transaction). **Never mixed into `depot_manifests`** — a third-party claim must stay distinguishable from a manifest vault-api parsed itself |
 | `schedule_state` | `id` (PK, `CHECK (id = 1)`), `last_sweep_at`, `last_sweep_targets`, `last_sweep_enqueued` | **v6**, WP 3.5. Single-row scheduler bookkeeping: when the last sweep started (UTC) and what it did. Persisted rather than in-memory so a restart mid-window does not re-sweep — see "Scheduler" below. The two counters are `NULL` while a sweep is in flight (or if the process died during one) |
@@ -367,6 +367,42 @@ install is in before the operator ever opens the web UI's settings. Covered by
 `tests/test_db.py::test_init_db_upgrades_a_v11_database_to_v12_in_place` and
 `..._upgrade_to_v12_is_idempotent_if_called_twice`.
 
+**v13 → v14 (WP 4h.1) is the v4/v5/v9 situation again, on `depot_manifests`
+this time.** Three columns — `first_seen_at`, `manifest_changed_at`,
+`observation_count` — needed for the "how often does this game change" panel
+field, and `CREATE TABLE IF NOT EXISTS depot_manifests` is a no-op against an
+existing v3-v13 table that lacks them. `db._add_missing_depot_manifest_columns`
+adds them via `ALTER TABLE ... ADD COLUMN`, guarded per column exactly like
+the earlier steps. Two details that make this one slightly different from its
+predecessors:
+
+- `first_seen_at`/`manifest_changed_at` are added **NULLable**, not
+  `NOT NULL DEFAULT ...` like `apps.needs_force` was — SQLite's `ADD COLUMN`
+  can only default to a *constant*, and the honest default for "when was this
+  row first observed" is "whatever `recorded_at` already says", not a literal.
+  A follow-up `UPDATE ... SET first_seen_at = recorded_at WHERE first_seen_at
+  IS NULL` (and the same for `manifest_changed_at`) backfills them
+  immediately afterwards, inside the same migration step. This is the
+  *conservative* direction, not a guess dressed up as one: a pre-existing
+  row's TRUE first-observed moment is unknown, and dating it to its LATEST
+  known touch can only ever make the row look YOUNGER than it really is,
+  never older — which is exactly the side the two honesty pins below want a
+  wrong guess to fall on.
+- `observation_count` DOES get a constant default (`DEFAULT 1`, the
+  `apps.needs_force` shape) — 1 is genuinely correct for a migrated row: it
+  resets every pre-existing depot back to "insufficient data" (pin 2's
+  boundary) until it is genuinely re-observed at least once post-upgrade,
+  rather than inventing an observation history this code never recorded.
+
+Also guarded against `depot_manifests` not existing at all yet (a v1/v2
+database, from before v3 introduced the table in the first place) —
+`PRAGMA table_info` on a missing table returns zero rows rather than raising,
+so the per-column loop is skipped entirely in that case and the unconditional
+`CREATE TABLE IF NOT EXISTS` right after creates the table fresh, with every
+v14 column already `NOT NULL` and nothing to backfill. Covered by
+`tests/test_db.py`'s v13→v14 upgrade test plus its idempotent-if-called-twice
+sibling, and by `tests/test_depot_manifests.py`'s upsert-semantics tests.
+
 **Ordering fix (WP 1.5 carry-over from the WP 1.4 review):** `init_db` now
 creates only the `schema_version` table, reads the stored version, and checks
 the downgrade guard *before* running the rest of `_DDL` — previously the full
@@ -452,7 +488,7 @@ appid both saw "no row" and both inserted; the loser got
 is now `INSERT OR IGNORE` plus a conditional name `UPDATE`, pinned by
 `tests/test_mapping.py::test_concurrent_upsert_of_the_same_new_appid_does_not_500`.
 
-## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4 + 3.5 + 3.8 + 3.9 + 3.11 + 3.12 + 4a.6r + settings-API/ADR-0009)
+## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4 + 3.5 + 3.8 + 3.9 + 3.11 + 3.12 + 4a.6r + settings-API/ADR-0009 + 4h.1)
 
 All routes below require `X-Api-Key` (see "Auth"). Full API table:
 `docs/PROJECT_PLAN.md` §6; the games, mapping, prefill, jobs, cache, agent,
@@ -460,7 +496,7 @@ clients, schedule and stats rows are implemented so far.
 
 | Method | Endpoint                          | Purpose |
 |--------|-------------------------------------|---------|
-| GET    | `/v1/games`                        | All tracked apps: `appid`, `name`, `status`, `last_prefill_at`, `last_manifest_check` (schema v4, WP 3.3; surfaced here WP 4c — the last run that CONFIRMED this app current, `null` until that exact outcome happens; **much narrower than "last time a job ran"**, see "Job outcome honesty" below; **and unlike `last_prefill_at`, survives `DELETE /v1/cache/{appid}`** — deletion nulls `last_prefill_at` but deliberately leaves this field, so a game with zero cached bytes can still show a past confirmation timestamp, see "Per-game deletion" below), `depot_count`, `size_bytes` (sum of the app's mapped depots' bytes on disk; `null` if unmapped or not yet cached — see "Per-game size calculation" below), `needs_force` (schema v5, WP 3.4 — whether the NEXT prefill will run with `--force`, see "needs_force" below) |
+| GET    | `/v1/games`                        | All tracked apps: `appid`, `name`, `status`, `last_prefill_at`, `last_manifest_check` (schema v4, WP 3.3; surfaced here WP 4c — the last run that CONFIRMED this app current, `null` until that exact outcome happens; **much narrower than "last time a job ran"**, see "Job outcome honesty" below; **and unlike `last_prefill_at`, survives `DELETE /v1/cache/{appid}`** — deletion nulls `last_prefill_at` but deliberately leaves this field, so a game with zero cached bytes can still show a past confirmation timestamp, see "Per-game deletion" below), `depot_count`, `size_bytes` (sum of the app's mapped depots' bytes on disk; `null` if unmapped or not yet cached — see "Per-game size calculation" below), `needs_force` (schema v5, WP 3.4 — whether the NEXT prefill will run with `--force`, see "needs_force" below), `manifest_change_frequency` (schema v14, WP 4h.1 — `null`/`"insufficient_data"`/`"stable"`/`"changed"`; **NOT a rate**, see "Change frequency" below), `manifest_observation_days` (days since the youngest-observed depot's first observation; `null` only alongside a `null` category), `manifest_days_since_last_change` (days since the most recently observed change; populated ONLY when the category is `"changed"`) |
 | GET    | `/v1/games/{appid}`                | Detail for one app: same fields plus `depots` (list of `{depotid, shared, size_bytes}`); `404` for an unknown `appid` |
 | PUT    | `/v1/mapping/{depotid}`            | Body `{"appid": int, "app_name": str \| null}` — **additively** upsert one depot→app mapping fact (manual fallback, see below); `422` for `depotid <= 0`, `appid <= 0`, or an unrecognized body field |
 | GET    | `/v1/mapping`                      | Full depot→app mapping table: list of `{depotid, appid}` |
@@ -485,7 +521,7 @@ clients, schedule and stats rows are implemented so far.
 | GET    | `/v1/steam/key`                    | Opt-in Steam Web API relay (WP 4a.6r): key status only — `{configured, key_last4}`. `key_last4` is `null` when unconfigured; the full key is never returned |
 | PUT    | `/v1/steam/key`                    | Body `{"key": str}` — set (or replace) the relay's Web API key. `200` with the same shape `GET` returns; `422` unless `key` is exactly 32 hexadecimal characters |
 | DELETE | `/v1/steam/key`                    | Clear the configured key. `204` whether or not one was set |
-| GET    | `/v1/steam/owned-games`            | `?steamid=<SteamID64>` — relay `GetOwnedGames`. `200` with `{configured: true, game_count, games: [{appid, name, playtime_forever, img_icon_url}]}`; `409` if no key is configured; `422` for an unusable `steamid`; `502` for any upstream failure. See "Steam Web API relay" below |
+| GET    | `/v1/steam/owned-games`            | `?steamid=<SteamID64>` — relay `GetOwnedGames`. `200` with `{configured: true, game_count, games: [{appid, name, playtime_forever, img_icon_url, rtime_last_played}]}` (`rtime_last_played` added WP 4h.1: Unix-epoch seconds or `null` — see "rtime_last_played — absence is not zero" below); `409` if no key is configured; `422` for an unusable `steamid`; `502` for any upstream failure. See "Steam Web API relay" below |
 | GET    | `/v1/steam/player-summaries`       | `?steamid=<SteamID64>` — relay `GetPlayerSummaries`. `200` with `{configured: true, players: [{steamid, personaname, avatar, avatarmedium, avatarfull, personastate}]}`; same `409`/`422`/`502` shape as `owned-games`. See "Steam Web API relay" below |
 | GET    | `/v1/settings`                     | Settings-API work package (ADR-0009): `{readonly, settings: [{key, effective, source, fallback, applies, env_only}, ...]}` — every overridable key plus informational env-only ones. `source` is `db`/`env`/`default`; `applies` is `immediately`/`next_sweep`/`restart-required`. See "Persisted settings" below |
 | PATCH  | `/v1/settings`                     | Partial update: `null` clears an override (revert to env/default), any other value sets it, validated with the SAME grammar `config.py` applies at startup. `200` with the same shape `GET` returns. `422` for an invalid value, an unknown key, or a recognised-but-environment-only key (distinct detail); `403` if `VAULT_SETTINGS_READONLY` is set. See "Persisted settings" below |
@@ -2331,16 +2367,139 @@ have. Non-`.bin` files are now ignored entirely, whatever their name; only a
 Pinned by `tests/test_manifest_ingest.py::test_canary_ignores_known_non_bin_sidecar_files`
 and `::test_log_cache_dir_canary_is_silent_for_known_sidecar_files`.
 
+### Change frequency (WP 4h.1)
+
+Phase 4h's decision-support panel wants to say "changes every few days" vs.
+"unchanged for two years" per app — one of the two fields WP 4h.1 added
+(alongside `rtime_last_played` in the Steam relay section above). This is the
+first thing that reads `depot_manifests` outside the ingestion path itself
+(see "What this work package deliberately did NOT do" below, which this
+supersedes for that one bullet), and it had to reckon with a fact this table
+was designed around: **it is "latest-per-(appid, depotid), not a history
+table"** (see the top of this section) — every re-ingest REPLACES the row, so
+there was never a record of individual change EVENTS, only the current
+snapshot. Three columns (schema v14, "Database schema" above) make a bounded,
+honest signal possible without turning this table into the history table its
+own design deliberately avoids being:
+
+- `first_seen_at` — written once, at INSERT, never touched by the upsert's
+  `DO UPDATE` afterwards. The observation window's anchor.
+- `manifest_changed_at` — starts equal to `first_seen_at`; only advances to
+  the new `recorded_at` when a re-ingest's `manifestid` actually **differs**
+  from what was stored. A confirmed-current, non-forced run (ADR-0006 tier 1)
+  re-ingests the SAME manifest and must not look like a change just because
+  vault-api looked again.
+- `observation_count` — increments on every ingest, changed or not.
+
+`vault_api.depot_manifests.change_frequency_for_app` (single app, used by
+`GET /v1/games/{appid}`) and `.change_frequency_by_app` (one bulk query for
+every app, used by `GET /v1/games` to avoid an N+1, pinned by
+`test_change_frequency_by_app_is_one_statement_regardless_of_app_count` —
+the same statement-count technique `test_prefill_cached.py` uses for the
+analogous `POST /v1/prefill/cached` claim) turn these into
+`GameSummary`/`GameDetail`'s three new fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `manifest_change_frequency` | `str \| null` | `null` = no `depot_manifests` row for any of this app's own-ingested depots at all (never prefilled since this feature existed, or mapped only via the manual fallback). `"insufficient_data"` = some data exists, but not enough to say anything (see the two pins below). `"stable"` = enough data, no observed manifest change, ever. `"changed"` = enough data, and at least one depot has been seen to change AT LEAST ONCE. **This field's own name is more confident than what it measures — see the correction right below the table.** |
+| `manifest_observation_days` | `int \| null` | Days since the YOUNGEST-observed depot's `first_seen_at` — the conservative (shortest) reading across the app's own-ingested depots. `null` only alongside a `null` category. Populated even when the category is `"insufficient_data"`, so a frontend can render the actual number ("observed for 3 days") instead of a bare label with nothing behind it. |
+| `manifest_days_since_last_change` | `int \| null` | Days since the MOST RECENTLY observed change across this app's depots (the latest, not the first, and not an average). Populated **only** when `manifest_change_frequency == "changed"` — `null` for `"stable"` (never observed one), `"insufficient_data"`, and `null` (never earned the right to say). |
+
+**Post-review correction: `manifest_change_frequency` is not a rate, and the
+category value is named to say so.** The category was originally called
+`"changing"` — reviewed and rejected: it answers "has this app's manifest
+been observed to change at least once since we started watching", full stop.
+An app that changed once three years ago and one that changes every week are
+BOTH `"changed"`, indistinguishable from the category alone, because nothing
+in it decays and `depot_manifests` never stored an event log to compute a
+cadence from in the first place (see "Latest-per-(appid, depotid)" at the top
+of this section — there is no history to rate). The category is now named
+`"changed"` (past tense, not `"changing"`) to stop implying an ongoing rate.
+`manifest_days_since_last_change` is the one rate-ADJACENT fact this table
+actually supports cheaply, and it is what gets a frontend closest to the
+plan section's own example statements: "changes every three days" is out of
+reach from this data; "last changed 3 days ago" is in reach, and the two are
+not the same claim — which is why it is its own field instead of being
+folded into the category.
+
+**The two honesty pins this field exists to prove, both mutation-tested
+(`tests/test_depot_manifests.py`):**
+
+1. **`null` and `"insufficient_data"` are deliberately different answers.**
+   "We have never looked" (no row at all) and "we looked, but not long or
+   often enough to say" (some rows, thin data) must never collapse into the
+   same "unknown" — a frontend that can only render one undifferentiated
+   "?" cannot distinguish a never-tracked game from a freshly-tracked one,
+   and Phase 4h's plan section explicitly wants that distinction visible.
+   Pinned by `test_pin_no_manifest_history_at_all_is_none_not_insufficient_data`.
+2. **A game with exactly one observation is the boundary where "frequency" is
+   undefined**, however old that single observation is —
+   `MIN_OBSERVATIONS_FOR_FREQUENCY = 2` gates on the WEAKEST-observed depot
+   across the app (one freshly-mapped depot pulls the whole app back to
+   `"insufficient_data"` even if every other depot has years of history).
+   Pinned by `test_pin_exactly_one_observation_is_insufficient_data_however_old`
+   and `test_one_freshly_added_depot_pulls_the_whole_app_back_to_insufficient_data`.
+3. **A short observation window is not stability.** `depot_manifests` starts
+   recording when *this vault* started watching, so on a vault running three
+   days every game looks unchanged forever if that alone were trusted.
+   `MIN_OBSERVATION_WINDOW_DAYS = 14` (same "give it two weeks" scale as the
+   existing `VAULT_GC_GRACE_DAYS` default) must clear before `"stable"` or
+   `"changed"` is reported at all — below it, `"insufficient_data"`, even
+   with two-plus unchanged observations. Pinned by
+   `test_pin_a_young_vault_reports_insufficient_data_not_stable` and the
+   half-open boundary test right after it.
+
+Both thresholds are hardcoded module constants in `depot_manifests.py`, not a
+new `VAULT_*` setting — this work package adds no new environment variable,
+matching `steam_relay.DEFAULT_CACHE_TTL_SECONDS`'s precedent for a fixed,
+documented floor instead of an operator-facing knob.
+
+**Scoping note:** both functions read only rows recorded under the target
+app's OWN `appid` column — never a co-owning app's rows for a shared depot
+(see "The reverse direction of ADR-0003" above). This keeps the feature from
+having to solve the shared-depot merge problem ADR-0003/ADR-0007 already have
+dedicated machinery for; a shared depot's change history is attributed to
+whichever app's own prefill jobs actually ingested it.
+
+**A poisoned `appid` is skipped, not raised.** `change_frequency_by_app`
+groups rows by `appid` read straight out of the database — SQLite enforces
+column *affinity*, not type, so a hand-edited/corrupted row can hold a
+non-numeric string there, exactly the poison
+`tests/test_gc.py::test_load_recorded_manifests_skips_poisoned_rows` already
+seeds against this same table. The function uses the SAME
+`deletion.coerce_positive_id` validator `gc.load_recorded_manifests` does for
+this column, and drops an unusable row rather than crashing — a single
+corrupted `depot_manifests` row must degrade the way it already did for GC
+reporting, not take out the whole `GET /v1/games` listing for every app.
+Pinned by `test_change_frequency_by_app_skips_a_poisoned_appid_row_instead_of_raising`
+(unit) and `test_list_games_survives_a_poisoned_depot_manifests_appid_row`
+(HTTP, `tests/test_games.py`).
+
+**These fields outlive a cache deletion, unlike `size_bytes`.**
+`DELETE /v1/cache/{appid}` never touches `depot_manifests` (see "Per-game
+deletion" below) — the same precedent `last_manifest_check` already sets
+(GameSummary, above): a `"stable"`/`"changed"` verdict describes the GAME's
+upstream update history, not the current cache state, so it is not a false
+claim for it to keep reporting `"stable"` (or a `manifest_days_since_last_
+change` value) about an app with zero bytes on disk right now.
+
+**Privacy note:** unlike `rtime_last_played`/`playtime_forever` above, this
+field is NOT personal data — it describes the GAME's upstream update
+history, not anything about an account or a person, so it carries none of the
+WP 4h.1 relay addendum's privacy caveats.
+
 ### What this work package deliberately did NOT do
 
-- No HTTP endpoint reads `depot_manifests` — nothing in plan §6 asks for one
-  yet, and none of the later Phase 3 items (`3.3`–`3.8`) need one added here.
 - No garbage collection (`3.6`/`3.7`) — this package only *records* manifest
   state; nothing deletes a chunk because of it.
 - No `deploy/` changes — `VAULT_STEAMPREFILL_CACHE_DIR`'s container-side
   volume mount and `VAULT_MANIFEST_ARCHIVE_DIR`'s persistent-volume wiring are
   explicitly a follow-up on top of WP 1.9's Compose file, not this package's
   scope.
+- ~~No HTTP endpoint reads `depot_manifests`~~ — true when this section was
+  written (WP 3.2), **superseded by WP 4h.1** ("Change frequency" above):
+  `GET /v1/games`/`GET /v1/games/{appid}` now read it, in aggregate, for the
+  `manifest_change_frequency`/`manifest_observation_days` fields.
 
 ## Scheduler (WP 3.5)
 
@@ -4023,12 +4182,13 @@ discipline as the manifest oracle (`vault_api/oracle.py`):
 - the number of games/players is capped (`MAX_GAMES`, `MAX_PLAYERS`), and a
   hostile document degrades to "the rest were ignored" rather than a memory
   blow-up or a crash;
-- **only the whitelisted fields the library grid needs ever cross into the
-  response** — `appid`, `name`, `playtime_forever`, `img_icon_url` for games;
-  `steamid`, `personaname`, `avatar`/`avatarmedium`/`avatarfull`,
-  `personastate` for players. Every other field Valve's API returns (visit
-  timestamps, community-stats flags, real names, location) is read by
-  nothing here and never reaches a client;
+- **only the whitelisted fields the library grid/decision-support panel need
+  ever cross into the response** — `appid`, `name`, `playtime_forever`,
+  `img_icon_url`, `rtime_last_played` (the last one added in WP 4h.1, see
+  below) for games; `steamid`, `personaname`,
+  `avatar`/`avatarmedium`/`avatarfull`, `personastate` for players. Every
+  other field Valve's API returns (visit timestamps, community-stats flags,
+  real names, location) is read by nothing here and never reaches a client;
 - a returned `steamid` that does not match the one requested is dropped, not
   trusted (the same corruption cross-check the oracle applies to `appid`);
 - an avatar URL that is not a bounded `http(s)://` string is dropped rather
@@ -4037,6 +4197,55 @@ discipline as the manifest oracle (`vault_api/oracle.py`):
 A garbage or unreachable upstream answer is a clean `502` with a generic
 detail message — never a crash, never a partially-validated value reaching a
 client.
+
+### `rtime_last_played` — absence is not zero (WP 4h.1)
+
+Phase 4h's decision-support panel wants to say things like "43 GB cached, 0
+minutes played" — which needs to know when an account last played a game, not
+just how long. `GetOwnedGames` carries this as `rtime_last_played`
+(Unix-epoch seconds); it was never asked for before this work package because
+nothing consumed it. `playtime_forever` (already relayed since WP 4a.6r) was
+the other half of that statement and needed no change.
+
+**No additional request parameter was needed.** Verified against the
+Steamworks Web API documentation for `IPlayerService/GetOwnedGames`:
+`rtime_last_played` is not gated behind a distinct flag, only behind the SAME
+privacy/ownership condition that already governs whether Steam returns
+anything beyond `appid`/`playtime_forever` at all — your own key against your
+own account, or a fully public profile. `include_appinfo=1` was already being
+sent. **This was checked against Valve's public documentation, not against a
+live account or key** — see "What this coder could not verify" below.
+
+**The honesty rule (pin 1): an absent upstream field surfaces as `null`, NEVER
+as `0`.** Steam omits `rtime_last_played` entirely for a private profile, an
+account viewed without full permissions, an old library entry, or (as far as
+this codebase could verify without a live key) simply a game never launched —
+that is a genuine ABSENCE, and rendering it as `0` would display as "last
+played 1970-01-01", a claim about the account this code did not actually
+observe.
+
+`vault_api.steam_relay._coerce_last_played` ALSO maps an upstream
+**explicit** `0` to `null` — but for a different, more careful reason than
+"it carries no information". **Steam's own convention is that an explicit
+`0` here DOES mean "never played" — that is real information, not noise.**
+It is discarded anyway, on purpose, because `playtime_forever` in the SAME
+response already states that identical fact (`playtime_forever == 0`), and
+rendering `rtime_last_played` as a literal 1970-01-01 date — decades before
+Steam existed, from a field whose whole job is to be a human-readable "last
+played" moment — is a strictly worse result than `null` for a fact the other
+field already carries. This is a deliberate trade (keep the two fields
+independent vs. never show an absurd date), not a claim that `0` is
+meaningless. `OwnedGameOut.rtime_last_played: int | None` carries the `null`
+end to end either way — never defaulted.
+
+This is deliberately asymmetric with `playtime_forever`, which keeps its
+existing `0`-on-malformed-input default (`int`, not nullable) — that field's
+TYPE is an existing, additive-only contract this work package does not touch,
+and in practice Steam's documented contract guarantees `appid`+
+`playtime_forever` together whenever a game object appears at all, so that
+default only ever fires on a genuinely hostile upstream body, never on an
+ordinary "never played" game (which Steam represents with its OWN explicit
+`0` — a real claim, unlike the absence case above).
 
 ### Rate-limit friendliness: a small in-memory cache
 
@@ -4078,6 +4287,23 @@ wording:
   in `SECURITY.md` (planned, WP 5.3 — not yet written); this section is the
   interim, authoritative source for this one feature.
 
+**WP 4h.1 addendum — a sharper personal-data note.** `rtime_last_played` (and
+`playtime_forever`, already relayed but unused by any frontend until this
+work package) are personal data in a sharper sense than the persona
+name/avatar this relay already carried: "when did this person last play this
+game" and "how long have they played it" are exactly the kind of fact the
+Phase 4h plan section calls out as judgemental, particularly in a
+shared-living-room vault with more than one person using the same Steam
+account or the same physical screen. **WP 5.3's threat model must cover this
+as a new personal-data surface flowing through the API response** — this
+paragraph is that inheritance point. This package only relays and validates
+the two fields; the display-side privacy controls the Phase 4h plan section
+demands (off by default or dismissible at any time, no nagging, never held up
+to somebody else) are WP 4h.2's (the web panel's) responsibility, not this
+one's. **No new endpoint aggregates these fields across clients or accounts**
+— both fields stay scoped to the one `steamid` a caller explicitly requested,
+exactly like every other field this relay already returns.
+
 ### What this work package deliberately did NOT do
 
 - **No new `VAULT_*` environment variable.** The key is runtime-set through
@@ -4094,6 +4320,30 @@ wording:
 - **No `web/` or `deploy/` wiring** — this work package is `api/`-only by
   design (WP 4a.6 consumes this relay from the web UI in its own,
   branch-parallel work package).
+
+### What WP 4h.1 deliberately did NOT do
+
+- **No display-side privacy control.** The Phase 4h plan section's "off by
+  default or dismissible, no nagging" stance applies to the WEB PANEL
+  (WP 4h.2), not to this relay — this package only makes the field available,
+  honestly, to whichever authenticated caller asks for it.
+- **No new outbound call.** `rtime_last_played` rides the SAME
+  `GetOwnedGames` request `playtime_forever` already used — no new endpoint,
+  no new parameter, no new host.
+- **No aggregation endpoint.** See the privacy addendum above — both new
+  fields stay scoped to one requested `steamid`.
+- **`playtime_forever`'s type is untouched.** It keeps its existing
+  `int`/0-default contract; only the brand-new `rtime_last_played` field gets
+  the fully nullable treatment. See the dedicated section above for why.
+- **Not verified against a live Steam account or key.** The "no extra
+  parameter needed" claim and the exact conditions under which Valve omits
+  `rtime_last_played` were checked against the Steamworks Web API's public
+  documentation and community reports, not against a real `GetOwnedGames`
+  response — no Steam Web API key was available in this coding session. This
+  belongs on the Zeus/device real-world verification list alongside the other
+  documented "checked against docs, not against a live account" gaps in this
+  file (e.g. the manifest oracle's shape assumption, "Manifest oracle"
+  section above).
 
 ## Auth
 

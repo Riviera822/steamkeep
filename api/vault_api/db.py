@@ -128,7 +128,36 @@ import sqlite3
 #: both sources and a bad value can never reach this table. A brand-new
 #: table, so -- like v6/v9/v10/v11/v12's additions -- this needs no
 #: ``ALTER`` step.
-SCHEMA_VERSION = 13
+#: v14 (WP 4h.1): added ``depot_manifests.first_seen_at``,
+#: ``depot_manifests.manifest_changed_at`` and
+#: ``depot_manifests.observation_count`` -- the minimal, honest signal the
+#: Phase-4h "how often does this game change" panel field needs
+#: (``vault_api/depot_manifests.py``'s "Change frequency" section has the
+#: full reasoning). ``first_seen_at`` is written ONCE, at INSERT, and never
+#: touched by the upsert's ``DO UPDATE`` again -- it is the observation
+#: window's anchor. ``manifest_changed_at`` starts equal to ``first_seen_at``
+#: and only advances to the new ``recorded_at`` when an ingest's
+#: ``manifestid`` actually differs from what was stored -- a plain re-ingest
+#: of an unchanged manifest (a confirmed-current, non-forced run) must not
+#: look like a change. ``observation_count`` increments on every ingest,
+#: changed or not, and is what lets ``depot_manifests.py`` tell "one
+#: observation" (frequency is undefined) apart from "many observations, no
+#: change" (genuinely stable). Same not-expressible-as-``CREATE TABLE IF NOT
+#: EXISTS`` situation as v4/v5/v9 -- an existing pre-v14 ``depot_manifests``
+#: table lacks all three columns -- so this needs its own explicit ``ALTER
+#: TABLE ... ADD COLUMN`` step (see ``_add_missing_depot_manifest_columns``).
+#: ``first_seen_at``/``manifest_changed_at`` are added NULLable (SQLite
+#: cannot default a NOT NULL ``ADD COLUMN`` to another column's value) and
+#: then backfilled from the row's own ``recorded_at`` -- the conservative
+#: choice ``vault_api/depot_manifests.py`` documents: a pre-existing row's
+#: TRUE first-observed moment is unknown, and dating it to its latest known
+#: touch (rather than guessing something older) is the direction that can
+#: never overstate how long it has actually been watched.
+#: ``observation_count`` gets a constant ``DEFAULT 1``, which is likewise
+#: conservative -- it forces every pre-existing row back to the
+#: "insufficient data" boundary until it is genuinely re-observed at least
+#: once post-upgrade, rather than inventing a history this code never saw.
+SCHEMA_VERSION = 14
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -245,15 +274,23 @@ CREATE INDEX IF NOT EXISTS idx_agent_reports_client_time
 -- exceed 2^63-1 even though every id observed during this project's research
 -- (e.g. 3040704736299968944, ~3e18) stayed under it. TEXT never overflows
 -- and this column is never used for arithmetic, only equality/lookup.
+-- v14 (WP 4h.1) columns, see the SCHEMA_VERSION docstring block above for
+-- the full reasoning: first_seen_at is written once at INSERT and never
+-- updated again (the observation-window anchor); manifest_changed_at starts
+-- equal to first_seen_at and only advances when a re-ingest's manifestid
+-- actually differs; observation_count increments on every ingest.
 CREATE TABLE IF NOT EXISTS depot_manifests (
-    appid            INTEGER NOT NULL,
-    containing_appid INTEGER,
-    depotid          INTEGER NOT NULL,
-    manifestid       TEXT NOT NULL,
-    chunk_count      INTEGER NOT NULL,
-    total_bytes      INTEGER NOT NULL,
-    recorded_at      TEXT NOT NULL,
-    source           TEXT NOT NULL,
+    appid               INTEGER NOT NULL,
+    containing_appid    INTEGER,
+    depotid             INTEGER NOT NULL,
+    manifestid          TEXT NOT NULL,
+    chunk_count         INTEGER NOT NULL,
+    total_bytes         INTEGER NOT NULL,
+    recorded_at         TEXT NOT NULL,
+    source              TEXT NOT NULL,
+    first_seen_at       TEXT NOT NULL,
+    manifest_changed_at TEXT NOT NULL,
+    observation_count   INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (appid, depotid)
 );
 
@@ -611,6 +648,13 @@ def init_db(db_path: str) -> None:
         if row is not None and row["version"] < 9:
             _add_missing_agent_report_columns(conn)
 
+        # v14 (WP 4h.1): same situation once more, for `depot_manifests`. An
+        # existing table from v3-v13 has none of the three change-frequency
+        # columns and `CREATE TABLE IF NOT EXISTS depot_manifests` below is a
+        # no-op against it.
+        if row is not None and row["version"] < 14:
+            _add_missing_depot_manifest_columns(conn)
+
         conn.executescript(_DDL)
 
         if row is None:
@@ -688,6 +732,66 @@ def _add_missing_agent_report_columns(conn: sqlite3.Connection) -> None:
             conn.execute(
                 f"ALTER TABLE agent_reports ADD COLUMN {column} {column_type}"
             )
+
+
+#: The ``depot_manifests`` columns added after v3 (WP 4h.1).
+#: ``first_seen_at``/``manifest_changed_at`` are added NULLable — SQLite's
+#: ``ADD COLUMN`` cannot default a ``NOT NULL`` column to another column's
+#: value — and backfilled below via ``UPDATE``. ``observation_count`` DOES
+#: take a constant default because 1 is genuinely the right value for a
+#: migrated row (see the ``SCHEMA_VERSION`` docstring block).
+_POST_V3_DEPOT_MANIFEST_COLUMNS = (
+    ("first_seen_at", "TEXT"),
+    ("manifest_changed_at", "TEXT"),
+    ("observation_count", "INTEGER NOT NULL DEFAULT 1"),
+)
+
+
+def _add_missing_depot_manifest_columns(conn: sqlite3.Connection) -> None:
+    """v3->v14 migration step: add ``depot_manifests``' change-frequency
+    columns (WP 4h.1; ``vault_api/depot_manifests.py`` "Change frequency").
+
+    Guarded per column via ``PRAGMA table_info`` for exactly the reasons
+    ``_add_missing_job_columns`` spells out. ``first_seen_at`` and
+    ``manifest_changed_at`` are backfilled from the row's own ``recorded_at``
+    once the columns exist — a pre-existing row's TRUE first-observed moment
+    is unknown, and dating it to its latest known touch (rather than
+    guessing something earlier) is the conservative direction: it can only
+    ever UNDERSTATE how long a depot has been watched, never overstate it,
+    which is the same "never wrongly claim stability" posture the two
+    honesty pins in ``depot_manifests.py`` are built around. The backfill
+    ``UPDATE`` is itself idempotent (``WHERE ... IS NULL``), matching the
+    per-column ``ADD COLUMN`` guard above — calling this twice against the
+    same file is safe.
+
+    **Also guarded against the table not existing at all yet** (a v1/v2
+    database, before v3 introduced ``depot_manifests`` in the first place —
+    ``PRAGMA table_info`` on a missing table quietly returns zero rows rather
+    than raising, so the per-column loop alone would try to ``ALTER`` a table
+    that isn't there). In that case there is nothing to migrate; the
+    unconditional ``CREATE TABLE IF NOT EXISTS`` in ``_DDL`` that runs right
+    after this function creates the table fresh, with every v14 column
+    already ``NOT NULL`` and no pre-existing rows to backfill.
+    """
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'depot_manifests'"
+    ).fetchone()
+    if table_exists is None:
+        return
+
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(depot_manifests)")}
+    for column, column_type in _POST_V3_DEPOT_MANIFEST_COLUMNS:
+        if column not in existing:
+            conn.execute(
+                f"ALTER TABLE depot_manifests ADD COLUMN {column} {column_type}"
+            )
+    conn.execute(
+        "UPDATE depot_manifests SET first_seen_at = recorded_at WHERE first_seen_at IS NULL"
+    )
+    conn.execute(
+        "UPDATE depot_manifests SET manifest_changed_at = recorded_at "
+        "WHERE manifest_changed_at IS NULL"
+    )
 
 
 def _add_missing_app_columns(conn: sqlite3.Connection) -> None:

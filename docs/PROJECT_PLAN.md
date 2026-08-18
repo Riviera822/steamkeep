@@ -1481,7 +1481,7 @@ posture §7 Phase 6 already takes toward client addresses in webhook payloads,
 for the same reason. WP 5.3's threat model must cover the new personal-data
 surface (playtime and last-played now flow through the API response).
 
-- [ ] **4h.1 (api)** — two small additions that make the panel sharp:
+- [x] **4h.1 (api)** — two small additions that make the panel sharp:
       `rtime_last_played` carried through the Steam relay (Steam returns it,
       we simply never asked; `playtime_forever` is ALREADY relayed and
       validated — `steam_relay.py`, unused by any frontend today), and a
@@ -1492,6 +1492,58 @@ surface (playtime and last-played now flow through the API response).
       as "not enough data", never as "changes rarely"** — the manifest history
       starts when WE started watching, so on a young vault every game looks
       stable.
+      *(WP 4h.1 done, Opus FAIL→fix→re-verified: `rtime_last_played` added to
+      the Steam relay's `OwnedGame`/`OwnedGameOut` — no extra request
+      parameter needed (verified against the Steamworks Web API docs, not a
+      live account); an absent OR an implausible-sentinel (`<=0`) upstream
+      value both degrade to `null`, never a manufactured `0` (pin 1) —
+      wording fixed in the fix round: Steam's own convention IS that `0`
+      means never-played (real information), discarded here only because
+      `playtime_forever` already carries that fact and a 1970-01-01 render
+      would be worse; `playtime_forever`'s existing type is untouched
+      (additive-only). Change frequency: schema v14 adds
+      `depot_manifests.first_seen_at`/`manifest_changed_at`/
+      `observation_count` (ALTER-migration with a conservative recorded_at
+      backfill, guarded against the table not existing yet); `GameSummary`/
+      `GameDetail` gain `manifest_change_frequency`
+      (`null`/`"insufficient_data"`/`"stable"`/`"changed"`),
+      `manifest_observation_days`, and — fix round, reviewer-authorised
+      semantic correction — `manifest_days_since_last_change`: the category
+      was originally `"changing"`, which the review correctly called not a
+      rate (an app that changed once 3 years ago and one that changes weekly
+      were indistinguishable); renamed to `"changed"` (has-changed-at-least-
+      once, past tense) and the new field carries the one rate-adjacent fact
+      the table can actually support (days since the MOST RECENT observed
+      change). Computed by
+      `depot_manifests.change_frequency_for_app`/`.change_frequency_by_app`
+      (bulk, no N+1, statement-count pinned) with a weakest-observed-depot
+      rule: `null` only when an app has NO manifest rows at all (never
+      conflated with `"insufficient_data"`, pin 2); fewer than 2 observations
+      on any one depot, or an observation window under 14 days (matching
+      `VAULT_GC_GRACE_DAYS`'s established scale), both force
+      `"insufficient_data"` rather than a confident claim. Fix round also
+      closed two review blockers: B1 (the deliverable WP 4h.2 consumes had
+      zero endpoint tests — added to `test_games.py`, all four states over
+      real HTTP for both routes, plus the null-out mutation re-run and
+      confirmed dead by name) and B2 (`change_frequency_by_app` 500'd `GET
+      /v1/games` on a poisoned `depot_manifests.appid` row that `gc.py`
+      already defends against for the same table — fixed with the same
+      `deletion.coerce_positive_id` skip, regression-pinned unit + HTTP).
+      Both original honesty-pin mutations re-verified dead by name after the
+      fix round. 1603 tests green, 1 skipped, on a tree rebased onto WP 4f:
+      1554 baseline + 12 (WP 4f) + 37 across this package's three rounds
+      (26 initial, 10 for the untested endpoint surface, 1 real pin for the
+      most-recent-change guarantee). An earlier draft of this note claimed
+      1580 and "net count unchanged by the fix round" — both wrong, and
+      caught by the reviewer in the same diff that shipped them, which is
+      why the numbers here are the measured ones. api/README.md documents both fields' exact semantics,
+      absence/unknown handling, the observation-window caveat, the NOT-a-rate
+      correction, the poisoned-row degrade, and that these fields survive
+      cache deletion (unlike `size_bytes`). Not verified against a live Steam
+      account/key — recorded on the Zeus/device list, incl. the reviewer's
+      own addition: every migrated row starts at one observation, so on Zeus
+      the panel legitimately shows `insufficient_data` for every game until
+      two post-upgrade observations plus a 14-day window exist.)*
 - [ ] **4h.2 (web)** — the panel itself: a right-hand column at BP-XL
       (>=1800px), a collapsible card below that width. Serves the statements
       above. Depends on 4h.1's fields and on Phase 4e's breakpoints.

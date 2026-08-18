@@ -49,9 +49,10 @@ hard) — the raw body is bounded before it is decoded, ``RecursionError`` from
 deeply nested JSON is caught by name and converted to ``SteamRelayError``, the
 number of games/players is capped, and every field that reaches a client is
 individually type- and shape-checked before being copied into the whitelisted
-response — only ``appid``, ``name``, ``playtime_forever``, ``img_icon_url``
-(games) and ``steamid``, ``personaname``, ``avatar*``, ``personastate``
-(players) ever cross that boundary, matching the library grid's stated needs
+response — only ``appid``, ``name``, ``playtime_forever``, ``img_icon_url``,
+``rtime_last_played`` (games, the last one added in WP 4h.1) and ``steamid``,
+``personaname``, ``avatar*``, ``personastate`` (players) ever cross that
+boundary, matching the library grid's/decision-support panel's stated needs
 in the work package boundaries. A garbage or hostile upstream answer degrades
 to a clean ``502`` (router) or a partial-but-valid record with the bad entries
 dropped — never a crash, and never a value that skipped validation reaching a
@@ -97,6 +98,16 @@ SteamID64 being looked up. **With the relay configured, library queries
 originate from the SERVER** (they leave the LAN toward Valve), not from the
 browser — see api/README.md "Steam Web API relay" and the ADR-0004 addendum,
 which this note mirrors verbatim in spirit.
+
+**WP 4h.1 addendum:** ``rtime_last_played`` is personal data in a sharper
+sense than anything else this relay already carried — "when did this person
+last play this game" is exactly the kind of fact Phase 4h's own privacy
+stance (docs/PROJECT_PLAN.md) singles out as judgemental in a shared-living-
+room vault. This module and ``routers/steam.py`` only relay and validate the
+field; the display-side privacy controls (off-by-default/dismissible, no
+nagging) are WP 4h.2's responsibility, not this package's — see
+api/README.md's "Steam Web API relay" section for the full note WP 5.3's
+threat model is expected to read.
 """
 
 from __future__ import annotations
@@ -285,6 +296,49 @@ def _coerce_nonneg_int(value: object) -> int | None:
     return None
 
 
+def _coerce_last_played(value: object) -> int | None:
+    """A plausible Unix-epoch ``rtime_last_played`` timestamp, or ``None``
+    (WP 4h.1 pin 1: "absence is not zero").
+
+    ``None`` is the single, honest answer for every reason Steam might not
+    have said anything usable here:
+
+    - the key is entirely ABSENT from the game object — a private profile, an
+      account viewed without full permissions (Valve restricts this field to
+      "your own key against your own account", verified against the
+      Steamworks Web API docs and community reports — see api/README.md), or
+      simply a game this account has never launched;
+    - the value is a non-``int`` or a ``bool`` (WP 2.4's house rule, same as
+      ``_coerce_nonneg_int``);
+    - the value is ``<= 0``. Rejecting exactly ``0`` (not just negatives) is
+      deliberate and specific to THIS field. **Steam's own convention IS that
+      an explicit ``0`` here means "never played"** — that is real
+      information, not noise, and this function does not dispute it. It is
+      discarded anyway, on purpose, because ``playtime_forever`` already
+      carries the identical "never played" fact in this SAME response
+      (``playtime_forever == 0``), and rendering ``rtime_last_played`` as
+      literally 1970-01-01 — decades before Steam existed, from a field whose
+      whole job is to be a human-readable "last played" MOMENT — is a strictly
+      worse user-facing result than ``null`` for a fact the other field
+      already states. Collapsing this ``0`` into the same ``None`` outcome as
+      a genuinely absent key is a deliberate trade of "keep two fields
+      perfectly independent" for "never show an absurd date", not a claim
+      that ``0`` carries no information.
+
+    This function's OWN code never manufactures a default the other
+    direction either: unlike ``playtime_forever`` below (whose 0-default
+    handles a value that, per Valve's documented contract, is realistically
+    never actually absent when a game object appears at all — see
+    ``routers/steam.py``'s module note), ``rtime_last_played`` is a brand-new
+    field with no such guarantee, so its absence is threaded through as
+    ``None`` end-to-end rather than defaulted.
+    """
+    coerced = _coerce_nonneg_int(value)
+    if coerced is None or coerced == 0:
+        return None
+    return coerced
+
+
 def _valid_avatar_url(value: object) -> str | None:
     """A bounded, http(s) avatar URL, or ``None``.
 
@@ -466,12 +520,20 @@ def _decode_json(payload: bytes, path: str) -> object:
 
 @dataclass(frozen=True)
 class OwnedGame:
-    """One library-grid row — exactly the fields the work package names."""
+    """One library-grid row — exactly the fields the work package names.
+
+    ``rtime_last_played`` (WP 4h.1) defaults to ``None`` so existing
+    construction sites (this codebase's own tests included) that predate the
+    field keep working unchanged — additive, per the work package's own
+    constraint. See ``_coerce_last_played`` for what makes a value usable and
+    why ``0`` degrades to ``None`` exactly like a missing key.
+    """
 
     appid: int
     name: str
     playtime_forever: int
     img_icon_url: str
+    rtime_last_played: int | None = None
 
 
 @dataclass(frozen=True)
@@ -531,8 +593,18 @@ def parse_owned_games(payload: bytes, path: str = OWNED_GAMES_PATH) -> OwnedGame
                 icon = raw_icon
             else:
                 icon = ""
+            # WP 4h.1 pin 1: absent/implausible -> None, never a manufactured
+            # 0 -- see _coerce_last_played. Unlike playtime_forever above,
+            # there is no "if None: default to 0" line here, deliberately.
+            rtime_last_played = _coerce_last_played(raw_game.get("rtime_last_played"))
             games.append(
-                OwnedGame(appid=appid, name=name, playtime_forever=playtime, img_icon_url=icon)
+                OwnedGame(
+                    appid=appid,
+                    name=name,
+                    playtime_forever=playtime,
+                    img_icon_url=icon,
+                    rtime_last_played=rtime_last_played,
+                )
             )
 
     game_count = _coerce_nonneg_int(response.get("game_count"))
@@ -557,6 +629,16 @@ def fetch_owned_games(
     every test in this project replaces ``steam_relay.http_fetch`` itself via
     ``monkeypatch.setattr``, so a second injection point would be dead code
     nothing ever used.
+
+    **No additional parameter is needed for ``rtime_last_played`` (WP 4h.1)**
+    — verified against the Steamworks Web API docs
+    (``IPlayerService/GetOwnedGames``): the field is not gated behind a
+    distinct request flag, only behind the SAME privacy/ownership condition
+    that already governs whether Steam returns anything beyond
+    ``appid``/``playtime_forever`` at all (own key against own account, or a
+    fully public profile). ``include_appinfo=1`` was already being sent.
+    This was checked against Valve's public documentation, not against a
+    live account — see api/README.md's honest verification-gap note.
     """
     params = {
         "key": api_key,

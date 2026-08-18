@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
+from vault_api import depot_manifests
 from vault_api.auth import require_api_key
 from vault_api.deps import DbOpener, db_opener, get_cache_root, get_size_cache
 from vault_api.sizes import SizeCache, app_size_bytes
@@ -58,6 +59,50 @@ class GameSummary(BaseModel):
     # visibility only — the API surface for triggering a forced run stays
     # DELETE then POST /v1/prefill, see api/README.md.
     needs_force: bool
+    # Phase 4h / WP 4h.1: whether this game's manifest has EVER been observed
+    # to change since this vault started watching it, derived from
+    # depot_manifests (vault_api/depot_manifests.py's "Change frequency"
+    # section has the full definition and reasoning). FOUR possible states:
+    #   null                -> no manifest data recorded for this app at all
+    #                          (never prefilled since this feature existed,
+    #                          or mapped only via the manual fallback).
+    #   "insufficient_data"  -> SOME data exists, but either fewer than 2
+    #                          observations were recorded for at least one of
+    #                          this app's depots, or the app's youngest-
+    #                          observed depot has been watched for less than
+    #                          14 days. Never "stable" -- a short window or a
+    #                          single observation is not evidence of either
+    #                          stability or change.
+    #   "stable"             -> enough data, and no observed manifest change.
+    #   "changed"            -> enough data, and at least one depot's
+    #                          manifest has been seen to change AT LEAST ONCE.
+    # `null` and `"insufficient_data"` are DELIBERATELY distinct states
+    # (pin 2): "we have never looked" and "we looked, but not long/often
+    # enough to say" are different honest answers, not the same "unknown".
+    #
+    # THIS IS NOT A FREQUENCY, despite the field's name (kept for continuity
+    # with the plan section's own wording) -- "changed" only means "at least
+    # once, ever", nothing decays, so a game that changed three years ago and
+    # one that changes weekly are indistinguishable from this field alone.
+    # See manifest_days_since_last_change below for the one rate-adjacent
+    # fact depot_manifests can actually support.
+    manifest_change_frequency: str | None = None
+    # Days since the YOUNGEST-observed depot's first recorded observation
+    # (the conservative bound across this app's depots -- see
+    # depot_manifests.py). Null only alongside manifest_change_frequency
+    # being null (no data at all); populated even when the category is
+    # "insufficient_data" so a frontend can render the actual number ("only
+    # observed for 3 days") instead of a bare label with nothing behind it.
+    manifest_observation_days: int | None = None
+    # Days since the MOST RECENTLY observed manifest change across this
+    # app's own depots. Populated ONLY when manifest_change_frequency ==
+    # "changed" -- null for "stable" (never observed one), "insufficient_data"
+    # and null (never earned the right to say). This is the field that comes
+    # closest to the plan section's "changes every three days" style
+    # statement -- "last changed N days ago" is a supportable claim; a true
+    # cadence is not (depot_manifests only ever stores the LATEST manifest
+    # per depot, never a change history).
+    manifest_days_since_last_change: int | None = None
 
 
 class DepotEntry(BaseModel):
@@ -84,6 +129,11 @@ class GameDetail(BaseModel):
     size_bytes: int | None = None
     # See GameSummary.needs_force.
     needs_force: bool
+    # See GameSummary.manifest_change_frequency / .manifest_observation_days /
+    # .manifest_days_since_last_change.
+    manifest_change_frequency: str | None = None
+    manifest_observation_days: int | None = None
+    manifest_days_since_last_change: int | None = None
 
 
 @router.get("/v1/games", response_model=list[GameSummary])
@@ -108,26 +158,38 @@ def list_games(
         depot_rows = conn.execute(
             "SELECT appid, depotid FROM depot_app_map"
         ).fetchall()
+        # One query for every app's change-frequency rows, grouped in Python
+        # (vault_api.depot_manifests.change_frequency_by_app) -- same
+        # avoid-the-N+1 shape as app_depotids/depot_bytes below, not a
+        # per-app query in this loop.
+        frequencies = depot_manifests.change_frequency_by_app(conn)
 
     app_depotids: dict[int, list[int]] = {}
     for row in depot_rows:
         app_depotids.setdefault(int(row["appid"]), []).append(int(row["depotid"]))
 
     depot_bytes = size_cache.get(cache_root).depot_bytes
+    no_manifest_data = depot_manifests.ChangeFrequency(None, None)
 
-    return [
-        GameSummary(
-            appid=row["appid"],
-            name=row["name"],
-            status=row["status"],
-            last_prefill_at=row["last_prefill_at"],
-            last_manifest_check=row["last_manifest_check"],
-            depot_count=row["depot_count"],
-            size_bytes=app_size_bytes(app_depotids.get(row["appid"], []), depot_bytes),
-            needs_force=bool(row["needs_force"]),
+    games = []
+    for row in rows:
+        frequency = frequencies.get(row["appid"], no_manifest_data)
+        games.append(
+            GameSummary(
+                appid=row["appid"],
+                name=row["name"],
+                status=row["status"],
+                last_prefill_at=row["last_prefill_at"],
+                last_manifest_check=row["last_manifest_check"],
+                depot_count=row["depot_count"],
+                size_bytes=app_size_bytes(app_depotids.get(row["appid"], []), depot_bytes),
+                needs_force=bool(row["needs_force"]),
+                manifest_change_frequency=frequency.category,
+                manifest_observation_days=frequency.observation_days,
+                manifest_days_since_last_change=frequency.days_since_last_change,
+            )
         )
-        for row in rows
-    ]
+    return games
 
 
 @router.get("/v1/games/{appid}", response_model=GameDetail)
@@ -171,6 +233,7 @@ def get_game(
             """,
             (appid,),
         ).fetchall()
+        frequency = depot_manifests.change_frequency_for_app(conn, appid)
 
     depot_bytes = size_cache.get(cache_root).depot_bytes
 
@@ -192,4 +255,7 @@ def get_game(
         depots=depots,
         size_bytes=app_size_bytes([row["depotid"] for row in depot_rows], depot_bytes),
         needs_force=bool(app_row["needs_force"]),
+        manifest_change_frequency=frequency.category,
+        manifest_observation_days=frequency.observation_days,
+        manifest_days_since_last_change=frequency.days_since_last_change,
     )

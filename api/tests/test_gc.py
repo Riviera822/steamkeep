@@ -1286,8 +1286,9 @@ def test_load_recorded_manifests_skips_poisoned_rows(conn) -> None:
     upsert_mapping(conn, depotid=441, appid=440, name="TF2")
     conn.execute(
         "INSERT INTO depot_manifests (appid, containing_appid, depotid, manifestid, "
-        "chunk_count, total_bytes, recorded_at, source) "
-        "VALUES ('not-an-appid', NULL, 441, '900', 1, 10, 'now', 'x')"
+        "chunk_count, total_bytes, recorded_at, source, "
+        "first_seen_at, manifest_changed_at, observation_count) "
+        "VALUES ('not-an-appid', NULL, 441, '900', 1, 10, 'now', 'x', 'now', 'now', 1)"
     )
     conn.commit()
 

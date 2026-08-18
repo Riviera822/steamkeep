@@ -188,7 +188,14 @@ def test_parses_a_well_formed_owned_games_response() -> None:
 
 def test_only_whitelisted_fields_survive_owned_games() -> None:
     """A field outside the work package's boundary list must never reach the
-    parsed result, however innocuous it looks."""
+    parsed result, however innocuous it looks.
+
+    ``rtime_last_played`` moved INTO the whitelist in WP 4h.1 (it used to be
+    the probe for this exact test) — it is asserted separately below in
+    ``test_rtime_last_played_survives_when_present``. ``playtime_2weeks`` and
+    ``has_community_visible_stats`` remain genuinely out of scope and are the
+    probes here now.
+    """
     doc = {
         "response": {
             "games": [
@@ -199,13 +206,92 @@ def test_only_whitelisted_fields_survive_owned_games() -> None:
                     "img_icon_url": "i",
                     "playtime_2weeks": 999,
                     "has_community_visible_stats": True,
-                    "rtime_last_played": 1234567890,
                 }
             ]
         }
     }
     result = steam_relay.parse_owned_games(encode(doc))
     assert result.games == (steam_relay.OwnedGame(appid=1, name="n", playtime_forever=1, img_icon_url="i"),)
+
+
+# ==========================================================================
+# 2b. rtime_last_played — WP 4h.1 pin 1 ("absence is not zero")
+# ==========================================================================
+
+
+def test_rtime_last_played_survives_when_present() -> None:
+    doc = {
+        "response": {
+            "games": [
+                {
+                    "appid": 1,
+                    "name": "n",
+                    "playtime_forever": 1,
+                    "img_icon_url": "i",
+                    "rtime_last_played": 1700000000,
+                }
+            ]
+        }
+    }
+    result = steam_relay.parse_owned_games(encode(doc))
+    assert result.games[0].rtime_last_played == 1700000000
+
+
+def test_rtime_last_played_is_null_when_the_key_is_entirely_absent() -> None:
+    """The boundary case pin 1 exists for: a private profile, a game never
+    played, or an account viewed without full permissions all omit the key
+    entirely — must surface as None, never a manufactured 0."""
+    doc = {
+        "response": {
+            "games": [{"appid": 1, "name": "n", "playtime_forever": 0, "img_icon_url": ""}]
+        }
+    }
+    result = steam_relay.parse_owned_games(encode(doc))
+    assert result.games[0].rtime_last_played is None
+
+
+def test_rtime_last_played_explicit_zero_is_null_not_a_real_timestamp() -> None:
+    """0 would render as 1970-01-01 -- decades before Steam existed. An
+    upstream 0 is treated exactly like an absent key (pin 1's 'absence is
+    not zero' extended to 'an implausible sentinel is not a real value
+    either')."""
+    doc = {
+        "response": {
+            "games": [
+                {"appid": 1, "name": "n", "playtime_forever": 0, "img_icon_url": "", "rtime_last_played": 0}
+            ]
+        }
+    }
+    result = steam_relay.parse_owned_games(encode(doc))
+    assert result.games[0].rtime_last_played is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        -1,  # negative
+        True,  # bool must not sneak through as 1 (WP 2.4 house rule)
+        "1700000000",  # a string, not Valve's native int
+        1700000000.5,  # float, not int
+        None,
+    ],
+)
+def test_rtime_last_played_garbage_degrades_to_null_not_a_crash(value: object) -> None:
+    doc = {
+        "response": {
+            "games": [
+                {
+                    "appid": 1,
+                    "name": "n",
+                    "playtime_forever": 0,
+                    "img_icon_url": "",
+                    "rtime_last_played": value,
+                }
+            ]
+        }
+    }
+    result = steam_relay.parse_owned_games(encode(doc))
+    assert result.games[0].rtime_last_played is None
 
 
 def test_a_private_profile_answers_with_no_games_key_and_is_not_an_error() -> None:
@@ -658,8 +744,47 @@ def test_owned_games_end_to_end_with_a_recorded_fixture(
         "name": "Team Fortress 2",
         "playtime_forever": 1234,
         "img_icon_url": "6b0312cda02f5f777efa2f3318c307ff9acafbb5",
+        # RECORDED_OWNED_GAMES's first entry has no rtime_last_played key at
+        # all -> null, never a manufactured 0 (WP 4h.1 pin 1).
+        "rtime_last_played": None,
     }
     assert VALID_KEY not in resp.text
+
+
+def test_owned_games_rtime_last_played_round_trips_over_http(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end pin against the REAL Pydantic response model
+    (``routers.steam.OwnedGameOut``), not a hand-written dict: a present
+    value survives, an absent one is null -- both in the SAME response."""
+    client.put("/v1/steam/key", headers=HEADERS, json={"key": VALID_KEY})
+    doc = {
+        "response": {
+            "game_count": 2,
+            "games": [
+                {
+                    "appid": 1,
+                    "name": "Played",
+                    "playtime_forever": 10,
+                    "img_icon_url": "",
+                    "rtime_last_played": 1700000000,
+                },
+                {
+                    "appid": 2,
+                    "name": "Never touched",
+                    "playtime_forever": 0,
+                    "img_icon_url": "",
+                },
+            ],
+        }
+    }
+    monkeypatch.setattr(steam_relay, "http_fetch", fetcher(encode(doc)))
+
+    resp = client.get("/v1/steam/owned-games", headers=HEADERS, params={"steamid": STEAMID_MIN})
+    assert resp.status_code == 200
+    games = resp.json()["games"]
+    assert games[0]["rtime_last_played"] == 1700000000
+    assert games[1]["rtime_last_played"] is None
 
 
 def test_player_summaries_end_to_end_with_a_recorded_fixture(

@@ -69,8 +69,35 @@ class KeyStatusOut(BaseModel):
 class OwnedGameOut(BaseModel):
     appid: int
     name: str
+    #: Minutes, always present in Steam's own response whenever a game
+    #: object appears at all (verified against the Steamworks Web API docs:
+    #: appid+playtime_forever are the two fields returned even under the
+    #: most restricted permission case) -- so the existing 0-default in
+    #: ``steam_relay.parse_owned_games`` for a malformed/missing value only
+    #: fires on a genuinely hostile upstream, not on a normal "never played"
+    #: game (Steam represents that with an explicit 0 of its own, which is a
+    #: real claim, not an absence). Left unchanged (additive-only, WP 4h.1):
+    #: this field's TYPE is a cross-frontend contract this work package must
+    #: not touch, even though its sibling ``rtime_last_played`` below gets
+    #: the fully honest nullable treatment because it is a brand-new field.
     playtime_forever: int
     img_icon_url: str
+    #: Unix-epoch seconds of this account's last recorded play session for
+    #: this app, or ``null`` (WP 4h.1). ``null`` covers two DIFFERENT
+    #: upstream situations, both collapsed to the same outcome on purpose: a
+    #: private profile / restricted-permission view / a game truly never
+    #: played, where Steam gives us NOTHING (key absent -- an absence, not a
+    #: claim); and an explicit upstream ``0``, which per Steam's own
+    #: convention DOES mean "never played" (a real claim, not noise) but is
+    #: discarded here anyway because ``playtime_forever`` already carries
+    #: that identical fact in this same response, and rendering it as a
+    #: literal 1970-01-01 date would be worse than ``null`` (see
+    #: ``steam_relay._coerce_last_played`` for the full reasoning). Never
+    #: coerced the OTHER way (absence -> a manufactured ``0``) -- that would
+    #: be inventing "never played" from data that never said so.
+    #: api/README.md documents this field's full semantics and its privacy
+    #: note.
+    rtime_last_played: int | None
 
 
 class OwnedGamesOut(BaseModel):
@@ -217,6 +244,7 @@ def get_owned_games(
                 name=game.name,
                 playtime_forever=game.playtime_forever,
                 img_icon_url=game.img_icon_url,
+                rtime_last_played=game.rtime_last_played,
             )
             for game in result.games
         ],
