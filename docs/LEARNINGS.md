@@ -91,7 +91,8 @@ These are not style preferences; each entry cost a review round to learn.
   died with `Syntax error: word unexpected`; (b) CRLF silently defeated a
   brand-new `verify-stack.sh` guard whose regex ended in `$` — the guard
   asserts ABSENCE, so it passed for the wrong reason on every run (P1
-  review); (c) it corrupts embedded `` literals elsewhere in the file
+  review); (c) it corrupts embedded `
+` literals elsewhere in the file
   (WP 4e.7, caught only by `git diff --stat` showing an unexpected hunk).
   Read and write **bytes**, or `open(..., newline="")`, and remember that
   `read_text()` also normalises on the way IN — a search string written with
@@ -535,3 +536,28 @@ These are not style preferences; each entry cost a review round to learn.
   and hidden-toggled needs a .class[hidden]{display:none} guard; sweep
   by cross-referencing display rules against .hidden= call sites
   (WP 4a.8; third instance of the class after h4.sec and .onbnav).
+
+## Process (2026-08-18 decision audit, Fable)
+
+- A control that protects a person other than the operator (privacy
+  switches, data-collection gates) gets a written failure-mode analysis
+  BEFORE any coder brief: for each store the setting can live in (env,
+  db volume, image default), state what happens when that store is lost,
+  and which direction the failure points. The 4h.0 ceiling design would
+  have shipped a switch whose volume-loss failure mode was "collection
+  silently resumes"; it was caught by the operator's question, not by
+  the pipeline — coder and reviewer both had ADR-0009 in front of them
+  and neither flagged it. Named options go to the operator first.
+- A package is committable only when the reviewer's round-2 REPORT is in
+  hand — orchestrator self-verification of the fixes is a supplement,
+  never a substitute for the verdict. WP 5.3 was committed on
+  self-verification after a round-1 FAIL; the retroactive round 2 had to
+  be commissioned by the audit. "Review complete" means report received,
+  not verdict word received (the 4e.6 post-commit report carried the
+  finding that became WP 4e.8).
+- The reviewer's read-only mandate now includes git explicitly, enforced
+  in .claude/agents/reviewer.md after the WP 4e.6 incident (a reviewer's
+  `git checkout` destroyed uncommitted CSS in a foreign worktree;
+  recovery was byte-exact from the served stylesheets, luck that should
+  never be load-bearing). Mutations happen in a scratch copy, never in
+  any working tree.
