@@ -1178,6 +1178,10 @@ refreshed and silently rots.
       `docs/LEARNINGS.md`. Every check this package added, across all three
       rounds, passed on every run; api suite 1482 passed/1 skipped on the
       final run (1461 baseline + 21 new in `test_p1_compose_env_defaults.py`).
+      **Fixed in WP 4g** (2026-08-18): step 5i's grep is now a bounded
+      wait-for-line loop instead of an immediate read, so this 105/109
+      result is historical — see `verify-stack.sh`'s step-5i comment and
+      `deploy/README.md`.
 - [ ] CI: GitHub Actions — lint, tests, multi-arch image build (amd64/arm64),
       publish to ghcr.io with pinned version tags
       *(WP 5.1 done 2026-08-09 — the test/lint half: api pytest (Linux),

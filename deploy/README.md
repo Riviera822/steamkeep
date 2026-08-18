@@ -32,21 +32,25 @@ deploy/
   (WSL2) — and, as of the 2026-08-17 packaging work package, `deploy/tests/
   verify-stack.sh` has now actually run against that real host: 105/109
   checks passed on the final run, across three total runs spanning two
-  review rounds. **The 4 failures are a genuine pre-existing bug in step
-  5i, unrelated to the packaging work package that finally ran it for
-  real:** nginx's cache-event `access_log` uses `buffer=64k flush=5s`
-  (`core/nginx/nginx.conf`), and step 5i greps the log file immediately
+  review rounds. **The 4 failures were a genuine pre-existing bug in step
+  5i**, unrelated to the packaging work package that finally ran it for
+  real: nginx's cache-event `access_log` uses `buffer=64k flush=5s`
+  (`core/nginx/nginx.conf`), and step 5i grepped the log file immediately
   after the triggering request with no wait for that flush — an isolated
-  repro confirms the correct 9-field line appears once you wait past the
+  repro confirmed the correct 9-field line appears once you wait past the
   5-second buffer (a fresh `docker run` of vault-core, one real MISS, and a
   check 7 s later shows the expected line every time; checking at 1 s does
   not). **Reproducible, not deterministic:** the same 4 lines failed on
-  every run so far, but the pass/fail line is genuinely timing-dependent —
+  every run so far, but the pass/fail line was genuinely timing-dependent —
   a slower host could clear the 5 s window before the grep and pass by
-  chance, so a future green 5i is not proof the underlying bug is fixed.
-  The feature itself is correct; the test's timing isn't. Tracked
-  separately for a fix to step 5i. Every check the packaging work package
-  itself added, across both review rounds, passed on every run.
+  chance, so a green 5i by itself would not have proven the underlying bug
+  was fixed. The feature itself was always correct; only the test's timing
+  wasn't. **Fixed in WP 4g** (2026-08-18): step 5i now polls for the line
+  with a bounded wait-for-line loop (up to 10 s) instead of reading
+  immediately, so a green run means the flush-and-read path actually
+  worked within budget — see `verify-stack.sh`'s comment above step 5i.
+  Every check the packaging work package itself added, across both review
+  rounds, passed on every run.
 - Outbound internet (the cache fetches from the Steam CDN on a miss).
 - Disk space for the cache. There is no eviction, ever — that is the
   project's whole point (`docs/PROJECT_PLAN.md` §3). You delete games
@@ -637,13 +641,26 @@ prompt, never a `TypeInitializationException`), and every fail-fast guard
 (split filesystems, empty/injected resolver, unrendered template, unwritable
 cache, missing/invalid `CACHE_IP`).
 
-**Known result, confirmed on three real runs across two review rounds
-(2026-08-17):** 105/109 pass on the final run; the 4 failures are step 5i's
-own timing bug (nginx's event-log buffer flushes after 5 s, the step checks
-immediately, and this is reproducible rather than strictly deterministic —
-see "Requirements" above) — see `verify-stack.sh`'s own comment above step
-5i. Everything else, including every check the packaging work package
-added across both rounds, is green.
+**Historical result (2026-08-17 packaging work package, three real runs
+across two review rounds):** 105/109 pass on the final run; the 4 failures
+were step 5i's own timing bug (nginx's event-log buffer flushes after 5 s,
+the step checked immediately, and this was reproducible rather than
+strictly deterministic — see "Requirements" above). Everything else,
+including every check the packaging work package added across both rounds,
+was green.
+
+**Fixed in WP 4g (2026-08-18):** step 5i now waits for the event-log line
+with a bounded poll (up to 10 s — the 5 s flush plus scheduling slack)
+instead of grepping immediately, and fails loudly (with a message that
+distinguishes "the line never arrived" from "the line arrived but didn't
+parse") if the line still hasn't shown up when the deadline passes — see
+`verify-stack.sh`'s comment above step 5i. **Measured, not expected:** a
+full run passes **109/109**, exit 0, with clean teardown — confirmed twice
+on 2026-08-18 (the fixing run and an independent review re-run) against
+Docker Engine 29.1.3 / Compose 2.40.3, with the event line arriving after
+~4 s. Note the wait bound is 10 polls, each preceded by a
+`docker compose exec` round trip, so the effective window is 2-4x the 5 s
+flush and widens on exactly the slow hosts that need it.
 
 It never enters credentials — reaching the login prompt is the pass condition.
 

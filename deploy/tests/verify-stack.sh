@@ -281,19 +281,21 @@ assert_contains "$noKey" "VAULT_API_KEY" "compose refuses to render without VAUL
 # written the same way, then actually run THREE times against a real
 # Docker host across two review rounds (WSL2, Engine 29.1.3/Compose
 # 2.40.3): 105/109 passed on the final run. Every packaging-WP check passed
-# on every run. The 4 failures are ALL in step 5i below, and are a genuine
+# on every run. The 4 failures were ALL in step 5i below, and were a genuine
 # PRE-EXISTING bug unrelated to this package: nginx's cache-event
 # `access_log` uses `buffer=64k flush=5s` (core/nginx/nginx.conf), and step
-# 5i's grep runs immediately after the triggering request with no wait for
+# 5i's grep ran immediately after the triggering request with no wait for
 # that flush -- an isolated repro (fresh `docker run` of vault-core alone,
-# one real MISS, checking the file at increasing delays) shows the correct
+# one real MISS, checking the file at increasing delays) showed the correct
 # 9-field line reliably once you wait past 5 s, and reliably empty before
 # that. Reproducible on every run so far, but NOT deterministic in the
-# strict sense -- the pass/fail line depends on real wall-clock timing
-# against a host whose speed varies, so a future green 5i on a slower
-# check would not by itself mean the underlying race is fixed. Tracked
-# separately for a fix to step 5i's timing; not fixed here to keep this
-# work package's diff confined to the packaging scope it was reviewed for.
+# strict sense -- the pass/fail line depended on real wall-clock timing
+# against a host whose speed varies, so a green 5i on a slower host would
+# not by itself have meant the underlying race was fixed (see
+# docs/LEARNINGS.md "Testing discipline" for the standing entry this bug
+# produced). FIXED in WP 4g with a bounded wait-for-line loop -- see the
+# comment above step 5i in section 5 below for the mechanism and why a flat
+# `sleep` would not have been an honest fix.
 step "3e. Phase-3 knobs (VAULT_EVENT_LOG / VAULT_GC_GRACE_DAYS / VAULT_AUTO_GC): feature-off defaults pass through unchanged"
 say 'The test .env above (section 3) sets none of the three -- deploy/README.md'
 say '"Phase-3 knobs" -- so the rendered config must show vault-core with an empty'
@@ -493,17 +495,40 @@ assert_contains "$logcfg" "max-file" "vault-core has a max-file limit"
 # format -- then reverts vault-core to the feature-off default before
 # section 8's fail-fast guards run.
 #
-# Known gap, honestly flagged (WP D1): this step (like 3e above) is new in
-# this work package and has never executed against a real Docker host --
-# WP D1's environment had no Docker available, same standing constraint
-# prior work packages have flagged (core/README.md "Known gap, honestly
-# flagged"). The shell logic was checked with `sh -n` and the field-parsing
-# below was replayed against core/README.md's own documented example line
-# (v1/MISS/200 in the right positions, 9 tab-separated fields), but the
-# actual container behaviour -- the real MISS reaching event.log, the
-# `docker compose up -d vault-core` recreate picking up the new env var,
-# and the healthcheck timing -- is confirmed only by this script's first
-# real run on the deploy target.
+# History (WP D1 -> packaging WP -> WP 4g): this step was written without a
+# Docker host available, so for a while its container behaviour really was
+# unverified. That gap is CLOSED. The packaging WP ran it against real
+# containers three times (which is how the timing bug below was found, since
+# it failed deterministically), and WP 4g's review re-ran the whole suite
+# green: 109/109, exit 0, on Engine 29.1.3 / Compose 2.40.3, with the event
+# line arriving after ~4s. The real MISS reaching event.log, the
+# `docker compose up -d vault-core` recreate picking up the new env var and
+# the healthcheck timing are all confirmed by real runs now -- do not read
+# the paragraph below as an open caveat.
+#
+# WP 4g fix -- the timing bug (docs/LEARNINGS.md "Testing discipline",
+# flush=5s entry): nginx buffers this access_log with `buffer=64k
+# flush=5s` (core/nginx/nginx.conf), and grepping the file immediately
+# after the triggering request is never raceless -- measured 0 lines at
+# t~0s and t~2s, the correct 9-field line at t~7s, on an untouched
+# baseline. Below, the grep is wrapped in a BOUNDED wait-for-line loop
+# (poll once per second, up to 10s = the 5s flush plus scheduling slack)
+# instead of a bare grep (raced 105/109 in the packaging-WP run) OR a flat
+# `sleep 6`/`sleep 10`. A fixed sleep is not an acceptable fix even though
+# it would make this step pass: on a slow or loaded host, `docker compose
+# exec` alone can already exceed 5s, which is exactly why the un-fixed
+# step could pass "by luck" today -- a sleep long enough to always clear
+# that variance is not a bound anyone could justify, and a shorter one
+# would silently keep the race, just with better odds. The loop instead
+# turns "wait, then check" into a real assertion: if the line never shows
+# up before the deadline, the four checks below fail with a message that
+# says so explicitly (nothing arrived), which is a distinct failure class
+# from "a line arrived but a field didn't match" (a parser/format
+# regression) -- collapsing those two into the same blank-field failure,
+# as the original code did, is exactly what made this bug take three
+# review rounds to diagnose correctly. A green 5i now means the
+# flush-and-read path worked within its documented budget, not that the
+# host happened to be slow enough to win the race unassisted.
 # =============================================================================
 step "5i. Cache-event log: enable, force a fresh MISS, verify the v1 line, revert"
 say 'VAULT_EVENT_LOG is off by default (core/README.md "Docker: VAULT_EVENT_LOG").'
@@ -530,16 +555,51 @@ evlog_miss=$(curl -s -o /dev/null -w 'http=%{http_code}' --max-time 120 -H "Host
 say "    MISS (event-log check)  $evlog_miss"
 assert_contains "$evlog_miss" "http=200" "the forced fresh MISS still succeeds against the real Steam CDN"
 
-evline=$(dc exec -T vault-core sh -c "grep '$CHUNK' /vault/logs/event.log | tail -1" | tr -d '\r')
-say "    event-log line: $evline"
-field_count=$(printf '%s' "$evline" | awk -F'\t' '{print NF}')
-field1=$(printf '%s' "$evline" | awk -F'\t' '{print $1}')
-field4=$(printf '%s' "$evline" | awk -F'\t' '{print $4}')
-field9=$(printf '%s' "$evline" | awk -F'\t' '{print $9}')
-assert_eq "9" "$field_count"  "the event-log line has exactly 9 tab-separated fields (core/README.md format)"
-assert_eq "v1" "$field1"      "field 1 is the v1 format version"
-assert_eq "MISS" "$field4"    "field 4 records MISS for this forced fresh fetch"
-assert_eq "200" "$field9"     "field 9 (HTTP status) is 200"
+say ''
+say 'Waiting (bounded) for the flush: nginx writes this access_log with'
+say 'buffer=64k flush=5s, so the line lands up to 5s after the request --'
+say 'one short line will never fill 64k, so the 5s timer is what actually'
+say 'governs this. Polling once per second for up to 10s (5s flush plus'
+say 'scheduling slack), not a flat sleep -- see the comment above this step'
+say 'for why a fixed sleep would hide rather than fix the race.'
+evline=""
+waited=0
+max_wait=10
+while [ "$waited" -lt "$max_wait" ]; do
+    evline=$(dc exec -T vault-core sh -c "grep '$CHUNK' /vault/logs/event.log 2>/dev/null | tail -1" | tr -d '\r')
+    [ -n "$evline" ] && break
+    waited=$((waited + 1))
+    sleep 1
+done
+
+if [ -z "$evline" ]; then
+    # Say what was actually observed, not what it probably means. The wait
+    # predicate is `grep $CHUNK`, so a format regression that dropped or
+    # shortened field 6 (the URI) writes a line this grep cannot match and
+    # lands right here -- calling that "the write path is broken" would
+    # misattribute it, which is the exact confusion WP 4g exists to remove.
+    # The line count and tail below let a reader tell the two apart at a
+    # glance: 0 lines means nothing was written, N lines means something was
+    # written that does not carry this chunk id.
+    ev_lines=$(dc exec -T vault-core sh -c "wc -l < /vault/logs/event.log 2>/dev/null || echo '?'" | tr -d '')
+    say "    event-log line: (no line matching the chunk after waiting ${max_wait}s; event.log has ${ev_lines} line(s))"
+    dc exec -T vault-core sh -c "tail -3 /vault/logs/event.log 2>/dev/null" | tr -d '' | sed 's/^/      last: /' || true
+    never_arrived="no event-log line matching this MISS's chunk id arrived within ${max_wait}s; event.log has ${ev_lines} line(s). 0 lines ==> nothing reached VAULT_EVENT_LOG (the write path). Non-zero ==> something was written but does not carry the chunk id, i.e. suspect the log_format, not the write path. A malformed-but-present matching line takes the other branch and reports expected-vs-got per field."
+    bad "the event-log line has exactly 9 tab-separated fields (core/README.md format) -- $never_arrived"
+    bad "field 1 is the v1 format version -- $never_arrived"
+    bad "field 4 records MISS for this forced fresh fetch -- $never_arrived"
+    bad "field 9 (HTTP status) is 200 -- $never_arrived"
+else
+    say "    event-log line (arrived after ${waited}s): $evline"
+    field_count=$(printf '%s' "$evline" | awk -F'\t' '{print NF}')
+    field1=$(printf '%s' "$evline" | awk -F'\t' '{print $1}')
+    field4=$(printf '%s' "$evline" | awk -F'\t' '{print $4}')
+    field9=$(printf '%s' "$evline" | awk -F'\t' '{print $9}')
+    assert_eq "9" "$field_count"  "the event-log line has exactly 9 tab-separated fields (core/README.md format)"
+    assert_eq "v1" "$field1"      "field 1 is the v1 format version"
+    assert_eq "MISS" "$field4"    "field 4 records MISS for this forced fresh fetch"
+    assert_eq "200" "$field9"     "field 9 (HTTP status) is 200"
+fi
 
 say ''
 say 'Reverting: strip VAULT_EVENT_LOG back out of the test .env and recreate'
