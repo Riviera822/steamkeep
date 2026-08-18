@@ -247,6 +247,150 @@ class VaultApiClientTest {
         assertEquals(JsonNull, result.settings[0].effective)
     }
 
+    // ---- steam relay (WP 4h.4; ADR-0004 second addendum) -----------------
+
+    @Test
+    fun `steamOwnedGames GETs v1 steam owned-games with the steamid query param and decodes the games list`() = runTest {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"configured":true,"game_count":1,
+                    |"games":[{"appid":440,"name":"Team Fortress 2","img_icon_url":"abc"}]}"""
+                    .trimMargin(),
+            ),
+        )
+
+        val result = client.steamOwnedGames("76561198042117903")
+
+        assertEquals(1, result.games.size)
+        assertEquals(440, result.games[0].appid)
+        // WP 4h.0's default-gate shape: the key is textually absent on the
+        // wire, which must decode as null, never a manufactured 0.
+        assertNull(result.games[0].playtime_forever)
+        // The request must land on THIS server (standing in for the vault)
+        // -- a bounded wait so a regression that pointed the method at
+        // api.steampowered.com instead fails this assertion instead of
+        // hanging indefinitely.
+        val recorded = server.takeRequest(2, TimeUnit.SECONDS)
+        assertEquals("/v1/steam/owned-games?steamid=76561198042117903", recorded?.path)
+        assertEquals("test-key-123", recorded?.getHeader("X-Api-Key"))
+    }
+
+    @Test
+    fun `steamOwnedGames 409 maps to Validation -- no relay key configured server-side`() = runTest {
+        server.enqueue(
+            MockResponse().setResponseCode(409).setBody(
+                """{"detail":"Steam relay is not configured. Set a Web API key via PUT /v1/steam/key."}""",
+            ),
+        )
+
+        try {
+            client.steamOwnedGames("76561198042117903")
+            fail("expected VaultApiError.Validation")
+        } catch (e: VaultApiError.Validation) {
+            assertEquals(409, e.status)
+        }
+    }
+
+    @Test
+    fun `steamOwnedGames 422 maps to Validation -- a rejected steamid`() = runTest {
+        server.enqueue(
+            MockResponse().setResponseCode(422).setBody(
+                """{"detail":"steamid must be a 17-digit SteamID64 in the individual-account range."}""",
+            ),
+        )
+
+        try {
+            client.steamOwnedGames("not-a-steamid")
+            fail("expected VaultApiError.Validation")
+        } catch (e: VaultApiError.Validation) {
+            assertEquals(422, e.status)
+        }
+    }
+
+    @Test
+    fun `steamPlayerSummaries GETs v1 steam player-summaries and decodes the players list`() = runTest {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"configured":true,"players":[{"steamid":"76561198042117903","personaname":"Example"}]}""",
+            ),
+        )
+
+        val result = client.steamPlayerSummaries("76561198042117903")
+
+        assertEquals(1, result.players.size)
+        assertEquals("Example", result.players[0].personaname)
+        val recorded = server.takeRequest(2, TimeUnit.SECONDS)
+        assertEquals("/v1/steam/player-summaries?steamid=76561198042117903", recorded?.path)
+    }
+
+    // ---- canary-key redaction (WP 4h.4 review nitpick) -------------------
+    //
+    // Restores, as ONE test covering four failure modes, the guarantee the
+    // deleted SteamWebApiClientTest's three MUTATION PIN tests used to pin
+    // by construction for the OLD device-local key (which lived in the
+    // query string, not a header, so the two are not structurally
+    // identical -- see VaultApiClient.kt's own kdoc on `execute()` for why
+    // this client's error paths never format a header value into a
+    // message at all): the vault-api key is a HEADER
+    // (`X-Api-Key`), never the query string, on the relay routes exactly
+    // like every other route this client wraps. This test does not rely
+    // on that "by construction" reasoning alone -- it plants a canary key
+    // and asserts it is absent from the resulting VaultApiError message
+    // across a non-2xx response, a genuine network failure, and a
+    // garbage (non-JSON) 200 body, so a future regression that DID start
+    // interpolating request/response details into a message would be
+    // caught here even if it happened to also leave the "it's a header,
+    // not a query param" reasoning intact.
+
+    private val canaryApiKey = "CANARY-KEY-MUST-NEVER-APPEAR-IN-A-VAULTAPIERROR-MESSAGE"
+
+    @Test
+    fun `MUTATION PIN -- a canary X-Api-Key never appears in a VaultApiError message across 4xx, 5xx, network, or garbage-body failures on the steam relay routes`() = runTest {
+        val canaryClient = VaultApiClient(
+            profile = SystemVpnProfile(server.url("/").toString().trimEnd('/')),
+            apiKeyProvider = { canaryApiKey },
+        )
+
+        // 4xx
+        server.enqueue(MockResponse().setResponseCode(409).setBody("""{"detail":"not configured"}"""))
+        val e409 = runCatching { canaryClient.steamOwnedGames("76561198042117903") }.exceptionOrNull()
+        assertFalse(e409?.message.orEmpty().contains(canaryApiKey))
+
+        // 5xx
+        server.enqueue(MockResponse().setResponseCode(502).setBody("upstream error, not json"))
+        val e502 = runCatching { canaryClient.steamOwnedGames("76561198042117903") }.exceptionOrNull()
+        assertFalse(e502?.message.orEmpty().contains(canaryApiKey))
+
+        // garbage (non-JSON) 200 body
+        server.enqueue(MockResponse().setResponseCode(200).setBody("not json at all"))
+        val eGarbage = runCatching { canaryClient.steamOwnedGames("76561198042117903") }.exceptionOrNull()
+        assertFalse(eGarbage?.message.orEmpty().contains(canaryApiKey))
+
+        // network failure: nothing listening on this port
+        val deadServer = MockWebServer().apply { start() }
+        val deadPort = deadServer.port
+        deadServer.shutdown()
+        val deadClient = VaultApiClient(
+            profile = SystemVpnProfile("http://127.0.0.1:$deadPort"),
+            apiKeyProvider = { canaryApiKey },
+        )
+        val eNetwork = runCatching { deadClient.steamOwnedGames("76561198042117903") }.exceptionOrNull()
+        assertFalse(eNetwork?.message.orEmpty().contains(canaryApiKey))
+
+        // Defense in depth, mirroring the deleted SteamWebApiClientTest's
+        // own pattern: the key DID legitimately have to reach the wire for
+        // the 4xx/5xx/garbage cases above (that is the whole point of
+        // X-Api-Key) -- confirm it as a header, never leaked into a path.
+        var sawCanaryHeader = false
+        var recorded = server.takeRequest(1, TimeUnit.SECONDS)
+        while (recorded != null) {
+            if (recorded.getHeader("X-Api-Key") == canaryApiKey) sawCanaryHeader = true
+            assertFalse(recorded.path.orEmpty().contains(canaryApiKey))
+            recorded = server.takeRequest(1, TimeUnit.SECONDS)
+        }
+        assertTrue("expected at least one recorded request to legitimately carry the canary as X-Api-Key", sawCanaryHeader)
+    }
+
     // ---- error mapping --------------------------------------------------
 
     @Test

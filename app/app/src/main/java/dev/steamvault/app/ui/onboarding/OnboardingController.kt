@@ -10,7 +10,6 @@ import dev.steamvault.app.net.profile.CleartextNotAllowedException
 import dev.steamvault.app.net.profile.ConnectivityProfile
 import dev.steamvault.app.net.profile.PublicDomainProfile
 import dev.steamvault.app.net.profile.SystemVpnProfile
-import dev.steamvault.app.net.steam.submitWebApiKey
 import dev.steamvault.app.repo.SteamIdentityRepository
 import dev.steamvault.app.repo.SteamIdentityState
 import dev.steamvault.app.repo.SteamLoginResult
@@ -78,9 +77,6 @@ class OnboardingController(
         private set
     var loginError by mutableStateOf<String?>(null)
         private set
-    var webApiKeyInput by mutableStateOf("")
-    var webApiKeyError by mutableStateOf<String?>(null)
-        private set
 
     val canAdvance: Boolean get() = canAdvanceOnboardingStep(step, tested)
 
@@ -104,8 +100,6 @@ class OnboardingController(
         connectionOk = false
         identityState = identityRepository.state()
         loginError = null
-        webApiKeyInput = ""
-        webApiKeyError = null
     }
 
     fun next() {
@@ -195,27 +189,12 @@ class OnboardingController(
         identityState = identityRepository.state()
     }
 
-    /** WP brief: "cleared from the field state after submit" -- see
-     * `submitWebApiKey`'s kdoc for why [webApiKeyInput] becomes `""`
-     * unconditionally, win or lose. */
-    fun submitWebApiKeyEntry() {
-        val result = submitWebApiKey(
-            rawInput = webApiKeyInput,
-            invalidFormatError = strings.invalidWebApiKeyFormat(),
-            genericError = { strings.webApiKeySaveFailed(it) },
-            persist = { identityRepository.setWebApiKey(it) },
-        )
-        webApiKeyInput = result.nextFieldValue
-        webApiKeyError = result.error
-        if (result.ok) identityState = identityRepository.state()
-    }
-
     // ---- Step 3: finish -------------------------------------------------------
 
     /** Persists the verified connection (and only the connection -- Steam
-     * identity was already persisted incrementally by [completeSteamLogin]/
-     * [submitWebApiKeyEntry] as each happened). Only reachable via the Done
-     * step, which is only reachable after step 1's [tested] gate passed. */
+     * identity was already persisted incrementally by [completeSteamLogin]
+     * as it happened). Only reachable via the Done step, which is only
+     * reachable after step 1's [tested] gate passed. */
     fun finish() {
         credentialStore.setBaseUrl(baseUrlText.trim())
         credentialStore.setProfileKind(

@@ -64,4 +64,35 @@ class EncryptedCredentialStoreSourceTest {
             source.contains("MasterKey.Builder("),
         )
     }
+
+    /**
+     * WP 4h.4 round-2 review catch: the shared `legacyPrefKeysToScrub`
+     * function is behaviourally pinned for `InMemoryCredentialStore` (the
+     * JVM-testable fake) via `InMemoryCredentialStoreTest`'s `MUTATION
+     * PIN`, but nothing in the JVM suite ever CONSTRUCTS a real
+     * [EncryptedCredentialStore] or calls its `clearSteamIdentity()` — so
+     * the production call sites themselves were unpinned; a diff that
+     * deleted BOTH the `init` block's scrub loop and
+     * `clearSteamIdentity()`'s restored `editor.remove(...)` line still
+     * passed the entire suite (577/0, both variants — measured, not
+     * assumed). This is a STRUCTURAL pin, not a behavioural one, for the
+     * same JVM/Keystore reason every other test in this file is
+     * structural: it proves the call sites exist in the source text, not
+     * that they run correctly at runtime.
+     */
+    @Test
+    fun `calls the shared legacy-key scrub at construction and on sign-out`() {
+        assertTrue(
+            "expected EncryptedCredentialStore.kt's constructor to call legacyPrefKeysToScrub(...) " +
+                "(WP 4h.4: the one-time migration that actively removes an existing install's " +
+                "abandoned device-local Steam Web API key, rather than leaving it to rot unrevoked)",
+            source.contains("legacyPrefKeysToScrub("),
+        )
+        assertTrue(
+            "expected EncryptedCredentialStore.kt's clearSteamIdentity() to also remove " +
+                "LEGACY_STEAM_WEB_API_KEY_PREF_NAME on Steam sign-out (belt-and-suspenders with the " +
+                "construction-time scrub above)",
+            source.contains("editor.remove(LEGACY_STEAM_WEB_API_KEY_PREF_NAME)"),
+        )
+    }
 }

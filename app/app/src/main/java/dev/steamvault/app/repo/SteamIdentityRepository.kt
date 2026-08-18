@@ -1,21 +1,27 @@
 package dev.steamvault.app.repo
 
+import dev.steamvault.app.net.VaultApiClient
 import dev.steamvault.app.net.model.OwnedGame
 import dev.steamvault.app.net.steam.PendingLoginState
+import dev.steamvault.app.net.steam.SteamLibraryFetcher
 import dev.steamvault.app.net.steam.SteamLoginState
 import dev.steamvault.app.net.steam.SteamOpenIdCallback
 import dev.steamvault.app.net.steam.SteamOpenIdClient
 import dev.steamvault.app.net.steam.SteamOpenIdConfig
 import dev.steamvault.app.net.steam.SteamOpenIdVerifier
-import dev.steamvault.app.net.steam.SteamWebApiClient
-import dev.steamvault.app.net.steam.SteamLibraryFetcher
+import dev.steamvault.app.net.steam.VaultRelayLibraryFetcher
 import dev.steamvault.app.storage.CredentialStore
 
-/** Everything the identity screen needs to render (WP 4b.3 brief: "signed-in state shows steamid/persona + sign-out"). */
+/**
+ * Everything the identity screen needs to render (WP 4b.3 brief: "signed-in
+ * state shows steamid/persona + sign-out"). Lost its third field,
+ * `hasWebApiKey`, in WP 4h.4 (ADR-0004's second addendum): there is no
+ * device-local Steam Web API key left to have configured or not -- library
+ * data flows through vault-api's own relay unconditionally once signed in.
+ */
 data class SteamIdentityState(
     val steamId64: String?,
     val personaName: String?,
-    val hasWebApiKey: Boolean,
 ) {
     val isSignedIn: Boolean get() = steamId64 != null
 }
@@ -29,11 +35,16 @@ sealed class SteamLoginResult {
 }
 
 /**
- * Steam identity (OpenID sign-in state + the on-device Steam Web API key
- * and library) — the data layer WP 4b.3 asks for. Nothing here calls
- * vault-api; this repository and [dev.steamvault.app.net.VaultApiClient]
- * are entirely separate (ADR-0004 decision 2, `SteamKeyIsolationTest`
- * pins the isolation structurally).
+ * Steam identity (OpenID sign-in state + library data) — the data layer WP
+ * 4b.3 asks for, updated by WP 4h.4 (ADR-0004's second addendum): OpenID
+ * sign-in is still fully independent of vault-api (identity established on
+ * Valve's page, never a credential this app sees), but library/persona
+ * fetching now goes THROUGH vault-api's relay ([libraryFetcher]'s
+ * production implementation, [VaultRelayLibraryFetcher], talks to
+ * [VaultApiClient]) rather than being isolated from it — see
+ * `SteamKeyIsolationTest`'s updated invariant (no direct-to-Valve Web API
+ * host reference anywhere in `src/main` anymore) for what is STILL
+ * structurally guaranteed after this change.
  */
 interface SteamIdentityRepository {
     /** Current persisted state, read fresh from [CredentialStore] every call. */
@@ -52,50 +63,59 @@ interface SteamIdentityRepository {
      */
     suspend fun completeLogin(rawCallbackUrl: String): SteamLoginResult
 
-    /** Persists the user's own Steam Web API key (entered manually — never obtained via OpenID). */
-    fun setWebApiKey(key: String)
-
     /**
-     * Best-effort persona-name refresh via `GetPlayerSummaries` — WP brief:
-     * "persona name optional". Requires both a signed-in [state] and a
-     * configured Web API key; returns `false` (without throwing) if either
-     * is missing or the call fails, `true` once the persona name is
-     * persisted.
+     * Best-effort persona-name refresh via `GetPlayerSummaries` (relayed
+     * through vault-api as of WP 4h.4) — WP brief: "persona name optional".
+     * Requires a signed-in [state]; returns `false` (without throwing) if
+     * not signed in or the call fails for any reason (no vault-api
+     * connection, no relay key configured server-side, a network failure),
+     * `true` once the persona name is persisted.
      */
     suspend fun refreshPersonaName(): Boolean
 
     /**
      * `GetOwnedGames`'s game count only — WP brief: "library fetch happens
-     * in 4b.4 — expose the repository, render a count preview only". Kept
-     * around for [dev.steamvault.app.ui.identity.IdentityScreen]'s existing
-     * "check library size" affordance; superseded for the actual library
-     * grid by [ownedGames] below (WP 4b.4), which this delegates to so the
-     * two never drift.
+     * in 4b.4 — expose the repository, render a count preview only".
+     * Superseded for the actual library grid by [ownedGames] below (WP
+     * 4b.4), which this delegates to so the two never drift.
      */
     suspend fun ownedGamesCountPreview(): Result<Int>
 
     /**
      * The full owned-library list (WP 4b.4 brief: "Steam library (owned
-     * games) merge per the mockup's model"). `Result.failure` — never a
-     * thrown exception — when not signed in, no Web API key is configured,
-     * or the on-device `GetOwnedGames` call itself fails; the Library
-     * screen's merge logic (`ui/library/logic/LibraryMerge.kt`) treats
-     * absence of this data as "the vault-only view must be fully
-     * functional" (mockup-notes.md open question 5 / WP brief), not an
-     * error state.
+     * games) merge per the mockup's model"; WP 4h.4: now relayed through
+     * vault-api). `Result.failure` — never a thrown exception — when not
+     * signed in or the relay call itself fails for any reason (no vault-api
+     * connection, `409` no relay key configured server-side, `422` a
+     * rejected steamid, a network failure); the Library screen's merge
+     * logic (`ui/library/logic/LibraryMerge.kt`) treats absence of this
+     * data as "the vault-only view must be fully functional" (mockup-
+     * notes.md open question 5 / WP brief), not an error state. Settings'
+     * Steam-identity section (`ui/settings/logic/SteamLibraryStatus.kt`)
+     * is where the SPECIFIC reason (not configured / private-or-empty /
+     * generic failure) gets a dedicated message instead.
      */
     suspend fun ownedGames(): Result<List<OwnedGame>>
 
-    /** Clears everything Steam-identity-related (steamid, persona, Web API key) — WP brief: "sign-out clears everything". */
+    /** Clears everything Steam-identity-related (steamid, persona) — WP brief: "sign-out clears everything". */
     fun signOut()
 }
 
 class SteamIdentityRepositoryImpl(
     private val credentialStore: CredentialStore,
     private val openIdVerifier: SteamOpenIdVerifier = SteamOpenIdClient(),
-    private val libraryFetcher: SteamLibraryFetcher = SteamWebApiClient(
-        apiKeyProvider = { credentialStore.getSteamWebApiKey().orEmpty() },
-    ),
+    /**
+     * The CURRENT [VaultApiClient], or `null` if no vault-api connection is
+     * configured yet — read fresh on every [libraryFetcher] call (WP 4h.4),
+     * never captured once: this repository is constructed once, long
+     * before a connection necessarily exists (Steam sign-in, unlike library
+     * fetching, is reachable during onboarding). Production default `{
+     * null }` only matters when [libraryFetcher] is ALSO left at its
+     * default -- [dev.steamvault.app.MainActivity] always supplies its own
+     * lambda over `vaultApiClientState`.
+     */
+    vaultApiClientProvider: () -> VaultApiClient? = { null },
+    private val libraryFetcher: SteamLibraryFetcher = VaultRelayLibraryFetcher(vaultApiClientProvider),
     /** WP 4b.7 replay-residual fix -- see [PendingLoginState]'s kdoc. Held
      * per-repository-instance (repository lifetime == app process lifetime,
      * same as [MainActivity]'s `by lazy` wiring), not persisted: a login
@@ -111,7 +131,6 @@ class SteamIdentityRepositoryImpl(
     override fun state(): SteamIdentityState = SteamIdentityState(
         steamId64 = credentialStore.getSteamId64(),
         personaName = credentialStore.getSteamPersonaName(),
-        hasWebApiKey = !credentialStore.getSteamWebApiKey().isNullOrBlank(),
     )
 
     override fun buildLoginUrl(): String {
@@ -156,13 +175,8 @@ class SteamIdentityRepositoryImpl(
         return SteamLoginResult.Success(steamId64)
     }
 
-    override fun setWebApiKey(key: String) {
-        credentialStore.setSteamWebApiKey(key)
-    }
-
     override suspend fun refreshPersonaName(): Boolean {
         val steamId64 = credentialStore.getSteamId64() ?: return false
-        if (credentialStore.getSteamWebApiKey().isNullOrBlank()) return false
         val persona = try {
             libraryFetcher.getPlayerSummary(steamId64)
         } catch (_: Exception) {
@@ -178,9 +192,6 @@ class SteamIdentityRepositoryImpl(
     override suspend fun ownedGames(): Result<List<OwnedGame>> {
         val steamId64 = credentialStore.getSteamId64()
             ?: return Result.failure(IllegalStateException("not signed in with Steam"))
-        if (credentialStore.getSteamWebApiKey().isNullOrBlank()) {
-            return Result.failure(IllegalStateException("no Steam Web API key configured"))
-        }
         return try {
             Result.success(libraryFetcher.getOwnedGames(steamId64))
         } catch (e: Exception) {

@@ -4093,12 +4093,21 @@ setting a key.
 ### What it is for
 
 The Steam Web API sends no CORS headers, so the Phase-4a **web UI**, running
-in a browser, cannot call `GetOwnedGames`/`GetPlayerSummaries` directly the
-way the native Android app does with its own device-local key (ADR-0004
-decision 2, untouched by this work package). This relay is vault-api's
-narrow answer: it stores one revocable, **read-scoped** Steam Web API key —
-entered once by the operator in the web UI's settings — and relays exactly
-two calls on the caller's behalf:
+in a browser, cannot call `GetOwnedGames`/`GetPlayerSummaries` directly at
+all. This relay is vault-api's narrow answer: it stores one revocable,
+**read-scoped** Steam Web API key — entered once by the operator in the web
+UI's settings — and relays exactly two calls on the caller's behalf:
+
+**Superseded (WP 4h.4, `app/README.md` "Steam library via the vault relay"):
+the native Android app uses this exact same relay now, not a device-local
+key of its own.** ADR-0004 decision 2 originally gave the app an independent,
+device-local path (its own Steam Web API key, entered on the phone, never
+proxied); ADR-0004's second addendum retired that path — the per-user key
+ask, a second egress point toward Valve, and a privacy gate (WP 4h.0) that
+only covered this relay were all reasons to move the app onto the SAME two
+endpoints below rather than keep two parallel designs. `GET /v1/steam/key`
+et al. below remain the operator-facing key management surface; nothing
+about THIS relay's shape changed for the app to start using it.
 
 - `IPlayerService/GetOwnedGames/v1` — the library grid's game list;
 - `ISteamUser/GetPlayerSummaries/v2` — persona name and avatar.

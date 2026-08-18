@@ -31,6 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import dev.steamvault.app.R
@@ -40,6 +41,7 @@ import dev.steamvault.app.storage.ProfileKind
 import dev.steamvault.app.ui.settings.logic.SettingDraft
 import dev.steamvault.app.ui.settings.logic.SettingsApplies
 import dev.steamvault.app.ui.settings.logic.SettingsSource
+import dev.steamvault.app.ui.settings.logic.SteamLibraryStatus
 import dev.steamvault.app.ui.settings.logic.canResetSetting
 import dev.steamvault.app.ui.settings.logic.effectiveAsFieldText
 import dev.steamvault.app.ui.settings.logic.parseSettingsApplies
@@ -85,7 +87,7 @@ fun SettingsScreen(
             }
 
             HorizontalDivider()
-            SteamIdentitySection(controller, onSignInSteamClick)
+            SteamIdentitySection(controller, scope, onSignInSteamClick)
             HorizontalDivider()
             NotificationsSection(onRequestNotificationPermission)
             HorizontalDivider()
@@ -374,11 +376,17 @@ private fun WebhookEventsField(
 }
 
 // ---------------------------------------------------------------------
-// Steam identity section (existing sign-in state + Web API key management)
+// Steam identity section (sign-in state +, WP 4h.4, an on-demand library
+// check against vault-api's relay -- there is no device-local key left to
+// manage, see ADR-0004's second addendum)
 // ---------------------------------------------------------------------
 
 @Composable
-private fun SteamIdentitySection(controller: SettingsController, onSignInSteamClick: () -> Unit) {
+private fun SteamIdentitySection(
+    controller: SettingsController,
+    scope: kotlinx.coroutines.CoroutineScope,
+    onSignInSteamClick: () -> Unit,
+) {
     Text(stringResource(R.string.settings_section_steam), style = MaterialTheme.typography.titleMedium)
     val identity: SteamIdentityState = controller.identityState
 
@@ -395,28 +403,35 @@ private fun SteamIdentitySection(controller: SettingsController, onSignInSteamCl
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         OutlinedButton(onClick = { controller.signOutSteam() }) { Text(stringResource(R.string.identity_sign_out)) }
-    }
 
-    Text(stringResource(R.string.onboarding_steam_key_label), style = MaterialTheme.typography.titleSmall)
-    // Masked display (WP brief: "only whether set, never the value").
-    Text(
-        if (identity.hasWebApiKey) stringResource(R.string.settings_steam_key_masked) else stringResource(R.string.settings_steam_key_not_set),
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    OutlinedTextField(
-        value = controller.webApiKeyInput,
-        onValueChange = { controller.webApiKeyInput = it },
-        placeholder = { Text(stringResource(R.string.onboarding_steam_key_placeholder)) },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-    )
-    controller.webApiKeyError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = { controller.submitWebApiKeyEntry() }) { Text(stringResource(R.string.onboarding_steam_key_save)) }
-        if (identity.hasWebApiKey) {
-            OutlinedButton(onClick = { controller.removeWebApiKey() }) { Text(stringResource(R.string.settings_steam_key_remove)) }
+        OutlinedButton(
+            onClick = { controller.checkSteamLibrary(scope) },
+            enabled = !controller.libraryChecking,
+        ) {
+            Text(
+                if (controller.libraryChecking) {
+                    stringResource(R.string.settings_steam_library_checking)
+                } else {
+                    stringResource(R.string.settings_steam_library_check_button)
+                },
+            )
         }
+        Text(
+            steamLibraryStatusText(controller.libraryStatus),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
+}
+
+@Composable
+private fun steamLibraryStatusText(status: SteamLibraryStatus): String = when (status) {
+    SteamLibraryStatus.Unknown -> stringResource(R.string.settings_steam_library_unknown)
+    is SteamLibraryStatus.Ready ->
+        pluralStringResource(R.plurals.settings_steam_library_count, status.gameCount, status.gameCount)
+    SteamLibraryStatus.MaybePrivateOrEmpty -> stringResource(R.string.settings_steam_library_maybe_private)
+    SteamLibraryStatus.RelayNotConfigured -> stringResource(R.string.settings_steam_library_not_configured)
+    SteamLibraryStatus.InvalidSteamId -> stringResource(R.string.settings_steam_library_invalid_steamid)
+    is SteamLibraryStatus.Failed -> stringResource(R.string.settings_steam_library_error, status.message)
 }
 
 // ---------------------------------------------------------------------

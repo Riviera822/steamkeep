@@ -88,8 +88,17 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
 
     private val credentialStore by lazy { EncryptedCredentialStore(applicationContext) }
+
+    /** WP 4h.4: [dev.steamvault.app.net.steam.VaultRelayLibraryFetcher] (this
+     * repository's default library fetcher) needs the CURRENT
+     * [VaultApiClient], read fresh on every call -- `vaultApiClientState`
+     * may still be `null` at the moment this lazy block itself runs (Steam
+     * OpenID sign-in, unlike library fetching, is reachable during
+     * onboarding, before any connection exists), but the lambda below
+     * re-reads the field every time it is invoked, same "read fresh"
+     * pattern [refreshVaultApiClient]'s own `apiKeyProvider` lambda uses. */
     private val identityRepository: SteamIdentityRepository by lazy {
-        SteamIdentityRepositoryImpl(credentialStore)
+        SteamIdentityRepositoryImpl(credentialStore, vaultApiClientProvider = { vaultApiClientState })
     }
     private val libraryPreferences by lazy { SharedPreferencesLibraryPreferences(applicationContext) }
 
@@ -304,9 +313,10 @@ class MainActivity : ComponentActivity() {
     }
 
     /** WP 4b.7's screen -- replaces the previous bare
-     * `ui.identity.IdentityScreen` placeholder (still compiles,
-     * unreferenced -- same "kept but unreachable" treatment WP 4b.3/4b.4
-     * gave `ui.gallery.GalleryScreen`). */
+     * `ui.identity.IdentityScreen` placeholder (removed outright in WP
+     * 4h.4, once the device-local Steam Web API key concept it rendered no
+     * longer existed to describe -- see `app/README.md`'s "Steam library
+     * via the vault relay" section). */
     @Composable
     private fun SettingsDestinationContent() {
         val controller = settingsControllerState

@@ -6,9 +6,32 @@ package dev.steamvault.app.storage
  * [CredentialStore] (repositories, API-client key wiring) can be tested on
  * the JVM without a device. Not a test CLASS itself (no `@Test` methods) —
  * see `InMemoryCredentialStoreTest` for the contract it is pinned against.
+ *
+ * [seed] (WP 4h.4 review fix) lets a test simulate "an existing install
+ * already has raw pref data" BEFORE construction runs — its one real use
+ * is `InMemoryCredentialStoreTest`'s migration pin: seeding
+ * [LEGACY_STEAM_WEB_API_KEY_PREF_NAME] and observing it gone afterward,
+ * the same shape [EncryptedCredentialStore]'s real constructor-time scrub
+ * has but cannot be exercised on the JVM directly. Every other call site
+ * keeps the no-arg default and is unaffected.
  */
-class InMemoryCredentialStore : CredentialStore {
-    private val values = mutableMapOf<String, String>()
+class InMemoryCredentialStore(seed: Map<String, String> = emptyMap()) : CredentialStore {
+    private val values = mutableMapOf<String, String>().apply { putAll(seed) }
+
+    init {
+        // Mirrors EncryptedCredentialStore's real constructor-time
+        // migration (same shared, pure `legacyPrefKeysToScrub` function)
+        // -- see CredentialStore.kt's kdoc.
+        for (key in legacyPrefKeysToScrub(values.keys.toSet())) {
+            values.remove(key)
+        }
+    }
+
+    /** Test-only introspection (WP 4h.4 migration pin): whether a RAW key
+     * name is present in the backing map, bypassing the [CredentialStore]
+     * interface entirely -- which, by design, has no accessor for the
+     * retired legacy key. */
+    internal fun containsRawKeyForTest(key: String): Boolean = values.containsKey(key)
 
     override fun getApiKey(): String? = values[KEY_API_KEY]
     override fun setApiKey(key: String?) = set(KEY_API_KEY, key)
@@ -25,13 +48,12 @@ class InMemoryCredentialStore : CredentialStore {
     override fun getSteamPersonaName(): String? = values[KEY_STEAM_PERSONA_NAME]
     override fun setSteamPersonaName(name: String?) = set(KEY_STEAM_PERSONA_NAME, name)
 
-    override fun getSteamWebApiKey(): String? = values[KEY_STEAM_WEB_API_KEY]
-    override fun setSteamWebApiKey(key: String?) = set(KEY_STEAM_WEB_API_KEY, key)
-
     override fun clearSteamIdentity() {
         values.remove(KEY_STEAM_ID64)
         values.remove(KEY_STEAM_PERSONA_NAME)
-        values.remove(KEY_STEAM_WEB_API_KEY)
+        // Restored (WP 4h.4 review fix), mirroring EncryptedCredentialStore's
+        // own restored line -- see that class's kdoc.
+        values.remove(LEGACY_STEAM_WEB_API_KEY_PREF_NAME)
     }
 
     override fun clear() {
@@ -48,6 +70,5 @@ class InMemoryCredentialStore : CredentialStore {
         const val KEY_PROFILE_KIND = "profileKind"
         const val KEY_STEAM_ID64 = "steamId64"
         const val KEY_STEAM_PERSONA_NAME = "steamPersonaName"
-        const val KEY_STEAM_WEB_API_KEY = "steamWebApiKey"
     }
 }

@@ -10,7 +10,13 @@ private const val PREF_KEY_BASE_URL = "vault_base_url"
 private const val PREF_KEY_PROFILE_KIND = "vault_profile_kind"
 private const val PREF_KEY_STEAM_ID64 = "steam_id64"
 private const val PREF_KEY_STEAM_PERSONA_NAME = "steam_persona_name"
-private const val PREF_KEY_STEAM_WEB_API_KEY = "steam_web_api_key"
+
+// WP 4h.4 removed the "steam_web_api_key" accessor pair entirely (ADR-0004's
+// second addendum: library data flows through the vault relay, never a
+// device-local key) -- see CredentialStore.kt's kdoc "Migration note" and
+// `legacyPrefKeysToScrub` for how an existing install's stored value under
+// that pref NAME is actively scrubbed (construction-time migration below),
+// not merely left unread.
 
 /**
  * [CredentialStore] backed by [EncryptedSharedPreferences] (androidx
@@ -55,6 +61,18 @@ class EncryptedCredentialStore(context: Context) : CredentialStore {
         )
     }
 
+    init {
+        // WP 4h.4 migration (review fix): an existing install may still
+        // have a value sitting under the retired device-local Steam Web
+        // API key's pref name -- scrub it once, the first time this store
+        // is constructed after upgrading, per `legacyPrefKeysToScrub`'s
+        // kdoc (CredentialStore.kt) and ADR-0010's "a credential nobody is
+        // prompted to revoke" reasoning.
+        for (key in legacyPrefKeysToScrub(prefs.all.keys)) {
+            prefs.edit().remove(key).apply()
+        }
+    }
+
     override fun getApiKey(): String? = prefs.getString(PREF_KEY_API_KEY, null)
     override fun setApiKey(key: String?) = putOrRemove(PREF_KEY_API_KEY, key)
 
@@ -70,14 +88,18 @@ class EncryptedCredentialStore(context: Context) : CredentialStore {
     override fun getSteamPersonaName(): String? = prefs.getString(PREF_KEY_STEAM_PERSONA_NAME, null)
     override fun setSteamPersonaName(name: String?) = putOrRemove(PREF_KEY_STEAM_PERSONA_NAME, name)
 
-    override fun getSteamWebApiKey(): String? = prefs.getString(PREF_KEY_STEAM_WEB_API_KEY, null)
-    override fun setSteamWebApiKey(key: String?) = putOrRemove(PREF_KEY_STEAM_WEB_API_KEY, key)
-
     override fun clearSteamIdentity() {
         val editor = prefs.edit()
         editor.remove(PREF_KEY_STEAM_ID64)
         editor.remove(PREF_KEY_STEAM_PERSONA_NAME)
-        editor.remove(PREF_KEY_STEAM_WEB_API_KEY)
+        // Restored (WP 4h.4 review fix): this line was deleted alongside
+        // the accessor pair it used to sit next to, which silently turned
+        // "sign out of Steam" into "leave the retired key in place" --
+        // belt-and-suspenders with the construction-time scrub in `init`
+        // above (harmless once that has already run; not redundant for
+        // the narrow window before the NEXT construction if a legacy
+        // value somehow reappears).
+        editor.remove(LEGACY_STEAM_WEB_API_KEY_PREF_NAME)
         editor.apply()
     }
 

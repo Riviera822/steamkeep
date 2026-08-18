@@ -140,9 +140,11 @@ for v1.)
 **vault-app** — Android app
 - Kotlin + Jetpack Compose
 - Steam identity via "Sign in with Steam" (OpenID against Valve's login
-  page — the app never sees credentials, see ADR-0004); library + covers
-  via Steam Web API (`GetOwnedGames`, device-local user-owned API key,
-  regular internet, never proxied through vault-api)
+  page — the app never sees credentials, see ADR-0004); library + persona
+  via vault-api's Steam relay since WP 4h.4 (ADR-0004 addendum 2: the
+  device-local Steam Web API key is gone — one operator key, server-side,
+  and WP 4h.0's privacy gate covers both frontends); covers still load
+  from Steam's public CDN
 - **Connectivity profiles** (user-selectable, abstracted behind one API-client
   interface — the server never knows or cares which one is used):
   - **Embedded Tailscale (tsnet):** Go Mobile `.aar` bridge, auth-key based.
@@ -1776,6 +1778,16 @@ surface (playtime and last-played now flow through the API response).
       rejected. This is the API-only half of the stance: the display-side
       "dismissible at any time, no nagging" half remains 4h.2/4h.3's to
       build. `docs/security/threat-model.md` §4 updated accordingly.
+- [x] **4h.4 (app)** — the Android app fetches library + persona through
+      vault-api's Steam relay; the device-local Steam Web API key is gone
+      (entry UI, EncryptedSharedPreferences storage, direct-to-Valve client
+      — deleted, with a construction-time + sign-out scrub for legacy
+      installs), no fallback by design so the 4h.0 gate cannot be bypassed
+      from a phone. Private-profile limit is a first-class UI state and an
+      accepted, recorded cost (ADR-0004 addendum 2). Suite 592→578 both
+      variants, ledger reconciled per file; Opus review rounds 1-3
+      (FAIL/FAIL/PASS — threat-model truth, pinned-the-fake call-site gap,
+      dual-source-set isolation blind spot all closed). 2026-08-19.
 - [x] **4h.1 (api)** — two small additions that make the panel sharp:
       `rtime_last_played` carried through the Steam relay (Steam returns it,
       we simply never asked; `playtime_forever` is ALREADY relayed and

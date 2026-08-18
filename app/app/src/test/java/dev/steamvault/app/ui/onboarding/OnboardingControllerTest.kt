@@ -15,26 +15,20 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-private const val VALID_KEY = "0123456789ABCDEF0123456789abcdef"
-
 private class FakeOnboardingStrings : OnboardingStrings {
     override fun invalidUrl() = "invalid-url"
     override fun enterApiKeyFirst() = "enter-key-first"
     override fun connectionOk() = "ok"
     override fun connectionFailure(reason: ConnectionFailureReason) = "failure:$reason"
-    override fun invalidWebApiKeyFormat() = "invalid-format"
-    override fun webApiKeySaveFailed(cause: Throwable) = "save-failed:${cause.message}"
 }
 
 private class FakeSteamIdentityRepository(
-    private var current: SteamIdentityState = SteamIdentityState(null, null, false),
+    private var current: SteamIdentityState = SteamIdentityState(null, null),
     var loginResult: SteamLoginResult = SteamLoginResult.Success("76561198042117903"),
 ) : SteamIdentityRepository {
-    var setWebApiKeyCalls = mutableListOf<String>()
     var buildLoginUrlCalls = 0
     var completeLoginCalls = 0
     var signOutCalls = 0
-    var throwOnSetWebApiKey: Exception? = null
 
     override fun state(): SteamIdentityState = current
     override fun buildLoginUrl(): String {
@@ -50,18 +44,12 @@ private class FakeSteamIdentityRepository(
         return loginResult
     }
 
-    override fun setWebApiKey(key: String) {
-        throwOnSetWebApiKey?.let { throw it }
-        setWebApiKeyCalls.add(key)
-        current = current.copy(hasWebApiKey = true)
-    }
-
     override suspend fun refreshPersonaName(): Boolean = false
     override suspend fun ownedGamesCountPreview(): Result<Int> = Result.success(0)
     override suspend fun ownedGames(): Result<List<OwnedGame>> = Result.success(emptyList())
     override fun signOut() {
         signOutCalls++
-        current = SteamIdentityState(null, null, false)
+        current = SteamIdentityState(null, null)
     }
 }
 
@@ -150,47 +138,10 @@ class OnboardingControllerTest {
         assertEquals("rejected", controller.loginError)
     }
 
-    // ---- submitWebApiKeyEntry: the compose-state clearing pin (WP 4b.7 brief) --
-
-    @Test
-    fun `MUTATION PIN -- webApiKeyInput is cleared after a SUCCESSFUL submit`() {
-        val (controller, _, identity) = controller()
-        controller.start(OnboardingMode.FIRST_RUN)
-        controller.webApiKeyInput = VALID_KEY
-
-        controller.submitWebApiKeyEntry()
-
-        assertEquals("", controller.webApiKeyInput)
-        assertNull(controller.webApiKeyError)
-        assertEquals(listOf(VALID_KEY), identity.setWebApiKeyCalls)
-        assertTrue(controller.identityState.hasWebApiKey)
-    }
-
-    @Test
-    fun `MUTATION PIN -- webApiKeyInput is cleared even after a REJECTED (invalid format) submit`() {
-        val (controller, _, identity) = controller()
-        controller.start(OnboardingMode.FIRST_RUN)
-        controller.webApiKeyInput = "not-a-valid-key"
-
-        controller.submitWebApiKeyEntry()
-
-        assertEquals("", controller.webApiKeyInput)
-        assertEquals("invalid-format", controller.webApiKeyError)
-        assertTrue(identity.setWebApiKeyCalls.isEmpty())
-    }
-
-    @Test
-    fun `MUTATION PIN -- webApiKeyInput is cleared even when the repository THROWS on persist`() {
-        val (controller, _, identity) = controller()
-        identity.throwOnSetWebApiKey = IllegalStateException("boom")
-        controller.start(OnboardingMode.FIRST_RUN)
-        controller.webApiKeyInput = VALID_KEY
-
-        controller.submitWebApiKeyEntry()
-
-        assertEquals("", controller.webApiKeyInput)
-        assertEquals("save-failed:boom", controller.webApiKeyError)
-    }
+    // ---- WP 4h.4: no device-local Steam Web API key entry left at all ---------
+    // (there used to be a "submitWebApiKeyEntry" mutation-pin block here --
+    // ADR-0004's second addendum removed the field, the method, and the UI
+    // path entirely; SteamIdentityState no longer carries hasWebApiKey.)
 
     // ---- finish() persists exactly the connection fields -----------------------
 

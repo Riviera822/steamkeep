@@ -806,8 +806,9 @@ entry in this register): one new divergence lands in this package.
   gains an opt-in relay for `GetOwnedGames`/`GetPlayerSummaries`; the Web
   API key is entered in the web UI settings and stored server-side.
   Boundaries in the ADR-0004 addendum (public-profile reads only, key
-  never logged/echoed, relay off until configured, Android keeps the
-  device-local path). NOTE: the relay endpoint itself is an api/-track
+  never logged/echoed, relay off until configured, Android kept the
+  device-local path at the time — superseded by WP 4h.4 (2026-08-19),
+  which moved the app onto this same relay; see ADR-0004 addendum 2). NOTE: the relay endpoint itself is an api/-track
   mini-package (serial against other api/ work); 4a.6 consumes it.
 ### WP 4a.7 — Notifications + bypass surfaces (web/) — **serial after 4a.3/4a.5 merge**
 - Bell + panel with navigate-to-target (round-6 semantics), bypass banner

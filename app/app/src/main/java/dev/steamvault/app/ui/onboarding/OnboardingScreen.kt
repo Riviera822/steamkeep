@@ -278,30 +278,6 @@ private fun SteamStep(
             Text(stringResource(R.string.identity_sign_out))
         }
     }
-
-    Text(stringResource(R.string.onboarding_steam_key_label), style = MaterialTheme.typography.titleSmall)
-    OutlinedTextField(
-        value = controller.webApiKeyInput,
-        onValueChange = { controller.webApiKeyInput = it },
-        placeholder = { Text(stringResource(R.string.onboarding_steam_key_placeholder)) },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-    )
-    Button(onClick = { controller.submitWebApiKeyEntry() }) {
-        Text(stringResource(R.string.onboarding_steam_key_save))
-    }
-    controller.webApiKeyError?.let {
-        Text(text = it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-    }
-    Text(
-        text = if (identity.hasWebApiKey) {
-            stringResource(R.string.onboarding_steam_key_configured)
-        } else {
-            stringResource(R.string.onboarding_steam_key_not_configured)
-        },
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
 }
 
 // ---------------------------------------------------------------------
@@ -329,7 +305,4 @@ private fun DoneStep(controller: OnboardingController) {
             },
         ),
     )
-    if (identity.hasWebApiKey) {
-        Text(stringResource(R.string.onboarding_steam_key_configured))
-    }
 }

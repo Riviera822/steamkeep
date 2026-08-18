@@ -19,10 +19,12 @@ package dev.steamvault.app.ui.onboarding.logic
  *                    leave this step on an unverified guess.
  *   Step 2 Steam    — optional: Steam OpenID sign-in (this app's OWN
  *                     device-local flow, WP 4b.3 -- unlike the web port,
- *                     which uses the vault-api Steam relay instead) plus the
- *                     Steam Web API key entry this WP adds a UI for
- *                     (closing the WP 4b.3 "setWebApiKey has no UI path" gap
- *                     recorded in app/README.md).
+ *                     which uses the vault-api Steam relay for identity
+ *                     too). WP 4h.4 removed this step's OTHER original
+ *                     half -- a device-local Steam Web API key entry field
+ *                     -- entirely: library data is relayed through
+ *                     vault-api unconditionally once signed in, so there is
+ *                     no key left for this step to collect.
  *   Step 3 Done     — summary, then the caller persists to
  *                     [dev.steamvault.app.storage.CredentialStore] and
  *                     shows the real app.

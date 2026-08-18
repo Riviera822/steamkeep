@@ -3,19 +3,30 @@
 **Verified against commit `234f16c`, 2026-08-18**, with §4 re-verified
 against the code as of **WP 4h.0** (not yet its own commit at the time of
 that update — see that section for file/line citations into the current
-tree instead of a hash). **WP 5.3-fix (this follow-up commit, 2026-08-18)
+tree instead of a hash). **WP 5.3-fix (a follow-up commit, 2026-08-18)
 re-verified every citation into `api/vault_api/routers/steam.py`,
 `config.py` and `settings_store.py` against the current tree** — see §4's
 own "Citation style note" for what changed there — **and corrected §5's
 outbound-flows list**, which had omitted two Android outbound calls it
-should have named from the start. Every other citation below was opened
-and read at `234f16c`. `docs/PROJECT_PLAN.md` in particular grows under
-active editing — including this very package's own tick — so citations
-into it are given as section-plus-quote anchors, never line numbers,
-precisely because a line number into a file that grows is a claim with a
-short shelf life. Citations into files that are not actively growing
-(source code, other docs) are given as line numbers/ranges, each verified
-at the stated commit; re-open them if reading this well after that date.
+should have named from the start. **WP 4h.4 (this commit, 2026-08-18)
+re-verified every §4/§5 citation into the Android app against the current
+tree, following ADR-0004's second addendum**: the app's device-local Steam
+Web API key and its direct-to-Valve calls are gone, closing the gap §4
+previously flagged against the app and retiring §5's former item 4 to a
+historical note (both sections below state the new facts plainly, not as
+a diff against the old text) — `app/`'s Kotlin sources now count as
+actively developed for this document's own citation-style purposes (see
+§4's "Citation style note"), so citations into them added or touched by
+this pass use `module::symbol` anchors with a short quote, the same
+convention WP 5.3-fix established for the Python files. Every other
+citation below was opened and read at `234f16c`. `docs/PROJECT_PLAN.md` in
+particular grows under active editing — including this very package's own
+tick — so citations into it are given as section-plus-quote anchors, never
+line numbers, precisely because a line number into a file that grows is a
+claim with a short shelf life. Citations into files that are not actively
+growing (source code, other docs) are given as line numbers/ranges, each
+verified at the stated commit; re-open them if reading this well after
+that date.
 
 This document describes the security posture of SteamVault *as shipped*, not
 as designed or aspired to. Every claim about behaviour below is followed by
@@ -30,13 +41,22 @@ document as an honest description of a hobby project's attack surface, not
 as a certification.
 
 **The privacy control §4 previously described as "in flight" has landed
-(WP 4h.0, ADR-0010).** §4 below now describes the shipped gate: two
-env-only, non-persistable, independent opt-outs for the Steam relay's
-`playtime_forever`/`rtime_last_played` fields, both off by default, each
-enforced at the relay boundary by omitting the JSON key entirely (not
-sending `0`/`null`), with `PATCH /v1/settings` rejecting attempts to set
-either. What has NOT changed, and is still worth flagging plainly: the gate
-covers `vault-api`'s relay only — see §4's own note on the Android app.
+(WP 4h.0, ADR-0010), and the gap this note used to flag against the
+Android app is now closed too (WP 4h.4, this commit).** §4 below now
+describes the shipped gate: two env-only, non-persistable, independent
+opt-outs for the Steam relay's `playtime_forever`/`rtime_last_played`
+fields, both off by default, each enforced at the relay boundary by
+omitting the JSON key entirely (not sending `0`/`null`), with `PATCH
+/v1/settings` rejecting attempts to set either. **What has changed since
+the previous version of this note:** the gate now covers both frontends,
+because the Android app no longer has an independent path to Valve for
+library data at all — ADR-0004's second addendum removed the app's
+device-local Steam Web API key entirely, so `GET /v1/steam/owned-games`
+is the ONLY source of library data for either frontend, with no fallback.
+See §4's own note below for the full detail, including what did NOT
+change: the app's OpenID identity verification still talks to Valve
+directly, but that flow carries no library data, only the identity
+assertion.
 
 ---
 
@@ -382,29 +402,72 @@ and restarting the `vault-api` container. `GET /v1/settings` still reports
 both as informational, env-only rows so an operator (or a future settings
 UI) can see the current state without a switch that would `422`.
 
-**What this gate does NOT cover: the Android app fetches playtime directly
-from Valve, with its own device-local key, never through this relay.**
-`SteamWebApiClient`'s own `STEAM_API_HOST`/`STEAM_API_BASE` constants
-(`app/app/src/main/java/dev/steamvault/app/net/steam/SteamWebApiClient.kt:
-129-131`) show the app talking to `api.steampowered.com` directly — the
-device-local-key design ADR-0004 always specified (§3) — so
-`VAULT_RELAY_EXPOSE_PLAYTIME`/`_LAST_PLAYED` have no effect on that path by
-construction, not by omission: there is nothing in `vault-api` for them to
-gate on a request the server never sees. This is not a live contradiction
-today — no Android UI code renders `playtimeForever` anywhere (verified by
-search, zero matches under `app/app/src/main/java/dev/steamvault/app/ui/`)
-— but a reader must not conclude the server-side switch reaches that path
-if a future Android screen ever displays it. **As of the tree this section
-was re-verified against, WP 4h.4 is in review (not yet merged, and not
-described here as landed) and is scoped to remove exactly this direct
-library-call path** (`SteamIdentityRepositoryImpl`'s `SteamWebApiClient`
-wiring, §5 below) **so the relay's server-side gate becomes the only path
-for these two fields once it lands.** What WP 4h.4 does NOT touch, and
-what §5 states separately: the OpenID `check_authentication` round trip
-against Valve (`SteamOpenIdClient.checkAuthentication`) establishes this
-device's Steam identity regardless of whether the library-fetch path
-exists at all, so that outbound flow to Valve remains even after WP 4h.4 —
-identity, not library data, is what it carries.
+**Updated (WP 4h.4, this commit): the gap this note used to describe is
+closed — the gate now covers both frontends.** ADR-0004's second addendum
+(`docs/adr/0004-steam-credentials-never-touch-steamvault.md`, "Addendum 2")
+removed the Android app's device-local Steam Web API key entirely.
+`net/steam/VaultRelayLibraryFetcher.kt::VaultRelayLibraryFetcher` — the
+app's one production `SteamLibraryFetcher` — calls
+`net/VaultApiClient.kt::steamOwnedGames`/`steamPlayerSummaries`, which hit
+the SAME `GET /v1/steam/owned-games`/`GET /v1/steam/player-summaries`
+routes the web UI already used ("`suspend fun steamOwnedGames(steamId64:
+String): OwnedGamesRelayOut = get("/v1/steam/owned-games", …)`" —
+`net/VaultApiClient.kt::steamOwnedGames`). Because both frontends now go
+through the identical route, `VAULT_RELAY_EXPOSE_PLAYTIME`/`_LAST_PLAYED`
+(`api/vault_api/routers/steam.py::_build_owned_game_out`) gate what the
+app receives exactly as they already gated the web UI — there is no
+longer a second, ungated path for these two fields to reach a device
+through.
+
+**There is no fallback to a direct Valve call from the app, and this is
+structurally pinned, not merely true today.**
+`app/app/src/test/java/dev/steamvault/app/net/SteamKeyIsolationTest.kt`
+walks every shipped Kotlin source set (`src/main` AND `src/debug` — the
+second scan closed a review-round blind spot) and asserts, by full-text
+search, that neither the literal host `api.steampowered.com` nor a
+`getSteamWebApiKey`/`setSteamWebApiKey` accessor pair appears anywhere:
+"`api.steampowered.com must not appear ANYWHERE in src/main or
+src/debug`" (`SteamKeyIsolationTest.kt`, the test's own failure-message
+literal). The device-local key is gone from storage, not merely unused:
+`storage/CredentialStore.kt::legacyPrefKeysToScrub` runs once at
+construction in every `CredentialStore` implementation and removes an
+existing install's already-abandoned key. **Precisely what is pinned
+where (review round 2 correction — an earlier version of this sentence
+overstated this): the JVM-testable fake's copy of this migration is
+BEHAVIOURALLY tested** — `InMemoryCredentialStoreTest.kt`'s `MUTATION
+PIN -- construction scrubs an existing install's legacy Steam Web API
+key` actually constructs a store over seeded data and observes the key
+gone — **but `storage/EncryptedCredentialStore.kt`'s real `init` block
+and its `clearSteamIdentity`'s restored removal line cannot run on the
+JVM at all (no Android Keystore off-device, same constraint this
+document's §7 "Storage on each client" already states for this class),
+so both are pinned STRUCTURALLY instead**, the same technique this class's
+other three guarantees already use:
+`EncryptedCredentialStoreSourceTest.kt`'s `calls the shared legacy-key
+scrub at construction and on sign-out` reads the class's own source text
+and asserts both call sites are present by name — proven to actually
+catch a regression: deleting either the `init` block or
+`clearSteamIdentity`'s removal line (independently, reviewer-verified)
+made that structural test fail, while the full behavioural suite around
+it stayed green (577/0 on both variants) because nothing else in the JVM
+suite ever constructs a real `EncryptedCredentialStore` or calls its
+`clearSteamIdentity()`. And `storage/EncryptedCredentialStore.kt::clearSteamIdentity`
+removes the legacy key again on Steam sign-out, belt-and-suspenders. A
+credential nobody is ever prompted to revoke is exactly the failure mode
+ADR-0010 already names for a different control (§4 above); this WP
+applies the same reasoning to a credential instead of a privacy flag.
+
+**What did NOT change.** The app's OpenID identity verification
+(`net/steam/SteamOpenIdClient.kt::SteamOpenIdClient.checkAuthentication`)
+still POSTs directly to Valve's own login endpoint (`steamcommunity.com`,
+§5 item 5 below) — that flow establishes WHO is signing in and carries no
+library data; it is unaffected by this change, and §5 states the
+distinction explicitly. Also unaffected: the relay's own confidentiality
+and storage properties described earlier in §3/§4 — moving the app onto
+the relay does not change what the relay key is, where it lives, or who
+can call `GET /v1/steam/owned-games` (still: anyone holding the single
+`VAULT_API_KEY`, §7) — it only removes the app's SEPARATE, previously
+ungated path to the same data.
 
 ### For how long
 
@@ -451,13 +514,27 @@ actually shipped:
   name in many Steam accounts, and a stable identifier that resolves back
   to a public Steam profile — so "no UI renders personal data from this
   relay yet" is false; the correct, narrower statement is "no UI renders
-  the *playtime/last-played* fields yet." The Android app's model parses
-  `playtimeForever`
-  (`app/app/src/main/java/dev/steamvault/app/net/model/SteamWebApi.kt:22`)
-  but no UI code under `app/app/src/main/java/dev/steamvault/app/ui/`
-  references it (verified by search — zero matches); Android does not call
-  the web relay at all (device-local Steam Web API access per ADR-0004),
-  so this particular persona/SteamID64 exposure is web-only.
+  the *playtime/last-played* fields yet." The Android app's model
+  (`net/model/SteamRelay.kt::OwnedGame`) still carries a `playtime_forever`
+  field, gated by the identical server-side switches described above
+  (both frontends decode the same `GET /v1/steam/owned-games` response) —
+  no UI code under `app/app/src/main/java/dev/steamvault/app/ui/` renders
+  it (verified by search — zero matches, unchanged from the previous
+  version of this note). **Updated (WP 4h.4, this commit): this exposure
+  is no longer web-only.** Android now also calls `GET
+  /v1/steam/player-summaries`
+  (`net/steam/VaultRelayLibraryFetcher.kt::VaultRelayLibraryFetcher.getPlayerSummary`)
+  through the SAME server-side relay the web UI's lookup uses, for the
+  same persona-name/SteamID64 purpose (Settings' Steam-identity section,
+  `app/README.md` "Steam library via the vault relay") — so both
+  frontends now read this exact field through the identical endpoint,
+  gated by the identical single `VAULT_API_KEY` (§7), with no separate
+  device-local path left on the Android side to be a second, independent
+  exposure surface. This does not make the exposure itself any narrower
+  (the fact "still renders a persona name and SteamID64, still has no
+  suppression control" from the paragraph above remains true for both
+  frontends) — it removes a duplicate, ungated copy of it, not the
+  exposure.
 - **Updated (WP 4h.0): the API-level half of "off by default" has now
   landed, ahead of the display-side half.** The "API answers with the data
   unconditionally to anyone with the key" gap this section used to flag
@@ -519,12 +596,14 @@ real Steam session). Beyond those two, `api/vault_api/oracle.py`'s own
 privacy section stakes out a claim worth checking precisely because it is
 stated as exhaustive: "Every other component talks only to the LAN, to
 Steam's CDN through vault-core, or to Valve through SteamPrefill" — i.e.
-nothing else should leave. As of commit `234f16c`, that claim has exactly
-**five** exceptions — this section previously listed three; the two
-Android items below were already named individually in §3/§4 but had been
-left out of this outbound-flows inventory, which is corrected here — some
-opt-in, some structural design decisions, none of them Steam credentials
-(§3):
+nothing else should leave. **As of this commit (WP 4h.4), that claim has
+exactly four LIVE exceptions, plus one now-CLOSED historical exception
+(item 4 below) kept in this list for the record rather than deleted** —
+this section previously listed three exceptions, then five (the two
+Android items had been named individually in §3/§4 but left out of this
+inventory, corrected by WP 5.3-fix), and now nets to four live ones once
+WP 4h.4 closed item 4 — some opt-in, some structural design decisions,
+none of them Steam credentials (§3):
 
 1. **The Steam Web API relay (§3, §4).** ADR-0004's addendum states the
    obligation directly: "SECURITY.md documents the added data path: with
@@ -544,7 +623,12 @@ opt-in, some structural design decisions, none of them Steam credentials
    every `GET /v1/steam/owned-games` or `GET /v1/steam/player-summaries`
    call sends the relay key and a SteamID64 to `api.steampowered.com` over
    HTTPS (`api/vault_api/steam_relay.py::STEAM_API_HOST`/`STEAM_API_BASE`
-   — pinned as a literal host, not derived from any setting).
+   — pinned as a literal host, not derived from any setting). **As of WP
+   4h.4 (this commit), this is also the ONLY such call the Android app
+   makes** — see item 4's historical note below and §4's own updated note
+   for the full story; the app calls the exact same two routes through
+   `net/VaultApiClient.kt::steamOwnedGames`/`steamPlayerSummaries`, not a
+   second, device-local path to Valve.
 2. **The optional manifest oracle.** `VAULT_MANIFEST_ORACLE` is off by
    default (`api/vault_api/config.py:92-93`: "the default"); when an
    operator turns it on, `vault-api` sends the Steam **app ids** it tracks
@@ -578,41 +662,47 @@ opt-in, some structural design decisions, none of them Steam credentials
    is currently viewing" to that CDN the same way any hotlinked image would
    to any host, at ordinary web scale — named here for completeness, not
    because it is a sharp risk.
-4. **The Android app's own direct Steam Web API calls (§3, §4) — the same
-   two endpoints as item 1, but from the DEVICE, never through vault-api.**
-   `SteamIdentityRepositoryImpl` wires a `SteamWebApiClient` as its
-   `libraryFetcher` by default
-   (`app/app/src/main/java/dev/steamvault/app/repo/SteamIdentityRepository.kt::
-   SteamIdentityRepositoryImpl`, the constructor's `libraryFetcher`
-   default, currently at :93-98), which calls `IPlayerService/GetOwnedGames/v1` and
+4. **CLOSED (WP 4h.4, this commit) — historical: the Android app's own
+   direct Steam Web API calls, the same two endpoints as item 1 but from
+   the DEVICE, never through vault-api.** Recorded here for the audit
+   trail, not as a live flow. Until this commit, `SteamIdentityRepositoryImpl`
+   wired a `SteamWebApiClient` as its `libraryFetcher` by default, which
+   called `IPlayerService/GetOwnedGames/v1` and
    `ISteamUser/GetPlayerSummaries/v2` against `api.steampowered.com`
    directly, using the device-local, user-owned key ADR-0004 decision 2
-   specifies — never the relay's key, and never proxied through vault-api
-   (`SteamWebApiClient.STEAM_API_HOST`/`STEAM_API_BASE`, already cited in
-   §4). There is no separate on/off switch for this one: it is off in
-   practice only until the operator pastes a Web API key into the app.
-   **As of the tree this section was verified against, WP 4h.4 is in
-   review — not merged, and not described here as landed — scoped to
-   remove exactly this direct path** so the server-side relay (item 1)
-   becomes the only route for these two calls once it lands; see §4's own
-   note on the same package.
+   originally specified — never the relay's key, and never proxied
+   through vault-api. That class (`net/steam/SteamWebApiClient.kt`) and
+   its device-local key (`storage/CredentialStore.kt`'s
+   `getSteamWebApiKey`/`setSteamWebApiKey` accessor pair) are DELETED, not
+   merely unused, as of this commit (ADR-0004's second addendum) — item 1
+   above is now the only route for these two calls from either frontend,
+   and `SteamKeyIsolationTest` (cited in §4's updated note) structurally
+   pins that neither the old host literal nor the old accessor names can
+   silently reappear anywhere in the app's shipped source. An existing
+   install's already-abandoned key is actively scrubbed, not left
+   orphaned — `storage/CredentialStore.kt::legacyPrefKeysToScrub`, cited
+   in §4.
 5. **The Android app's OpenID identity verification, to Valve (§3) —
-   unaffected by WP 4h.4.** Completing "Sign in with Steam" POSTs the
-   callback's `openid.*` parameters back to Valve's login endpoint with
+   unaffected by WP 4h.4, and confirmed still live as of this commit.**
+   Completing "Sign in with Steam" POSTs the callback's `openid.*`
+   parameters back to Valve's login endpoint with
    `openid.mode=check_authentication`
-   (`app/app/src/main/java/dev/steamvault/app/net/steam/SteamOpenIdClient.kt::
-   SteamOpenIdClient.checkAuthentication`, currently at :81-89) — the step
-   that actually proves
-   the deep-link callback was not forged, per OpenID 2.0. This call carries
-   no Steam Web API key and no vault-api secret, only the OpenID assertion
-   Valve itself issued, and it establishes *identity* (a SteamID64), never
-   library data — a materially different flow from item 4, which is why
-   WP 4h.4 removing item 4 does not remove this one: the app still has to
-   establish who is signing in against Valve regardless of how (or
-   whether) it later fetches library data.
+   (`net/steam/SteamOpenIdClient.kt::SteamOpenIdClient.checkAuthentication`,
+   whose own kdoc describes exactly this: "POSTs every `openid.*` param
+   [...] extracted back to Valve with `openid.mode` overridden to
+   check_authentication, per OpenID 2.0") — the step
+   that actually proves the deep-link callback was not forged, per OpenID
+   2.0. This call carries no Steam Web API key and no vault-api secret,
+   only the OpenID assertion Valve itself issued, and it establishes
+   *identity* (a SteamID64), never library data — a materially different
+   flow from the now-closed item 4, which is why removing item 4 did not
+   remove this one: the app still has to establish who is signing in
+   against Valve regardless of how (or whether) it fetches library data
+   afterward.
 
-Beyond the two core flows named above and the five exceptions just listed,
-nothing else in this repository makes an outbound network call as shipped:
+Beyond the two core flows named above and the four live exceptions just
+listed (plus the one now-closed historical exception, item 4), nothing
+else in this repository makes an outbound network call as shipped:
 agent reports and Android/web-to-API traffic stay LAN-internal by design
 (§1), and webhooks (`docs/PROJECT_PLAN.md` §7 Phase 3/Phase 6, out of this
 package's own footprint) are opt-in and point at a URL the operator

@@ -13,6 +13,8 @@ import dev.steamvault.app.net.model.JobControlOut
 import dev.steamvault.app.net.model.JobDetail
 import dev.steamvault.app.net.model.JobSummary
 import dev.steamvault.app.net.model.MappingEntry
+import dev.steamvault.app.net.model.OwnedGamesRelayOut
+import dev.steamvault.app.net.model.PlayerSummariesRelayOut
 import dev.steamvault.app.net.model.PrefillJobRef
 import dev.steamvault.app.net.model.PrefillRequest
 import dev.steamvault.app.net.model.SettingsOut
@@ -73,13 +75,17 @@ private fun defaultOkHttpClient(): OkHttpClient = OkHttpClient.Builder()
  * confirm dialog needs the full depot->app table to compute
  * [dev.steamvault.app.ui.library.logic.MultiPlan]'s set-aware arithmetic,
  * the same "add it with the WP that needs it" rule web/js/api.js documents
- * (that WP's own multiplan.js port needed the identical fetch). Deliberately
- * NOT wrapped here: the `/v1/steam/...` endpoints (the Steam Web API relay).
- * This is excluded on purpose, not by omission: ADR-0004 (api/README.md "Steam Web API relay")
- * keeps the Android app on its OWN device-local `GetOwnedGames` call
- * (WP 4b.3), the same way it always has — the relay exists because the
- * WEB UI has no CORS story for calling Valve directly, a constraint that
- * does not apply to a native app.
+ * (that WP's own multiplan.js port needed the identical fetch).
+ *
+ * **`/v1/steam/...` (the Steam Web API relay) IS wrapped, as of WP 4h.4 —
+ * superseding the WP 4b.2-era exclusion note this kdoc used to carry.**
+ * ADR-0004's second addendum removed the app's own device-local Steam Web
+ * API key entirely: [steamOwnedGames]/[steamPlayerSummaries] are now the
+ * ONLY path this app has to library/persona data, authenticated exactly
+ * like every other route here (`X-Api-Key`), never Valve's Web API host
+ * directly. See `net/steam/VaultRelayLibraryFetcher.kt`'s kdoc and
+ * `app/README.md`'s "Steam library via the vault relay" section for the
+ * full story, including the `409`/`422` states callers must branch on.
  *
  * `X-Api-Key` is attached to EVERY request, including `/v1/health` —
  * mirroring web/js/api.js's `request()`, which sends it unconditionally
@@ -211,6 +217,26 @@ class VaultApiClient(
     /** @param updates key -> new value ([dev.steamvault.app.net.model.settingPatchValue]), or `null` to clear the override. */
     suspend fun patchSettings(updates: Map<String, JsonElement?>): SettingsOut =
         patch("/v1/settings", buildSettingsPatch(updates))
+
+    // ---- steam relay (WP 4h.4; ADR-0004 second addendum) -----------------
+    // The device-local Steam Web API key and its direct-to-Valve calls are
+    // gone -- library/persona data now flows exclusively through this
+    // client, same as everything else it wraps. `net/steam/
+    // VaultRelayLibraryFetcher.kt` is the one production caller.
+
+    /**
+     * `GET /v1/steam/owned-games` (`vault_api/routers/steam.py::get_owned_games`).
+     * `409` (no key configured server-side) and `422` (rejected `steamid`)
+     * both surface as [dev.steamvault.app.net.error.VaultApiError.Validation]
+     * (distinguished by `.status`) via [execute]'s normal error mapping —
+     * no special handling needed here.
+     */
+    suspend fun steamOwnedGames(steamId64: String): OwnedGamesRelayOut =
+        get("/v1/steam/owned-games", params = mapOf("steamid" to steamId64))
+
+    /** `GET /v1/steam/player-summaries` (`vault_api/routers/steam.py::get_player_summaries`). */
+    suspend fun steamPlayerSummaries(steamId64: String): PlayerSummariesRelayOut =
+        get("/v1/steam/player-summaries", params = mapOf("steamid" to steamId64))
 
     // ---- plumbing -----------------------------------------------------
 

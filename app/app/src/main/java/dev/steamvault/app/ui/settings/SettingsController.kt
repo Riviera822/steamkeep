@@ -6,12 +6,15 @@ import androidx.compose.runtime.setValue
 import dev.steamvault.app.net.VaultApiClient
 import dev.steamvault.app.net.error.VaultApiError
 import dev.steamvault.app.net.model.SettingsOut
-import dev.steamvault.app.net.steam.submitWebApiKey
 import dev.steamvault.app.repo.SteamIdentityRepository
 import dev.steamvault.app.repo.SteamLoginResult
 import dev.steamvault.app.storage.CredentialStore
 import dev.steamvault.app.ui.settings.logic.SettingDraft
+import dev.steamvault.app.ui.settings.logic.SteamLibraryStatus
 import dev.steamvault.app.ui.settings.logic.buildSettingsPatchDraft
+import dev.steamvault.app.ui.settings.logic.steamLibraryStatusFor
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 
 /** What the Connection section shows -- never the API key itself (WP brief: "never the API key"). */
 data class ConnectionSummary(val profileKind: String?, val baseUrl: String?) {
@@ -32,8 +35,11 @@ data class ConnectionSummary(val profileKind: String?, val baseUrl: String?) {
  *    makes "the body contains only changed keys" true by construction.
  *  - Steam identity -- the existing sign-in/out state
  *    ([dev.steamvault.app.repo.SteamIdentityRepository], unchanged from WP
- *    4b.3) plus Web API key management this WP adds a UI path for
- *    (masked display, remove -- [removeWebApiKey]).
+ *    4b.3) plus, as of WP 4h.4, an on-demand library CHECK
+ *    ([checkSteamLibrary]) against vault-api's relay -- there is no key to
+ *    manage anymore (ADR-0004's second addendum), so this replaces the
+ *    former Web API key entry/masked-display/remove UI this class used to
+ *    own.
  *  - Connection -- [connectionSummary] reads [CredentialStore] directly
  *    (never the API key); [disconnect] clears the WHOLE store
  *    ("forget this vault" -- [CredentialStore.clear]'s own documented
@@ -73,8 +79,12 @@ class SettingsController(
         private set
     var loginError by mutableStateOf<String?>(null)
         private set
-    var webApiKeyInput by mutableStateOf("")
-    var webApiKeyError by mutableStateOf<String?>(null)
+
+    /** WP 4h.4: what the last [checkSteamLibrary] call found (or
+     * [SteamLibraryStatus.Unknown] before the first one). */
+    var libraryStatus by mutableStateOf<SteamLibraryStatus>(SteamLibraryStatus.Unknown)
+        private set
+    var libraryChecking by mutableStateOf(false)
         private set
 
     val isDirty: Boolean get() = drafts.isNotEmpty()
@@ -165,29 +175,33 @@ class SettingsController(
         refreshIdentity()
     }
 
-    /** WP brief: "closing the recorded setWebApiKey UI gap" -- see
-     * `submitWebApiKey`'s kdoc for the unconditional field-clearing guarantee. */
-    fun submitWebApiKeyEntry() {
-        val result = submitWebApiKey(
-            rawInput = webApiKeyInput,
-            invalidFormatError = strings.invalidWebApiKeyFormat(),
-            genericError = { strings.webApiKeySaveFailed(it) },
-            persist = { identityRepository.setWebApiKey(it) },
-        )
-        webApiKeyInput = result.nextFieldValue
-        webApiKeyError = result.error
-        if (result.ok) {
-            refreshIdentity()
-            toast = strings.webApiKeySavedToast()
+    /**
+     * WP 4h.4: fetches the signed-in user's library through vault-api's
+     * relay and maps the outcome to a [SteamLibraryStatus] (`ui/settings/
+     * logic/SteamLibraryStatus.kt`'s job, not this method's) -- covers the
+     * ordinary success count, the `409`/`422` relay error states, the
+     * `game_count == 0` "maybe private" state, and everything else
+     * ([identityRepository.ownedGames]'s own kdoc lists every precondition
+     * this can fail on). Never throws.
+     *
+     * `libraryChecking` is cleared in a `finally` (review fix): the screen
+     * leaving composition cancels this coroutine mid-suspend
+     * ([identityRepository.ownedGames] awaits network I/O), and without
+     * `finally` that leaves the button permanently disabled for the rest
+     * of this controller's lifetime if the screen is ever recomposed with
+     * the same instance -- same class of bug `docs/LEARNINGS.md`'s async-
+     * poll-fork entry warns about for busy/in-flight flags generally.
+     */
+    fun checkSteamLibrary(scope: CoroutineScope) {
+        scope.launch {
+            libraryChecking = true
+            try {
+                val result = identityRepository.ownedGames()
+                libraryStatus = steamLibraryStatusFor(result)
+            } finally {
+                libraryChecking = false
+            }
         }
-    }
-
-    /** Masked management (WP brief: "never the value") -- only clears the
-     * stored key, never displays it. */
-    fun removeWebApiKey() {
-        credentialStore.setSteamWebApiKey(null)
-        refreshIdentity()
-        toast = strings.webApiKeyRemovedToast()
     }
 
     // ---- Connection -----------------------------------------------------------

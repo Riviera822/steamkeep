@@ -374,11 +374,14 @@ wrapped:
 
 - **`/v1/mapping`** — no current caller (same "add it with the WP that
   needs it" rule `web/js/api.js` documents for the web client).
-- **`/v1/steam/*`** (the Steam Web API relay) — excluded on purpose, not
-  by omission. ADR-0004 (`api/README.md` "Steam Web API relay") keeps the
-  Android app on its OWN device-local `GetOwnedGames` call (WP 4b.3); the
-  relay exists only because the web UI has no CORS story for calling Valve
-  directly, a constraint that does not apply to a native app.
+- **`/v1/steam/*`** (the Steam Web API relay) is now WRAPPED
+  (`steamOwnedGames`/`steamPlayerSummaries`), as of WP 4h.4 — **superseding
+  this bullet's own WP 4b.2-era claim that it was excluded on purpose.**
+  ADR-0004's second addendum removed the Android app's device-local Steam
+  Web API key entirely: the relay these two methods call is the ONLY path
+  this app has to library/persona data now, the same two endpoints the web
+  UI already used. See "Steam library via the vault relay (WP 4h.4)" below
+  for the full story.
 
 `X-Api-Key` is attached to every request, including `/v1/health` — the
 same choice `web/js/api.js`'s `request()` makes, rather than special-casing
@@ -668,8 +671,11 @@ attributes, summed: 124/0/0); `app/app/build/reports/lint-results-debug.txt`:
   decision functions only — WP 4b.8.
 - **No UI.** Nothing in `app/app/src/main/java/.../ui/` consumes any of
   this yet — the debug gallery screen is unchanged.
-- **No `/v1/mapping` or `/v1/steam/*` client methods** — see the "API
-  client" section above for why both are deliberate exclusions, not gaps.
+- **No `/v1/mapping` or `/v1/steam/*` client methods** — true as of WP
+  4b.2; see the "API client" section above for why both were deliberate
+  exclusions at the time, and its own updated note for why `/v1/steam/*`
+  stopped being one in WP 4h.4 (`/v1/mapping` remains unwrapped — no
+  caller needed it yet).
 - **No `tsnet` profile, no dependency, no stub class** — post-v1 per
   `docs/WORKPACKAGES.md`; only the `ConnectivityProfile` seam exists.
 - **No instrumented test of `EncryptedCredentialStore`** — no
@@ -682,11 +688,24 @@ attributes, summed: 124/0/0); `app/app/build/reports/lint-results-debug.txt`:
 
 ## Steam identity — OpenID + GetOwnedGames on-device (WP 4b.3)
 
+**Superseded in part by WP 4h.4 ("Steam library via the vault relay",
+near the end of this file) — read that section for what is ACTUALLY
+shipped today.** Everything below this point describes WP 4b.3 as it
+shipped at the time: OpenID sign-in still works exactly as documented
+here, but the on-device `GetOwnedGames`/`GetPlayerSummaries` call this
+section describes — and the device-local Steam Web API key that drove it
+— was deleted outright in WP 4h.4 (ADR-0004's second addendum). This
+section is kept for its still-accurate OpenID content and as the
+historical record of the design WP 4h.4 replaced, not as a description of
+what ships now.
+
 Branch-parallel after 4b.2 per `docs/WORKPACKAGES.md`. Implements
 ADR-0004 decision 2 end to end on the Android side: "Sign in with Steam"
 resolves to a SteamID64 without this app ever seeing a password, and the
 user's own Steam Web API key (entered manually, never obtained via OpenID)
 drives an on-device `GetOwnedGames` call that never touches vault-api.
+**(WP 4h.4: the second half of that sentence — the device-local key and
+the on-device call — no longer describes shipped behavior; see below.)**
 
 ```
 app/app/src/main/java/dev/steamvault/app/
@@ -844,43 +863,58 @@ through `identityRepository.completeLogin` for exactly this reason (review
 fix N2), rather than leaving a stale pending value that a LATER attacker
 window could still target.
 
-### Steam Web API on-device (`SteamWebApiClient`)
+### Steam Web API on-device (`SteamWebApiClient`) — REMOVED in WP 4h.4
+
+**Everything in this subsection describes a class and a data flow that no
+longer exist.** Kept as the historical record of what WP 4b.3 shipped and
+WP 4h.4 deleted outright (ADR-0004's second addendum) — not a description
+of shipped behavior. See "Steam library via the vault relay (WP 4h.4)"
+near the end of this file for what replaced it.
 
 `GetOwnedGames` (`IPlayerService/GetOwnedGames/v1`, `include_appinfo=1`)
 and `GetPlayerSummaries` (`ISteamUser/GetPlayerSummaries/v2`, for the
 optional persona name), using the device-local key from
 `CredentialStore.getSteamWebApiKey()` — **never** vault-api's own key,
 and never sent to vault-api at all (ADR-0004 decision 2).
-`SteamKeyIsolationTest` is the grep-provable pin: it reads
-`VaultApiClient.kt`'s source text and asserts it never references
+`SteamKeyIsolationTest` was the grep-provable pin: it read
+`VaultApiClient.kt`'s source text and asserted it never referenced
 `getSteamWebApiKey`, `SteamWebApiClient`, `SteamOpenIdClient`, or
-`SteamIdentityRepository`.
+`SteamIdentityRepository`. **(WP 4h.4: that test file still exists, but
+every invariant above it is gone — `getSteamWebApiKey`/
+`setSteamWebApiKey` no longer exist ANYWHERE, and `VaultApiClient.kt` now
+correctly DOES reference the Steam relay routes; see its updated kdoc for
+the current, narrower invariant it actually pins.)**
 
-Same security posture as above (host pinned to `api.steampowered.com`,
+Same security posture as above (host pinned to Valve's Web API domain,
 HTTPS only, no redirects, bounded 2 MiB read). **Key redaction**
 (mirroring `api/vault_api/steam_relay.py`'s `_redacted_url` discipline,
-read at HEAD as the reference): every error path builds its
+read at HEAD as the reference): every error path built its
 `SteamWebApiError` message from a fixed literal plus, at most, an HTTP
 status code or an exception CLASS NAME — `e.message` from a caught
-`IOException` is never interpolated (some `IOException` subtypes can
-embed connection details), so the key — which lives only in the request
-query string — can never reach a log line or an exception message.
-`SteamWebApiClientTest`'s three `MUTATION PIN` tests plant a canary key
-and assert it is absent from the network-failure, non-2xx, and
-oversized-body exception messages (while separately confirming the key
-DID legitimately reach the wire, via the recorded request path — the pin
-is about the client-side message, not about whether Valve received the
-key).
+`IOException` was never interpolated (some `IOException` subtypes can
+embed connection details), so the key — which lived only in the request
+query string — could never reach a log line or an exception message.
+`SteamWebApiClientTest`'s three `MUTATION PIN` tests (also deleted in WP
+4h.4, along with the class they tested) planted a canary key and asserted
+it was absent from the network-failure, non-2xx, and oversized-body
+exception messages.
 
 `net/model/SteamWebApi.kt`'s `parseOwnedGames`/`parsePlayerSummary`
-mirror `api/vault_api/steam_relay.py::parse_owned_games`'s tolerant shape:
-a malformed individual entry (wrong type, boolean masquerading as an
-int/appid, oversized string) is skipped, not fatal; a document with no
-usable `response` object raises `SteamWebApiError`; a `SerializationException`
-or `StackOverflowError` from a hostile/deeply-nested body is caught and
-converted rather than escaping as a raw exception type.
+(deleted in WP 4h.4; superseded by `net/model/SteamRelay.kt`'s plain
+`@Serializable` DTOs, decoded through `VaultJson` like everything else in
+that package) mirrored `api/vault_api/steam_relay.py::parse_owned_games`'s
+tolerant shape: a malformed individual entry (wrong type, boolean
+masquerading as an int/appid, oversized string) was skipped, not fatal; a
+document with no usable `response` object raised `SteamWebApiError`; a
+`SerializationException` or `StackOverflowError` from a hostile/deeply-
+nested body was caught and converted rather than escaping as a raw
+exception type.
 
 ### Data layer (`SteamIdentityRepository`)
+
+**WP 4h.4 note:** `hasWebApiKey` below no longer exists on
+`SteamIdentityState` — see "Steam library via the vault relay (WP 4h.4)"
+for the current shape.
 
 `SteamIdentityState(steamId64, personaName, hasWebApiKey)` is read fresh
 from `CredentialStore` on every call. `completeLogin` never throws — every
@@ -1169,13 +1203,23 @@ condition (`row.free && !thisAppIsHolder`).
 
 ## Onboarding + settings (WP 4b.7)
 
+**Partially superseded by WP 4h.4 ("Steam library via the vault relay",
+near the end of this file).** The connection-flow half of this section
+(Step 1 Connect, `net/connection/ConnectionCheck.kt`, the Connection
+section in Settings) is unchanged and still accurate. Everything this
+section says about a Steam Web API key entry field/UI —
+`net/steam/SteamWebApiKeyInput.kt`, `submitWebApiKey`/`removeWebApiKey`,
+the "closes the `setWebApiKey()` UI gap" framing below — describes a UI
+path WP 4h.4 deleted outright, not what ships today.
+
 Branch-parallel after 4b.3 per `docs/WORKPACKAGES.md` Phase 4b — dispatched
 after every other 4b.x package, so it is the first WP with everything else
 (4b.1-4b.6) already in place to write against. Closes the two gaps every
 earlier WP's README section flagged as "not this WP": nothing wrote a
 vault-api connection into `CredentialStore` (`net/profile/
 ConnectivityProfileFactory.kt`'s "Gap this documents" note), and
-`setWebApiKey()` had no UI path at all (WP 4b.3's own bullet list).
+`setWebApiKey()` had no UI path at all (WP 4b.3's own bullet list). **(WP
+4h.4: `setWebApiKey()` itself no longer exists — see above.)**
 
 ```
 app/app/src/main/java/dev/steamvault/app/
@@ -2356,3 +2400,397 @@ generates locally per the "Toolchain setup" instructions above.
   later package next touches `QueueRow` — either add the equivalent
   decorative glyph for visual parity with web, or note explicitly that
   Android intentionally omits it.
+
+## Steam library via the vault relay, superseding on-device GetOwnedGames (WP 4h.4)
+
+**The decision, in one sentence:** the Android app's Steam library and
+persona data now come exclusively from vault-api's own relay
+(`GET /v1/steam/owned-games`, `GET /v1/steam/player-summaries` — the SAME
+two endpoints the web UI has used since the WP 4a.6r/ADR-0004 first
+addendum), never directly from Valve, and there is no fallback. See
+`docs/adr/0004-steam-credentials-never-touch-steamvault.md`'s second
+addendum for the full "why now, why no fallback" reasoning; this section
+is the "what actually shipped" companion.
+
+**What this deleted outright (not hidden behind a flag):**
+
+```
+app/app/src/main/java/dev/steamvault/app/
+├── net/steam/SteamWebApiClient.kt        # REMOVED — direct-to-Valve GetOwnedGames/GetPlayerSummaries
+├── net/steam/SteamWebApiKeyInput.kt      # REMOVED — 32-hex key-entry validation + field-clearing
+├── net/model/SteamWebApi.kt              # REMOVED — hand-parsed OwnedGame/SteamPersona DTOs
+└── ui/identity/IdentityScreen.kt         # REMOVED (was src/debug/, already unreachable since WP 4b.7)
+```
+
+Plus every accessor/field/UI control that only existed to serve the
+device-local key: `CredentialStore.getSteamWebApiKey`/`setSteamWebApiKey`
+(and `EncryptedCredentialStore`'s backing pref entry),
+`SteamIdentityState.hasWebApiKey`, `SteamIdentityRepository.setWebApiKey`,
+`OnboardingController`/`SettingsController`'s `webApiKeyInput`/
+`webApiKeyError`/`submitWebApiKeyEntry`/`removeWebApiKey`, and the
+matching `OutlinedTextField`/button/masked-display Compose blocks in
+`OnboardingScreen.kt`'s Step 2 and `SettingsScreen.kt`'s Steam-identity
+section.
+
+**Migration note, corrected (review catch — the first draft of this note
+was wrong).** An install that already had a value under the now-removed
+`steam_web_api_key` `EncryptedSharedPreferences` entry does NOT keep it
+sitting unread forever — that was this WP's own first-draft argument, and
+it does not survive contact with ADR-0010's logic applied to a credential
+instead of a privacy flag: a credential nobody is ever prompted to revoke
+is a real ongoing risk, not a harmless orphan. `CredentialStore.kt`'s
+`legacyPrefKeysToScrub` runs once at construction in every implementation
+— an upgrading install has the key actively removed the next time its
+`CredentialStore` is constructed (in practice: the next app launch), and
+`EncryptedCredentialStore.clearSteamIdentity` (Settings' sign-out) removes
+it too, belt-and-suspenders.
+
+**Precisely what is pinned where, and how (review round 2 correction — an
+earlier version of this paragraph overstated the production half as
+"actual behavioral pin," which was never true).** The JVM-testable
+`InMemoryCredentialStore` fixture's copy of this migration IS behaviourally
+pinned: `InMemoryCredentialStoreTest`'s `MUTATION PIN -- construction
+scrubs an existing install's legacy Steam Web API key` constructs a real
+store instance over seeded data and observes the key gone afterward. The
+PRODUCTION copy — `EncryptedCredentialStore`'s real `init` block and its
+`clearSteamIdentity`'s restored removal line — cannot be exercised the
+same way: this class needs a real Android Keystore, unavailable off-device
+(the same JVM constraint every other guarantee in this class carries), so
+sharing `legacyPrefKeysToScrub` between the two closed only the
+LOGIC-drift half of the "don't pin the fake" rule — the CALL-SITE-EXISTENCE
+half was still open, and a diff that deleted BOTH the `init` block and the
+restored `clearSteamIdentity` line passed the entire suite (577/0, both
+variants — measured, not assumed). `EncryptedCredentialStoreSourceTest.kt`
+closes that gap the same way its other three guarantees are already
+pinned — STRUCTURALLY, by reading the class's own source text —
+with a fourth assertion, `calls the shared legacy-key scrub at
+construction and on sign-out`, checking both `legacyPrefKeysToScrub(`
+and `editor.remove(LEGACY_STEAM_WEB_API_KEY_PREF_NAME)` are present.
+Mutation-verified independently: deleting the `init` block alone fails
+that test; separately reverting and deleting only `clearSteamIdentity`'s
+removal line also fails it; both reverted before this report.
+
+**Upgraders who want the STRONGER guarantee of revoking the key on
+Valve's side, not just deleting it from this app, should do so directly
+at <https://steamcommunity.com/dev/apikey>** — this app deleting its own
+copy does not by itself invalidate the key at Valve.
+
+**What replaced it:**
+
+```
+app/app/src/main/java/dev/steamvault/app/
+├── net/
+│   ├── VaultApiClient.kt                       # + steamOwnedGames()/steamPlayerSummaries()
+│   ├── model/SteamRelay.kt                     # OwnedGame/OwnedGamesRelayOut/PlayerSummaryEntry/
+│   │                                           #   PlayerSummariesRelayOut/SteamPersona — plain
+│   │                                           #   @Serializable DTOs, decoded through VaultJson
+│   └── steam/VaultRelayLibraryFetcher.kt       # SteamLibraryFetcher's ONE production impl now
+├── repo/SteamIdentityRepository.kt             # ownedGames()/refreshPersonaName(): no more
+│                                                #   "no Web API key configured" precondition
+└── ui/settings/
+    ├── logic/SteamLibraryStatus.kt             # the first-class UI states (below)
+    ├── SettingsController.kt                   # + checkSteamLibrary(), libraryStatus/libraryChecking
+    └── SettingsScreen.kt                       # + the "Check library" button/status text
+```
+
+### `net/model/SteamRelay.kt` — DTOs, not a hand-parser
+
+Unlike the deleted `SteamWebApi.kt` (which hand-walked
+`kotlinx.serialization.json.JsonElement` field by field, because it had to
+tolerate a genuinely hostile, unvalidated Valve response), the relay's
+response is vault-api's OWN already-validated, already-whitelisted output
+(`vault_api/steam_relay.py`/`routers/steam.py` do that validation
+server-side) — so these are plain `@Serializable` data classes, decoded
+through the same `VaultJson` instance (`ignoreUnknownKeys = true`) every
+other `net/model` DTO uses, field names kept verbatim snake_case per this
+package's own no-renaming-layer convention.
+
+**One real behavior change worth naming plainly, not just a plumbing
+swap.** The deleted `parseOwnedGames` skipped an individual malformed game
+ENTRY (wrong type, boolean masquerading as an int) and kept the rest of
+the list — a private-input-tolerant design appropriate for a genuinely
+hostile, unvalidated Valve response. `OwnedGamesRelayOut`'s plain
+`@Serializable` decode has no such per-entry fallback: one malformed entry
+anywhere in `games` fails the WHOLE decode (a `SerializationException`
+surfaces as `VaultApiError.Unknown`), same as every other list-shaped
+`net/model` DTO in this client (`GameSummary`, `JobSummary`, etc., none of
+which skip individual malformed rows either). This is deliberate,
+fail-loud, and consistent with treating vault-api as a validated,
+already-whitelisted source rather than a hostile one — but it is a real
+trade against the old design's per-entry resilience, made because the
+threat model changed (this app now trusts vault-api's own validation
+instead of re-validating Valve's raw output itself), not an oversight.
+
+**The one property that is NOT defensive boilerplate: `OwnedGame.playtime_forever`/
+`rtime_last_played` both default to `null` (audit requirement, not a
+nicety).** WP 4h.0's privacy gate (`ADR-0010`,
+`vault_api/routers/steam.py`, `response_model_exclude_unset=True`) OMITS
+either JSON key from the response ENTIRELY when its
+`VAULT_RELAY_EXPOSE_*` switch is off — and both default OFF server-side,
+so the shape with BOTH keys textually absent is what a default-configured
+vault actually sends, not an edge case a defensive default merely
+tolerates. `SteamRelayParsingTest`'s
+`MUTATION PIN -- both playtime_forever and rtime_last_played ABSENT...`
+fixture is built to match that real shape exactly (both keys absent, not
+present-as-`null`) and dies by name if either field's default is removed
+(`MissingFieldException`).
+
+### `net/steam/VaultRelayLibraryFetcher.kt` — the new `SteamLibraryFetcher`
+
+A thin adapter over `VaultApiClient.steamOwnedGames`/`steamPlayerSummaries`
+— no retry logic, no caching (vault-api's own `RelayCache` already covers
+that), no error translation: whatever `VaultApiClient` throws (a
+[`VaultApiError`](#the-six-kind-error-taxonomy-neterrorvaultapierrorkt)
+with `.status` set to `409`/`422`/etc.) propagates unwrapped, per the WP
+brief's "whatever the app already does for other vault calls." The one
+piece of actual logic is `getPlayerSummary`'s steamid cross-check
+(mirroring `vault_api/steam_relay.py::parse_player_summaries`'s own rule
+server-side — kept here too, `docs/LEARNINGS.md`'s "everything returned is
+hostile input" applied one layer further out) and the `vaultApiClientProvider`
+indirection: `SteamIdentityRepositoryImpl` (and the `SteamLibraryFetcher`
+it defaults to) is constructed once, in `MainActivity`'s `by lazy`
+wiring, potentially before any vault-api connection exists (Steam OpenID
+sign-in is reachable during onboarding, unlike library fetching) — so the
+CURRENT `VaultApiClient` is read fresh on every call via
+`{ vaultApiClientState }`, the same "read fresh" pattern
+`VaultApiClient`'s own `apiKeyProvider` already established.
+
+### The private-profile trade-off — a real regression, named honestly
+
+Under the OLD device-local design, each user's OWN Steam Web API key saw
+their OWN library even behind a private Steam profile (Valve's stricter
+checks apply against the CALLING key's own account). The relay uses ONE
+operator-owned key for every signed-in user on a vault; Valve's
+`GetOwnedGames` for a DIFFERENT SteamID answers with nothing at all
+(`configured: true, game_count: 0`) unless that profile's game details
+happen to be public — the identical wire shape a genuinely empty library
+produces. `ui/settings/logic/SteamLibraryStatus.kt`'s
+`MaybePrivateOrEmpty` state is the honest answer: it cannot and does not
+try to tell the two causes apart, and names both in the rendered message
+(`settings_steam_library_maybe_private`) rather than presenting an empty
+shelf that reads as a bug. See the ADR-0004 addendum for why this is an
+ACCEPTED cost, not an oversight.
+
+### First-class UI states (`ui/settings/logic/SteamLibraryStatus.kt`)
+
+Settings' Steam-identity section gained a "Check library" button (visible
+only once signed in — there is nothing to check otherwise) plus a status
+line, backed by `SettingsController.checkSteamLibrary()` →
+`SteamIdentityRepository.ownedGames()` → `steamLibraryStatusFor(result)`.
+Six states, each with its OWN string resource — never a generic
+"something went wrong":
+
+| State | Cause | String resource |
+|---|---|---|
+| `Unknown` | Not checked yet this session | `settings_steam_library_unknown` |
+| `Ready(count)` | Ordinary success | `settings_steam_library_count` (plural) |
+| `MaybePrivateOrEmpty` | `configured:true, game_count:0` | `settings_steam_library_maybe_private` |
+| `RelayNotConfigured` | `409` — no key on vault-api | `settings_steam_library_not_configured` |
+| `InvalidSteamId` | `422` — rejected steamid | `settings_steam_library_invalid_steamid` |
+| `Failed(message)` | Anything else (network, `5xx`, no vault-api connection) | `settings_steam_library_error` |
+
+`409`/`422` are both read off `VaultApiError.status` — the shared
+`web/js/errors.js`-mirroring taxonomy folds both into the `validation`
+kind, so `.status` (not the sealed subclass) is what actually
+distinguishes them, exactly as `VaultApiClientTest`'s existing 409/422
+tests already establish for every other endpoint.
+
+### What did NOT change
+
+- **Steam OpenID sign-in.** `net/steam/SteamOpenIdClient.kt`,
+  `SteamOpenIdLoginUrl.kt`, `SteamOpenIdCallback.kt`, the per-login replay
+  fix (`SteamLoginState.kt`/`PendingLoginState`) — all untouched. The app
+  still never sees a Steam password; only the flow that fetches library
+  DATA after signing in changed.
+- **`SteamKeyIsolationTest`'s existence and purpose**, even though its
+  invariants were rewritten — see its own kdoc for the three specific,
+  narrower claims it pins now (no `getSteamWebApiKey`/`setSteamWebApiKey`
+  anywhere, no direct-to-Valve Web API host reference anywhere,
+  `VaultApiClient.kt` still ignorant of the OpenID identity classes even
+  though it now correctly knows about the relay routes).
+
+### Tests (WP 4h.4)
+
+**578 tests (both `testDebugUnitTest`/`testReleaseUnitTest`, identical
+counts — the deleted `IdentityScreen.kt` was `src/debug`-only and already
+unreferenced), down from the WP 4h.1 baseline of 592 — net −14, reconciled
+file by file below (review round 2 correction: an earlier version of this
+paragraph printed 572/−20/39-deleted, an arithmetic error caught in
+review — `SteamWebApiClientTest` genuinely has 9 tests, not 8 — and two
+review-fix rounds below added 6 more tests total across
+`InMemoryCredentialStoreTest`, `VaultApiClientTest`, and
+`EncryptedCredentialStoreSourceTest` after the original count was
+measured; every number here is checked against the actual counted `@Test`
+methods, not re-guessed).**
+
+Deleted outright, with their production classes (40 tests):
+
+| File | Tests |
+|---|---|
+| `SteamWebApiClientTest` | 9 |
+| `SteamWebApiParsingTest` | 22 |
+| `SteamWebApiKeyInputTest` | 9 |
+| **Total deleted** | **40** |
+
+New or changed (26 tests, net):
+
+| File | Before → After | Net |
+|---|---|---|
+| `SteamRelayParsingTest` (new) | 0 → 7 | +7 |
+| `VaultRelayLibraryFetcherTest` (new) | 0 → 6 | +6 |
+| `SteamLibraryStatusTest` (new) | 0 → 8 | +8 |
+| `VaultApiClientTest` (+4 relay tests, +1 review-fix canary-redaction test) | 21 → 26 | +5 |
+| `SteamKeyIsolationTest` (rewritten invariant) | 2 → 3 | +1 |
+| `SteamIdentityRepositoryTest` (rewritten in place — the "no Web API key configured" precondition tests are gone, nothing replaces them 1:1 since there is no longer a precondition to test) | 26 → 23 | −3 |
+| `OnboardingControllerTest` (the `submitWebApiKeyEntry` mutation pins removed) | 10 → 7 | −3 |
+| `InMemoryCredentialStoreTest` (review-fix round: the construction-time migration pin, its unrelated-values-untouched companion, a sanity check, and the pure-function sanity check) | 5 → 9 | +4 |
+| `EncryptedCredentialStoreSourceTest` (review round 2: the structural pin closing the production-scrub call-site gap — see the corrected paragraph above) | 3 → 4 | +1 |
+| **Total net** | | **+26** |
+
+`592 − 40 + 26 = 578`, matching the measured count exactly. A smaller
+passing suite here is the correct, honest shape for a work package that
+deletes far more test surface (a whole device-local key/parse/input
+stack, 40 tests) than it net-adds (21 new-file tests + 5 net across
+changed files, 26 total) — not a coverage regression to explain away; the
+review's own guarantee-by-guarantee walk of the three deleted files
+concluded the suite is not weakened (the empty-library guarantee came out
+upgraded, per `SteamLibraryStatusTest`'s dedicated `MaybePrivateOrEmpty`
+state versus the old parser's silent empty-list fallthrough).
+
+Mutation-verified by name (applied, run, observed the failing test(s),
+reverted — none left in the tree). **Round 2 correction (Opus review):**
+the first version of this section described mutation 1 and the
+`api.steampowered.com` redirection wrongly — both are rewritten below to
+what was actually observed on a second, careful run, not what seemed like
+the obviously-correct story.
+
+- **`OwnedGame.playtime_forever`/`rtime_last_played`'s absent-field
+  tolerance.** The naive mutation — deleting the `Int? = null` defaults
+  outright — does **not** isolate cleanly: it breaks *compilation*, not
+  just decode, because `LibraryMergeTest`/`SteamIdentityRepositoryTest`/
+  `SteamLibraryStatusTest` construct `OwnedGame` without supplying every
+  field (relying on the very defaults being removed). The correct,
+  compiling form of this mutation is
+  `@kotlinx.serialization.Required` on both properties — it keeps the
+  Kotlin-level default (every existing constructor call site still
+  compiles) while forcing kotlinx's decoder to require the JSON key. Run
+  this way, the mutation kills **five** tests by name, not one:
+  `SteamRelayParsingTest`'s `MUTATION PIN -- both playtime_forever and
+  rtime_last_played ABSENT...` (the intended target) plus
+  `SteamRelayParsingTest`'s `only playtime_forever exposed...` and
+  `a future field this client has never heard of is ignored...` (both
+  fixtures also omit one or both fields), plus `VaultApiClientTest`'s
+  `steamOwnedGames GETs v1 steam owned-games...` and
+  `VaultRelayLibraryFetcherTest`'s `getOwnedGames delegates to
+  VaultApiClient steamOwnedGames...` (both decode a fixture missing
+  `playtime_forever` too). The correct claim is therefore "this mutation
+  is guarded from five independent directions," not "the other cases stay
+  green" — the LEARNINGS rule this corrects: pin the mechanism that
+  *actually* kills the mutation, not the one that seems like it should.
+- **Pointing `VaultApiClient.steamOwnedGames` at a literal
+  `https://api.steampowered.com` URL.** This sandbox has real network
+  egress — the request does NOT time out or go unreachable; it reaches
+  Valve's actual API, which answers (predictably, given no valid key/
+  steamid pairing) with a body that does not decode as
+  `OwnedGamesRelayOut`. That is what actually kills the three tests
+  exercising this method — `VaultApiClientTest`'s
+  `steamOwnedGames GETs v1 steam owned-games...`,
+  `steamOwnedGames 409 maps to Validation...`, and
+  `steamOwnedGames 422 maps to Validation...` (all three route through the
+  same mutated method) — each via a `kotlinx.serialization.json.internal.JsonDecodingException`
+  wrapped in `VaultApiError.Unknown`, not a network timeout. The unmutated
+  `steamPlayerSummaries` test stays green, confirming the mutation's
+  effect is scoped to the one method changed.
+- Folding `steamLibraryStatusFor`'s `409`/`422`/empty-list branches into a
+  single generic `Failed(...)` result kills
+  `SteamLibraryStatusTest`'s three dedicated `MUTATION PIN` tests
+  (`RelayNotConfigured`, `InvalidSteamId`, `MaybePrivateOrEmpty`) by name,
+  each independently, while every other test in that file (and the
+  non-mutated cases within those tests' neighbors) stays green.
+- Dropping `EncryptedCredentialStore`/`InMemoryCredentialStore`'s
+  construction-time migration scrub (WP 4h.4 review fix — see the
+  "Migration note, corrected" paragraph above) kills
+  `InMemoryCredentialStoreTest`'s
+  `MUTATION PIN -- construction scrubs an existing install's legacy Steam
+  Web API key` AND `a seeded legacy key does not disturb unrelated seeded
+  values` by name, both independently reverted before this report.
+- `SteamKeyIsolationTest`'s reintroduced-violation guard was verified the
+  other direction, **in both shipped source sets it now walks (review
+  catch — the first version only ever walked `src/main`, exactly the blind
+  spot the deleted, `src/debug`-only `IdentityScreen.kt` would have hidden
+  behind)**: temporarily adding a literal `"api.steampowered.com"` string
+  and a `getSteamWebApiKey()`-named call to one scratch file under
+  `src/main/java/dev/steamvault/app/net/steam/` AND a second scratch file
+  under `src/debug/java/dev/steamvault/app/net/` simultaneously made both
+  of that test's assertions fail, and the reported `Hits:` list named BOTH
+  scratch files in each failure message, confirming neither source set is
+  a blind spot anymore (reverted before this report; not left in the tree).
+
+Verified command + output tail (JDK 17.0.12 Temurin + the `platforms;
+android-35`/`build-tools;35.0.0`/`platform-tools` SDK components this
+project already pins, both provisioned fresh into scratch locations
+outside the repo for this environment — same "Toolchain note" shape WP
+4c-app's own verification recorded, no repo file changed as a result
+beyond the machine-specific, gitignored `app/local.properties`; this is
+the review round 3 re-run, after the production-scrub structural pin
+below, forced with `--rerun-tasks` and a prior `--stop` since this
+class's own tests read source files directly and can otherwise report a
+stale `UP-TO-DATE` result — measured directly during this WP's own
+mutation runs below, not a theoretical concern):
+
+```
+$ ./gradlew.bat --stop && ./gradlew.bat testDebugUnitTest testReleaseUnitTest lintDebug --console=plain --rerun-tasks
+...
+BUILD SUCCESSFUL in 1m 20s
+55 actionable tasks: 55 executed
+```
+
+`578 tests completed, 0 failed` on both variants (summed from the
+`testDebugUnitTest`/`testReleaseUnitTest` XML reports'
+`tests=`/`failures=`/`errors=` attributes). `app/app/build/reports/lint-results-debug.txt`
+reads exactly `"No issues found."` — the new plurals resource
+(`settings_steam_library_count`) and every removed/renamed string were
+checked this way, not assumed clean. `assembleDebug` was not run for this
+WP (no APK-level claim made here beyond what the unit-test compile step
+already proves — `compileDebugKotlin`/`compileReleaseKotlin` both
+succeeded as part of the command above).
+
+**Review round 3: the production-side legacy-key scrub was unpinned —
+fixed.** Sharing `legacyPrefKeysToScrub` between `EncryptedCredentialStore`
+and `InMemoryCredentialStore` closed the LOGIC-drift half of "don't pin
+the fake," but left the CALL-SITE-EXISTENCE half open: nothing in the JVM
+suite ever constructs a real `EncryptedCredentialStore` or calls its
+`clearSteamIdentity()`, so a diff deleting BOTH the `init` block's scrub
+loop and `clearSteamIdentity`'s restored `editor.remove(...)` line still
+passed 577/0 on both variants (reviewer-verified). Fixed with a fourth
+`EncryptedCredentialStoreSourceTest.kt` assertion (the same structural
+technique its other three guarantees already use, since this class
+cannot run on the JVM at all):
+
+```kotlin
+@Test
+fun `calls the shared legacy-key scrub at construction and on sign-out`() {
+    assertTrue(source.contains("legacyPrefKeysToScrub("))
+    assertTrue(source.contains("editor.remove(LEGACY_STEAM_WEB_API_KEY_PREF_NAME)"))
+}
+```
+
+Mutation-verified, both production lines independently (reverted before
+this report):
+
+- Deleting the entire `init` block: `EncryptedCredentialStoreSourceTest >
+  calls the shared legacy-key scrub at construction and on sign-out
+  FAILED` (`AssertionError` on the first assertion).
+- Reverting that, then deleting only `clearSteamIdentity`'s restored
+  `editor.remove(LEGACY_STEAM_WEB_API_KEY_PREF_NAME)` line: the SAME test
+  failed again (`AssertionError` on the second assertion). A stale
+  `UP-TO-DATE` pass was observed once during this probe and initially
+  blamed on the `File(...)` path not being a declared Gradle input — the
+  review measured that mechanism and refuted it: the subject file is
+  production Kotlin, so any statement-level edit changes compiled output
+  and re-runs the test task transitively; four review probes (two plain,
+  two forced) all failed correctly. The one stale pass had some other
+  cause (likely a report read from the previous run). `--rerun-tasks`
+  remains sound hygiene for source-text pins whose subject is only
+  incidentally a compile input — e.g. a token planted in a comment
+  changes the text but not the compiled output.

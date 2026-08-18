@@ -58,6 +58,11 @@ private class FakeOpenIdVerifier(
     }
 }
 
+/** Fakes [SteamLibraryFetcher] (WP 4h.4: the vault-relay-backed
+ * production implementation is [dev.steamvault.app.net.steam.VaultRelayLibraryFetcher],
+ * covered separately in `VaultRelayLibraryFetcherTest`) -- this repository
+ * only depends on the INTERFACE, so [SteamIdentityRepositoryImpl]'s own
+ * logic (preconditions, Result wrapping) is what this file pins. */
 private class FakeLibraryFetcher(
     var games: List<OwnedGame> = emptyList(),
     var persona: SteamPersona? = null,
@@ -82,16 +87,24 @@ class SteamIdentityRepositoryTest {
         // reading the other's internals.
         stateGenerator: () -> String = { TEST_STATE },
     ): Triple<SteamIdentityRepository, FakeOpenIdVerifier, FakeLibraryFetcher> =
-        Triple(SteamIdentityRepositoryImpl(store, verifier, fetcher, stateGenerator = stateGenerator), verifier, fetcher)
+        Triple(
+            SteamIdentityRepositoryImpl(
+                credentialStore = store,
+                openIdVerifier = verifier,
+                libraryFetcher = fetcher,
+                stateGenerator = stateGenerator,
+            ),
+            verifier,
+            fetcher,
+        )
 
     @Test
-    fun `initial state is signed out with no persona and no key`() {
+    fun `initial state is signed out with no persona`() {
         val (repo, _, _) = repo()
         val state = repo.state()
         assertFalse(state.isSignedIn)
         assertNull(state.steamId64)
         assertNull(state.personaName)
-        assertFalse(state.hasWebApiKey)
     }
 
     @Test
@@ -160,12 +173,7 @@ class SteamIdentityRepositoryTest {
         assertNull(repo.state().steamId64)
     }
 
-    @Test
-    fun `setWebApiKey persists the key and flips hasWebApiKey`() {
-        val (repo, _, _) = repo()
-        repo.setWebApiKey("0123456789ABCDEF0123456789ABCDEF")
-        assertTrue(repo.state().hasWebApiKey)
-    }
+    // ---- ownedGamesCountPreview / ownedGames (WP 4h.4: no key precondition anymore) --
 
     @Test
     fun `ownedGamesCountPreview fails when not signed in`() = runTest {
@@ -175,20 +183,9 @@ class SteamIdentityRepositoryTest {
     }
 
     @Test
-    fun `ownedGamesCountPreview fails when signed in but no Web API key is configured`() = runTest {
+    fun `MUTATION PIN -- ownedGamesCountPreview succeeds once signed in, with no Web API key precondition left to check`() = runTest {
         val store = InMemoryCredentialStore().apply { setSteamId64(VALID_STEAM_ID) }
-        val (repo, _, _) = repo(store = store)
-        val result = repo.ownedGamesCountPreview()
-        assertTrue(result.isFailure)
-    }
-
-    @Test
-    fun `ownedGamesCountPreview returns the game count once signed in with a key configured`() = runTest {
-        val store = InMemoryCredentialStore().apply {
-            setSteamId64(VALID_STEAM_ID)
-            setSteamWebApiKey("0123456789ABCDEF0123456789ABCDEF")
-        }
-        val fetcher = FakeLibraryFetcher(games = listOf(OwnedGame(440, "TF2", 1, "")))
+        val fetcher = FakeLibraryFetcher(games = listOf(OwnedGame(440, "TF2")))
         val (repo, _, _) = repo(fetcher = fetcher, store = store)
 
         val result = repo.ownedGamesCountPreview()
@@ -198,10 +195,7 @@ class SteamIdentityRepositoryTest {
 
     @Test
     fun `ownedGamesCountPreview surfaces a fetcher failure as a Result failure, not an exception`() = runTest {
-        val store = InMemoryCredentialStore().apply {
-            setSteamId64(VALID_STEAM_ID)
-            setSteamWebApiKey("0123456789ABCDEF0123456789ABCDEF")
-        }
+        val store = InMemoryCredentialStore().apply { setSteamId64(VALID_STEAM_ID) }
         val fetcher = FakeLibraryFetcher(throwOnGames = RuntimeException("boom"))
         val (repo, _, _) = repo(fetcher = fetcher, store = store)
 
@@ -217,19 +211,9 @@ class SteamIdentityRepositoryTest {
     }
 
     @Test
-    fun `ownedGames fails when signed in but no Web API key is configured`() = runTest {
+    fun `MUTATION PIN -- ownedGames returns the full list once signed in, with no Web API key precondition left to check`() = runTest {
         val store = InMemoryCredentialStore().apply { setSteamId64(VALID_STEAM_ID) }
-        val (repo, _, _) = repo(store = store)
-        assertTrue(repo.ownedGames().isFailure)
-    }
-
-    @Test
-    fun `ownedGames returns the full list once signed in with a key configured`() = runTest {
-        val store = InMemoryCredentialStore().apply {
-            setSteamId64(VALID_STEAM_ID)
-            setSteamWebApiKey("0123456789ABCDEF0123456789ABCDEF")
-        }
-        val games = listOf(OwnedGame(440, "TF2", 1, ""), OwnedGame(570, "Dota 2", 2, ""))
+        val games = listOf(OwnedGame(440, "TF2"), OwnedGame(570, "Dota 2"))
         val (repo, _, _) = repo(fetcher = FakeLibraryFetcher(games = games), store = store)
 
         val result = repo.ownedGames()
@@ -238,11 +222,19 @@ class SteamIdentityRepositoryTest {
     }
 
     @Test
-    fun `ownedGames surfaces a fetcher failure as a Result failure, not an exception`() = runTest {
-        val store = InMemoryCredentialStore().apply {
-            setSteamId64(VALID_STEAM_ID)
-            setSteamWebApiKey("0123456789ABCDEF0123456789ABCDEF")
-        }
+    fun `ownedGames returns an empty list unchanged -- the maybe-private-or-empty case is not this layer's job to interpret`() = runTest {
+        val store = InMemoryCredentialStore().apply { setSteamId64(VALID_STEAM_ID) }
+        val (repo, _, _) = repo(fetcher = FakeLibraryFetcher(games = emptyList()), store = store)
+
+        val result = repo.ownedGames()
+
+        assertTrue(result.isSuccess)
+        assertTrue(result.getOrNull()!!.isEmpty())
+    }
+
+    @Test
+    fun `ownedGames surfaces a fetcher failure -- e g a VaultApiError -- as a Result failure, not an exception`() = runTest {
+        val store = InMemoryCredentialStore().apply { setSteamId64(VALID_STEAM_ID) }
         val fetcher = FakeLibraryFetcher(throwOnGames = RuntimeException("boom"))
         val (repo, _, _) = repo(fetcher = fetcher, store = store)
 
@@ -251,15 +243,14 @@ class SteamIdentityRepositoryTest {
 
     @Test
     fun `ownedGamesCountPreview delegates to ownedGames -- the two can never drift`() = runTest {
-        val store = InMemoryCredentialStore().apply {
-            setSteamId64(VALID_STEAM_ID)
-            setSteamWebApiKey("0123456789ABCDEF0123456789ABCDEF")
-        }
-        val games = listOf(OwnedGame(440, "TF2", 1, ""), OwnedGame(570, "Dota 2", 2, ""))
+        val store = InMemoryCredentialStore().apply { setSteamId64(VALID_STEAM_ID) }
+        val games = listOf(OwnedGame(440, "TF2"), OwnedGame(570, "Dota 2"))
         val (repo, _, _) = repo(fetcher = FakeLibraryFetcher(games = games), store = store)
 
         assertEquals(2, repo.ownedGamesCountPreview().getOrNull())
     }
+
+    // ---- refreshPersonaName (WP 4h.4: no key precondition anymore) -------
 
     @Test
     fun `refreshPersonaName is false when not signed in`() = runTest {
@@ -268,18 +259,8 @@ class SteamIdentityRepositoryTest {
     }
 
     @Test
-    fun `refreshPersonaName is false when signed in but no Web API key is configured`() = runTest {
+    fun `refreshPersonaName persists the persona name once signed in`() = runTest {
         val store = InMemoryCredentialStore().apply { setSteamId64(VALID_STEAM_ID) }
-        val (repo, _, _) = repo(store = store)
-        assertFalse(repo.refreshPersonaName())
-    }
-
-    @Test
-    fun `refreshPersonaName persists the persona name once available`() = runTest {
-        val store = InMemoryCredentialStore().apply {
-            setSteamId64(VALID_STEAM_ID)
-            setSteamWebApiKey("0123456789ABCDEF0123456789ABCDEF")
-        }
         val fetcher = FakeLibraryFetcher(persona = SteamPersona(VALID_STEAM_ID, "Example"))
         val (repo, _, _) = repo(fetcher = fetcher, store = store)
 
@@ -297,7 +278,6 @@ class SteamIdentityRepositoryTest {
         val (repo, _, _) = repo(store = store)
         repo.buildLoginUrl()
         repo.completeLogin(callbackUrl())
-        repo.setWebApiKey("0123456789ABCDEF0123456789ABCDEF")
         assertTrue(repo.state().isSignedIn)
 
         repo.signOut()
@@ -305,7 +285,6 @@ class SteamIdentityRepositoryTest {
         val state = repo.state()
         assertFalse(state.isSignedIn)
         assertNull(state.personaName)
-        assertFalse(state.hasWebApiKey)
         assertEquals("vault-key", store.getApiKey())
         assertEquals("http://192.168.1.50:8080", store.getBaseUrl())
         assertEquals(ProfileKind.SYSTEM_VPN, store.getProfileKind())

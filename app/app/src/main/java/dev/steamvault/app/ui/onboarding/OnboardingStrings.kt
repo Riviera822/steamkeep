@@ -17,8 +17,6 @@ interface OnboardingStrings {
     fun enterApiKeyFirst(): String
     fun connectionOk(): String
     fun connectionFailure(reason: ConnectionFailureReason): String
-    fun invalidWebApiKeyFormat(): String
-    fun webApiKeySaveFailed(cause: Throwable): String
 }
 
 class AndroidOnboardingStrings(private val resources: Resources) : OnboardingStrings {
@@ -34,8 +32,4 @@ class AndroidOnboardingStrings(private val resources: Resources) : OnboardingStr
             reason.status ?: 0,
         )
     }
-
-    override fun invalidWebApiKeyFormat(): String = resources.getString(R.string.onboarding_steam_key_invalid_format)
-    override fun webApiKeySaveFailed(cause: Throwable): String =
-        resources.getString(R.string.onboarding_steam_key_save_failed, cause.message ?: "")
 }

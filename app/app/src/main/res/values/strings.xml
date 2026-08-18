@@ -24,10 +24,8 @@
     <string name="reduced_motion_on">Reduced motion: ON (animations disabled)</string>
     <string name="reduced_motion_off">Reduced motion: OFF (animations enabled)</string>
 
-    <!-- Steam identity screen (WP 4b.3). Library grid rendering is WP 4b.4;
-         this screen only shows a game-count preview (WP brief boundary). -->
-    <string name="identity_title">Steam account</string>
-    <string name="identity_signed_out_hint">Sign in with your Steam account to link it to this device.</string>
+    <!-- Steam identity vocabulary (WP 4b.3), shared by the Settings screen's
+         Steam-identity section and the onboarding flow's Steam step. -->
     <string name="identity_sign_in">Sign in with Steam</string>
     <string name="identity_sign_out">Sign out</string>
     <!-- Review round S3: SteamLoginResult.Failure.reason is always a
@@ -37,17 +35,6 @@
     <string name="identity_steamid_label">SteamID64: %1$s</string>
     <string name="identity_persona_label">Signed in as %1$s</string>
     <string name="identity_persona_unknown">Persona name not loaded yet</string>
-    <string name="identity_no_web_api_key">Add your Steam Web API key in Settings to load your library.</string>
-    <string name="identity_refresh_library_count">Check library size</string>
-    <string name="identity_library_count_unknown">Library size: not checked yet</string>
-    <string name="identity_library_count_error">Could not reach the Steam Web API — try again later.</string>
-    <!-- AGP lint's PluralsCandidate check (app/README.md's lintDebug gate,
-         warningsAsErrors) flags a bare "%1$d games" string; a plurals
-         resource is the correct fix rather than a suppression. -->
-    <plurals name="identity_library_count">
-        <item quantity="one">Library size: %1$d game</item>
-        <item quantity="other">Library size: %1$d games</item>
-    </plurals>
 
     <!-- Bottom nav (WP 4b.4): three destinations per the frozen mockup and
          the WP 4a.1 decision (Clients is a sheet, not a nav item). -->
@@ -138,7 +125,10 @@
     <string name="onboarding_step2_title">Step 2 of 3 · Steam identity</string>
     <string name="onboarding_step3_title">Step 3 of 3 · Ready</string>
     <string name="onboarding_step1_lede">Enter how this device reaches your vault-api, and the API key it accepts.</string>
-    <string name="onboarding_step2_lede">Optional — sign in with Steam and add a Web API key to see your library with names and cover art. You can set this up later under Settings instead.</string>
+    <!-- WP 4h.4 rewording: there is no Web API key to add anymore — the
+         vault relays library data using the operator's own key, once,
+         server-side. -->
+    <string name="onboarding_step2_lede">Optional — sign in with Steam to see your library merged into the vault\'s. No key to create or paste; the vault reads it using its own configured key. You can set this up later under Settings instead.</string>
     <string name="onboarding_done_lede">You\'re all set.</string>
 
     <string name="onboarding_profile_system_vpn">System VPN / LAN</string>
@@ -165,14 +155,6 @@
     <string name="onboarding_back">Back</string>
     <string name="onboarding_finish">Go to library</string>
     <string name="onboarding_cancel">Cancel</string>
-
-    <string name="onboarding_steam_key_label">Web API key (32 hex characters)</string>
-    <string name="onboarding_steam_key_placeholder">from steamcommunity.com/dev/apikey</string>
-    <string name="onboarding_steam_key_save">Save key</string>
-    <string name="onboarding_steam_key_configured">Web API key configured</string>
-    <string name="onboarding_steam_key_not_configured">No Web API key configured yet</string>
-    <string name="onboarding_steam_key_invalid_format">Enter exactly 32 hexadecimal characters (0–9, a–f).</string>
-    <string name="onboarding_steam_key_save_failed">Could not save the key: %1$s</string>
 
     <string name="onboarding_summary_connection">Connection: %1$s</string>
     <string name="onboarding_summary_connection_verified">verified</string>
@@ -253,11 +235,32 @@
     <string name="settings_disconnect_confirm_confirm">Disconnect</string>
     <string name="settings_disconnect_confirm_cancel">Cancel</string>
 
-    <string name="settings_steam_key_masked">Configured (hidden)</string>
-    <string name="settings_steam_key_not_set">Not configured</string>
-    <string name="settings_steam_key_remove">Remove key</string>
-    <string name="settings_toast_webapikey_saved">Steam Web API key saved.</string>
-    <string name="settings_toast_webapikey_removed">Steam Web API key removed.</string>
+    <!-- WP 4h.4 (ADR-0004's second addendum): the device-local Steam Web
+         API key entry/masked-display/remove UI these strings used to serve
+         is gone — library data now comes through vault-api's relay,
+         checked on demand. -->
+    <string name="settings_steam_library_check_button">Check library</string>
+    <string name="settings_steam_library_checking">Checking…</string>
+    <string name="settings_steam_library_unknown">Library: not checked yet</string>
+    <!-- AGP lint's PluralsCandidate check (app/README.md's lintDebug gate,
+         warningsAsErrors) flags a bare "%1$d games" string; a plurals
+         resource is the correct fix rather than a suppression, same
+         precedent as library_bulk_selected_count. -->
+    <plurals name="settings_steam_library_count">
+        <item quantity="one">%1$d game found</item>
+        <item quantity="other">%1$d games found</item>
+    </plurals>
+    <!-- The private-profile / genuinely-empty-library ambiguity is real,
+         not a wording gap: vault-api's ONE operator-owned key cannot tell
+         the two apart any more than this string can (see
+         ui/settings/logic/SteamLibraryStatus.kt's class kdoc). The remedy
+         sentence (review nitpick) names the ACTUAL Steam privacy setting
+         a user can change, rather than leaving them to guess "private"
+         means something they cannot act on. -->
+    <string name="settings_steam_library_maybe_private">0 games found. Your Steam profile\'s game details may be private — the vault reads libraries using the operator\'s own key, not yours. If you want your library to show up, set "Game details" to Public in your Steam privacy settings.</string>
+    <string name="settings_steam_library_not_configured">The vault owner hasn\'t set up a Steam Web API key yet. Once they do (once, server-side), every signed-in user\'s library works — no key of your own needed.</string>
+    <string name="settings_steam_library_invalid_steamid">Steam did not recognize this account\'s SteamID64 — try signing in again.</string>
+    <string name="settings_steam_library_error">Could not check your Steam library: %1$s</string>
 
     <!-- Notifications section (WP 4b.8) — see SettingsScreen.kt's
          NotificationsSection kdoc for why this is a single always-shown
@@ -287,7 +290,7 @@
          never a count) — lint's heuristic fires on the trailing word
          "failed", but there is no quantity here to pluralize, unlike the
          genuine plural candidates elsewhere in this file
-         (identity_library_count et al., see their own comment). -->
+         (settings_steam_library_count et al., see their own comment). -->
     <string name="notif_job_failed_body" tools:ignore="PluralsCandidate">The download for app %1$d failed — check Downloads for details.</string>
     <string name="notif_update_ready_title">Update ready</string>
     <string name="notif_update_ready_body">%1$s has an update ready to download.</string>
@@ -467,7 +470,7 @@
     <string name="detail_gc_dry_run_none">No orphaned chunks found — nothing to collect.</string>
     <!-- AGP lint's PluralsCandidate check flags "%d chunks" as a bare
          string (app/README.md's lintDebug gate, warningsAsErrors) - same
-         precedent as identity_library_count/library_bulk_selected_count. -->
+         precedent as settings_steam_library_count/library_bulk_selected_count. -->
     <plurals name="detail_gc_would_delete">
         <item quantity="one">Would delete %1$s across %2$d chunk.</item>
         <item quantity="other">Would delete %1$s across %2$d chunks.</item>
