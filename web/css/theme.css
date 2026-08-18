@@ -57,7 +57,37 @@
      value changes per breakpoint. */
   --gutter:16px;    /* horizontal inset — matches .view-root's existing 16px side padding */
   --nav-h:64px;     /* bottom-nav rendered height (7px+9px vertical padding + ~48px content); 0 once BP-L turns it into a side rail */
-  --rail-w:232px;   /* BP-L left-rail width */
+  /* BP-L left-rail width (WP 4e.6: narrowed from WP 4e.1's 232px — operator
+     verdict, live at ~2000px: "232px feels unnecessarily large for the
+     three things in it"). 180px is not a guess: measured live in a real
+     browser at this exact value (Chromium, the `--ui` font stack).
+     **Corrected (Opus review nitpick, WP 4e.6 review round): the FIRST
+     version of this comment said 136px/169px/12px, each off by exactly the
+     amount `.nav`'s own `border-right:1px` eats — restated below with the
+     actual measured edges, not the arithmetic-only ones.** `.nav`'s content
+     box is 159px (180 - 10px padding each side - the 1px border-right; BP-L
+     has no border-left), and `.nav-btn` fills it edge to edge, so a
+     button's OWN content box (inside its further 12px padding each side)
+     is 135px, running from x=22 to x=157 — measured directly, not derived.
+     The longest nav label, "Downloads" at the rail's 12.5px `.nav-lb` size,
+     spans x=55 to x=120.5 (65.5px); the 21px icon sits at x=22-43, the
+     12px `.nav-btn` gap fills x=43-55. That leaves x=120.5-157 (36.5px) for
+     `.nav-pip`, which `margin-left:auto` always pushes flush against the
+     157px edge regardless of digit count — so the number that actually
+     matters is the GAP between the label and the pip's own left edge, not
+     a "slack past the button" that a flush-right element can never have.
+     Measured: 21.5px for a one-digit pip (0-9), 17.4px for the worst
+     REACHABLE case, a two-digit "20" (`api.js`'s `jobs(limit=20)` caps the
+     pip's own count at 20 — a three-digit pip is not a smaller-margin case
+     that got rounded away, it is impossible). Both are comfortably
+     positive: no wrap, no overlap, at every width this token affects (it
+     does not vary by viewport). The freed 52px (232 - 180) goes to the
+     cover wall (theme.css/app.css `--w-wall`, WP 4e.2) — see
+     css-layout-foundation.test.js for the re-derived column/tile numbers at
+     this width and .bulk's still-exact Δleft/Δwidth=0 algebra, which is
+     parametric on this token and therefore survives the narrowing by
+     construction, not by re-verification alone. */
+  --rail-w:180px;
   --w-text:960px;   /* single-column content width (.view-root/.onb/.banner-wrap) — replaces the four hand-copied "960"/"928"/"78" numbers below BP-M; narrows to 760px at BP-M for a comfortable reading column. NOT exhaustive (Opus review nitpick N5, WP 4e.1 fix round): .view-root's own "20px 16px 32px" padding and .bulk's "left/right:12px" insets are still separate, untouched literals — this token replaces the FOUR that were copies of the SAME number, not every dimensional literal in app.css */
   /* ceiling for the tile "wall" (library grid). Base/pre-BP-L value only —
      the 960px-everywhere era ended with WP 4e.2: app.css's BP-L block raises
@@ -93,21 +123,47 @@
      **Second round on this exact sentence (Opus review B2, WP 4e.2 second
      fix round) — the first "fix" asserted a band narrower than reality, a
      mistake this same comment already disproved ten lines below.** 176px
-     produces a measured 177-222px range across BP-L/BP-XL (1.02x-1.29x the
-     173px mockup tile), swept at 4px resolution over 396 widths
+     produces a measured 176-222.75px range across BP-L/BP-XL (1.02x-1.29x
+     the 173px mockup tile), swept at 4px resolution over 396 widths
      (1024-2600px plus 3440px), both densities. The overshoot is worst at
      the fewest columns and tightens as columns are added: <=203px from 7
-     columns up (viewport >=~1580px), but up to ~222px in the 4-column band
-     (1024-1204px, `max = 176 + (176+12)/4 = 223`, matching the swept
-     measurement). **A tighter ceiling (e.g. 205px) at EVERY width is
-     unachievable with `minmax(F,1fr)` at all — not a tuning problem this
-     token failed to solve: it would need F<=158px, which is already below
-     Compact's own 150px floor**, i.e. there is no single Comfortable value
-     that is both wider than Compact and never exceeds 205px in the
-     few-column band. See the coder's report for the full sweep and
-     app.css's BP-L `.grid.cols3` comment for why 150px (not 176px) is the
-     Compact floor: it restores the value this token first shipped with in
-     WP 4e.1 and in this plan's own text.
+     columns up (viewport >=~1580px), but up to ~222.75px in the 4-column
+     band (1024-1204px, `max = 176 + (176+12)/4 = 223` theoretical, matching
+     the swept measurement to within rounding). **A tighter ceiling (e.g.
+     205px) at EVERY width is unachievable with `minmax(F,1fr)` at all — not
+     a tuning problem this token failed to solve: it would need F<=158px,
+     which is already below Compact's own 150px floor**, i.e. there is no
+     single Comfortable value that is both wider than Compact and never
+     exceeds 205px in the few-column band. See the coder's report for the
+     full sweep and app.css's BP-L `.grid.cols3` comment for why 150px (not
+     176px) is the Compact floor: it restores the value this token first
+     shipped with in WP 4e.1 and in this plan's own text.
+
+     **Third correction to this same low-end number (Opus review nitpick,
+     WP 4e.6 review round) — "this exact sentence has now been corrected
+     twice for asserting a band narrower than reality; make it the last
+     time."** The WP 4e.2 sweep above (4px resolution, at the OLD 232px
+     rail) reported 177px as its lowest sampled value; after WP 4e.6
+     narrowed `--rail-w` to 180px, the same sweep's sampling grid lands on
+     different absolute pixel widths and would report a slightly different
+     low end (measured: 0.9px lower) — a resampling artifact, not a real
+     change in what the token can produce, and not worth re-sweeping a
+     third time to chase. **The actually correct, rail-width-INDEPENDENT
+     bound needs no sweep at all: it is exactly this token's own value,
+     176px, full stop** — `minmax(176px, 1fr)` cannot render a track
+     narrower than 176px BY DEFINITION, at any viewport, under any
+     `--rail-w`; a sweep can only ever find a value that APPROACHES 176px
+     from above; it can land exactly ON 176px only if a sampled viewport
+     happens to coincide with a column-count threshold exactly. Verified
+     live at the new rail width rather than merely asserted: 1155px viewport
+     -> 176.000px tile (5 columns, exactly at the n=5 threshold); 1156px ->
+     176.19px; 1154px -> 222.75px (4 columns, the SAME upper bound as
+     before — the fewest-column overshoot depends only on `F`/`gap`/`n`, not
+     on `--rail-w`, so this half of the range is unaffected by the rail
+     narrowing and did not need re-verifying, only the low end's exact
+     sampled value did). The range is therefore stated as **176px-222.75px**
+     from here on — the low end BY DEFINITION, not by sample, so it cannot
+     drift again the way the high-precision-looking "177px" did.
 
      **S6 (operator decision, WP 4e.2 second fix round): Comfortable and
      Compact render IDENTICALLY — same column count, same tile width to

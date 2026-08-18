@@ -26,6 +26,18 @@ test("GET /v1/settings returns every overridable key plus env-only informational
   assert.equal(dbPath.env_only, true);
 });
 
+// WP 4e.6 rail foot / WP 4e.7 (api/) — server_version is a SIBLING of
+// readonly on the response object, never a row inside `settings`, matching
+// the real endpoint's shape (it has no source precedence and PATCH rejects
+// it as an unrecognised key — nothing in demo mode's coercePatchValue
+// accepts it either, by omission).
+test("GET /v1/settings carries server_version as a top-level string sibling of readonly, not a settings row", async () => {
+  const out = await demoRequest("GET", "/v1/settings");
+  assert.equal(typeof out.server_version, "string");
+  assert.ok(out.server_version.length > 0);
+  assert.equal(out.settings.some((s) => s.key === "server_version"), false, "server_version must not appear as a settings row");
+});
+
 test("a freshly reset demo has no db-sourced overrides", async () => {
   const out = await demoRequest("GET", "/v1/settings");
   for (const entry of out.settings.filter((s) => !s.env_only)) {

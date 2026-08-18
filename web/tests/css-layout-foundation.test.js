@@ -618,6 +618,100 @@ test(".banner-wrap has width:100% (the shrink-to-fit fix — must never silently
   assert.equal(/(^|[;{\s])display\s*:/.test(body), false, "`.banner-wrap` must stay free of an author `display` rule — it is [hidden]-toggled");
 });
 
+// ---------------------------------------------------------------------
+// 4. WP 4e.6 — the rail narrowed (232px -> 180px) and gained head/foot
+// content. A drift on either half of this deserves its own named failure:
+// the WIDTH regressing silently undoes the operator's own measured verdict
+// ("232px feels unnecessarily large for the three items in it"), and the
+// CONTENT regressing (showing on the phone bottom bar, or never being
+// switched back on at BP-L) is the exact class of bug B1/B2 already found
+// once in this same shell-layout package (WP 4e.1 fix round) — re-check
+// every fixed/overlay surface a shell change touches, not just the one the
+// diff's own description names.
+// ---------------------------------------------------------------------
+
+test("theme.css's --rail-w is 180px, not the WP 4e.1 232px — a drift here must fail", () => {
+  assert.match(themeTop, /--rail-w\s*:\s*180px\b/, "--rail-w changed from the WP 4e.6 operator-verdict value (180px) or lost its unit");
+  // Only ONE assignment should exist (unlike --nav-h/--w-wall, --rail-w is
+  // never redeclared per breakpoint — it is a single, width-independent
+  // rail dimension) — a second assignment slipping in elsewhere would mean
+  // two sources of truth for the same token.
+  const assignments = [...stripComments(themeCss).matchAll(/--rail-w\s*:\s*([^;]+);/g)];
+  assert.equal(assignments.length, 1, `expected exactly one --rail-w assignment, found ${assignments.length}`);
+});
+
+test("app.css's top-level .rail-head/.rail-foot are display:none (phone/tablet chrome never shows rail content)", () => {
+  for (const selector of [".rail-head", ".rail-foot"]) {
+    const body = ruleBody(appTop, selector);
+    assert.ok(body, `${selector} rule not found at top level`);
+    assert.match(body, /display\s*:\s*none\b/, `${selector} must be display:none below BP-L`);
+  }
+});
+
+test("BP-L switches .rail-head/.rail-foot back to display:block, and .rail-foot pins itself to the rail's bottom edge", () => {
+  const block = findMediaBlock(1024);
+  const headBody = ruleBody(block.body, ".rail-head");
+  assert.ok(headBody, ".rail-head override not found in the BP-L block");
+  assert.match(headBody, /display\s*:\s*block\b/);
+  const footBody = ruleBody(block.body, ".rail-foot");
+  assert.ok(footBody, ".rail-foot override not found in the BP-L block");
+  assert.match(footBody, /display\s*:\s*block\b/);
+  assert.match(
+    footBody,
+    /margin-top\s*:\s*auto\b/,
+    ".rail-foot must use margin-top:auto to reach the bottom of .nav's BP-L flex column — without it, it would sit directly under the nav buttons instead of at the rail's foot",
+  );
+});
+
+// ---------------------------------------------------------------------
+// Opus review should-fix S1 (WP 4e.6 review round): the app.css BP-L
+// --w-wall comment's own "1600px is unreachable at this breakpoint" claim
+// went stale the moment --rail-w narrowed in the SAME package — at 180px it
+// DOES bind (measured live: .view-root computes to exactly 1600px, capped,
+// at a 1799px viewport). The comment was corrected, but a comment alone is
+// exactly the failure mode this phase keeps re-learning ("a comment that
+// explains a value must be verifiable from the value"): this test computes
+// the SAME breakeven arithmetic from the live token values, so a future
+// --rail-w (or --w-wall) change that flips "does the cap bind at BP-L's own
+// widest viewport" fails a named test instead of leaving a silently stale
+// sentence.
+// ---------------------------------------------------------------------
+
+test("BP-L's --w-wall cap binding status matches the current --rail-w — computed from the live tokens, not hand-asserted", () => {
+  const railWMatch = /--rail-w\s*:\s*(\d+)px/.exec(themeTop);
+  assert.ok(railWMatch, "--rail-w not found in theme.css's :root");
+  const railW = Number(railWMatch[1]);
+
+  const bpLBlock = findMediaBlock(1024);
+  const wWallMatch = /--w-wall\s*:\s*(\d+)px/.exec(bpLBlock.body);
+  assert.ok(wWallMatch, "--w-wall not (re)declared in the BP-L block");
+  const wWallBpL = Number(wWallMatch[1]);
+
+  // Constants measured, not tokens: BP-L's own widest possible viewport is
+  // 1799.98px (BP-XL takes over at exactly 1800px), and >=768px viewports
+  // reserve 15px for a classic scrollbar (N3, WP 4e.1/4e.2's six-width
+  // tables) whenever content overflows vertically, which the library view
+  // always does past a handful of games.
+  const BP_L_MAX_VIEWPORT = 1799.98;
+  const SCROLLBAR_PX = 15;
+  const bpLMaxColumn = BP_L_MAX_VIEWPORT - railW - SCROLLBAR_PX;
+  const capBinds = bpLMaxColumn > wWallBpL;
+
+  // Pinned to the CURRENT shipped reality (WP 4e.6: 180px rail, 1600px
+  // wall -> binds), not to whichever direction happened to be true when
+  // this test was written, so the failure message always names what to
+  // re-check if it ever flips.
+  assert.equal(
+    capBinds,
+    true,
+    `Expected BP-L's --w-wall cap to BIND at --rail-w:${railW}px (max column ` +
+      `${bpLMaxColumn}px vs --w-wall ${wWallBpL}px) — if this is false, either ` +
+      `--rail-w widened back past ~185px or --w-wall changed, and app.css's ` +
+      `BP-L comment (the "1600px is UNREACHABLE" paragraph corrected in WP ` +
+      `4e.6) needs re-checking against the new numbers either way`,
+  );
+});
+
 test("no colour/font/radius :root token changed — every original hex/font/radius value from theme.css is still present verbatim", () => {
   const mustStillContain = [
     "--bg:#0A1016", "--surface:#111C24", "--raised:#17252F", "--raised-2:#1D303C",

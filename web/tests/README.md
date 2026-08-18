@@ -52,7 +52,13 @@ node --test web/tests/backoff.test.js
   at module load, so a plain object stand-in is enough. Regression
   coverage for review blocker B1 (a nudge racing an in-flight poll used to
   fork a second, permanently duplicating timer chain and double-fire every
-  notification).
+  notification). Extended (WP 4e.6) with the fourth, `keyFn`-less "cache"
+  resource: its tick payload shape (`{item}`, never a `{diff}` key),
+  `store.snapshot("cache")`'s undefined-before-first-poll/preserved-on-
+  failure behaviour, and its own B1-style in-flight/nudge race replay — all
+  fake `apiClient` objects in this file gained a `cacheSummary` stub so the
+  new loop does not error on every `store.start()` call this file already
+  made before this WP existed.
 - `demo-data.test.js` — `web/js/demo-data.js`'s request routing: the exact
   `CacheDeletionOut` response shape, ADR-0003 shared-depot protection
   (`DELETE /v1/cache/{appid}` skips a depot still cached by another game,
@@ -125,7 +131,10 @@ module and tested headlessly here:
   look, every time — no flaky randomness) and stays in range.
 - `format.test.js` — `web/js/lib/format.js`: `formatBytesGB`'s
   under/over-100-GB rounding and that it never fabricates a number for
-  null/zero/negative/non-finite input.
+  null/zero/negative/non-finite input. Gained `formatBytesGBOrZero` coverage
+  (WP 4e.6, rail foot): the deliberately OPPOSITE zero rule from
+  `formatBytesGB` — a genuine zero renders (`"0.0 GB"`), only
+  null/undefined/negative/non-finite input stays `null`.
 - `render-plan.test.js` — `web/js/lib/render-plan.js` (WP 4a.3 review fix,
   blocker B1): the pure games-tick patch-vs-rebuild decision. First poll,
   and added/removed rows, always mean a full render (grid membership can
@@ -361,7 +370,8 @@ WP's keyboard-nav/focus-trap work, which genuinely are testable headlessly:
   fake `document`, extended just far enough to run `router.js` (touches
   `window.addEventListener` at module load) and `sheet-dialog.js`/
   `status-icon.js` (build real element/SVG subtrees) — NOT a jsdom
-  replacement, see its header.
+  replacement, see its header. Extended (WP 4e.6, Opus review should-fix
+  S3) with `FakeElement.replaceChildren` for `rail-panel-wiring.test.js`.
 - `modal-stack.test.js` — `web/js/lib/modal-stack.js`, the new shared
   "which overlay is topmost" stack behind the focus trap both
   `onboarding.js` and `sheet-dialog.js` had deferred to this WP: pushing one
@@ -690,6 +700,46 @@ genuinely is pure and DOM-free.
   `needs_force=true` and a done row is `false`, matching api/README.md's
   real lifecycle exactly (the pre-fix default produced `idle` +
   `needs_force=false`, a shape the real API can never emit).
+- `rail-content.test.js` (WP 4e.6) — `web/js/lib/rail-content.js`'s three
+  pure presentation functions, no DOM: `vaultNameFromSettings` (a real
+  effective value trims and returns; a malformed response/missing entry/
+  empty-after-trim value are all `null`); `cacheFootFromSummary` — the
+  headline **unknown-vs-zero** guarantee: no summary yet or a malformed one
+  is `null`, but a GENUINE zero (`total_bytes:0`, an empty cache;
+  `free_disk_bytes:0`, the disk is full) renders as a real `"0.0 GB"`, never
+  collapsed into "unknown" the way the tile-badge helper `formatBytesGB`
+  deliberately does for the same input shape (two named mutation targets:
+  swapping the module's `formatBytesGBOrZero` import back to `formatBytesGB`
+  kills BOTH the total_bytes and free_disk_bytes zero pins); and
+  `versionFromSettings` (coordinator addition mid-WP, confirmed shape from
+  the parallel WP 4e.7 `api/` package: a top-level `server_version` string,
+  sibling of `readonly`) — absent/non-string/empty are all `null`, a real
+  value is trimmed and `v`-prefixed (not double-prefixed if already
+  `v`/`V`-prefixed), and a pathologically long value is clamped with a
+  trailing ellipsis (mutation target: returning `""` instead of `null` for
+  the absent case kills the exact-null pin by name).
+- `demo-data-settings.test.js` gained a pin (WP 4e.6/4e.7) for
+  `GET /v1/settings`'s new `server_version` field: a top-level string
+  sibling of `readonly`, never a row inside `settings` (matching the real
+  endpoint's shape — the field has no source precedence and `PATCH` rejects
+  it as an unrecognised key).
+- `rail-panel-wiring.test.js` (WP 4e.6, Opus review should-fix S3, new) —
+  `web/js/components/rail-panel.js`'s DOM-wiring, refactored into a
+  dependency-injected `createRailPanel()` factory specifically so this file
+  could exist (the same `store.js`/`store-singleton.js` split, applied to a
+  component for the first time; `app.js` now performs the one real,
+  side-effecting call this file used to make on import). Drives it with
+  `fake-dom.js` `FakeElement`s and trivial fake store/api objects — no real
+  `document`, `store-singleton.js`, or network. Covers: the two mutations
+  that used to pass the full suite silently (a fabricated `"Free null"` row
+  when `free_disk_bytes` is `null`; a poll failure blanking the rail
+  instead of leaving the last real number on screen); the initial-snapshot
+  paint (mirrors `bypass-banner.js`'s own pattern); `.rail-head`/
+  `.rail-foot`/`#rail-version` all hidden when they have nothing to show
+  (should-fix S4), including the AND-not-OR regression test for
+  `.rail-foot`'s combined visibility rule; and the settings-fetch gating
+  (skipped with no key and demo mode off, runs otherwise, never throws on
+  rejection).
 
 #### Honest list of what WP 4e.1's pass did NOT catch on its own — and what closed the gap
 
@@ -956,3 +1006,189 @@ overlays via their actual UI controls (a real click on the panel's own close
 affordance, or a trusted keypress) avoids the issue entirely. Not a product
 bug — recorded here because it cost real time to diagnose and the next
 person driving this suite by hand should not have to rediscover it.
+
+### WP 4e.6 — The rail narrower, and earning its width (Phase 4e)
+
+`--rail-w` 232px -> 180px (operator verdict: "232px feels unnecessarily
+large for the three things in it"), plus two new rail-content pieces (vault
+name, cache used/free) and a third added mid-WP by the coordinator (server
+version) — see `docs/PROJECT_PLAN.md`'s Phase 4e section and
+`docs/WORKPACKAGES.md`'s D-12 for the full narrative. Test additions:
+`format.test.js` (+5, `formatBytesGBOrZero`), `rail-content.test.js` (new,
++21, all three pure content functions), `store-poll-loop.test.js` (+4, the
+new "cache" resource loop), `css-layout-foundation.test.js` (+3, `--rail-w`/
+display-toggle/`margin-top:auto`), `demo-data-settings.test.js` (+1,
+`server_version`'s shape) — 462 baseline + 34 first pass, +2 more after the
+coordinator's `server_version` shape correction (an "already starts with
+v" pin and a real-world-shaped value pin) = 498 green, first-round PASS.
+
+**Opus review: PASS, no blockers — four should-fixes, all addressed, suite
+now 515 green.** S1 (`css-layout-foundation.test.js` +1): the WP 4e.2
+`--w-wall:1600px` comment's own "unreachable at BP-L" claim went stale the
+moment THIS package narrowed `--rail-w` — at 180px the cap genuinely binds
+at BP-L's own top end (measured: `.view-root` 1600px, capped, at 1799px).
+Comment corrected; a new structural pin computes the same breakeven
+arithmetic from the live `--rail-w`/`--w-wall` tokens so the next such
+change fails a named test instead of leaving a comment stale again. S2
+(`store-poll-loop.test.js` +1): the cache loop's cadence
+(`intervals.gamesMs`) was completely unpinned — mutating it to
+`jobsFastMs` (2s in production, 7.5x more often) survived all 498 prior
+tests, since none of them gave the cache loop a cadence distinct from
+every other interval. A live-timing pin (short `gamesMs`, huge everything
+else) closes it — wrapped in `try`/`finally` around `store.stop()` after a
+REAL hang was measured while developing it (a failing assertion skipped
+cleanup, leaving a 50s timer alive and hanging the test file's exit past a
+120s harness timeout with zero output, until the retry with cleanup-on-
+failure came back in under 100ms). S3 (`rail-panel-wiring.test.js`, new,
++15): `rail-panel.js` had NO test coverage at all — deleting
+`if (payload.error) return;` (blanks the rail on a transient poll failure)
+and deleting `if (foot.freeText !== null)` (renders a literal `"Free
+null"`) both passed the full suite. Fixed by refactoring `rail-panel.js`
+into a dependency-injected `createRailPanel()` factory — the SAME
+`store.js`/`store-singleton.js` split applied to a component for the first
+time, with the real wiring call moved into `app.js` — so it can be driven
+headlessly with `fake-dom.js` elements (extended with `replaceChildren`)
+and trivial fake store/api stand-ins; both mutations now die by name. S4
+(`rail-panel-wiring.test.js`, folded into the same new file): "render
+nothing, never a placeholder" had only been applied to the TEXT inside the
+rail's elements, not their wrapping containers — a default install showed
+an empty `.rail-head` with a bare divider line above the nav, and
+`.rail-foot` carried dead space from `#rail-version`'s own margin even with
+real cache data. `headEl.hidden`/`footEl.hidden`/`versionEl.hidden` are now
+toggled alongside the text (via the plain `hidden` attribute, guarded in
+app.css's BP-L block against the `display:block` override each would
+otherwise lose to, same cascade fix as `.btn[hidden]`/`h4.sec[hidden]`);
+`.rail-foot` hides only when BOTH the cache summary AND the version line
+have nothing to show, pinned as its own AND-not-OR regression test.
+
+Nitpicks also closed: `theme.css`'s rail geometry comment corrected its
+136px/169px/12px figures to the actual measured 135px/157px/21.5px (the
+`.nav` `border-right:1px` was missing from the original arithmetic; the
+"12px slack" figure implicitly assumed a 3-digit pip, which `api.js`'s
+`jobs(limit=20)` makes unreachable); the `--tile-min` overshoot band's low
+end is now stated as exactly 176px (the token's own floor, by definition of
+`minmax()`, not a swept approximation that can drift again) rather than a
+third slightly-wrong sampled figure; this file's own WP 4e.6 write-up
+corrected "paints... before subscribing" to the actual order (subscribe
+first, then paint from whatever snapshot already exists).
+
+**A correction to this WP's OWN brief, found before any code shipped, not
+after (unlike WP 4e.1/4e.2's review-round corrections).** The brief that
+opened this package asserted `GET /v1/cache/summary` was "already polled by
+the store's slow loop". `git log -- web/js/store.js` showed exactly one
+commit (WP 4a.2) since that loop's creation, and `api.cacheSummary()` —
+defined in `api.js` since the same WP — had zero call sites anywhere in
+`web/js/`. Rather than either (a) silently building on a false premise or
+(b) invoking the brief's own fallback ("if a piece of data is not already
+in the store, say so and leave it out") and shipping a rail with only ONE
+content piece, the fourth `ResourceLoop` was added to `store.js` itself —
+a real endpoint, the EXISTING `ResourceLoop` class (no new race-handling
+code), the EXISTING slow cadence value (`intervals.gamesMs`, not a new
+number) — on the reasoning that the brief's INTENT (the operator explicitly
+rejected a rail with only one content piece: "A narrower rail with nothing
+else in it would answer half of what they said") outweighed a literal
+reading of a fallback clause written for the case where the underlying data
+genuinely has no source at all, which is not what this is.
+
+**Unknown-vs-zero, the headline guarantee, verified in BOTH directions —
+this phase has burned a review round before on testing only one direction
+of a fail-closed rule (LEARNINGS "Testing discipline").** `formatBytesGB`
+(WP 4a.3, the library tile badge) deliberately treats 0 the SAME as
+null/negative/non-finite ("nothing to print" — a never-downloaded game
+shows the icon alone). Reusing it here would have been the natural,
+WRONG choice: "0 bytes free" (disk full) and "0 bytes cached" (empty vault)
+are both real, DIFFERENT-from-unknown facts the rail must show, not hide
+behind the same "nothing to print" the tile badge uses for a genuinely
+different situation. `formatBytesGBOrZero` exists specifically to invert
+that one rule while keeping every other input (null/undefined/negative/
+non-finite) mapped the same way — pinned with a `formatBytesGBOrZero(0) !==
+formatBytesGB(0)` assertion in `format.test.js` so the two helpers cannot
+silently converge again, plus the two dedicated "GENUINE zero" tests in
+`rail-content.test.js` whose mutation target (aliasing the import back to
+`formatBytesGB`) is recorded in this file's own header and re-verified live
+by the coder (temporarily applied, watched both tests fail by name, then
+reverted).
+
+**A poll failure is NOT treated as "unknown" — a decision the pure-function
+layer alone cannot prove, because it lives in the wiring, not the data.**
+`cacheFootFromSummary(null)` is unknown (correct — no summary object at
+all). But `rail-panel.js`'s subscription to the store's "cache" resource
+deliberately does NOT call that function with the payload's `item` when the
+payload is `{error}` — it leaves the LAST successful render on screen,
+matching the exact convention `bypass-banner.js`'s own "clients"
+subscription already uses (`if (!Array.isArray(items)) return;`). This is
+DOM-wiring logic, outside what a pure-function test can see, so it was
+verified the only way available: live, in the running browser, by
+importing the already-loaded `api.js`/`store-singleton.js` modules from the
+console, monkey-patching `api.cacheSummary` to reject, calling
+`store.refreshNow()`, and confirming `#rail-cache`'s `textContent` was
+byte-identical before and after the failure, then recovered on the next
+successful poll after restoring the original function. Not encoded as a
+headless test (there is no DOM/component-level test file for `rail-
+panel.js`, same posture as `bypass-banner.js`/`notifications.js` — see this
+file's own "Scope" section for why DOM-wiring components are deliberately
+left to live verification, not unit-tested directly); recorded here as the
+live-verification evidence a reviewer would otherwise have to re-derive
+from source reading alone.
+
+#### Live verification (no jsdom/browser here — done against a running vault-api + the 400-game demo fixture, per the brief)
+
+Rail geometry (Chromium, the `--ui` font stack, live measurement, not
+assumed — **corrected once already, Opus review round 1 nitpick: the
+FIRST pass's 136px/169px/12px figures omitted `.nav`'s own
+`border-right:1px`, restated below with the real measured edges**): at
+180px, `.nav`'s content box is 159px (180 - 10px padding/side - the 1px
+border-right), and a `.nav-btn`'s OWN content box (inside its further 12px
+padding/side) is 135px, spanning x=22 to x=157; "Downloads" (the longest
+label) spans x=55-120.5 (65.5px) at the rail's 12.5px `.nav-lb` size. Since
+`.nav-pip`'s `margin-left:auto` always pushes it flush against the 157px
+edge regardless of digit count, the number that matters is the label-to-pip
+GAP, not a "slack past the button edge" a flush-right element can never
+have: 21.5px for a one-digit pip, 17.4px for the worst REACHABLE case (a
+two-digit "20" — `api.js`'s `jobs(limit=20)` makes a three-digit pip
+impossible, not merely unlikely). No wrap, no overlap at any of
+1024/1920/2560px.
+
+Column/tile numbers, re-measured after the narrowing (compare against WP
+4e.2's own table at 232px):
+
+| width | Comfortable (was @232px) | Compact (was @232px) |
+|---|---|---|
+| 1024 | 4 cols / 190.3px (n/a — untested at 232px) | — |
+| 1920 | 9 cols / 177.4px (was 8 / 194.6px) | 10 cols / 158.5px (was 10 / 153.3px) |
+| 2560 | 10 cols / 186px (unchanged — BP-XL's 2000px `--w-wall` cap already bound before AND after) | 12 cols / 153px (unchanged, same reason) |
+
+The freed 52px buys a genuinely extra column at 1920px (both densities
+shift), but changes NOTHING at 2560px — the cap was already binding there
+at 232px, and 52 more px of available column has nowhere left to go. Not a
+bug: the exact "cap binding? false/true" mechanism WP 4e.2's own report
+already established, re-confirmed rather than re-derived.
+
+`.bulk`'s Δleft/Δwidth against `.view-root`'s own content-area edges
+(`left+16`/`right-16` on `.view-root`'s border-box rect): measured exactly
+`0`/`0` at 1024px, 1920px, and 2560px, in multi-select, with the bulk bar's
+`.22s` slide-up transition settled — confirming WP 4e.2's
+`left:calc(var(--rail-w) + var(--gutter))`/`right:var(--gutter)` formula is
+genuinely parametric on `--rail-w` (no formula change was needed for this
+WP to ship correctly), not merely re-verified by coincidence at one width.
+
+Base (<720px) re-confirmed byte-unaffected at 375px (mobile-emulation
+preset) and 719px: `.rail-head`/`.rail-foot` both computed `display:none`,
+the bottom nav's `grid-template-columns` still exactly `121px 121px 121px`
+at 375px, nav height unchanged.
+
+Rail content, all three degrade states, live: `#rail-vault-name` /
+`#rail-cache` / `#rail-version` all render correctly in demo mode
+(`"steamvault-demo"`, `"Used 6054 GB" "Free 466 GB"`, `"v0.1.0"` — the last
+one only after the demo fixture was extended with `server_version` for 1:1
+parity with the confirmed real shape); the cache-failure case is described
+above (byte-identical before/after a monkey-patched rejection). The
+"before the first poll" state could not be caught mid-flight in the BROWSER
+(demo mode's fixture resolves too fast, sub-frame, to reliably observe the
+gap from outside) — covered instead by the headless
+`store.snapshot("cache")`-is-`undefined`-before-the-first-tick pin in
+`store-poll-loop.test.js` plus `rail-panel.js`'s own order (subscribe FIRST,
+then unconditionally paint from whatever snapshot already exists — which is
+`undefined` at that point), which a source read, and now
+`rail-panel-wiring.test.js`'s own headless pin, both confirm renders nothing
+rather than a placeholder.

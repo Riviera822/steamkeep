@@ -51,6 +51,30 @@
  * `document` and a manually-gated fetcher — no jsdom, no real browser,
  * plain `node:test` (see that file's header for why this needed no new
  * dependency).
+ *
+ * **"cache" resource (WP 4e.6) — a single-snapshot resource, not a diffed
+ * list.** Added for the rail foot's used/free-space summary
+ * (`GET /v1/cache/summary`, `api.cacheSummary()` — the method existed since
+ * WP 4a.2 but had zero call sites anywhere in web/js/ until this WP; an
+ * earlier draft of the WP 4e.6 brief assumed this loop already existed,
+ * which was not true as of `git log -- web/js/store.js` at the time —
+ * corrected here rather than silently left wrong). Every OTHER resource
+ * below is a list keyed by `keyFn` and diffed by `diffByKey` because a view
+ * needs to know WHICH items changed; the rail foot only ever needs the
+ * latest whole object, and there is no notification event tied to it (the
+ * brief's own reasoning: the Downloads nav pip already carries queued/
+ * running/paused, so duplicating that signal here would be two truths
+ * about one thing). Rather than force a single object through the
+ * list-shaped diff machinery (wrapping it in a one-element array just to
+ * satisfy `keyFn` would be a distinct, harder-to-read kind of "invented"
+ * shape), `ResourceLoop` below treats an OMITTED `keyFn` as this resource's
+ * own opt-out: skip `diffByKey` entirely, still get every race-safety
+ * property (in-flight guard, generation token, backoff, hidden-tab park)
+ * every other loop already has, since those come from the surrounding
+ * class, not from the diff step. It reuses `intervals.gamesMs` for its
+ * cadence — not a new number — because disk usage changes at roughly the
+ * same pace user-visible game state does, and a genuinely separate cadence
+ * would need its own justification this WP does not have.
  */
 
 import { api } from "./api.js";
@@ -183,7 +207,12 @@ class ResourceLoop {
     if (this.stopped || token !== this.gen) return; // stop()/a newer schedule fired while the fetch was in flight
 
     this.backoff.reset();
-    const diff = diffByKey(prev, curr, this.keyFn);
+    // `keyFn` is OMITTED for a single-snapshot resource (WP 4e.6's "cache"
+    // loop, module header above) — there is nothing to key a list diff by,
+    // and no consumer needs added/updated/removed buckets for it, so `diff`
+    // is simply absent from the tick payload rather than a diffByKey() call
+    // forced through a fabricated one-element-array shape.
+    const diff = this.keyFn ? diffByKey(prev, curr, this.keyFn) : undefined;
     this.prev = curr;
     if (this.onTick) this.onTick({ prev, curr, diff });
 
@@ -207,7 +236,13 @@ export function createPollingStore({
   intervals = DEFAULT_INTERVALS,
   backoffOptions,
 } = {}) {
-  const subscribers = { jobs: new Set(), games: new Set(), clients: new Set(), notifications: new Set() };
+  const subscribers = {
+    jobs: new Set(),
+    games: new Set(),
+    clients: new Set(),
+    cache: new Set(),
+    notifications: new Set(),
+  };
 
   function emit(kind, payload) {
     for (const cb of subscribers[kind]) cb(payload);
@@ -252,7 +287,23 @@ export function createPollingStore({
     onError: (err) => emit("clients", { error: err }),
   });
 
-  const loops = [jobsLoop, gamesLoop, clientsLoop];
+  // "cache" (WP 4e.6, module header above): no keyFn — a single snapshot
+  // object, not a diffed list, so `onTick` only ever gets `curr` (there is
+  // no `diff`/notification event for this resource). `curr` is `undefined`
+  // on the very first tick if the request itself hasn't resolved yet, and
+  // stays whatever it last was on a failed tick (`onError` fires instead of
+  // `onTick`, exactly like every other loop) — the rail panel's own
+  // "unknown until proven otherwise" rendering (lib/rail-content.js) is
+  // what turns that into "show nothing", not this loop.
+  const cacheLoop = new ResourceLoop({
+    fetcher: () => apiClient.cacheSummary(),
+    getIntervalMs: () => intervals.gamesMs,
+    backoffOptions,
+    onTick: ({ curr }) => emit("cache", { item: curr }),
+    onError: (err) => emit("cache", { error: err }),
+  });
+
+  const loops = [jobsLoop, gamesLoop, clientsLoop, cacheLoop];
 
   function onVisibilityChange() {
     // Coming back into view: nudge every loop to refresh immediately
@@ -286,9 +337,11 @@ export function createPollingStore({
     },
     /**
      * Subscribe to a resource's ticks (`"jobs"|"games"|"clients"`, payload
-     * `{items, diff}` or `{error}`) or to derived notification events
-     * (`"notifications"`, payload an array of event objects from
-     * notifications.js). Returns an unsubscribe function.
+     * `{items, diff}` or `{error}`; `"cache"`, payload `{item}` or
+     * `{error}` — a single object, no `diff`, see the module header) or to
+     * derived notification events (`"notifications"`, payload an array of
+     * event objects from notifications.js). Returns an unsubscribe
+     * function.
      */
     subscribe(kind, callback) {
       if (!subscribers[kind]) throw new RangeError(`Unknown subscription kind: ${kind}`);
@@ -300,6 +353,7 @@ export function createPollingStore({
       if (kind === "jobs") return jobsLoop.prev;
       if (kind === "games") return gamesLoop.prev;
       if (kind === "clients") return clientsLoop.prev;
+      if (kind === "cache") return cacheLoop.prev;
       throw new RangeError(`Unknown resource: ${kind}`);
     },
   };

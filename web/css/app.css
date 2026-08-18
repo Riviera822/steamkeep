@@ -90,6 +90,32 @@
 }
 .nav-pip.on{ display:grid; }
 
+/* Rail head/foot (WP 4e.6 — the rail earning its narrowed width: vault name
+   at the top, cache used/free space at the bottom). Both are phone-chrome-
+   invisible by construction, matching D-1's own framing of the rail itself
+   ("the mockup has no concept of a rail at all"): `display:none` here is a
+   deliberate, unconditional top-level rule (same posture as `.banner-wrap`'s
+   `width:100%` fix, WP 4e.1) — below BP-L `.nav` is a 3-column CSS GRID with
+   exactly `repeat(3,1fr)` explicit tracks (rule above), so two extra
+   in-flow children with no override here would auto-place into a SECOND
+   implicit row instead of merely "not showing" — this is load-bearing, not
+   cosmetic. BP-L's own media block (below) turns both back on.
+
+   **Both ARE `[hidden]`-toggled from JS, as of the WP 4e.6 review round
+   (Opus should-fix S4) — corrected from this comment's own earlier claim,
+   which said neither ever was.** `components/rail-panel.js` sets
+   `headEl.hidden`/`footEl.hidden` when there is nothing honest to show
+   inside them (an empty box with a divider line is its own kind of
+   placeholder). The matching `[hidden]` guards
+   (`.rail-head[hidden]`/`.rail-foot[hidden]`, `display:none`) live in the
+   BP-L block below, next to each element's `display:block` override — see
+   that block's own comments for why hiding the CONTAINER, not just its
+   text, was the fix. Below BP-L this rule already reads `display:none`
+   unconditionally, so `[hidden]` has nothing to override there; no base
+   guard is needed for THIS rule specifically. */
+.rail-head{ display:none; }
+.rail-foot{ display:none; }
+
 /* ============================================================
    Library view (WP 4a.3)
    Ported from docs/design/vault-app-mockup.html (frozen round 7) — class
@@ -881,25 +907,42 @@ body.onboarding .nav{ display:none; }
        of a handful of oversized tiles — the regression WP 4e.1 caught and
        fixed by sequencing is exactly why this could not move until now.
 
-       **1600px is UNREACHABLE at this breakpoint, and that is fine (Opus
-       review S2, WP 4e.2 fix round — an earlier version of this comment
-       claimed the widening here itself produced "~8 columns of ~186px at
-       1920", which is wrong: 1920px is BP-XL's own range below, not BP-L's,
-       and nothing is capped there — see that block's comment for the real
-       mechanism).** BP-L's widest possible viewport is 1799.98px (BP-XL
-       takes over at 1800px exactly); the main column at that width is
-       `1799 - 232 (--rail-w) = 1567px`, 33px short of ever reaching 1600px —
-       measured live (`cap binding?`) false at 1024/1400/1700/1799px, no
-       exception. So at THIS breakpoint the actual effect of this line is
-       simply "remove the 960px cap" — any value >=1568px behaves
-       identically here, and the widening BP-L delivers comes entirely from
-       that removal, not from 1600 specifically. 1600px is kept anyway, as a
-       deliberate guard: it is comfortably above the 1567px BP-L can ever
-       reach today, so a future change to `--rail-w` (narrower rail) or to
-       the BP-L/BP-XL boundary cannot silently make this cap start binding
-       by accident — a plain "remove the cap" (`none`) would not carry that
-       protection forward. BP-XL below raises the WALL again, to 2000px,
-       where it DOES bind (see that block's comment for the real numbers). */
+       **UPDATE (WP 4e.6, Opus review should-fix S1): the "1600px is
+       unreachable at BP-L" claim below is now FALSE — this is the exact
+       "future change to `--rail-w`" scenario the guard's own prose warned
+       about, it happened in this WP, and the guard did its job (bound
+       safely, nothing visibly broke) — but nobody had updated the sentence
+       describing it, and no test caught the arithmetic drifting either.**
+       `--rail-w` narrowed 232px -> 180px in WP 4e.6. The breakeven rail
+       width for this cap, solved from `1799.98 - railW - 15(scrollbar) =
+       1600`, is `railW = 184.98px`: at any `--rail-w` NARROWER than that,
+       BP-L's own top end now exceeds 1600px and the cap binds; at 232px it
+       never did, at 180px it now does. Measured live: `.view-root` is
+       `1599px` (uncapped) at a 1794px viewport and exactly `1600px`
+       (capped) from 1795px up through BP-L's own 1799.98px ceiling — a
+       genuinely reachable, ~5px-wide binding band at the very top of BP-L
+       (at 1799px: 8 columns, 185.5px tiles, 4px narrower than the
+       would-be-uncapped 1604px — small, and invisible in practice, but
+       real). `web/tests/css-layout-foundation.test.js` now has a
+       structural pin computing this exact breakeven from the live
+       `--rail-w`/`--w-wall` token values, so the NEXT `--rail-w` change
+       fails a test instead of leaving a comment stale again.
+       **Below is the ORIGINAL (WP 4e.2) reasoning — the DECISION it
+       explains (keep 1600px as a deliberate guard rather than `none`) is
+       still correct; only its "currently unreachable" premise has
+       changed:** at `--rail-w:232px`, BP-L's top-end column was
+       `1799.98 - 232 - 15 = 1552.98px` (the original text measured
+       "1567px", omitting the scrollbar term — both readings agree on the
+       one fact that mattered then, that the cap did not bind).
+       Comfortably under 1600px. 1600px was kept anyway, as a deliberate
+       guard against a future narrower rail making the cap start binding
+       "by accident" — a plain "remove the cap" (`none`) would not have
+       carried that protection forward, and `.view-root` would have grown
+       UNBOUNDED at BP-L's own top end instead of settling on a designed
+       ceiling once the guard's own predicted scenario actually arrived.
+       BP-XL below raises the WALL again, to 2000px, where it also binds
+       (see that block's comment for the real numbers) — a separate,
+       unrelated decision. */
     --w-wall:1600px;
   }
 
@@ -1098,6 +1141,114 @@ body.onboarding .nav{ display:none; }
      without touching the DOM (`aria-current`/click/keyboard handling stay
      exactly as `app.js` wired them — nothing here is DOM position). */
   .nav-pip{ position:static; top:auto; right:auto; order:1; margin-left:auto; box-shadow:none; }
+
+  /* ----- Rail head: vault name (WP 4e.6, "content that earns the width") -
+     `vault_name` already exists as a setting (GET/PATCH /v1/settings,
+     ADR-0009) and Settings already renders it (views/settings.js) — this is
+     a second, read-only presentation of the SAME value, fetched
+     independently (components/rail-panel.js does its own one-time GET
+     /v1/settings, gated on having a stored key or demo mode exactly like
+     onboarding.js's reconnect-path getSteamKey() call — see that module's
+     header for why a call that would just 401 on a genuine first run is
+     skipped rather than merely tolerated). `.rail-vault-name` carries no
+     text at all until that fetch resolves, and stays empty on failure —
+     never a fabricated placeholder (lib/rail-content.js's
+     vaultNameFromSettings, pinned headlessly as a pure function).
+
+     **Opus review should-fix S4 (WP 4e.6 review round): the CONTAINER is
+     now `[hidden]`-toggled too, not just its text.** Before this fix, a
+     default install with no `vault_name` set still showed this element's
+     `border-bottom` divider above the nav with nothing above it — "render
+     nothing, never a placeholder" had only been applied to the text node,
+     not to the box drawn around it. `components/rail-panel.js` now sets
+     `headEl.hidden` alongside `vaultNameEl.textContent`; this guard rule is
+     what makes that actually take effect against the `display:block`
+     immediately below (same `[hidden]`-vs-author-`display` cascade bug as
+     `.btn[hidden]`/`h4.sec[hidden]`/`.onbnav[hidden]` elsewhere in this
+     file — css-hygiene.test.js's lint now tracks this pair too). */
+  .rail-head{
+    display:block;
+    padding:2px 12px 14px;
+    margin-bottom:6px;
+    border-bottom:1px solid var(--line-soft);
+  }
+  .rail-head[hidden]{ display:none; }
+  .rail-vault-name{
+    margin:0;
+    font-family:var(--cond);
+    text-transform:uppercase;
+    letter-spacing:.5px;
+    font-size:11px;
+    font-weight:700;
+    color:var(--dim);
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+
+  /* ----- Rail foot: cache used/free space (WP 4e.6's second content piece)
+     `GET /v1/cache/summary`, polled by store.js's slow loop alongside
+     games/clients (added by THIS WP — store.js's module header corrects an
+     earlier draft's "already polled" premise) rather than a one-off fetch:
+     disk usage genuinely changes while the app sits open (downloads,
+     deletes, GC), and a number that goes stale the moment a download
+     finishes would be its own kind of dishonesty. Deliberately not a queue
+     summary — the Downloads nav pip already carries queued/running/paused
+     for this exact rail, and repeating it here would be two truths about
+     one thing (the brief's own reasoning for picking this endpoint).
+     `margin-top:auto` inside `.nav`'s BP-L flex column (rule above) pushes
+     this to the rail's bottom edge with no extra spacer element. `.rail-
+     cache` carries NO children at all before the first successful poll,
+     while one is in flight, and after a failed one — never a fabricated
+     "0 B" (lib/rail-content.js's cacheFootFromSummary, a pure function
+     pinned headlessly; LEARNINGS "Testing discipline": a fail-closed
+     default needs a test that pins the DEFAULT direction, not just the
+     populated one).
+
+     **Opus review should-fix S4 (WP 4e.6 review round): the CONTAINER is
+     now `[hidden]`-toggled too, same reasoning as `.rail-head` above.**
+     Before this fix, `.rail-foot` stayed visible with its `border-top`
+     divider even when NEITHER the cache summary nor the version line had
+     anything to show (every build before WP 4e.7 lands `server_version`,
+     combined with a cache poll that has not resolved yet, was exactly this
+     case). `components/rail-panel.js` now hides the whole foot only when
+     BOTH sources are empty — either one alone is enough to keep it
+     visible, so a build with real cache data but no version yet still
+     shows the used/free lines normally. */
+  .rail-foot{
+    display:block;
+    margin-top:auto;
+    padding:14px 12px 2px;
+    border-top:1px solid var(--line-soft);
+  }
+  .rail-foot[hidden]{ display:none; }
+  .rail-cache{
+    display:flex; flex-direction:column; gap:4px;
+  }
+  .rail-cache-row{
+    display:flex; justify-content:space-between; align-items:baseline;
+    gap:10px; margin:0; font-size:11px;
+  }
+  .rail-cache-row .k{ color:var(--dim-2); }
+  .rail-cache-row .v{ color:var(--dim); font-family:var(--mono); white-space:nowrap; }
+
+  /* Optional version line (coordinator addition, mid-WP: WP 4e.7, api/, adds
+     a server-reported version to GET /v1/settings in parallel). Untrusted
+     server text — `overflow:hidden`/`text-overflow:ellipsis` is the CSS-side
+     half of the same two-layer defence lib/rail-content.js's
+     `versionFromSettings` already clamps at the data layer (LEARNINGS
+     "redundant defence layers... pin each layer standalone"): even if the
+     JS-side clamp were ever bypassed, this rule alone still stops a
+     pathological value from widening or overrunning the fixed-width rail. */
+  .rail-version{
+    margin:8px 0 0;
+    font-size:10px;
+    color:var(--dim-2);
+    font-family:var(--mono);
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
 
   /* `.onb` (the onboarding overlay) deliberately keeps `--w-text` instead of
      `--w-wall` (see the `.banner-wrap` rule above, in this same block, for

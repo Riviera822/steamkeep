@@ -1,6 +1,10 @@
 /**
  * Minimal in-memory DOM shim shared by the WP 4a.8 DOM-wiring regression
- * tests (`dialog-wiring.test.js`, `modal-stack.test.js`).
+ * tests (`dialog-wiring.test.js`, `modal-stack.test.js`), extended by WP 4e.6
+ * (`rail-panel-wiring.test.js`) with `replaceChildren` — the shim grows just
+ * far enough for each new consumer's actual DOM-API surface, per its own
+ * established pattern, rather than trying to anticipate every method up
+ * front.
  *
  * Same spirit as `store-poll-loop.test.js`'s fake `document` (a plain object
  * exposing only the members the module under test actually touches, set
@@ -76,6 +80,15 @@ class FakeElement {
     this.children.push(node);
     node.parentNode = this;
     return node;
+  }
+  // WP 4e.6 (rail-panel-wiring.test.js): rail-content rendering clears and
+  // rebuilds its container on every tick the same way notifications.js's
+  // log list already does in production — added here rather than assuming
+  // a DOM shim only needs what existed before this WP.
+  replaceChildren(...nodes) {
+    for (const c of this.children) c.parentNode = null;
+    this.children = [];
+    this.append(...nodes);
   }
   contains(node) {
     let cur = node;

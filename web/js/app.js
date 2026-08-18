@@ -19,6 +19,16 @@ import { maybeShowOnboardingOnStartup } from "./onboarding.js";
 // actions open), and ES modules are evaluated once and cached.
 import "./components/notifications.js";
 import "./components/bypass-banner.js";
+// WP 4e.6, Opus review should-fix S3: rail-panel.js is a plain, dependency-
+// injected factory (`createRailPanel`) with NO import-time side effects of
+// its own — the same `store.js`/`store-singleton.js` split, applied to this
+// component instead of self-wiring on import like notifications.js/
+// bypass-banner.js above. This is the one real, side-effecting call (the
+// `store-singleton.js` role), which is why it needs the store/api imports
+// below rather than a bare `import "./components/rail-panel.js";`.
+import { createRailPanel } from "./components/rail-panel.js";
+import { store } from "./store-singleton.js";
+import { api, getStoredApiKey, isDemoMode } from "./api.js";
 
 const RENDERERS = {
   library: renderLibrary,
@@ -49,6 +59,20 @@ for (const btn of navButtons) {
 
 onViewChange(renderView);
 initToast();
+createRailPanel({
+  elements: {
+    headEl: document.getElementById("rail-head"),
+    vaultNameEl: document.getElementById("rail-vault-name"),
+    footEl: document.getElementById("rail-foot"),
+    cacheEl: document.getElementById("rail-cache"),
+    versionEl: document.getElementById("rail-version"),
+    createElement: (tag) => document.createElement(tag),
+  },
+  store,
+  apiClient: api,
+  getStoredApiKey,
+  isDemoMode,
+});
 renderView(currentView());
 // WP 4a.6: shows the 3-step onboarding overlay on top of whatever view just
 // rendered when no vault API key is stored yet and demo mode was not

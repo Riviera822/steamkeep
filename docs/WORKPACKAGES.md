@@ -457,6 +457,223 @@ Compact; 2560px: 10 cols/186px Comfortable, 12 cols/153px Compact), `.bulk`
 alignment reconfirmed exact, BP-M/base unaffected. 400-card full rebuild:
 21-27ms (WP 4e.1 baseline ~29-33ms, no regression).
 
+Recorded divergence (WP 4e.6, 2026-08-18, operator decision — inserted
+ahead of WP 4e.3/4e.4/4e.5 in the numbering, at the operator's request, on
+the shipped 232px rail: **"232px feels unnecessarily large for the three
+things in it"**; asked whether to narrow the rail or give it content, the
+operator chose **both** — user veto welcome, same as every entry in this
+register): one new divergence lands in this package.
+
+- **D-12 (rail content: vault name + cache summary, no mockup analogue).**
+  D-1 already covers the rail's own EXISTENCE (the frozen mockup has no
+  concept of a rail at all — phone-only bottom-nav chrome); this entry
+  covers the CONTENT WP 4e.6 adds inside it, which is new relative to D-1
+  too, not merely a restyling. `--rail-w` narrows 232px -> 180px
+  (`theme.css`) — measured live (Chromium, the `--ui` font stack) rather
+  than guessed: `.nav`'s content box is 159px (180 - 10px padding/side -
+  the 1px `border-right`), and a `.nav-btn`'s OWN content box (inside its
+  further 12px padding/side) is 135px, spanning x=22-157. The longest label
+  ("Downloads" at the rail's 12.5px `.nav-lb` size) spans x=55-120.5
+  (65.5px); `.nav-pip`'s `margin-left:auto` always sits flush against the
+  157px edge regardless of digit count, so the number that matters is the
+  label-to-pip GAP: 21.5px for a one-digit pip, 17.4px for the worst
+  REACHABLE case (a two-digit "20" — `api.js`'s `jobs(limit=20)` makes a
+  three-digit pip impossible, not merely unlikely), no wrap, no overlap
+  either way. *(Correction, Opus review round 1 nitpick: the first pass's
+  136px/169px/12px figures omitted the `border-right:1px` above — restated
+  here with the actual measured edges, not the arithmetic-only ones.)* The
+  freed 52px goes to the cover wall (`--w-wall`, WP 4e.2) via the existing
+  `--rail-w`-derived formulas — nothing about those formulas needed to
+  change for the width to move, which is exactly what "parametric, not
+  hand-derived" (WP 4e.2's own framing for `.bulk`) is supposed to buy.
+  Two content pieces fill the freed rail chrome, per the operator's own
+  "not too wide for three items, but not nothing either" framing:
+  - **Vault name** (rail head, `#rail-vault-name`) — the existing
+    `vault_name` setting (`GET`/`PATCH /v1/settings`, ADR-0009), already
+    rendered by `views/settings.js`, now ALSO shown here via an independent,
+    ONE-TIME fetch (`components/rail-panel.js`), gated exactly like
+    `onboarding.js`'s reconnect-path `getSteamKey()` call (skipped with no
+    stored key and demo mode off, so a first run does not fire a call that
+    would just 401). **Known, accepted gap:** a vault rename from Settings
+    does not update the rail head until the next reload (Settings' own save
+    path does not reload the page; onboarding's "Ready" step does) —
+    teaching Settings/onboarding to publish into a shared cache was judged
+    bigger than this package's brief.
+  - **Cache used/free space** (rail foot, `#rail-cache`) — `GET
+    /v1/cache/summary`. The brief that opened this package claimed this
+    endpoint was "already polled by the store's slow loop"; it was not (`git
+    log -- web/js/store.js` showed one commit, WP 4a.2, and
+    `api.cacheSummary()` had zero call sites anywhere in `web/js/` before
+    this WP) — corrected in `store.js`'s own module header rather than
+    silently left wrong. This WP adds a FOURTH `ResourceLoop` to
+    `createPollingStore` (a single-snapshot resource: no `keyFn`, no
+    `diffByKey`, no notification event — the Downloads nav pip already
+    carries queued/running/paused, so a queue summary here would be two
+    truths about one thing, which is why cache/summary was picked over it),
+    reusing `intervals.gamesMs` — not a new cadence number. Both figures
+    degrade honestly: `lib/rail-content.js`'s `cacheFootFromSummary` returns
+    `null` (render nothing) before the first poll or on a malformed body,
+    but renders a GENUINE zero (`total_bytes:0` — an empty cache;
+    `free_disk_bytes:0` — the disk is full) rather than collapsing it into
+    "unknown" the way the tile-badge helper `formatBytesGB` deliberately
+    does for the same input shape (a new sibling function,
+    `formatBytesGBOrZero`, exists specifically because the two helpers need
+    OPPOSITE zero-handling). A poll that fails outright is treated
+    differently again: `rail-panel.js` leaves the last successful render on
+    screen rather than blanking it (the same convention `bypass-banner.js`'s
+    own "clients" subscription already uses) — live-verified end to end by
+    monkey-patching `api.cacheSummary` to reject, nudging the store, and
+    confirming the rail foot text is byte-identical before and after the
+    failure, then recovers on the next successful poll.
+  - **Server version (coordinator addition, mid-WP, landed via a parallel
+    `api/` package — WP 4e.7):** a third line, `#rail-version`, reading
+    `GET /v1/settings`'s confirmed top-level `server_version` string
+    (a sibling of `readonly`, never a `settings` row — it has no source
+    precedence and `PATCH` rejects it as an unrecognised key). Absent,
+    non-string, or empty-after-trim are all the SAME "render nothing" case
+    (`versionFromSettings`, `lib/rail-content.js`) — deliberately not
+    distinguished, since the field is a hand-maintained constant server-side
+    (no release-tagging process yet, WP 5.5) and a malformed value is a real
+    possibility. Rendered as `v<value>` (never double-prefixed if the server
+    value already starts with `v`/`V`), clamped to 24 chars before the
+    prefix so a pathological value cannot widen the fixed rail even before
+    CSS's own `overflow:hidden` backs it up. This is the SERVER's reported
+    version, on purpose, never a frontend constant: `VAULT_WEB_DIR` can
+    point this `web/` at a different image than the one actually running,
+    so the two genuinely can diverge, which is exactly what an operator
+    needs surfaced, not hidden behind a UI-side guess. `demo-data.js`'s
+    `GET /v1/settings` fixture gained the same top-level field
+    (`"0.1.0"`, matching `vault_api/__init__.py`'s real `__version__`) for
+    1:1 demo-mode parity (LEARNINGS "Web UI": demo fixtures are a shipped
+    surface, not exempt from matching the real shape).
+
+  Both new elements are invisible below BP-L by construction
+  (`.rail-head{ display:none }`/`.rail-foot{ display:none }`, unconditional
+  top-level rules — below BP-L, `.nav` is still a 3-column CSS grid with
+  exactly `repeat(3,1fr)` explicit tracks, so two extra in-flow children
+  with no override would auto-place into a second implicit row instead of
+  merely "not showing", which is why this is load-bearing, not cosmetic);
+  BP-L's own block switches both back to `display:block`, with
+  `.rail-foot{ margin-top:auto }` pinning it to the bottom of `.nav`'s BP-L
+  flex column. **Both ARE now `[hidden]`-toggled from JS (should-fix S4,
+  review round below) — an earlier draft of this entry said neither ever
+  was, which stopped being true the moment S4 landed.** All three lines are
+  plain, non-interactive text (`<p>`s): no
+  new focusable control exists, so "nothing reachable only by hover" holds
+  trivially, and `aria-current`/keyboard reachability on the three nav
+  buttons are untouched (verified: no `tabindex` added anywhere, button DOM
+  order/attributes unchanged).
+
+  Live-verified (Chromium, running vault-api + the 400-game demo fixture,
+  demo mode): rail width 180px at every viewport (fixed, not
+  viewport-dependent); at 1024px the auto-fill grid now gives 4 cols/190.3px
+  (Comfortable); at 1920px 9 cols/177.4px Comfortable (was 8 cols/194.6px at
+  232px — the freed 52px buys a whole extra column) and 10 cols/158.5px
+  Compact (was 10 cols/153.3px); at 2560px both densities are IDENTICAL to
+  the pre-narrowing WP 4e.2 numbers (10 cols/186px Comfortable, 12
+  cols/153px Compact) because BP-XL's 2000px `--w-wall` cap already bound
+  before AND after the rail narrowed — the extra 52px simply has nowhere
+  left to go at that width, correctly. `.bulk`'s Δleft/Δwidth against
+  `.view-root`'s own content-area edges measured exactly 0/0 in multi-select
+  at 1024/1920/2560px, confirming the WP 4e.2 formula
+  (`left:calc(var(--rail-w) + var(--gutter))`) is genuinely parametric on
+  `--rail-w` rather than re-verified by coincidence. Base (<720px, at 375px
+  and 719px) confirmed byte-unaffected: `.rail-head`/`.rail-foot` both
+  `display:none`, the bottom nav's own `grid-template-columns` still
+  `121px 121px 121px` at 375px, unchanged.
+
+  Suite 498 green at first pass (462 WP 4e.2 baseline + 36: 5
+  `formatBytesGBOrZero` pins, 21 `rail-content.test.js` pins across all
+  three content pieces incl. the unknown-vs-zero mutation targets, 4 new
+  `store-poll-loop.test.js` "cache" loop pins, 3 `css-layout-foundation.
+  test.js` pins for `--rail-w`/display toggling/`margin-top:auto`, 1
+  `demo-data-settings.test.js` pin for `server_version`'s shape — plus 2
+  more added after the coordinator's `server_version` shape correction).
+
+  **Opus review: PASS, no blockers — "the first package in this phase
+  where every pin the coder claimed could actually observe its own
+  violation." Ten mutations died by name, including three the reviewer
+  added itself. Four should-fixes, all addressed; suite now 515 green.**
+
+  - **S1** — the WP 4e.2 `--w-wall:1600px` comment's own "1600px is
+    unreachable at BP-L" claim went stale the INSTANT this package
+    narrowed `--rail-w` — exactly the "future change to `--rail-w`"
+    scenario that comment's guard was written to warn about. At 180px, BP-L's
+    own widest viewport (1799.98px) gives a main column of
+    `1799.98 - 180 - 15(scrollbar) = 1604.98px`, over 1600px — the cap now
+    genuinely binds (measured: `.view-root` computes to exactly 1600px,
+    capped, at 1799px; 8 columns, 185.5px tiles; uncapped at 1794px,
+    1599px). Visual cost: ~4px, invisible in practice — the guard did its
+    job at exactly the margin it was sized for, only the comment describing
+    it was stale, and no test had caught the arithmetic drifting. Fixed:
+    the comment corrected in place (the ORIGINAL WP 4e.2 reasoning for
+    keeping 1600px as a guard rather than `none` is left intact, since that
+    decision is still correct), plus a new structural pin in
+    `css-layout-foundation.test.js` computing the same breakeven from the
+    live `--rail-w`/`--w-wall` tokens, so the next such change fails a
+    named test instead of leaving a comment stale again.
+  - **S2** — the cache loop's cadence (`intervals.gamesMs`) was completely
+    unpinned: mutating it to `intervals.jobsFastMs` (2s in production, 7.5x
+    more frequent — the one loop whose endpoint can trigger a cold,
+    seek-bound depot walk on `SizeCache` TTL expiry) survived all 498 prior
+    tests, since none of them gave the cache loop a cadence distinct from
+    every other interval. Fixed with a live-timing pin in
+    `store-poll-loop.test.js` (a short `gamesMs`, huge everything else) —
+    wrapped in `try`/`finally` around `store.stop()` after a REAL hang was
+    measured while developing it: a failing assertion skipped cleanup,
+    leaving a 50s reschedule timer alive and hanging the test file's exit
+    past a 120s harness timeout with zero output; the fix (clean up
+    regardless of outcome) brought it back to under 100ms.
+  - **S3** — `rail-panel.js` had ZERO test coverage (the "components/*.js
+    are DOM glue, not unit-tested" default, treated as a hard rule rather
+    than the default it actually is). Two real bugs hid behind that gap:
+    deleting `if (payload.error) return;` (a failed poll blanks the rail
+    back to "unknown" instead of leaving the last real number visible) and
+    deleting `if (foot.freeText !== null)` (renders a literal `"Free
+    null"` — a fabricated value, the precise failure this package exists
+    to prevent) both passed the full suite. Fixed by refactoring
+    `rail-panel.js` into a dependency-injected `createRailPanel()` factory
+    — the SAME `store.js`/`store-singleton.js` split, applied to a
+    component for the first time (`app.js` now makes the one real,
+    side-effecting call this file used to make on import) — so
+    `rail-panel-wiring.test.js` (new, 15 tests) can drive it with
+    `fake-dom.js` `FakeElement`s (extended with `replaceChildren`) and
+    trivial fake store/api stand-ins; both mutations now die by name.
+  - **S4** — "render nothing, never a placeholder" had only been applied to
+    the TEXT inside `#rail-vault-name`/`#rail-cache`/`#rail-version`, not to
+    the `.rail-head`/`.rail-foot` boxes drawn around them: a default install
+    with no `vault_name` set showed an empty box with a bare divider line
+    above the nav, and `.rail-foot` carried dead space from
+    `#rail-version`'s own margin even with real cache data (every build
+    before WP 4e.7 merged `server_version`). Fixed:
+    `headEl.hidden`/`footEl.hidden`/`versionEl.hidden` now toggle alongside
+    the text, guarded in app.css's BP-L block against the `display:block`
+    override each would otherwise lose the cascade to (same
+    `[hidden]`-vs-author-`display` fix as `.btn[hidden]`/`h4.sec[hidden]`/
+    `.onbnav[hidden]` elsewhere in this file); `.rail-foot` hides ONLY when
+    BOTH the cache summary and the version line have nothing to show
+    (either alone keeps it visible), pinned as its own AND-not-OR
+    regression test in `rail-panel-wiring.test.js` — live-verified in a
+    real browser too (`.rail-head`/`.rail-foot` both computed
+    `display:none`, zero height, when force-hidden).
+
+  Nitpicks also closed: `theme.css`'s rail geometry comment's
+  136px/169px/12px figures (the `.nav` `border-right:1px` was missing from
+  the arithmetic) corrected to the real measured 135px/157px/21.5px-17.4px
+  above; the `--tile-min` overshoot band's low end restated as exactly
+  176px (the token's own `minmax()` floor, by definition, not a third
+  swept approximation that could drift again — "this exact sentence has
+  now been corrected twice... make it the last time"); `web/tests/
+  README.md`'s "paints... before subscribing" corrected to the actual
+  order (subscribe first, then paint from the existing snapshot).
+
+  Suite 515 green after the fix round (498 + 17: the S1 structural pin, the
+  S2 cadence pin, and `rail-panel-wiring.test.js`'s 15 tests). Re-verified
+  live: the S1 binding at 1794/1799px, the S4 hidden-container behaviour in
+  a real browser (not just the headless factory tests), and the demo-mode
+  render (vault name, cache summary, version line) all still correct after
+  the refactor.
+
 ### WP 4a.1 — Static serving + app shell (api/ + web/) — **first, serial**
 - vault-api mounts `web/` (StaticFiles, SPA fallback, sane CSP/security
   headers, no-cache for index). Router auth must NOT cover static assets;

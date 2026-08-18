@@ -599,8 +599,15 @@ function coercePatchValue(key, value) {
   throw validationError(`'${key}' must be a string, or null to clear the override.`);
 }
 
+// WP 4e.6 (rail foot): mirrors vault_api/__init__.py's real `__version__`
+// constant — a hand-maintained string, sibling of `readonly`, never a
+// `settings` row (PATCH has nothing to reject here since demo mode has no
+// PATCH validation for it at all, matching the real server's "unrecognised
+// key" rejection in spirit: this fixture simply never accepts writes to it).
+const DEMO_SERVER_VERSION = "0.1.0";
+
 function handleGetSettings() {
-  return { readonly: settingsReadonly, settings: describeDemoSettings() };
+  return { readonly: settingsReadonly, server_version: DEMO_SERVER_VERSION, settings: describeDemoSettings() };
 }
 
 function handlePatchSettings(body) {

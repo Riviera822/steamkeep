@@ -59,6 +59,14 @@
        change. app.js finds nav buttons via `data-view`, not DOM position,
        so no JS changed. -->
   <nav class="nav" aria-label="Primary">
+    <!-- Rail head (WP 4e.6): vault name. Invisible below BP-L (css/app.css's
+         unconditional `.rail-head{ display:none }`) — populated once by
+         js/components/rail-panel.js, never toggled via [hidden]. Empty text
+         is the honest "not known yet" state; see that module and
+         js/lib/rail-content.js for the degrade rules. -->
+    <div class="rail-head" id="rail-head">
+      <p class="rail-vault-name" id="rail-vault-name"></p>
+    </div>
     <button type="button" class="nav-btn" data-view="library">
       <span class="nav-ic" aria-hidden="true">
         <svg width="21" height="21" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2.6" y="2.6" width="7" height="7" rx="1.8"/><rect x="12.4" y="2.6" width="7" height="7" rx="1.8"/><rect x="2.6" y="12.4" width="7" height="7" rx="1.8"/><rect x="12.4" y="12.4" width="7" height="7" rx="1.8"/></svg>
@@ -87,6 +95,20 @@
       </span>
       <span class="nav-lb">Settings</span>
     </button>
+    <!-- Rail foot (WP 4e.6): cache used/free space. Same invisibility
+         posture as the head above (unconditional display:none below BP-L,
+         never [hidden]-toggled). js/components/rail-panel.js rebuilds
+         #rail-cache's children on every store "cache" tick; empty means
+         "not known yet", never a fabricated zero. -->
+    <div class="rail-foot" id="rail-foot">
+      <div class="rail-cache" id="rail-cache"></div>
+      <!-- Optional version line (coordinator addition, WP 4e.7): GET
+           /v1/settings's top-level `server_version` string, sibling of
+           `readonly` (js/lib/rail-content.js's versionFromSettings). Empty
+           text is the honest "absent/blank/malformed" state — all three
+           degrade the same way, never a fallback string. -->
+      <p class="rail-version" id="rail-version"></p>
+    </div>
   </nav>
 
   <main id="view-root" class="view-root" aria-live="polite"></main>
