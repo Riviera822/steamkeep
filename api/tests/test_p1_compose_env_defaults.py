@@ -35,7 +35,7 @@ COMPOSE_PATH = Path(__file__).resolve().parents[2] / "deploy" / "compose.yaml"
 # One entry per `${VAR:-default}` line in deploy/compose.yaml's vault-api
 # `environment:` block that has a real default (VAULT_API_KEY uses `:?...`,
 # no default, and is deliberately excluded). The expected value is always a
-# real config.py symbol, never a literal typed here twice, EXCEPT the two
+# real config.py symbol, never a literal typed here twice, EXCEPT the three
 # noted cases where config.py itself has no named constant for the default
 # (a literal there is the ground truth, not a copy of one).
 EXPECTED_DEFAULTS: dict[str, str] = {
@@ -59,14 +59,33 @@ EXPECTED_DEFAULTS: dict[str, str] = {
     "VAULT_MANIFEST_ORACLE_TIMEOUT": str(config.DEFAULT_MANIFEST_ORACLE_TIMEOUT),
     "VAULT_WEBHOOK_TIMEOUT_SECONDS": str(config.DEFAULT_WEBHOOK_TIMEOUT_SECONDS),
     # WP 4h.0 (ADR-0010): env-only privacy gate, forwarded directly (unlike
-    # VAULT_SWEEP_INCLUDE_CACHED/VAULT_SETTINGS_READONLY, which are
-    # deliberately absent from this dict because compose never forwards
-    # them) -- see deploy/compose.yaml's own comment for why these two are
-    # the exception.
+    # VAULT_SWEEP_INCLUDE_CACHED, which is deliberately absent from this dict
+    # because compose never forwards it -- it is DB-overridable at runtime
+    # via PATCH /v1/settings instead, ADR-0009) -- see deploy/compose.yaml's
+    # own comment for why that one is the exception.
     "VAULT_RELAY_EXPOSE_PLAYTIME": "true" if config.DEFAULT_RELAY_EXPOSE_PLAYTIME else "false",
     "VAULT_RELAY_EXPOSE_LAST_PLAYED": (
         "true" if config.DEFAULT_RELAY_EXPOSE_LAST_PLAYED else "false"
     ),
+    # Fable-audit follow-up (security lock that fails open if omitted):
+    # VAULT_SETTINGS_READONLY is env-only BY DEFINITION (ADR-0009 decision 3
+    # -- a lock on the settings-write API cannot be unlockable through that
+    # same API), so unlike VAULT_SWEEP_INCLUDE_CACHED above it has NO
+    # DB-overridable alternative path at all and forwarding it here is the
+    # only way an operator following api/README.md's "the operator
+    # hard-lock" can ever reach it. No DEFAULT_SETTINGS_READONLY constant
+    # exists in config.py (Settings.from_env inlines the literal `False`
+    # default for `_env_bool("VAULT_SETTINGS_READONLY", False)`) -- the
+    # applicable precedent is VAULT_EVENT_LOG_PATH above (no derivable
+    # env-default symbol either), NOT VAULT_LOG_LEVEL: that one's stated
+    # rationale is "no dataclass default", which does not hold here --
+    # `settings_readonly: bool = False` is a real dataclass default
+    # (config.py:923), just not one that is itself named. Not a coverage
+    # hole either way: the env default (`False` for unset/blank) is already
+    # pinned by three tests in test_config.py
+    # (test_settings_readonly_defaults_to_false and its true/false-spelling
+    # and rejects-anything-else siblings).
+    "VAULT_SETTINGS_READONLY": "false",
 }
 
 

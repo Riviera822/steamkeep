@@ -222,21 +222,33 @@ services:
       # container; there is no runtime switch.
       VAULT_RELAY_EXPOSE_PLAYTIME: ${VAULT_RELAY_EXPOSE_PLAYTIME:-false}
       VAULT_RELAY_EXPOSE_LAST_PLAYED: ${VAULT_RELAY_EXPOSE_LAST_PLAYED:-false}
+      # Settings-API operator hard-lock (ADR-0009 decision 3; api/README.md
+      # "The operator hard-lock"). Forwarded HERE, and NOT grouped with
+      # VAULT_NAME/VAULT_SCHEDULE_*/VAULT_WEBHOOK_URL/VAULT_WEBHOOK_EVENTS
+      # below despite all of them being settings-API keys too: those have a
+      # DB-overridable alternative path (PATCH
+      # /v1/settings once the stack is up, ADR-0009), and this one does not
+      # -- a lock on the settings-write API can never be unlockable through
+      # that same API (ADR-0009 decision 3), so env forwarding is the ONLY
+      # path that reaches it at all. A shipped compose file that omitted this
+      # line could never actually enable the hard-lock api/README.md
+      # documents as a supported headless/GitOps deployment mode -- see
+      # tests/test_p1_compose_env_defaults.py, which fails if this line is
+      # ever removed. Off (read-write) by default, matching config.py's own
+      # default.
+      VAULT_SETTINGS_READONLY: ${VAULT_SETTINGS_READONLY:-false}
       # VAULT_DB_PATH, VAULT_CACHE_ROOT, VAULT_STEAMPREFILL_PATH and
       # VAULT_WEB_DIR are baked into the image (they describe the image's own
       # layout, not a deployment choice) -- see api/Dockerfile. VAULT_NAME,
       # VAULT_SCHEDULE_WINDOW, VAULT_SCHEDULE_INTERVAL_MINUTES,
       # VAULT_SCHEDULE_CLIENT_STALE_DAYS, VAULT_WEBHOOK_URL and
-      # VAULT_WEBHOOK_EVENTS are deliberately NOT forwarded here either, but
-      # for a different reason: they are DB-overridable at runtime via
-      # PATCH /v1/settings (ADR-0009) once the stack is up, which is the
-      # supported way to set them -- see api/README.md "Settings" and the
-      # web UI / app settings screens. VAULT_SETTINGS_READONLY is
-      # deliberately env-only BY DEFINITION (a settings-API lock cannot be
-      # unlockable through that same API) -- like VAULT_RELAY_EXPOSE_PLAYTIME/
-      # _LAST_PLAYED above it has no DB-override counterpart at all, but
-      # (unlike those two) it is NOT forwarded here today, out of scope for
-      # this work package to change.
+      # VAULT_WEBHOOK_EVENTS are deliberately NOT forwarded here, for a
+      # different reason than VAULT_SETTINGS_READONLY above: they are
+      # DB-overridable at runtime via PATCH /v1/settings (ADR-0009) once the
+      # stack is up, which is the supported way to set them -- see
+      # api/README.md "Settings" and the web UI / app settings screens. That
+      # reasoning does not transfer to VAULT_SETTINGS_READONLY, which is why
+      # it is forwarded separately above instead of grouped with these.
       # VAULT_MANIFEST_ARCHIVE_DIR and VAULT_STEAMPREFILL_CACHE_DIR are
       # genuine path overrides tied to volume layout, not general-purpose
       # tuning knobs -- left env-only and documented via the

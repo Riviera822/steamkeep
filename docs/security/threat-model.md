@@ -109,7 +109,7 @@ SteamVault's control — there is no code-level guard (no IP allowlist, no
 only thing standing between "LAN-only by design" and "an open,
 unauthenticated Steam-CDN-scoped HTTP relay on the internet" is the
 operator's own router/firewall configuration and reading the docs. The same
-is true of `vault-api`'s port 8080 (`deploy/compose.yaml:225-231`) — its
+is true of `vault-api`'s port 8080 (`deploy/compose.yaml:260-266`) — its
 authentication is real (§7), but exposing it directly still exposes a
 single shared bearer credential with no rate limiting and no brute-force
 lockout (see §7) to the entire internet instead of to a LAN.
@@ -119,9 +119,9 @@ this risk, and the compose file itself is unusually blunt about it: the
 comment above its port mapping is titled "OPEN-RESOLVER WARNING — THE MOST
 DANGEROUS TWO LINES IN THIS FILE" and explains that a wrong bind turns it
 into "a DNS amplification/reflection weapon aimed at third parties, using
-your bandwidth and your IP's reputation" (`deploy/compose.yaml:301-320`).
+your bandwidth and your IP's reputation" (`deploy/compose.yaml:336-355`).
 The default bind (`127.0.0.1`) fails closed if the operator forgets to set
-`VAULT_DNS_BIND` (`deploy/compose.yaml:318-320`), which is a real,
+`VAULT_DNS_BIND` (`deploy/compose.yaml:353-355`), which is a real,
 code-level mitigation — but it only protects the *default*; nothing stops
 an operator from setting `VAULT_DNS_BIND=0.0.0.0` themselves.
 
@@ -231,7 +231,7 @@ itself — this project's own Phase-0 research supports the checkable claim
 that what gets persisted afterward is "not raw credentials," `poc/
 steamprefill/PROTOCOL.md:176`; see the closing gap list for the stronger
 claim this document does *not* make) is written by SteamPrefill into
-`/opt/steamprefill/Config`, which `deploy/compose.yaml:260` mounts from the
+`/opt/steamprefill/Config`, which `deploy/compose.yaml:295` mounts from the
 named Docker volume `vault-steamprefill`. `deploy/README.md:119-120,
 126-127` names this directly: "The session lands in the
 `vault-steamprefill` volume at `/opt/steamprefill/Config`… **Treat the
@@ -267,7 +267,7 @@ operator generates on Valve's site — stored server-side once the operator
 enters it in Settings. Verified in the schema: `steam_relay_key.api_key` is
 a plain `TEXT` column with no encryption-at-rest of its own
 (`api/vault_api/db.py:523-527`) inside the `vault-db` SQLite file
-(`deploy/compose.yaml:255`). It never appears in a `GET` response body in
+(`deploy/compose.yaml:290`). It never appears in a `GET` response body in
 full — `GET /v1/steam/key` returns only whether one is configured plus the
 last four characters (`api/vault_api/steam_relay.py:35-36`, docstring
 verified against the router's actual response shape) — and is cleared from
@@ -552,7 +552,7 @@ the `Host` header, and the HTTP status code.
 
 **Where it lands:** under `/vault/logs/` inside the same shared Docker
 volume both `vault-core` and `vault-api` mount
-(`deploy/compose.yaml:242-252`), only when the operator sets
+(`deploy/compose.yaml:277-287`), only when the operator sets
 `VAULT_EVENT_LOG`/`VAULT_EVENT_LOG_PATH` (both empty/off by default,
 `deploy/compose.yaml:62, 164`). It is off by default in `core/Dockerfile`
 per that same comment, though `.env.example` ships it uncommented (i.e.
@@ -610,7 +610,7 @@ standard browser same-origin behaviour, not a SteamVault-specific control,
 and is not a substitute for anything above.
 
 **The key travels in cleartext by default.** `vault-api` serves plain HTTP
-(`deploy/compose.yaml:225-231`); nothing enforces TLS unless the operator
+(`deploy/compose.yaml:260-266`); nothing enforces TLS unless the operator
 puts a reverse proxy in front of it (§1, public-domain profile). On the
 default LAN deployment, `X-Api-Key` goes out unencrypted on every request,
 same as the rest of the traffic — consistent with, and no worse than, the
@@ -641,7 +641,10 @@ given that this is the one credential that gates the whole control plane.
 ### What "read-only" genuinely prevents
 
 There is exactly one read-only mechanism in the codebase:
-`VAULT_SETTINGS_READONLY` (env-only, `api/vault_api/config.py:875, 1130`).
+`VAULT_SETTINGS_READONLY` (env-only, `api/vault_api/config.py:923, 1186`),
+forwarded in the shipped `deploy/compose.yaml` (`vault-api` service,
+`deploy/compose.yaml:239`) -- an operator using the shipped stack can
+actually set it, not just the underlying env var in isolation.
 Reading `routers/settings.py` directly (`api/vault_api/routers/settings.py:95,
 116, 189` and the surrounding handler): when set, it makes `PATCH
 /v1/settings` answer `403` with a distinct detail message. **It does
@@ -700,7 +703,7 @@ applied consistently across four different ecosystems (Docker base images,
 GitHub Actions, Gradle) rather than in just one.
 
 **The one place this project's own pins are loose is its own output.**
-`deploy/compose.yaml:41, :133, :288` — the `vault-core`, `vault-api`, and
+`deploy/compose.yaml:41, :133, :323` — the `vault-core`, `vault-api`, and
 `vault-dns` service definitions — all resolve `${VAULT_IMAGE_TAG:-0.1.0}`, a
 mutable tag, not a digest, for the images this project ships of *itself*.
 This is a materially different risk than the base-image pins above (those

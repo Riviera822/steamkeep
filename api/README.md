@@ -5646,10 +5646,11 @@ scheduler tick.
 
 ### What this work package deliberately did NOT do
 
-- **No `deploy/` changes.** `VAULT_SETTINGS_READONLY` is documented in
-  `api/.env.example`; wiring it through `deploy/compose.yaml` is a
-  follow-up, same pattern as every other WP in this project that touches
-  `config.py`.
+- ~~No `deploy/` changes.~~ **Done.** `VAULT_SETTINGS_READONLY` is forwarded
+  in `deploy/compose.yaml`'s `vault-api` service (`${VAULT_SETTINGS_READONLY:-false}`,
+  off/read-write by default) and documented in both `api/.env.example` and
+  `deploy/.env.example` -- the follow-up this section originally deferred.
+  Pinned by `api/tests/test_p1_compose_env_defaults.py`.
 - **No live reload for `vault_name`/`webhook_url`/`webhook_events`** — see
   "The honest gap" above.
 - **No UI.** Phase 4a's settings screen is expected to build on this

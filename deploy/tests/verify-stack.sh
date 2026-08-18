@@ -371,7 +371,8 @@ for pair in \
     "VAULT_EVENT_LOG_MAX_BYTES:67108864" \
     "VAULT_MANIFEST_ORACLE_URL:https://api.steamcmd.net/v1/info" \
     "VAULT_MANIFEST_ORACLE_TIMEOUT:10.0" \
-    "VAULT_WEBHOOK_TIMEOUT_SECONDS:5.0"
+    "VAULT_WEBHOOK_TIMEOUT_SECONDS:5.0" \
+    "VAULT_SETTINGS_READONLY:false"
 do
     key=${pair%%:*}
     expected=${pair#*:}
@@ -706,19 +707,27 @@ webroot_body=$(cat "$work/webroot.html")
 assert_contains "$webroot_body" "<title>SteamVault</title>" "GET / body is the real app shell (title tag), not a generic 404 page"
 assert_contains "$webroot_body" 'id="app"' "GET / body contains the app shell's root element"
 
-step "6i. Env-forwarding regression guard: VAULT_EVENT_LOG_PATH and VAULT_MANIFEST_ORACLE actually reach vault-api's process environment"
+step "6i. Env-forwarding regression guard: VAULT_EVENT_LOG_PATH, VAULT_MANIFEST_ORACLE and VAULT_SETTINGS_READONLY actually reach vault-api's process environment"
 say 'Section 3e already proved these render into `docker compose config` output;'
 say 'this is the stronger claim -- that the value genuinely lands in the RUNNING'
 say "container's environment, not merely in the rendered YAML (a passthrough"
 say 'line can exist in compose.yaml and still not reach the process if, say, the'
 say 'key were misspelled on one side). `printenv NAME` exits 0 iff NAME is a'
 say 'defined variable, even when its value is empty -- exactly what is being'
-say 'proved here, since the test .env leaves both unset.'
-run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' exec -T vault-api sh -c 'printenv VAULT_EVENT_LOG_PATH; echo \"exit=\$?\"; printenv VAULT_MANIFEST_ORACLE; echo \"exit=\$?\"'"
+say 'proved here, since the test .env leaves all three unset.'
+say 'VAULT_SETTINGS_READONLY (Fable-audit follow-up: a security lock that fails'
+say 'open if the forwarding line is ever removed) is checked the same way --'
+say 'api/tests/test_p1_compose_env_defaults.py already pins the rendered'
+say "compose.yaml text; this proves the container's actual process environment,"
+say 'which a misspelled key on either side could still defeat even with that'
+say 'text-level pin green.'
+run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' exec -T vault-api sh -c 'printenv VAULT_EVENT_LOG_PATH; echo \"exit=\$?\"; printenv VAULT_MANIFEST_ORACLE; echo \"exit=\$?\"; printenv VAULT_SETTINGS_READONLY; echo \"exit=\$?\"'"
 evpath_defined=$(dc exec -T vault-api sh -c 'printenv VAULT_EVENT_LOG_PATH >/dev/null 2>&1; echo "exit=$?"')
 oracle_defined=$(dc exec -T vault-api sh -c 'printenv VAULT_MANIFEST_ORACLE >/dev/null 2>&1; echo "exit=$?"')
+settings_readonly_defined=$(dc exec -T vault-api sh -c 'printenv VAULT_SETTINGS_READONLY >/dev/null 2>&1; echo "exit=$?"')
 assert_contains "$evpath_defined" "exit=0" "VAULT_EVENT_LOG_PATH is a defined env var inside the running vault-api container"
 assert_contains "$oracle_defined" "exit=0" "VAULT_MANIFEST_ORACLE is a defined env var inside the running vault-api container"
+assert_contains "$settings_readonly_defined" "exit=0" "VAULT_SETTINGS_READONLY is a defined env var inside the running vault-api container"
 
 step "6j. Regression guard: /v1/health and an authed route still behave after the build-context change"
 say '6a/6b above already exercise these for auth-contract reasons; restated'
