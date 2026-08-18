@@ -40,11 +40,38 @@
  * property form, and the two local `el(tag, className, ...)` /
  * `sectionHeading(text)` factory functions in
  * onboarding.js/settings.js/downloads.js) and resolves per FILE, top-to-
- * bottom, in one forward pass — good enough for this codebase's
- * straightforward "build the element, set its class, use it later"
- * construction style (verified against every real `.hidden =` site as of
- * this WP — see the mutation notes below), but not a substitute for a real
- * scope-aware JS parser.
+ * bottom, in one forward pass for every idiom EXCEPT one (WP 4e.8): the
+ * `ident: document.getElementById("id")` object-literal property — the
+ * dependency-injection idiom `app.js` uses to hand DOM elements into
+ * `createRailPanel()` (`elements: { headEl: document.getElementById(
+ * "rail-head"), ... }`). That idiom's whole point is that the identifier
+ * crosses a file boundary: the property name becomes a destructured
+ * PARAMETER name in the function it is passed to, in a DIFFERENT file,
+ * which is where the real `.hidden =`/`setAttribute`/... toggle then
+ * happens (`rail-panel.js`). A per-file forward pass structurally cannot
+ * see that, and it is exactly how `.rail-head[hidden]`/`.rail-foot[hidden]`
+ * (app.css) went undetected as required guards for a whole work package:
+ * `rail-panel.js`'s `headEl.hidden =`/`footEl.hidden =` sites (WP 4e.6)
+ * never resolved against `app.js`'s `headEl:`/`footEl:` seeds (also WP
+ * 4e.6) — different files, and a colon-form property the old `byId` regex
+ * (which only matched `ident = document.getElementById(...)`) could not
+ * see either. `buildDiSeedMap()` below closes this by building ONE
+ * project-wide ident -> id map for this specific idiom only, consulted as
+ * a FALLBACK only when an identifier was never locally seeded at all (see
+ * `findHiddenToggledClasses`'s `hiddenAssign` branch) — every other idiom's
+ * resolution is completely unchanged. Going cross-file has its own
+ * soundness cost: two unrelated DI sites in two different files could, in
+ * principle, reuse the same property/parameter name for two DIFFERENT
+ * elements; that is guarded explicitly (a same-ident/different-id
+ * collision across DI seeds is a hard test failure naming both sites, not
+ * a silent last-write-wins) — see the collision tests below, and the
+ * fourth limitation note further down for the one residual gap that guard
+ * does not close.
+ *
+ * Good enough for this codebase's straightforward "build the element, set
+ * its class, use it later" construction style (verified against every real
+ * `.hidden =` site as of this WP — see the mutation notes below), but not a
+ * substitute for a real scope-aware JS parser.
  *
  * **Two known limitations, stated rather than silently worked around
  * (Opus review nitpick N1, WP 4e.1 fix round).** (1) `SIMPLE_CLASS_
@@ -79,6 +106,41 @@
  * object-literal parsing, not another regex. Not exploited by any real
  * code here as of this WP; recorded as an acknowledged gap rather than
  * implied to be covered by the four idioms this file actually scans for.
+ *
+ * **Fourth limitation, added by WP 4e.8's cross-file DI resolution — and
+ * why only the DI-vs-DI case above got an explicit collision guard
+ * (Opus review SF2, WP 4e.8 fix round).** The collision guard
+ * (`buildDiSeedMap`'s `collisions` list) only catches two DI SEEDS
+ * disagreeing with EACH OTHER — the same object-literal property name
+ * pointing at two different ids. It does NOT catch a plain, non-DI local
+ * identifier in one file happening to share a name with a DI-seeded
+ * identifier in a different, unrelated file: if such a name collision
+ * existed, a `.hidden =` toggle on that local identifier — one NEVER
+ * locally seeded by any idiom this file understands (`set === undefined`;
+ * an identifier that resolved LOCALLY, even to a knowingly empty Set,
+ * already wins and is never touched by the fallback — see
+ * `findHiddenToggledClasses`'s `hiddenAssign` branch and the "fallback
+ * never overrides a local seed" test below) — would incorrectly inherit
+ * the unrelated file's DI-seeded classes. But note the DIRECTION of that
+ * failure: it can only ADD an extra, unwarranted class to `hiddenToggledClasses`
+ * (a false positive — Lint 1 demands a guard that was never actually
+ * needed, a loud and immediately obvious failure) or misattribute a site
+ * to the wrong class. It can never SWALLOW a real guard requirement,
+ * because without ANY seed — local or DI — that site was already invisible
+ * to this lint before WP 4e.8 existed; this limitation cannot make a true
+ * positive disappear. The DI-vs-DI collision guarded above is different in
+ * kind: two DI seeds disagreeing and resolved last-write-wins WOULD
+ * silently swallow a real guard requirement (whichever id lost the
+ * overwrite stops being seen at all) — which is exactly why that case, and
+ * only that case, gets a hard test failure rather than a documented gap.
+ * Not exploited by any real code as of this WP: the DI idiom's five actual
+ * `diSeedMap` entries (`headEl`, `vaultNameEl`, `footEl`, `cacheEl`,
+ * `versionEl`, all app.js -> rail-panel.js) do not collide with any other
+ * identifier name anywhere in web/js/ (verified by grep). `createElement`
+ * is passed through the SAME object literal (`elements: { ..., createElement:
+ * (tag) => document.createElement(tag) }`) but is not a `DI_SEED_RE` match
+ * at all — its value is an arrow function, not a `document.getElementById(...)`
+ * call — so it is not in `diSeedMap` and is irrelevant to this limitation.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -220,6 +282,65 @@ function buildIdClassMap(html) {
 const idClassMap = buildIdClassMap(indexHtml);
 
 // ---------------------------------------------------------------------
+// DI-seed idiom (WP 4e.8): `ident: document.getElementById("id")` as an
+// object-literal property — see this file's header for why this ONE idiom,
+// unlike every other seed form below, needs project-wide (cross-file)
+// visibility rather than per-file resolution.
+// ---------------------------------------------------------------------
+
+const DI_SEED_RE = /(\w+)\s*:\s*document\.getElementById\(\s*["']([^"']+)["']\s*\)/g;
+
+/**
+ * Scans every given file for the `ident: document.getElementById("id")`
+ * idiom and builds a PROJECT-WIDE ident -> id map (the property name is
+ * meant to be read from a different file than the one that declares it, so
+ * per-file scoping would defeat the idiom's own purpose).
+ *
+ * Soundness cost of going cross-file: two unrelated DI sites in two
+ * different files could reuse the same property/parameter name for two
+ * DIFFERENT elements — nothing about the idiom itself prevents it. A naive
+ * last-write-wins map would then silently claim resolution coverage it
+ * never actually earned, which is precisely the failure class this whole
+ * lint exists to close, one level up. So a same-ident/different-id
+ * collision is collected and reported BY NAME (the shared identifier, both
+ * files, both ids) instead of resolved by overwrite; the caller turns a
+ * non-empty `collisions` list into a hard test failure. A same-ident/
+ * SAME-id repeat (the identical element legitimately named the same way
+ * twice) is not a collision.
+ *
+ * @param {string[]} files
+ * @returns {{
+ *   map: Map<string, {id: string, file: string}>,
+ *   collisions: Array<{ident: string, siteA: string, siteB: string}>,
+ * }}
+ */
+function buildDiSeedMap(files) {
+  const map = new Map();
+  const collisions = [];
+  for (const file of files) {
+    const text = readFileSync(file, "utf8");
+    const relFile = path.relative(webDir, file);
+    for (const m of text.matchAll(DI_SEED_RE)) {
+      const ident = m[1];
+      const id = m[2];
+      const existing = map.get(ident);
+      if (!existing) {
+        map.set(ident, { id, file: relFile });
+      } else if (existing.id !== id) {
+        collisions.push({
+          ident,
+          siteA: `${existing.file} (id="${existing.id}")`,
+          siteB: `${relFile} (id="${id}")`,
+        });
+      }
+    }
+  }
+  return { map, collisions };
+}
+
+const { map: diSeedMap, collisions: diSeedCollisions } = buildDiSeedMap(jsFiles);
+
+// ---------------------------------------------------------------------
 // JS static scan: for every `.hidden = ` site, resolve the identifier's
 // known class set at that point in the file (single forward pass, see this
 // file's header for the supported idioms and their scope).
@@ -235,8 +356,18 @@ function tokensFromQuotedList(argText) {
 
 /** @returns {Map<string, Array<{file:string, ident:string}>>} class token ->
  * every (file, identifier) site where an element carrying that class was
- * hidden-toggled. */
-function findHiddenToggledClasses(files, idMap) {
+ * hidden-toggled.
+ *
+ * `diSeeds` (WP 4e.8, default empty — every pre-existing caller in this
+ * file that only exercises local, single-file idioms passes none and is
+ * unaffected): the project-wide ident -> {id} map from `buildDiSeedMap()`,
+ * consulted ONLY when an identifier was never locally seeded by any of the
+ * per-file idioms above at all (`classesByIdent.get(ident) === undefined`).
+ * Local resolution — including a local seed that resolved to a knowingly
+ * EMPTY class set — always wins and is never overridden by a cross-file
+ * DI seed; this is what keeps every idiom's existing per-file resolution
+ * unchanged. */
+function findHiddenToggledClasses(files, idMap, diSeeds = new Map()) {
   const results = new Map();
   const record = (file, ident, classSet) => {
     for (const cls of classSet) {
@@ -353,7 +484,23 @@ function findHiddenToggledClasses(files, idMap) {
       } else if (ev.type === "querySelectorClass") {
         classesByIdent.set(ev.ident, new Set([ev.extra]));
       } else if (ev.type === "hiddenAssign") {
-        const set = classesByIdent.get(ev.ident);
+        let set = classesByIdent.get(ev.ident);
+        // WP 4e.8: fall back to the cross-file DI-seed map ONLY when this
+        // identifier has no local resolution at all (`undefined`) — e.g.
+        // rail-panel.js's `headEl`/`footEl`/`versionEl`, which are function
+        // PARAMETERS this file's per-file scan never assigns a class set to
+        // by any local idiom, because their actual seed
+        // (`headEl: document.getElementById("rail-head")`) lives in
+        // app.js. A local set that resolved to a knowingly empty Set (id
+        // seeded but no `class` attribute, say) is left exactly as-is — it
+        // already made a real determination and stays authoritative.
+        if (set === undefined) {
+          const diSeed = diSeeds.get(ev.ident);
+          if (diSeed) {
+            const seedClasses = idMap.get(diSeed.id);
+            set = seedClasses ? new Set(seedClasses.split(/\s+/)) : new Set();
+          }
+        }
         if (set && set.size) record(path.relative(webDir, file), ev.ident, set);
       }
     }
@@ -362,7 +509,7 @@ function findHiddenToggledClasses(files, idMap) {
   return results;
 }
 
-const hiddenToggledClasses = findHiddenToggledClasses(jsFiles, idClassMap);
+const hiddenToggledClasses = findHiddenToggledClasses(jsFiles, idClassMap, diSeedMap);
 
 // ---------------------------------------------------------------------
 // Lint 1: every display-styled class that is ALSO hidden-toggled needs a
@@ -515,6 +662,196 @@ test("sectionHeadingFactory's hardcoded ['sec'] mapping still matches the real s
     /\.className\s*=\s*["']sec["']/,
     "sectionHeading() no longer assigns className \"sec\" — update the hardcoded mapping in findHiddenToggledClasses above",
   );
+});
+
+// ---------------------------------------------------------------------
+// WP 4e.8: the DI-seed idiom's cross-file resolution and its collision
+// guard, plus direct named pins on the two live instances the cross-file
+// fix restores coverage for.
+// ---------------------------------------------------------------------
+
+// The real-tree gate: if a future coder's DI seed reuses an existing
+// property/parameter name for a different element, this fails BY NAME
+// (both files, both ids) rather than silently resolving last-write-wins.
+test("DI-seed idiom: no identifier name resolves to two different ids across the real DI seeds in web/js/", () => {
+  assert.deepEqual(
+    diSeedCollisions,
+    [],
+    `DI-seed collision(s) — same identifier, different ids, would corrupt cross-file resolution: ${JSON.stringify(diSeedCollisions, null, 2)}`,
+  );
+});
+
+// Proves the collision guard above is not vacuous: constructs an ACTUAL
+// collision in throwaway fixtures (never web/js/) and asserts buildDiSeedMap
+// reports it by name, naming both sites.
+test("DI-seed collision guard fires on a constructed fixture: same identifier, two files, two different ids", () => {
+  const fileA = path.join(__dirname, ".tmp-di-collision-a.js");
+  const fileB = path.join(__dirname, ".tmp-di-collision-b.js");
+  writeFileSync(fileA, 'createThing({ dupIdent: document.getElementById("id-one") });\n');
+  writeFileSync(fileB, 'createOther({ dupIdent: document.getElementById("id-two") });\n');
+  try {
+    const { collisions } = buildDiSeedMap([fileA, fileB]);
+    assert.equal(collisions.length, 1, `expected exactly one collision, got: ${JSON.stringify(collisions)}`);
+    const [c] = collisions;
+    assert.equal(c.ident, "dupIdent");
+    assert.match(c.siteA, /id-one/);
+    assert.match(c.siteB, /id-two/);
+  } finally {
+    rmSync(fileA, { force: true });
+    rmSync(fileB, { force: true });
+  }
+});
+
+// Sanity: the SAME identifier seeded with the SAME id twice (e.g. two
+// different call sites legitimately re-declaring the same pairing) is not
+// a collision — only a different id under the same name is.
+test("DI-seed collision guard: the same identifier/id pair repeated across files is NOT a collision", () => {
+  const fileA = path.join(__dirname, ".tmp-di-nocollision-a.js");
+  const fileB = path.join(__dirname, ".tmp-di-nocollision-b.js");
+  writeFileSync(fileA, 'createThing({ sameIdent: document.getElementById("same-id") });\n');
+  writeFileSync(fileB, 'createOther({ sameIdent: document.getElementById("same-id") });\n');
+  try {
+    const { collisions } = buildDiSeedMap([fileA, fileB]);
+    assert.deepEqual(collisions, []);
+  } finally {
+    rmSync(fileA, { force: true });
+    rmSync(fileB, { force: true });
+  }
+});
+
+// Proves the cross-file fallback in findHiddenToggledClasses is
+// load-bearing, not incidental: a DI seed declared in one fixture file must
+// be visible to a `.hidden =` toggle on the SAME identifier NAME in a
+// DIFFERENT fixture file. Mutation-verified: replacing the `set === undefined`
+// fallback branch in findHiddenToggledClasses with a no-op (i.e. reverting
+// to the pre-WP-4e.8 per-file-only resolution) makes this test fail by name
+// — the exact regression this WP closes.
+test("DI-seed idiom resolves cross-file: a seed in one file is visible to a .hidden = toggle on the same identifier name in a different file", () => {
+  const seedFile = path.join(__dirname, ".tmp-di-seed.js");
+  const consumerFile = path.join(__dirname, ".tmp-di-consumer.js");
+  writeFileSync(seedFile, 'createPanel({ probeDiIdent: document.getElementById("probe-di-id") });\n');
+  writeFileSync(consumerFile, ["function wire(probeDiIdent) {", "  probeDiIdent.hidden = true;", "}"].join("\n"));
+  try {
+    const idMap = new Map([["probe-di-id", "probe-di-class"]]);
+    const { map: fixtureDiSeedMap, collisions } = buildDiSeedMap([seedFile, consumerFile]);
+    assert.deepEqual(collisions, [], "fixture must not itself trip the collision guard");
+    const found = findHiddenToggledClasses([seedFile, consumerFile], idMap, fixtureDiSeedMap);
+    assert.ok(
+      found.has("probe-di-class"),
+      "the DI seed declared in one file was not resolved for the .hidden = toggle in a different file — cross-file resolution regressed",
+    );
+  } finally {
+    rmSync(seedFile, { force: true });
+    rmSync(consumerFile, { force: true });
+  }
+});
+
+// Confirms local resolution still wins over the cross-file fallback: an
+// identifier that WAS locally seeded (even to a class set unrelated to the
+// DI seed's) must never be overridden by a same-named DI seed elsewhere.
+test("DI-seed fallback never overrides a local seed: an identifier resolved locally keeps its LOCAL classes, not the cross-file DI seed's", () => {
+  const seedFile = path.join(__dirname, ".tmp-di-local-seed.js");
+  const consumerFile = path.join(__dirname, ".tmp-di-local-consumer.js");
+  writeFileSync(seedFile, 'createPanel({ sharedName: document.getElementById("di-side-id") });\n');
+  writeFileSync(
+    consumerFile,
+    [
+      'const sharedName = document.createElement("div");',
+      'sharedName.className = "locally-seeded-class";',
+      "sharedName.hidden = true;",
+    ].join("\n"),
+  );
+  try {
+    const idMap = new Map([["di-side-id", "di-side-class"]]);
+    const { map: fixtureDiSeedMap } = buildDiSeedMap([seedFile, consumerFile]);
+    const found = findHiddenToggledClasses([seedFile, consumerFile], idMap, fixtureDiSeedMap);
+    assert.ok(found.has("locally-seeded-class"), "the local seed's own class was not recorded");
+    assert.ok(!found.has("di-side-class"), "the local seed was incorrectly overridden by the cross-file DI seed");
+  } finally {
+    rmSync(seedFile, { force: true });
+    rmSync(consumerFile, { force: true });
+  }
+});
+
+// MF1 (Opus review must-fix, WP 4e.8 fix round): every test above proves the
+// LINT LOGIC is correct in the abstract, entirely on throwaway fixtures —
+// nothing yet pinned that PRODUCTION CODE still actually exercises the one
+// idiom this lint's cross-file resolution understands. The reviewer
+// measured this directly (M5b): pull app.js's five `document.getElementById(
+// ...)` calls into local `const`s and pass them into `createRailPanel({
+// elements: { headEl, vaultNameEl, footEl, cacheEl, versionEl, ... } })` as
+// shorthand properties instead of the colon form — syntactically valid,
+// `node --check` clean, behaviourally IDENTICAL at runtime — and
+// `DI_SEED_RE` (which only matches the `ident: document.getElementById(...)`
+// colon form) then matches nothing at all in app.js: cross-file resolution
+// goes silently dead and the full suite (fixtures included) stayed green.
+// Same structural-pin lesson as the `sectionHeadingFactory` drift test above
+// and docs/LEARNINGS.md's WP 4f entry: a lint whose fixtures all pass can
+// still be completely disconnected from the real tree it exists to police.
+// This test reads the REAL `hiddenToggledClasses`/`diSeedMap` built from
+// web/js/ itself (no fixture) and is verified to die under BOTH known ways
+// that disconnection happens: the cross-file fallback disabled (M3) and the
+// app.js shorthand-property refactor above (M5b) — both mutations applied
+// by hand to this exact file/app.js, run, and reverted for this fix (see
+// the coder's report).
+test("real tree: the DI-seed idiom is actually IN USE on production code — rail-head/rail-foot are observed as hidden-toggled, not merely handled correctly in the abstract", () => {
+  assert.ok(
+    hiddenToggledClasses.has("rail-head"),
+    "rail-head no longer appears as hidden-toggled — the DI-seed cross-file resolution stopped seeing " +
+      "components/rail-panel.js's headEl.hidden site (fallback disabled, or app.js no longer uses the colon-form DI-seed idiom)",
+  );
+  assert.ok(
+    hiddenToggledClasses.has("rail-foot"),
+    "rail-foot no longer appears as hidden-toggled — the DI-seed cross-file resolution stopped seeing " +
+      "components/rail-panel.js's footEl.hidden site (fallback disabled, or app.js no longer uses the colon-form DI-seed idiom)",
+  );
+  // Sharpens the failure message above by naming the exact seed pairs
+  // expected straight out of app.js, rather than only the downstream symptom.
+  assert.equal(
+    diSeedMap.get("headEl")?.id,
+    "rail-head",
+    'diSeedMap has no "headEl" -> "rail-head" DI seed — app.js no longer uses the ' +
+      '`headEl: document.getElementById("rail-head")` colon-form idiom this lint\'s cross-file resolution understands',
+  );
+  assert.equal(
+    diSeedMap.get("footEl")?.id,
+    "rail-foot",
+    'diSeedMap has no "footEl" -> "rail-foot" DI seed — app.js no longer uses the ' +
+      '`footEl: document.getElementById("rail-foot")` colon-form idiom this lint\'s cross-file resolution understands',
+  );
+});
+
+// Direct named pins (brief requirement: each guard must fail BY NAME when
+// deleted, independent of whether the JS-side cross-reference resolves).
+// These read `guardSelectors` directly — populated from `combinedCss`
+// (theme.css + app.css combined, see the top of this file), with no
+// dependency on the JS scan at all — so they catch a deleted guard even if
+// some future JS refactor outruns this file's parser again, and even if the
+// guard rule itself moved from app.css into theme.css.
+test("named pin: .rail-head[hidden]{ display:none; } guard rule exists (app.css or theme.css)", () => {
+  assert.ok(
+    guardSelectors.has(".rail-head[hidden]"),
+    ".rail-head[hidden]{ display:none; } is missing — .rail-head carries an author display:block rule " +
+      "(app.css BP-L block) and components/rail-panel.js sets headEl.hidden, so without this guard the toggle silently does nothing",
+  );
+});
+
+test("named pin: .rail-foot[hidden]{ display:none; } guard rule exists (app.css or theme.css)", () => {
+  assert.ok(
+    guardSelectors.has(".rail-foot[hidden]"),
+    ".rail-foot[hidden]{ display:none; } is missing — .rail-foot carries an author display:block rule " +
+      "(app.css BP-L block) and components/rail-panel.js sets footEl.hidden, so without this guard the toggle silently does nothing",
+  );
+});
+
+// Note from the brief, verified: `.rail-version` carries NO author
+// `display` rule (only margin/font/overflow), so the general Lint 1
+// cross-reference correctly does not (and must not) demand a
+// `.rail-version[hidden]` guard for it, even though rail-panel.js also
+// toggles `versionEl.hidden`. A guard demanded here would mean this WP's
+// fix went over-broad.
+test("sanity: .rail-version has no author display rule, so no [hidden] guard is required for it", () => {
+  assert.ok(!displayRulesByClass.has("rail-version"), "rail-version unexpectedly has an author display rule now");
 });
 
 // ---------------------------------------------------------------------
