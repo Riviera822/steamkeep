@@ -1920,7 +1920,10 @@ surface (playtime and last-played now flow through the API response).
       package); or deliberately env-only, volume-topology-sensitive
       (`VAULT_MANIFEST_ARCHIVE_DIR`, `VAULT_STEAMPREFILL_CACHE_DIR` — new §3
       in `tuned-setup.md`); plus `VAULT_SETTINGS_READONLY`, env-only by
-      definition. `.env.example` makes the cache-event log pair default-ON
+      definition — left unforwarded by P1, closed as a forwarding gap on
+      2026-08-18 (Fable audit finding: the one env-only key with NO
+      alternative path, so the shipped compose could not enable the
+      documented hard-lock at all; now forwarded + pinned). `.env.example` makes the cache-event log pair default-ON
       (user decision, WP 3.11's consumer justifies it) with an honest
       read-not-truncate growth warning, a reachable
       `VAULT_EVENT_LOG_MAX_BYTES=0` escape hatch, an upgrade note that a
