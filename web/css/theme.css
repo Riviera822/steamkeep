@@ -195,7 +195,45 @@
      be its own feature with its own failure modes, and the brief's scope is
      the auto-fill grid itself, not a de-sawtoothing layer on top of it. */
   --tile-min:176px;
-  --w-sheet:480px;  /* existing .sheet max-width, tokenized (WP 4a.7's hard-coded 480px) */
+  --w-sheet:480px;  /* existing .sheet max-width, tokenized (WP 4a.7's hard-coded 480px) — the DRAWER variant's width (WP 4e.3's notifications/clients panels) and every other sheet below BP-L. Deliberately NOT widened for the drawer: it is an ambient side panel, not the primary reading surface, same reasoning the confirm dialogs (`.dialog`, 420px, untouched) stay narrow — "that is their job" (operator, WP 4e.3 fix round 2). */
+  /* WP 4e.3 fix round 2 (operator decision, 2026-08-18): the game detail
+     sheet's CENTRED CARD widens at BP-L — a dedicated token, not a literal
+     inside `.sheet--center`, because `app.css`'s BP-L block needs the
+     centred card and the drawer to differ (480px is still correct for the
+     drawer) at the SAME breakpoint, which a single redefined `--w-sheet`
+     cannot express; WP 4h.3 (header art in the detail card) is expected to
+     consume this same token rather than a second literal.
+
+     **680px, not 720px or 760px — chosen from the type measure of the
+     card's own longest running prose, not merely picked at the low end of
+     the operator's given 680-760px range for its own sake.** The detail
+     sheet's longest continuous paragraph is the status-icon legend caption
+     (`components/game-detail-sheet.js`'s equivalent of the frozen mockup's
+     `.hint`/`.u2`/`.u3`/`.ohint` copy, ~11.5px, `line-height:1.5`-`1.55`,
+     e.g. "vault-api learns which depots belong to a game by watching what
+     a download writes..." or the status-icon legend's own two-sentence
+     caption) — a proportional sans face (`--ui`: Roboto/Segoe UI/system-ui)
+     at 11.5px averages roughly 0.55em per character for mixed-case running
+     text, ~6.3px/char. `.sheet .body`'s own 18px side padding (app.css's
+     "sheets" section) leaves a content column of (cardWidth - 36px), so:
+       680px card -> 644px column -> ~102 characters/line
+       720px card -> 684px column -> ~108 characters/line
+       760px card -> 724px column -> ~115 characters/line
+     All three exceed the classic 45-75-character "ideal" measure (and even
+     the ~90-character outer bound some guides allow) — this content was
+     laid out for a 480px sheet, and NONE of the operator's approved range
+     restores a textbook reading measure for it. 680px is the least-bad of
+     the three: it is the closest to that bound the approved range allows,
+     and the actual cost is real but bounded — these captions are short (2-4
+     sentences, not long-form copy) and supplementary (a legend/explanation,
+     not the primary task content), so a handful of ~100-character wrapped
+     lines is a real but tolerable readability tax, not an unusable one. If
+     it proves uncomfortable in practice, the cheaper fix is capping the
+     PROSE elements themselves (a `max-width` on `.hint`/`.u2`/`.u3`/
+     `.ohint` alone, independent of the card), not renegotiating this token
+     — out of scope for this package, recorded here as the honest escape
+     hatch rather than pretended unnecessary. */
+  --w-sheet-l:680px;
   --search-w:420px; /* WP 4e.2: cap on the library search field once it sits
                         beside the filter chips in a BP-L toolbar band
                         (grid-template-areas "search chips") instead of

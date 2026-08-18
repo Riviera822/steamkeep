@@ -33,23 +33,41 @@
  * (the "sheet closes on navigation" / "background inert" regression the
  * WP 4a.8 brief asks for). Verified live against a running vault-api
  * instance for everything else (see the coder's report).
+ *
+ * **Desktop overlay geometry (WP 4e.3) — presentation-only, added here as a
+ * plain modifier class, not a second state model.** Below BP-L (1024px,
+ * `css/theme.css`'s breakpoint table) every instance stays the mockup's
+ * bottom sheet, unchanged. From BP-L up, the operator's decision
+ * (`docs/PROJECT_PLAN.md`'s Phase 4e section) is that the three
+ * `createSheetDialog` instances split into two different desktop shapes:
+ * the game detail sheet becomes a centred card, the notifications panel and
+ * the clients sheet become a right-edge drawer. `variant` ("center" |
+ * "drawer") is passed once at construction and only ever appends a second,
+ * static class (`sheet-backdrop--<variant>`/`sheet--<variant>`) alongside
+ * the existing `sheet-backdrop`/`sheet` ones — every open()/close()/focus/
+ * inert/Escape mechanic below is completely unaware of it, and
+ * `css/app.css`'s BP-L block is the only place the variant classes do
+ * anything at all (see that file's "desktop overlay geometry" section).
+ * `variant` is optional (omit it and an instance stays a bottom sheet at
+ * every width — used by `web/tests/dialog-wiring.test.js`'s throwaway test
+ * sheets, which have no desktop-geometry opinion of their own).
  */
 
 import { pushModal, popModal } from "../lib/modal-stack.js";
 
 /**
- * @param {{ariaLabel: string}} options
+ * @param {{ariaLabel: string, variant?: "center"|"drawer"}} options
  * @returns {{
  *   backdrop: HTMLElement, sheet: HTMLElement, body: HTMLElement,
  *   open: () => void, close: () => void, isOpen: () => boolean,
  * }}
  */
-export function createSheetDialog({ ariaLabel }) {
+export function createSheetDialog({ ariaLabel, variant }) {
   const backdrop = document.createElement("div");
-  backdrop.className = "sheet-backdrop";
+  backdrop.className = variant ? `sheet-backdrop sheet-backdrop--${variant}` : "sheet-backdrop";
 
   const sheet = document.createElement("div");
-  sheet.className = "sheet";
+  sheet.className = variant ? `sheet sheet--${variant}` : "sheet";
   sheet.setAttribute("role", "dialog");
   sheet.setAttribute("aria-modal", "true");
   sheet.setAttribute("aria-label", ariaLabel);

@@ -40,7 +40,13 @@ const state = {
   clients: store.snapshot("clients") || [],
 };
 
-const dialog = createSheetDialog({ ariaLabel: "Client status" });
+// WP 4e.3: "drawer" — same ambient-side-panel treatment as the notifications
+// panel (docs/PROJECT_PLAN.md's Phase 4e section): from BP-L up this appears
+// at the right edge instead of the bottom. No motion either way — a plain
+// `display` toggle, same as every other overlay here (Opus review, WP 4e.3
+// fix round: "slides in" overclaimed an animation this codebase's overlays
+// do not have). Below BP-L it stays the mockup's bottom sheet, unchanged.
+const dialog = createSheetDialog({ ariaLabel: "Client status", variant: "drawer" });
 
 const heading = document.createElement("h2");
 heading.textContent = "Clients";

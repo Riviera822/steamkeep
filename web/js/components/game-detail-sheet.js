@@ -139,7 +139,12 @@ let lastStructuralKey = null;
 // Sheet scaffold (WP 4a.7's createSheetDialog, reused verbatim)
 // ---------------------------------------------------------------------
 
-const dialog = createSheetDialog({ ariaLabel: "Game detail" });
+// WP 4e.3: "center" — the operator's decision puts the detail sheet at eye
+// level as a centred card from BP-L up (docs/PROJECT_PLAN.md's Phase 4e
+// section); below BP-L it stays the mockup's bottom sheet, unchanged. See
+// sheet-dialog.js's header for why this is a plain, static modifier class
+// and not a second state model.
+const dialog = createSheetDialog({ ariaLabel: "Game detail", variant: "center" });
 
 const contentEl = document.createElement("div");
 const gcSectionEl = document.createElement("div");

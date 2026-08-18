@@ -674,6 +674,103 @@ register): one new divergence lands in this package.
   render (vault name, cache summary, version line) all still correct after
   the refactor.
 
+Recorded divergence (WP 4e.3, 2026-08-18, operator decision — "detail +
+confirmations become a centred card at eye level; notifications and clients
+become a drawer from the right — ambient side panels, not focused tasks;
+mobile keeps its bottom sheets, unchanged" — user veto welcome, same as every
+entry in this register): one new divergence lands in this package.
+
+- **D-13 (overlay geometry at BP-L: two new shapes with no mockup
+  analogue).** The frozen mockup is phone-only — every overlay it defines
+  (`.sheet-backdrop`/`.sheet`, `.dialog-backdrop`/`.dialog`) is a single
+  390×844-frame shape with no wide-viewport variant to diverge FROM; this
+  entry records the shapes WP 4e.3 invents for BP-L (`min-width:1024px`,
+  the SAME breakpoint the D-1 rail conversion uses, not an independently
+  chosen one), not a change to an existing mockup shape the way D-1/D-3/
+  D-4/D-11/D-12 each were.
+  - **Centred card** — the game detail sheet (`components/game-detail-sheet.
+    js`, `sheet-dialog.js`'s new `variant:"center"` option) centres at eye
+    level instead of sliding up from the bottom. **Card WIDTH (operator
+    decision, 2026-08-18, fix round 2): the card widens to 680px at BP-L**
+    (`--w-sheet-l`, a NEW, dedicated token in `theme.css` — not a
+    redefinition of the shared `--w-sheet`, which the drawer and every
+    other sheet still need at 480px, and not a literal inside
+    `.sheet--center`, since `app.css`'s BP-L block needs both widths to
+    coexist at the same breakpoint; WP 4h.3's header art is expected to
+    build against this same token). This is the plan item's "sizing" half,
+    genuinely delivered, not merely "placement" — 680px, the low end of the operator-approved
+    680-760px range (the selected option was labelled ~720px), not 720px or the range's 760px ceiling, chosen from the type
+    measure of the card's own longest running prose (the status-icon legend
+    /depot-unknown captions, ~11.5px, ~0.55em/character): even 680px yields
+    ~102 characters/line for that text against the classic 45-75-character
+    ideal, worse at 720/760px, so the LOW end of the approved range was the
+    least-bad choice, not an arbitrary pick within it — full arithmetic in
+    `theme.css`'s own token comment. The confirm dialogs stay at their
+    existing, deliberately narrow `.dialog` width (420px, untouched) —
+    "that is their job" (operator) — only the detail sheet itself widens;
+    the drawer stays at `--w-sheet` (480px) for the same reason (an ambient
+    side panel, not the primary reading surface).
+  - **Right-edge drawer** — the notifications panel and the clients sheet
+    (`variant:"drawer"`) appear at the right edge, full viewport height,
+    instead of the bottom. No motion either way for either new shape (nor
+    for the bottom sheet they replace) — every overlay in this app,
+    including these two, is a plain `display` toggle with no transition
+    anywhere in the codebase; an early draft of this entry and of the
+    shipped code comments said "slides in", which overclaimed an animation
+    that does not exist (Opus review, fix round — corrected in both
+    places).
+  - The bulk-delete/GC-execute confirm dialogs (`.dialog-backdrop`/
+    `.dialog`, reused verbatim by `game-detail-sheet.js`'s two confirms and
+    `views/library.js`'s bulk delete) stay a centred card at every width, as
+    they always were — but needed a BP-L re-centring fix of their own
+    (**Opus review blocker B1**): they used to centre on the FULL viewport,
+    while the sheet's own new centring axis moved to the content area
+    (excluding the rail) — a live-measured constant −90px (`--rail-w`/2)
+    mismatch between a confirm and the card it covers, the exact failure
+    mode this package's own centred-card design note already named for the
+    sheet, shipped anyway for the dialog. Fixed with
+    `padding-left:calc(var(--rail-w) + 22px)` on `.dialog-backdrop` (the
+    `+ 22px` preserves the base rule's own uniform 22px inset, which a bare
+    `var(--rail-w)` would have replaced, landing 11px off) — z-index
+    stacking (45 above the sheet's 40) needed no change, and still holds at
+    this breakpoint by construction.
+  - Both variants reuse the SAME `.sheet-backdrop`/`.sheet` DOM/JS scaffold
+    (`sheet-dialog.js`), gated purely by a static modifier class
+    (`sheet-backdrop--<variant>`/`sheet--<variant>`) — no second focus trap,
+    no second Escape listener, no new state model; `lib/modal-stack.js`'s
+    existing push/pop/Escape stack is unaware the classes exist. Mobile
+    (below BP-L) is untouched: every rule this package adds lives inside
+    the existing BP-L `@media` block (`git diff --stat` on `app.css` is
+    purely additive).
+
+  Verification: `web/tests/css-overlay-geometry.test.js` (new, structural
+  CSS pins plus one fake-DOM behavioural pin for the nesting/Escape-ordering
+  claim) — 524 baseline → 539 green on the first pass, 540 after the B1 fix
+  round (one pin added: the confirm-dialog/sheet centring-axis match,
+  computed from the live `--rail-w` token rather than two repeated
+  literals), 543 after the operator's card-width decision (three more:
+  `--w-sheet-l`'s existence/range, `.sheet--center` sourcing its max-width
+  from it rather than `--w-sheet`, and `.sheet--drawer` gaining no such
+  override — mutation-tested in both directions, token deleted and
+  `.sheet--center` pointed back at `--w-sheet`, both dying by name). Every
+  mutation this file's pins claim to catch was applied and reverted, dying
+  by name each time, across all three rounds — see the coder's reports for
+  the full list (breakpoint-anchoring, mobile-unchanged,
+  z-index-above-rail/topbar, z-index-above-sheet, B1's centring-axis match,
+  N1's drawer border cleanup, N2's drawer body top-padding match, the
+  JS-side variant-class wiring, and the width-token pair). Two of the
+  first-pass test names
+  overclaimed "byte-identical to the pre-WP rule" (Opus review S3) — the
+  underlying claim about the shipped diff is true (purely additive, `git
+  diff --stat` shows 0 deletions), but the regex-based pins themselves only
+  check specific property values, not full rule-body literal-identity (the
+  reviewer proved this by adding an unrelated property to the base rule and
+  watching the suite stay green); renamed to "keeps every pre-WP property
+  value" rather than switched to a literal-text comparison, matching this
+  codebase's existing value-pin convention (`css-layout-foundation.test.js`)
+  rather than adding a new byte-snapshot style this file would be the only
+  one to use.
+
 ### WP 4a.1 — Static serving + app shell (api/ + web/) — **first, serial**
 - vault-api mounts `web/` (StaticFiles, SPA fallback, sane CSP/security
   headers, no-cache for index). Router auth must NOT cover static assets;

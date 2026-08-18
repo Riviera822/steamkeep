@@ -47,7 +47,15 @@ const state = {
 const bell = document.getElementById("btn-notifs");
 const pip = document.getElementById("npip");
 
-const dialog = createSheetDialog({ ariaLabel: "Notifications" });
+// WP 4e.3: "drawer" — the operator's decision treats notifications as an
+// ambient side panel, not a focused task, so from BP-L up it appears at the
+// right edge instead of the bottom (docs/PROJECT_PLAN.md's Phase 4e
+// section). No motion either way — like every other overlay in this app, it
+// is shown/hidden via a plain `display` toggle, no transition (Opus review,
+// WP 4e.3 fix round: "slides in" overclaimed a slide animation that does
+// not exist anywhere in this codebase's overlays). Below BP-L it stays the
+// mockup's bottom sheet, unchanged.
+const dialog = createSheetDialog({ ariaLabel: "Notifications", variant: "drawer" });
 
 const heading = document.createElement("h2");
 heading.textContent = "Notifications";

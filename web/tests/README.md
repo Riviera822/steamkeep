@@ -1192,3 +1192,110 @@ then unconditionally paint from whatever snapshot already exists — which is
 `undefined` at that point), which a source read, and now
 `rail-panel-wiring.test.js`'s own headless pin, both confirm renders nothing
 rather than a placeholder.
+
+### WP 4e.3 — Overlay geometry at BP-L (Phase 4e, D-13)
+
+The frozen mockup's overlays (`.sheet-backdrop`/`.sheet`,
+`.dialog-backdrop`/`.dialog`) are a single 390px-phone-frame shape with no
+responsive layer — on a >=1024px shell they rendered as a ~480px card glued
+to the bottom edge, far from whatever control opened it (the operator's own
+words: "strangely pressed against the bottom edge"). Operator decision (see
+`docs/PROJECT_PLAN.md`'s Phase 4e section and `docs/WORKPACKAGES.md`'s D-13):
+the game detail sheet becomes a CENTRED CARD at eye level; notifications and
+the clients sheet become a right-edge DRAWER; mobile keeps its bottom
+sheets, unchanged. `sheet-dialog.js`'s new `variant` option ("center" |
+"drawer") appends a static modifier class at construction — presentation
+only, `lib/modal-stack.js`'s push/pop/Escape stack is completely unaware of
+it. New test file: `css-overlay-geometry.test.js` (structural CSS pins in
+the same style `css-layout-foundation.test.js` established, plus one
+fake-DOM behavioural pin for the nesting/Escape-ordering claim, using the
+shared `fake-dom.js` harness). 524 baseline -> 539 green, first-round PASS.
+
+**Opus review: FAIL, one blocker — found by the reviewer's own headless-
+Chrome pass against a copy of the tree (screenshots at
+1024/1184/1424/2544px), not by any structural pin in this file.** Every
+structural claim held (13 mutations re-run and dying by name, the
+`padding-left` centring measured exact — card centre == content-axis centre
+to 0.0px at all four widths — presentation-only confirmed by grepping every
+added line for listener/inert/focus vocabulary and finding none). **B1:**
+the bulk-delete/GC-execute confirm dialogs (`.dialog-backdrop`, reused
+verbatim by three call sites) still centred on the FULL viewport while the
+sheet's own new centring axis moved to the content area — a live-measured
+constant −90px (`--rail-w`/2) mismatch between a confirm and the card it
+covers, the exact failure mode this package's own design comment had
+already named for the sheet and then shipped anyway for the dialog. Fixed
+with `padding-left:calc(var(--rail-w) + 22px)` on `.dialog-backdrop` at
+BP-L (the `+ 22px` preserves the base rule's own uniform 22px inset, which
+a bare `var(--rail-w)` would have replaced, landing 11px off); a new pin
+computes both insets from the live `--rail-w` token and asserts they
+resolve to the same axis rather than re-typing it as two literals that
+could drift apart again — mutation-verified twice (reverting to the bare
+`var(--rail-w)`, and deleting the override entirely both die by the same
+named test). Suite: 539 -> 540 (one pin added).
+
+Should-fixes, all addressed: **S1/S2** — this WP's divergence (D-13,
+`docs/WORKPACKAGES.md`) and this README entry, previously missing (every
+prior 4e web package shipped its divergence entry in the same commit).
+**S3** — two first-pass test names claimed "byte-identical to the pre-WP
+rule"; true of the shipped DIFF (purely additive, `git diff --stat` shows 0
+deletions) but not of what those specific pins check — the reviewer added
+an unrelated property to the base `.sheet-backdrop` rule and the suite
+stayed green, since a regex-based pin asserts specific property values are
+present, not that the rule contains nothing else. Renamed to "keeps every
+pre-WP property value" (picked over switching to a literal rule-body
+comparison, to stay consistent with `css-layout-foundation.test.js`'s
+existing value-pin convention rather than adding a second, byte-snapshot
+style only this file would use). **S4** — the mutation report had
+mis-attributed a kill: reverting `variant:"center"` in
+`game-detail-sheet.js`'s own `createSheetDialog(...)` call kills ONLY the
+source-grep wiring test (section 5, "the three real overlay components
+request the operator-decided variant"), never the fake-DOM nesting pin
+(section 6) — that test builds its OWN `createSheetDialog({variant:
+"center"})` instance directly and cannot see a regression in a different
+file's call site at all. Corrected in both the coder's report and a new
+comment on the nesting test stating this scope explicitly. **S6** — "slides
+in from the right edge" appeared in `app.css`'s comments and two of the
+three JS components; no transition/animation exists anywhere in this
+codebase's overlays (verified: none of `.sheet`/`.sheet-backdrop`/
+`.dialog`/`.dialog-backdrop` carry a `transition`/`animation` property, in
+any state). Reworded to "appears at the right edge" — no motion added; this
+package is geometry (position/shape), and a reduced-motion-guarded slide-in
+transition would be a new, separately-scoped feature with its own testing
+surface, not a fix to a wording bug. **N1/N2** (cheap, folded into the
+existing drawer test rather than new ones): the drawer's now-full-height
+top/bottom edges are flush against the viewport exactly like the (already
+borderless) right edge — `border-top` dropped to match, `border-bottom`
+left as the base rule's existing `none` rather than the fix round's own
+first draft, which had mistakenly ADDED one; and with `.grab` hidden, the
+drawer's `h2` sat 10px under the screen edge against the topbar's 14px —
+matched via `.sheet--drawer .body{padding-top:14px}`.
+
+**S5 — the operator's decision arrived in a second fix round: the detail
+card widens to 680px at BP-L.** A DEDICATED token, `--w-sheet-l`
+(`theme.css`), not a redefinition of the shared `--w-sheet` (which the
+drawer, and every other sheet, still need at 480px) and not a literal
+inside `.sheet--center` — `app.css`'s BP-L block needs both widths to
+coexist at the same breakpoint, and WP 4h.3's header art is expected to
+build against this same token. 680px, not the operator's own suggested
+720px: chosen from the type measure of the card's own longest running
+prose (the status-icon legend/depot-unknown captions, ~11.5px), which
+yields ~102 characters/line at 680px against the classic 45-75-character
+ideal — worse at 720/760px — so the LOW end of the operator's approved
+680-760px range was the least-bad choice, not an arbitrary pick within it
+(full character-per-line arithmetic in `theme.css`'s own token comment).
+The plan item's "sizing and placement" is now genuinely delivered, not
+merely placement; the confirm dialogs stay at their existing, deliberately
+narrow `.dialog` width (420px) — "that is their job" (operator) — and the
+drawer stays at `--w-sheet` (480px) for the same reason.
+
+Three new pins for this decision (`css-overlay-geometry.test.js`):
+`--w-sheet-l`'s existence and 680-760px range, `.sheet--center` sourcing
+its `max-width` from `--w-sheet-l` rather than `--w-sheet`, and
+`.sheet--drawer` gaining no such override at all. Mutation-tested in both
+directions: deleting the token, and pointing `.sheet--center` back at
+`--w-sheet`, each died by name.
+
+Suite 543 green after both fix rounds (539 first pass + 1 B1's centring-
+axis pin + 3 the width-token pair — N1/N2/S3/S4/S6 all extended or renamed
+EXISTING assertions/comments rather than adding new test cases, matching
+how WP 4e.2's own N5/N6 nitpicks were closed in place).

@@ -1651,8 +1651,13 @@ D-4, D-11, D-12) for what each package diverges from the mockup and why.
       as D-12 (`docs/WORKPACKAGES.md`) — content beyond what D-1 already
       covers for the rail's mere existence, since the frozen mockup has no
       rail at all.)*
-- [ ] Overlay geometry at BP-L (detail sheet / notifications / clients sheet
-      sizing and placement once the shell is no longer phone-width)
+- [x] Overlay geometry at BP-L (detail sheet / notifications / clients sheet
+      sizing and placement once the shell is no longer phone-width) — WP 4e.3,
+      2026-08-18: centred card (680px via --w-sheet-l, operator-approved range
+      680-760) + right drawer at BP-L, mobile byte-unchanged; Opus review
+      round 1 FAIL (confirm dialogs -90px off-axis, found by headless-Chrome
+      measurement), round 2 PASS (offset 0.0px at three widths); D-13 in
+      docs/WORKPACKAGES.md
 - [ ] Downloads/Settings-specific desktop layout (both currently just
       inherit `.view-root`'s width from WP 4e.1's foundation, unreviewed for
       their own content shape at desktop widths)

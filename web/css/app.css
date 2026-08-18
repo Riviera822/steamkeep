@@ -1257,6 +1257,173 @@ body.onboarding .nav{ display:none; }
      sibling to visually stack against, so there is no seam to align, and a
      narrower reading column suits its step-by-step content better than the
      tile-wall width would. */
+
+  /* ----- Desktop overlay geometry (WP 4e.3) -------------------------------
+     Every overlay this app shows ports the mockup's phone-frame bottom
+     sheet 1:1 (`.sheet-backdrop`/`.sheet`, this file's "sheets" section
+     above) — correct at 390px, visibly wrong once the shell itself is
+     desktop-width: a ~480px card glued to the bottom edge of a >=1024px
+     viewport, far from whatever control opened it (the operator's own
+     words: overlays are "strangely pressed against the bottom edge").
+
+     Operator decision (docs/PROJECT_PLAN.md's Phase 4e section): the game
+     detail sheet becomes a CENTRED CARD at eye level; the notifications
+     panel and the clients sheet — ambient side panels, not focused tasks —
+     become a DRAWER from the right edge. Below this breakpoint every
+     overlay stays the mockup's bottom sheet, unchanged: every rule this WP
+     adds lives inside THIS block (`git diff --stat` on this file is purely
+     additive, 0 deletions), so nothing outside it can differ from before —
+     web/tests/css-overlay-geometry.test.js additionally pins the base
+     rules' key property values directly (see that file's own naming note
+     for exactly what those pins do and do not check) — the
+     `sheet-backdrop--center`/`sheet--center`/`sheet-backdrop--drawer`/
+     `sheet--drawer` modifier classes (`sheet-dialog.js`'s `variant` option)
+     do nothing outside this block.
+
+     Breakpoint choice: BP-L, the SAME `min-width:1024px` query as the
+     bottom-nav -> left-rail shell conversion above, not a fourth breakpoint.
+     This is exactly the width the shell itself stops being phone-shaped —
+     an overlay still shaped for a phone frame past that point is the whole
+     bug report, so the overlay geometry switches in lockstep with the shell
+     change that motivates it, never on an independently-chosen number (the
+     test file computes this from the rail conversion's own block rather
+     than asserting "1024" a second time).
+
+     **Correction (Opus review blocker B1, WP 4e.3 fix round): the
+     bulk-delete/GC-execute confirm dialogs are NOT unchanged.** The claim
+     this paragraph used to make — "need NO change here" — was true for
+     Z-INDEX only. `.dialog-backdrop` (this file's "bulk-delete confirm
+     dialog" section, near the top) centres on the FULL viewport
+     (`align-items:center;justify-content:center`, no BP-L override before
+     this fix); `.sheet-backdrop--center` right below centres on the
+     CONTENT axis (`padding-left:var(--rail-w)`). Before this WP both shared
+     the same (full-viewport) axis; this WP's own centring fix for the sheet
+     broke that shared axis for every confirm dialog stacked on top of a
+     sheet, live-measured at a constant −90px (= `--rail-w`/2) offset
+     between the confirm's centre and the card's — the EXACT failure mode
+     this section's own centred-card comment already named for the sheet,
+     shipped anyway for the dialog. Fixed below, in this same block: the
+     stacking relationship (z-index:45 vs 40) still holds unchanged, as
+     originally claimed — only the CENTRING axis needed the fix. */
+
+  /* Confirm dialogs re-centred onto the SAME content axis as the centred
+     card they cover (`.dialog-backdrop` reused verbatim by
+     `game-detail-sheet.js`'s delete/GC-execute confirms and
+     `views/library.js`'s bulk-delete confirm — this fixes all three at
+     once, the one shared class). `calc(var(--rail-w) + 22px)`, not a bare
+     `var(--rail-w)`: the base rule's `padding:22px` already insets the
+     dialog from every edge on narrow screens, and `padding-left` on its own
+     REPLACES that shorthand's left value rather than adding to it — a bare
+     `var(--rail-w)` would drop the original 22px and land 11px (half of
+     22px) off the card's own axis. web/tests/css-overlay-geometry.test.js
+     computes both insets (this one and `.sheet-backdrop--center`'s) from
+     the live tokens and asserts they resolve to the same axis, rather than
+     re-typing `--rail-w` as two independent literals that could drift
+     apart again the way this blocker shipped. */
+  .dialog-backdrop{
+    padding-left:calc(var(--rail-w) + 22px);
+  }
+
+  /* Centred card — `padding-left:var(--rail-w)` on the BACKDROP (not
+     `left:var(--rail-w)`) is the load-bearing choice: the backdrop keeps
+     its full `inset:0` box so the dimming scrim still covers the rail too
+     (matching `inert`'s own "nothing behind an open modal is reachable"
+     contract, lib/modal-stack.js) — only the flex CONTENT box used for
+     centring shrinks, so the card centres in the visual content area to the
+     right of the rail. Centring on the full viewport instead (the naive
+     `align-items:center` alone) would put the card's centre at 50% of the
+     WHOLE window, which sits to the left of the content area's own centre
+     by half the rail's width — exactly the failure mode
+     web/tests/css-overlay-geometry.test.js pins against (and the one B1
+     above shows this file itself needed a second reminder of, for the
+     confirm dialogs).
+
+     **Card width (operator decision, WP 4e.3 fix round 2, 2026-08-18): the
+     centred card widens to `--w-sheet-l` (theme.css — see that token's own
+     comment for the 680px value and the type-measure arithmetic behind
+     it), genuinely delivering the plan item's "sizing", not merely
+     "placement".** This is a DIFFERENT token from the drawer's/every other
+     sheet's `--w-sheet` (480px, unchanged) on purpose — a dedicated token
+     rather than a redefined `--w-sheet` or a literal inside this rule,
+     because the centred card and the drawer need DIFFERENT widths at the
+     SAME breakpoint, and WP 4h.3 (header art in the detail card) is
+     expected to build against this same token. The confirm dialogs stay at
+     their own, deliberately narrow `.dialog` width (420px, untouched) —
+     "that is their job" (operator) — only the detail sheet itself widens. */
+  .sheet-backdrop--center{
+    align-items:center;
+    padding-left:var(--rail-w);
+  }
+  .sheet--center{
+    max-width:var(--w-sheet-l);
+    border-bottom-left-radius:var(--r-xl);
+    border-bottom-right-radius:var(--r-xl);
+    border-bottom:1px solid var(--line);
+    box-shadow:0 24px 50px -12px rgba(0,0,0,.75);
+  }
+  /* No drag-to-dismiss affordance on a card with no edge for that gesture
+     to reach toward — same reasoning the drawer variant below applies to
+     its own grab handle. */
+  .sheet--center .grab{ display:none; }
+
+  /* Right-edge drawer — appears at, not slides in from, the right edge:
+     like every overlay in this app, it is shown/hidden by a plain `display`
+     toggle (`.sheet-backdrop.on{display:flex}`, this file's "sheets"
+     section) with no transition anywhere in that path (Opus review, WP
+     4e.3 fix round — the module comments describing this variant used to
+     say "slides in", which overclaimed an animation that does not exist).
+     `align-items:stretch` (cross axis) with no explicit height lets
+     flexbox fill the backdrop's own cross size (the full viewport height);
+     `max-height:100vh` lifts the base rule's 88vh cap so it actually
+     reaches edge to edge instead of stopping short, matching a real
+     side-panel drawer rather than a still bottom-anchored card.
+     `justify-content:flex-end` (main axis) pins it to the right edge.
+
+     Borders/radius (Opus review N1, WP 4e.3 fix round): with the drawer
+     now full-height, its TOP edge is also flush against the viewport, the
+     same reasoning that already dropped the base rule's right-edge border
+     for a bottom sheet flush against the viewport's bottom — so `border-top`
+     is dropped here too, alongside `border-right`; the base rule's own
+     `border-bottom:none` needs no override at all (the bottom edge was
+     already flush and borderless for the base bottom sheet, and stays that
+     way here). Only the LEFT edge — the one genuinely interior edge a
+     right-aligned, full-height drawer has — keeps the border and gains the
+     rounded corners (`border-bottom-left-radius`, the base rule's own
+     `border-top-left-radius` already covers the top-left corner;
+     `border-top-right-radius` is reset to 0 since that corner is now hard,
+     where two flush edges meet).
+
+     Stacking: the backdrop's own `position:fixed;inset:0` and `z-index:40`
+     (this file's "sheets" section, untouched by this WP) already paint
+     above BOTH the rail (`.nav`'s `z-index:1` in this same BP-L block) and
+     the topbar (`z-index:20`, this file's top section) — a drawer is no
+     different from the bottom sheet it replaces in this respect, since
+     neither `.nav` nor `.topbar` gained a stacking context of its own here.
+     web/tests/css-overlay-geometry.test.js pins this ordering by name: it
+     is this variant's own failure mode (nothing about `flex-end` alignment
+     alone guarantees paint order, only the z-index numbers do), not
+     something the flex placement above proves on its own. */
+  .sheet-backdrop--drawer{
+    align-items:stretch;
+    justify-content:flex-end;
+  }
+  .sheet--drawer{
+    max-height:100vh;
+    border-top:none;
+    border-right:none;
+    border-top-right-radius:0;
+    border-bottom-left-radius:var(--r-xl);
+    box-shadow:-18px 0 40px -12px rgba(0,0,0,.7);
+  }
+  .sheet--drawer .grab{ display:none; }
+  /* Opus review N2, WP 4e.3 fix round: with `.grab` hidden, the drawer's
+     first visible content (the `h2` inside `.body`) sat 10px under the
+     physical screen edge (`.sheet .body`'s own `padding:10px 18px 22px`,
+     this file's "sheets" section) — 4px shy of the topbar's own 14px
+     (`.topbar{padding:14px 16px}`, this file's top section), a visible
+     misalignment between two things sharing the same top edge of the
+     viewport. Matched here rather than left as a coincidence. */
+  .sheet--drawer .body{ padding-top:14px; }
 }
 
 @media (min-width:1024px) and (hover:hover) and (pointer:fine){
