@@ -2006,6 +2006,51 @@ surface (playtime and last-played now flow through the API response).
       GC env vars are read by `vault_api/config.py` but not yet forwarded
       by `deploy/compose.yaml`) with a working Compose-override recipe
       rather than a silently-broken `.env` example)*
+- [x] **SECURITY.md + threat model** (WP 5.3 docs half, 2026-08-18; the
+      pre-release security review below is a separate, still-open half of
+      the same work package — see that item). Root
+      [`SECURITY.md`](../SECURITY.md): supported-versions note (pre-release,
+      no tags yet), reporting via GitHub's private vulnerability reporting
+      for this repository (no email address anywhere, per the operator's
+      constraint). The substantial part is
+      [`docs/security/threat-model.md`](security/threat-model.md): every
+      behavioural claim cited by file/line (or, for `docs/PROJECT_PLAN.md`
+      itself, a section-plus-quote anchor rather than a line number, since
+      this file grows under active editing) against the shipped code, not
+      the ADRs' designs (same discipline WP 5.2 established for the README).
+      Covers the LAN trust boundary and what an untrusted device on it can
+      already do (`vault-core`'s `/depot/` path is unauthenticated by
+      design, and its Host allowlist restricts *where* it can relay, not
+      *who* may use it), the cache contents and why they are not a licence
+      bypass, ADR-0004's credentials claim verified against the code (and
+      exactly where a real Steam session lives at rest —
+      `vault-steamprefill` volume), the WP 4h.1 personal-data surface
+      (playtime/last-played: no display has shipped yet, so the operator's
+      "off by default or dismissible" requirement cannot yet be said to be
+      met, and — as of the commit this was verified against — the API
+      answers unconditionally to anyone holding the one shared key, ahead of
+      an env-only relay opt-out now in flight; flagged for whoever builds
+      WP 4h.2 to read first), outbound data flows (the opt-in Steam relay,
+      the opt-in manifest oracle, and the CSP's one external cover-art
+      host — what leaves the LAN and under what conditions), the ADR-0008
+      event log, precisely what `VAULT_SETTINGS_READONLY` and the bypass
+      banner do and do not mean, and supply-chain pinning (digest-pinned
+      base images and SHA-pinned CI actions vs. this project's own
+      mutable-tag image references, pending WP 5.5's first publish). Named
+      plainly as out of scope rather than glossed over: physical host
+      access, a compromised LAN, a malicious operator, and in-LAN DoS via
+      the unauthenticated relay-and-store path. Reviewed by Opus (round 1:
+      FAIL, four must-fixes — two broken-by-drift citations into this very
+      file, an understated personal-data claim, a missing outbound-data-flows
+      section, and the plan tick overreaching the delivered scope — all
+      fixed; round 2 pending). Several claims explicitly could not be
+      substantiated from code alone and are listed as open gaps in the
+      document's own closing section rather than asserted anyway.
+- [ ] **Pre-release security review (WP 5.3 review half, Fable mandatory)**
+      — after an api/core code freeze. Not started: `api`/`core` are not
+      frozen (4h.2/4h.3 are open, and a relay privacy opt-out is in flight),
+      so this cannot start yet regardless of the docs half above being done.
+      See §11 item 5.
 - [ ] Announcement: r/selfhosted, r/homelab, LanCache Discord (stay fair:
       frame as a complement/alternative, not a "LanCache killer")
 
@@ -2187,8 +2232,11 @@ Phases 1–3 plus 4a shipped. Rewritten 2026-08-17 to reflect the real state.
    triggers now shipped), and the opt-in "keep the cache current" sweep mode
    (its auto-GC prerequisite is shipped — see §7 Phase 3; the sweep mode's
    own frontend surface in both UIs is still open).
-5. [ ] **WP 5.3** SECURITY.md + threat model + pre-release security review
-   (Fable mandatory) — after an api/core code freeze.
-6. [ ] **User-gated:** WP 5.5 (GitHub org + `ghcr.io/steamvault/*` publish)
+5. [x] **WP 5.3 docs half** — `SECURITY.md` + `docs/security/threat-model.md`,
+   done 2026-08-18 (see §7 Phase 5).
+6. [ ] **WP 5.3 review half, still open** — pre-release security review
+   (Fable mandatory), after an api/core code freeze that has not happened
+   yet.
+7. [ ] **User-gated:** WP 5.5 (GitHub org + `ghcr.io/steamvault/*` publish)
    and WP 5.6 (announcement, only after the user's own end-to-end test with
    the Android app). Phase 6 integrations are deliberately post-release.

@@ -109,7 +109,10 @@ internet, and never port-forward vault-api either — reach it from outside
 the LAN only via Tailscale/Twingate or your own TLS reverse proxy with
 forward-auth on top of the API key. See `docs/PROJECT_PLAN.md` §10 and
 [`deploy/README.md`](deploy/README.md#security-posture) for the full
-reasoning.
+reasoning, and [`docs/security/threat-model.md`](docs/security/threat-model.md)
+for the full trust-boundary writeup — what an untrusted device on your LAN
+can already do, where credentials actually live, and what this project does
+not defend against.
 
 ### Point Steam at the cache (pick one DNS mode)
 
@@ -249,6 +252,12 @@ continuously updated checklist.
 - [`dns/README.md`](dns/README.md) — vault-dns and DNS rewrite instructions
   for AdGuard Home / Pi-hole / dnsmasq / Unbound
 - [`deploy/README.md`](deploy/README.md) — full deployment reference
+- [`docs/security/threat-model.md`](docs/security/threat-model.md) — the
+  trust boundary, the cache contents, where credentials actually live, the
+  personal-data surface, outbound data flows, and what this project
+  deliberately does not defend against, cited by file/line against shipped
+  code
+- [`SECURITY.md`](SECURITY.md) — how to report a vulnerability privately
 
 ## License
 
