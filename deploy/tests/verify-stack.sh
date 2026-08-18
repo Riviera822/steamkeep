@@ -583,7 +583,9 @@ if [ -z "$evline" ]; then
     # written that does not carry this chunk id.
     ev_lines=$(dc exec -T vault-core sh -c "wc -l < /vault/logs/event.log 2>/dev/null || echo '?'" | tr -d '')
     say "    event-log line: (no line matching the chunk after waiting ${max_wait}s; event.log has ${ev_lines} line(s))"
-    dc exec -T vault-core sh -c "tail -3 /vault/logs/event.log 2>/dev/null" | tr -d '' | sed 's/^/      last: /' || true
+    if [ "${ev_lines:-0}" != "0" ]; then
+        dc exec -T vault-core sh -c "tail -3 /vault/logs/event.log 2>/dev/null" | tr -d '' | sed 's/^/      last: /' || true
+    fi
     never_arrived="no event-log line matching this MISS's chunk id arrived within ${max_wait}s; event.log has ${ev_lines} line(s). 0 lines ==> nothing reached VAULT_EVENT_LOG (the write path). Non-zero ==> something was written but does not carry the chunk id, i.e. suspect the log_format, not the write path. A malformed-but-present matching line takes the other branch and reports expected-vs-got per field."
     bad "the event-log line has exactly 9 tab-separated fields (core/README.md format) -- $never_arrived"
     bad "field 1 is the v1 format version -- $never_arrived"
