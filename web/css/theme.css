@@ -59,9 +59,94 @@
   --nav-h:64px;     /* bottom-nav rendered height (7px+9px vertical padding + ~48px content); 0 once BP-L turns it into a side rail */
   --rail-w:232px;   /* BP-L left-rail width */
   --w-text:960px;   /* single-column content width (.view-root/.onb/.banner-wrap) — replaces the four hand-copied "960"/"928"/"78" numbers below BP-M; narrows to 760px at BP-M for a comfortable reading column. NOT exhaustive (Opus review nitpick N5, WP 4e.1 fix round): .view-root's own "20px 16px 32px" padding and .bulk's "left/right:12px" insets are still separate, untouched literals — this token replaces the FOUR that were copies of the SAME number, not every dimensional literal in app.css */
-  --w-wall:960px;   /* ceiling for the tile "wall" (library grid) — .view-root picks this up at BP-L instead of --w-text (app.css), but its VALUE is deliberately still 960px in every breakpoint block right now (the pre-WP baseline, matching --w-text exactly): widening it before a later WP's auto-fill grid exists to use the room would grow the mockup's still-fixed 2/3/list tiles even further past their already-oversized baseline, which is a regression this foundation package must not ship (see app.css's BP-L block for the measured numbers). A later WP raises this ONE value alongside landing that grid */
-  --tile-min:150px; /* floor for a future `repeat(auto-fill,minmax(var(--tile-min),1fr))` library grid — declared here, not wired to any grid yet (WP 4e.1 report: "the auto-fill grid itself" is a later package) */
+  /* ceiling for the tile "wall" (library grid). Base/pre-BP-L value only —
+     the 960px-everywhere era ended with WP 4e.2: app.css's BP-L block raises
+     this to 1600px (and BP-XL to 2000px) now that the auto-fill grid below
+     actually has columns to give the extra room to. Below BP-L this value is
+     dead anyway (.view-root uses --w-text there), so it stays 960px simply to
+     match --w-text's own base — no behaviour depends on it. See app.css's
+     BP-L/BP-XL blocks for the real story and
+     web/tests/css-layout-foundation.test.js for the updated pins. */
+  --w-wall:960px;
+  /* floor for `repeat(auto-fill,minmax(var(--tile-min),1fr))` — wired into
+     `.grid`'s BP-L `grid-template-columns` by WP 4e.2 (declared-but-unwired
+     since WP 4e.1). This is the COMFORTABLE density's floor (the "Two
+     columns"/grid2 segmented-control state, relabeled "Comfortable" by WP
+     4e.2's D-3 — see docs/WORKPACKAGES.md); `.grid.cols3` overrides it to
+     150px for the "Compact" density in the same BP-L block. Below BP-L this
+     value is unused — the fixed 2/3/list switch there is untouched (base
+     phone/Android-parity surface).
+
+     **Why 176px, not the 173px mockup tile itself, and not the first-shipped
+     210px (Opus review S1, WP 4e.2 fix round).** `minmax(F,1fr)` does not
+     hold tiles AT F — before an (n+1)th column can appear, the existing n
+     columns stretch (the `1fr` half of `minmax`) up to just under
+     `max = F + (F+gap)/n` (with gap=12px here): the overshoot is worst at
+     the FEWEST columns and tightens as columns are added, not a flat
+     percentage. The floor must be picked KNOWING every tile will overshoot
+     it by an amount that shrinks as column count grows, not at the design
+     size itself. The first-shipped 210px produced a measured 225.6-246.0px
+     range (1.30x-1.42x the 173px mockup tile) — the module header's "no card
+     here ever sees a size it wasn't designed for" claim was false as
+     shipped.
+
+     **Second round on this exact sentence (Opus review B2, WP 4e.2 second
+     fix round) — the first "fix" asserted a band narrower than reality, a
+     mistake this same comment already disproved ten lines below.** 176px
+     produces a measured 177-222px range across BP-L/BP-XL (1.02x-1.29x the
+     173px mockup tile), swept at 4px resolution over 396 widths
+     (1024-2600px plus 3440px), both densities. The overshoot is worst at
+     the fewest columns and tightens as columns are added: <=203px from 7
+     columns up (viewport >=~1580px), but up to ~222px in the 4-column band
+     (1024-1204px, `max = 176 + (176+12)/4 = 223`, matching the swept
+     measurement). **A tighter ceiling (e.g. 205px) at EVERY width is
+     unachievable with `minmax(F,1fr)` at all — not a tuning problem this
+     token failed to solve: it would need F<=158px, which is already below
+     Compact's own 150px floor**, i.e. there is no single Comfortable value
+     that is both wider than Compact and never exceeds 205px in the
+     few-column band. See the coder's report for the full sweep and
+     app.css's BP-L `.grid.cols3` comment for why 150px (not 176px) is the
+     Compact floor: it restores the value this token first shipped with in
+     WP 4e.1 and in this plan's own text.
+
+     **S6 (operator decision, WP 4e.2 second fix round): Comfortable and
+     Compact render IDENTICALLY — same column count, same tile width to
+     within 0.2px — across several sub-1400px bands** (measured: 1024-1076,
+     1208-1238, and from ~1396px up to the point the bands actually start
+     differing again), a direct consequence of picking two floors this
+     close together (176px vs 150px, a 1.17x ratio) to keep the "fix the
+     tile" guarantee honest. In those bands, pressing "Compact" moves
+     `aria-pressed`, fires the "Compact layout" toast, and changes nothing
+     else on screen. Accepted, not engineered around: the affected widths
+     are all below 1400px (not the ranges this phase's screens are aimed
+     at), and the alternative — narrowing Compact's floor to ~135px to force
+     visible separation from Comfortable at every width — would put the
+     card internals 22% below the 173px design size, squarely in the
+     territory the "fix the tile" principle exists to protect against, with
+     no measurement behind it.
+
+     **Tile width is intentionally sawtoothed across the BP-L/BP-XL range,
+     not smoothed (operator decision, WP 4e.2 fix round).** Because of the
+     overshoot mechanism above, tile width does NOT grow monotonically with
+     viewport width — widening the window can add a column and make every
+     tile SMALLER. Re-measured against the 176px Comfortable floor (Opus
+     review S1 fix round): 220.0px at a 1195px viewport (4 columns) drops to
+     177.6px at 1215px (5 columns) — a ~19% shrink from a 20px WIDER window —
+     before growing again toward the next threshold. This is inherent to
+     `auto-fill` at any floor value, not a bug in this one. It is documented
+     here and in the coder's report rather than engineered around — a
+     smoothing mechanism (container queries, JS-computed floors, etc.) would
+     be its own feature with its own failure modes, and the brief's scope is
+     the auto-fill grid itself, not a de-sawtoothing layer on top of it. */
+  --tile-min:176px;
   --w-sheet:480px;  /* existing .sheet max-width, tokenized (WP 4a.7's hard-coded 480px) */
+  --search-w:420px; /* WP 4e.2: cap on the library search field once it sits
+                        beside the filter chips in a BP-L toolbar band
+                        (grid-template-areas "search chips") instead of
+                        stretching to the full, now much wider, --w-wall
+                        column — a ~1536px-wide text input inside a 1600px
+                        column would be absurd. See app.css's BP-L block,
+                        ".view-library" grid. */
 }
 
 *, *::before, *::after{ box-sizing:border-box; }

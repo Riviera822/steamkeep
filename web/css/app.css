@@ -154,7 +154,33 @@
 .noresult{ grid-column:1/-1; text-align:center; padding:30px 16px; }
 .noresult p{ margin:0 0 14px; font-size:12.5px; line-height:1.6; color:var(--dim-2); }
 .noresult b{ color:var(--text); }
-.empty{ text-align:center; padding:30px 16px; color:var(--dim); font-size:12.5px; }
+/* `grid-column:1/-1` (Opus review blocker B1, WP 4e.2 fix round): `.grid`'s
+   BP-L auto-fill rule turns its "no results" `<p class="empty">` fallback
+   (appended as a direct child of `.grid` by `library.js`'s `renderEmptyState`)
+   into just ONE `auto-fill` track alongside the invisible ones the same rule
+   would still generate for the row, instead of spanning the row the way
+   `.noresult` above already does. Measured live before this fix: at 2560px
+   it rendered as an 8.5%-of-row-wide block hard against the left edge —
+   reachable any time a filter/chip combination matches zero games (the
+   brief's own review found this ONE CLICK away: `renderChips` renders every
+   chip including zero-count ones, so "Failed" is on screen and clickable
+   even in a library with no failed jobs). **This is a correction, not a new
+   divergence (Opus review, second fix round): the frozen mockup already
+   applies `style="grid-column:1/-1"` inline to this exact element**
+   (`docs/design/vault-app-mockup.html:1826`), while its other two `.empty`
+   uses carry no such style — the WP 4a.3 port dropped the inline style when
+   translating the mockup's markup into this stylesheet, so this restores
+   mockup-faithful behaviour rather than inventing it.
+   Safe globally, not just for `.grid` (corrected call-site count, second fix
+   round — "verified by grep" previously undercounted AND overcounted at
+   once): `.empty`'s two OTHER real uses are `downloads.js`'s single
+   `emptyMessage()` caller (its Active-section "no download running"
+   fallback — NOT two call sites, as an earlier version of this comment
+   claimed) and `settings.js:553`'s `el("p", "empty", "Loading settings…")`
+   loading state, omitted from that earlier count entirely. Both live inside
+   plain block containers (Downloads' Active section, Settings' body — never
+   `display:grid`), where `grid-column` is simply ignored. */
+.empty{ grid-column:1/-1; text-align:center; padding:30px 16px; color:var(--dim); font-size:12.5px; }
 
 /* ---------- filter chips ---------- */
 .chips{
@@ -846,23 +872,35 @@ body.onboarding .nav{ display:none; }
        `/^\d+px$/` — see web/tests/css-layout-foundation.test.js's named pin
        for this exact CLASS of bug, not just this one instance. */
     --nav-h:0px;
-    /* `--w-wall` is DELIBERATELY still 960px here — the same value as
-       `:root`'s base default, restated rather than omitted so this reads as
-       an intentional decision, not a forgotten override (orchestrator
-       review finding, WP 4e.1: a coder measured the naive version of this
-       package — `--w-wall:1440px` here — and found it made the EXISTING
-       tile-oversize problem WORSE, not better: `.view-root`'s cap grew past
-       960px while `.grid` is still the mockup's fixed 2/3/list column
-       switch, not an auto-fill density grid, so the same two oversized
-       tiles rendered even bigger (measured ~815x1222 at 1920px, ~838x1257
-       at 2560px, versus 458x687 before this WP). The library column must
-       keep its CURRENT effective width until a later package's auto-fill
-       grid can actually use the extra space — sequencing, not scope creep.
-       WP 4e.2 (the auto-fill grid) changes this ONE value when it lands;
-       see web/tests/css-layout-foundation.test.js's
-       "`--w-wall` never widens past the pre-4e.2 baseline" pin, and
-       docs/PROJECT_PLAN.md's Phase 4e section. */
-    --w-wall:960px;
+    /* WP 4e.2 raises this from the WP 4e.1 placeholder (960px, restated flat
+       in every block on purpose while the grid below was still the mockup's
+       fixed 2/3/list switch — see docs/PROJECT_PLAN.md's Phase 4e section
+       and web/tests/css-layout-foundation.test.js for that history). Now
+       that `.grid` below is a real `repeat(auto-fill,minmax(var(--tile-min),
+       1fr))` density grid, a wider wall actually buys more COLUMNS instead
+       of a handful of oversized tiles — the regression WP 4e.1 caught and
+       fixed by sequencing is exactly why this could not move until now.
+
+       **1600px is UNREACHABLE at this breakpoint, and that is fine (Opus
+       review S2, WP 4e.2 fix round — an earlier version of this comment
+       claimed the widening here itself produced "~8 columns of ~186px at
+       1920", which is wrong: 1920px is BP-XL's own range below, not BP-L's,
+       and nothing is capped there — see that block's comment for the real
+       mechanism).** BP-L's widest possible viewport is 1799.98px (BP-XL
+       takes over at 1800px exactly); the main column at that width is
+       `1799 - 232 (--rail-w) = 1567px`, 33px short of ever reaching 1600px —
+       measured live (`cap binding?`) false at 1024/1400/1700/1799px, no
+       exception. So at THIS breakpoint the actual effect of this line is
+       simply "remove the 960px cap" — any value >=1568px behaves
+       identically here, and the widening BP-L delivers comes entirely from
+       that removal, not from 1600 specifically. 1600px is kept anyway, as a
+       deliberate guard: it is comfortably above the 1567px BP-L can ever
+       reach today, so a future change to `--rail-w` (narrower rail) or to
+       the BP-L/BP-XL boundary cannot silently make this cap start binding
+       by accident — a plain "remove the cap" (`none`) would not carry that
+       protection forward. BP-XL below raises the WALL again, to 2000px,
+       where it DOES bind (see that block's comment for the real numbers). */
+    --w-wall:1600px;
   }
 
   .app{
@@ -888,6 +926,136 @@ body.onboarding .nav{ display:none; }
      once a later WP raises `--w-wall` alongside the auto-fill grid. */
   .banner-wrap{ grid-area:banner; max-width:var(--w-wall); }
   .view-root{ grid-area:main; max-width:var(--w-wall); }
+
+  /* ----- Library auto-fill grid (WP 4e.2, the D-4 fix) -------------------
+     "Fix the tile, multiply the columns": every ported px value INSIDE the
+     card — the 2/3 `.cap` aspect-ratio, the 14.5px condensed `.name`, the
+     23px `.cappill`, the 17px `.sic` icon — is untouched by this rule and
+     stays valid AS LONG AS `--tile-min` is picked knowing the overshoot
+     mechanism (see theme.css's `--tile-min` comment: `minmax(F,1fr)` grows
+     existing columns up to just under `F·(n+1)/n` before adding another,
+     never holds them AT F) — see the `.grid.cols3` reset directly below for
+     the one place that WOULD have handed the card a size its typography
+     wasn't designed for. Only the column COUNT changes, driven by width via
+     `auto-fill` instead of a fixed 2-or-3 switch. Below BP-L this selector
+     is untouched — the base `repeat(2,1fr)` / `.cols3`'s `repeat(3,1fr)`
+     stay exactly as the mockup shipped them (phone/Android-parity surface;
+     pinned by name in css-layout-foundation.test.js, Opus review S3: a
+     mutation that switched this BASE rule to `auto-fill` too used to survive
+     the suite). */
+  .grid, .grid.cols3{
+    grid-template-columns:repeat(auto-fill, minmax(var(--tile-min), 1fr));
+    gap:13px 12px;
+  }
+  /* The segmented layout control is a DENSITY control from here up, not a
+     literal column count (D-3, docs/WORKPACKAGES.md — "two columns" stopped
+     being true the moment the count started coming from width; `library.js`
+     relabels the control itself to "Comfortable"/"Compact"/"List"). Compact
+     is simply a smaller `--tile-min` floor -> more, narrower columns; it is
+     NOT a redesigned tile (see the reset immediately below). 150px restores
+     the value this token first shipped with in WP 4e.1 (theme.css, and this
+     plan's own text) — see theme.css's `--tile-min` comment for why
+     Comfortable's floor (176px) is NOT simply the 173px mockup tile itself,
+     and why tile width is deliberately left sawtoothed across breakpoint
+     thresholds rather than smoothed. */
+  .grid.cols3{ --tile-min:150px; }
+  /* `.cols3`'s mobile-only compact tile typography two sections above (11px
+     `.name`, 20px `.cappill`, 15px `.sic`, tighter gaps/pick size) was tuned
+     for a ~113px 3-per-row PHONE tile (`(390-32-2*9)/3`). The tiles
+     `auto-fill` actually produces at this breakpoint — see the coder's
+     measured six-width table, and theme.css's `--tile-min` comment for the
+     overshoot mechanism that explains WHY — sit much closer to the BASE
+     (non-`.cols3`) card's own 173px design size than to the tile that
+     typography was tuned for. Restated here rather than left to drift:
+     every one of `.cols3`'s mobile overrides, reset back to the exact base
+     value, so "Compact" differs from "Comfortable" ONLY in `--tile-min`
+     (hence column count) — never in the card's own look. This is the "fix
+     the tile" guarantee made concrete, not merely asserted — and, per Opus
+     review S3, now mutation-pinned by name: deleting any of these eight
+     reset rules must fail css-layout-foundation.test.js, not silently pass. */
+  .grid.cols3 .cap{ border-radius:var(--r-m); }
+  .grid.cols3 .cap .name{ left:9px; right:9px; bottom:8px; font-size:14.5px; letter-spacing:.4px; }
+  .grid.cols3 .cappill{ left:7px; top:7px; min-height:23px; padding:3px 8px 3px 3px; gap:5px; font-size:10.5px; }
+  .grid.cols3 .cappill .sic{ --sz:17px; }
+  .grid.cols3 .card{ gap:7px; }
+  /* NB: no separate `.grid.cols3 .meta .size` reset line here (Opus review
+     nitpick, WP 4e.2 fix round) — `.meta .size` carries no font-size rule of
+     its own anywhere in this file, base or `.cols3`; it simply INHERITS
+     `.meta`'s own font-size (CSS `font-size` inherits by default), so
+     resetting `.meta` above to the base's 11px already resets `.size` too.
+     The pre-4e.2 base `.grid.cols3 .meta .size{font-size:10px}` rule (still
+     present in the base ruleset above) was already redundant for the exact
+     same reason — restating an inherited value, not overriding one — this
+     reset simply does not repeat that redundancy a second time. */
+  .grid.cols3 .meta{ gap:6px; font-size:11px; }
+  .grid.cols3 .pick{ top:7px; right:7px; width:21px; height:21px; }
+  /* `.grid.list` needs no override at all: its top-level rule
+     (`grid-template-columns:1fr`) already carries a HIGHER specificity
+     (two classes) than this block's plain `.grid` rule (one class), so it
+     keeps winning regardless of source order — list stays list. */
+
+  /* ----- Bulk action bar, re-derived from the library's content column ---
+     (WP 4e.2). WP 4e.1 left this on `--w-text`, which only ever LOOKED
+     correct because `--w-wall == --w-text` (960px) everywhere at the time —
+     "960 == 928 == 760-32" was a coincidence of three copies of one number,
+     not a real derivation (WP 4e.1 review handoff). That coincidence breaks
+     the instant `--w-wall` diverges from `--w-text`, which is now, always,
+     at this breakpoint: `.bulk` must track `.view-root`'s OWN cap, `--w-wall`.
+     The left/right insets ALSO change, from the base's own 12px to
+     `--rail-w + --gutter` / `--gutter` — not an arbitrary "whatever looks
+     aligned" pick: matching `.view-root`'s CONTENT-area edges (inside its
+     16px padding) works out to exactly this pair of insets in BOTH the
+     capped case (available width > --w-wall, both boxes centred
+     independently) and the uncapped case (narrower BP-L widths, where
+     `.view-root` simply fills the main column) — using the base's own 12px
+     here instead matches only the capped case and drifts 4px off in the
+     uncapped one (12 != --gutter's 16). Pinned live at ten widths (Opus
+     review: exact match, Δleft=Δwidth=0, in both regimes) in the coder's
+     report; see web/tests/css-layout-foundation.test.js for the structural
+     half. */
+  .bulk{
+    left:calc(var(--rail-w) + var(--gutter));
+    right:var(--gutter);
+    max-width:calc(var(--w-wall) - (var(--gutter) * 2));
+  }
+
+  /* ----- Library toolbar band: search + chips side by side (WP 4e.2) -----
+     `.view-library` has exactly SIX in-flow children (`.bulk` is
+     `position:fixed` — out of grid flow by construction, needs no area of
+     its own), and every one of them already carries its own distinct class
+     (`.lib-head`/`.lib-checkrow`/`.search`/`.chips`/`.grid`/`.hint`) — areas
+     below are assigned BY CLASS, never by `nth-child`, so re-ordering
+     `library.js`'s `section.append(...)` call cannot silently desync this
+     layout from the DOM. `.search` is capped at `--search-w` (theme.css)
+     instead of stretching to the library's own, now much wider, `--w-wall`
+     column — a ~1536px-wide text input inside a 1600px column would be
+     absurd; the chips column absorbs whatever width that leaves and still
+     wraps internally past BP-M (`.chips{flex-wrap:wrap}` above, unchanged).
+     `align-items:start` keeps every row top-aligned rather than the grid's
+     default stretch, matching each item's own natural height exactly as it
+     rendered in normal flow below this breakpoint. */
+  .view-library{
+    display:grid;
+    grid-template-columns:var(--search-w) 1fr;
+    column-gap:var(--gutter);
+    grid-template-areas:
+      "head   head"
+      "check  check"
+      "search chips"
+      "cards  cards"
+      "hint   hint";
+    align-items:start;
+  }
+  .view-library > .lib-head{ grid-area:head; }
+  .view-library > .lib-checkrow{ grid-area:check; }
+  .view-library > .search{ grid-area:search; }
+  .view-library > .chips{ grid-area:chips; }
+  /* NB: this `.grid` is the CARDS grid (a grid item of `.view-library` here,
+     and independently a grid CONTAINER for its own card children via the
+     auto-fill rule above) — the two `display:grid` layers are unrelated
+     properties on the same element, not a naming collision. */
+  .view-library > .grid{ grid-area:cards; }
+  .view-library > .hint{ grid-area:hint; }
 
   /* The rail. Overrides every base `.nav` property that assumed a
      horizontal, bottom-pinned, 3-column bar — `bottom`/`border-top`/
@@ -950,13 +1118,37 @@ body.onboarding .nav{ display:none; }
   .nav-btn:hover{ background:var(--raised); color:var(--text); }
 }
 
-/* ---------- BP-XL (>= 1800px) — reserved, deliberately a no-op for now --
-   Structurally present (so the breakpoint plumbing lands in this package,
-   per the brief), but `--w-wall` stays at the SAME 960px as BP-L above —
-   see that block's comment for why widening it now would regress the
-   tile-oversize problem this phase exists to fix. WP 4e.2 (the auto-fill
-   grid) is expected to give this block a real, wider value once the grid
-   can use the room; until then this is intentionally inert. */
+/* ---------- BP-XL (>= 1800px) — the tile wall gets a second, wider cap ---
+   WP 4e.1 left this a deliberate no-op (960px, same as BP-L) because the
+   grid was still fixed-column and widening bought nothing but bigger
+   oversized tiles. WP 4e.2's decision, argued against the brief's own
+   measurement note ("the topbar and reading measures do not improve past
+   ~1600"): that note is true of `--w-text`-based content (the banner, the
+   onboarding wizard, Settings/Downloads' text columns) — nothing there
+   benefits from more width, and nothing here changes it. It is NOT true of
+   the tile WALL: unlike a line of text, a grid of small tiles keeps
+   getting genuinely more useful with more columns, because `auto-fill`
+   simply adds another one rather than stretching existing content into an
+   uncomfortable reading measure. So `--w-wall` gets a SECOND, wider value
+   here — 2000px, not fully uncapped: on an unbounded ultra-wide monitor
+   (3440px+) an uncapped wall would keep adding columns forever with no
+   design ceiling at all, and the toolbar band right above it (search capped
+   at --search-w, chips wrapping) would look increasingly stranded under an
+   ever-widening grid with nothing else on the page that wide. This is a
+   genuinely SEPARATE decision from BP-L's 1600px, not a continuation of
+   it — BP-L's own cap is unreachable within BP-L's own width range (see
+   that block's comment), so there is no meaningful sense in which 2000px
+   "raises past" a value that never bound anything in the first place. What
+   2000px DOES do, measurably: at the 1920-2560px range most desktop users
+   actually have, it lets the wall grow past where 1600px would have capped
+   it (at 1920px, the main COLUMN box — viewport minus --rail-w, before
+   `.view-root`'s own padding — is 1688px; its CONTENT width, inside that
+   16px-each-side padding, is 1656px, corrected wording, second fix round:
+   an earlier version of this comment called 1656 the "column width", which
+   is the content measure, not the box — BP-L's 1600px WOULD bind against
+   either number there, if BP-XL did not exist to override it with this
+   value first — see the coder's six-width table for the real,
+   live-measured column counts). */
 @media (min-width:1800px){
-  :root{ --w-wall:960px; }
+  :root{ --w-wall:2000px; }
 }

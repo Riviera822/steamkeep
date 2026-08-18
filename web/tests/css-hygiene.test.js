@@ -30,9 +30,15 @@
  * class-set tracking only understands the concrete DOM-construction idioms
  * this codebase actually uses (`document.getElementById`/`createElement`,
  * `.className = "..."`, `.classList.add(...)`, `.querySelector(".cls")`,
- * `.setAttribute("hidden", ...)`/`.removeAttribute("hidden")` alongside the
- * `.hidden = ...` property form, and the two local
- * `el(tag, className, ...)` / `sectionHeading(text)` factory functions in
+ * `.setAttribute("hidden", ...)`/`.removeAttribute("hidden")` and
+ * `.toggleAttribute("hidden", ...)` (WP 4e.2 — the `.hidden = ...`/
+ * `setAttribute`/`removeAttribute` trio already covered here still missed
+ * this idiom; no current code uses it, but the brief that shipped the first
+ * two attribute forms explicitly flagged this one as the next gap, so it is
+ * closed pre-emptively rather than waiting for a live probe to find it the
+ * way N1 found the `setAttribute` gap) alongside the `.hidden = ...`
+ * property form, and the two local `el(tag, className, ...)` /
+ * `sectionHeading(text)` factory functions in
  * onboarding.js/settings.js/downloads.js) and resolves per FILE, top-to-
  * bottom, in one forward pass — good enough for this codebase's
  * straightforward "build the element, set its class, use it later"
@@ -58,10 +64,25 @@
  * (verified by the sanity test below finding the real three-class overlap
  * this file expects), but a reviewer or future coder should know where the
  * edges are rather than assume this is a real parser.
+ *
+ * **Third limitation, stated rather than pretended away (Opus review,
+ * WP 4e.2 second fix round): this lint ENUMERATES idioms, it does not
+ * GENERALISE over "any way JS can set the hidden attribute/property".**
+ * `el.hidden ||= true` / `el.hidden ??= true` and `el.toggleAttribute?.(
+ * "hidden", true)` (optional chaining) are now recognised — both were
+ * one character away from an idiom already covered, and both were probed
+ * and found to survive silently before this fix. But `Object.assign(el,
+ * {hidden: true})` sets the exact same property through a shape a FORWARD
+ * regex scan over `identifier.hidden`/`identifier.toggleAttribute(...)`
+ * text cannot see at all (the identifier and the property name never sit
+ * next to each other in the source) — closing it would need real
+ * object-literal parsing, not another regex. Not exploited by any real
+ * code here as of this WP; recorded as an acknowledged gap rather than
+ * implied to be covered by the four idioms this file actually scans for.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -250,7 +271,13 @@ function findHiddenToggledClasses(files, idMap) {
     for (const m of text.matchAll(/\b(\w+)\s*=\s*[\w.]+\.querySelector\(\s*["']\.([\w-]+)["']\s*\)/g)) {
       push("querySelectorClass", m.index, m[1], m[2]);
     }
-    for (const m of text.matchAll(/(\w+)\.hidden\s*=/g)) {
+    // Opus review nitpick, WP 4e.2 second fix round: `el.hidden ||= true` /
+    // `el.hidden ??= true` toggle the same property a plain `el.hidden = `
+    // assignment does, but the literal `\s*=` below used to require the
+    // `=` immediately after optional whitespace — "hidden ||=" has `|`
+    // characters in that gap, so it never matched. The optional
+    // `(?:\|\||\?\?)?` group closes it without touching the plain-`=` case.
+    for (const m of text.matchAll(/(\w+)\.hidden\s*(?:\|\||\?\?)?=/g)) {
       push("hiddenAssign", m.index, m[1], null);
     }
     // N1 (Opus review nitpick, WP 4e.1 fix round): `el.hidden = ...` is not
@@ -264,10 +291,37 @@ function findHiddenToggledClasses(files, idMap) {
     // way, with no guard, survived the lint before this fix) — closed by
     // treating both attribute-manipulation forms as additional hiddenAssign
     // events at the SAME identifier.
-    for (const m of text.matchAll(/(\w+)\.setAttribute\(\s*["']hidden["']\s*,/g)) {
+    // Opus review nitpick, WP 4e.2 fix round: all three attribute-based
+    // regexes below now carry the `i` flag. HTML attribute names are
+    // case-insensitive by spec (the DOM lowercases the qualified name on
+    // write, verified by the reviewer in a real DOM) — `setAttribute(
+    // "HIDDEN", "")`/`toggleAttribute("Hidden", true)` genuinely toggle the
+    // same `hidden` attribute a lowercase call site would, and both used to
+    // survive this lint silently (the literal `["']hidden["']` match is
+    // case-SENSITIVE by default, so it simply never fired for either).
+    for (const m of text.matchAll(/(\w+)\.setAttribute\(\s*["']hidden["']\s*,/gi)) {
       push("hiddenAssign", m.index, m[1], null);
     }
-    for (const m of text.matchAll(/(\w+)\.removeAttribute\(\s*["']hidden["']\s*\)/g)) {
+    for (const m of text.matchAll(/(\w+)\.removeAttribute\(\s*["']hidden["']\s*\)/gi)) {
+      push("hiddenAssign", m.index, m[1], null);
+    }
+    // WP 4e.2: `el.toggleAttribute("hidden", cond)` (and the no-second-arg
+    // `el.toggleAttribute("hidden")` form) toggle the exact same underlying
+    // `hidden` attribute as the three forms above — a class carrying an
+    // author `display` rule needs the same `[hidden]` guard regardless of
+    // WHICH of these four idioms a future call site happens to use. No file
+    // in web/js/ uses this idiom as of this WP (see the sanity-negative test
+    // below, which proves the regex is live rather than dead code); it is
+    // added now, alongside the class of bug it closes, rather than waiting
+    // for a live probe the way N1's `setAttribute` gap was found.
+    //
+    // Opus review nitpick, WP 4e.2 second fix round: `el.toggleAttribute?.(
+    // "hidden", true)` (optional-chained, e.g. guarding a possibly-null
+    // element) toggles the identical attribute a plain `.toggleAttribute(`
+    // call does, but the literal `\(` right after the identifier used to
+    // require the call parenthesis with nothing in between — `\??\.?`
+    // allows the optional `?` and the `.` of `?.` to sit there instead.
+    for (const m of text.matchAll(/(\w+)\.toggleAttribute\??\.?\(\s*["']hidden["']/gi)) {
       push("hiddenAssign", m.index, m[1], null);
     }
 
@@ -341,6 +395,106 @@ test("sanity: the three historically-buggy classes (.btn, h4.sec, .onbnav) are f
   for (const cls of ["btn", "sec", "onbnav"]) {
     assert.ok(displayRulesByClass.has(cls), `no display rule found for .${cls} — CSS parsing regressed`);
     assert.ok(hiddenToggledClasses.has(cls), `no hidden-toggle site found for .${cls} — JS scanning regressed`);
+  }
+});
+
+// WP 4e.2: no real file in web/js/ uses `toggleAttribute("hidden", ...)`
+// today, so — unlike the `setAttribute`/`removeAttribute` regexes above,
+// which the sanity test's real `.btn`/`h4.sec`/`.onbnav` sites exercise
+// directly — this idiom's regex would otherwise be untested dead code. This
+// test drives `findHiddenToggledClasses` (the exact function the real lint
+// above calls) against a throwaway fixture file containing the idiom, on
+// both the two-argument and bare forms, proving the new regex actually
+// fires rather than merely reading as though it should. The fixture is
+// written to and removed from web/tests/ itself (never web/js/, so it can
+// never leak into the real scan) inside this single test.
+test("toggleAttribute(\"hidden\", ...) is recognized as a hidden-toggle site, both the two-arg and bare forms", () => {
+  const fixturePath = path.join(__dirname, ".tmp-toggle-attribute-fixture.js");
+  writeFileSync(
+    fixturePath,
+    [
+      'const a = document.createElement("button");',
+      'a.className = "probe-two-arg";',
+      "a.toggleAttribute('hidden', someCondition);",
+      'const b = document.createElement("button");',
+      'b.className = "probe-bare";',
+      'b.toggleAttribute("hidden");',
+    ].join("\n"),
+  );
+  try {
+    const found = findHiddenToggledClasses([fixturePath], new Map());
+    assert.ok(found.has("probe-two-arg"), "toggleAttribute(\"hidden\", cond) form not recognized");
+    assert.ok(found.has("probe-bare"), "bare toggleAttribute(\"hidden\") form not recognized");
+  } finally {
+    rmSync(fixturePath, { force: true });
+  }
+});
+
+// Opus review nitpick, WP 4e.2 fix round: the reviewer's own probe —
+// `toggleAttribute("HIDDEN", true)` and `setAttribute("Hidden", "")` — both
+// verified in a real DOM to genuinely set the `hidden` attribute (the spec
+// lowercases the qualified name on write), and both used to survive this
+// lint silently because the literal `["']hidden["']` match was
+// case-sensitive. This fixture pins all three attribute-based idioms
+// (setAttribute/removeAttribute/toggleAttribute) against exactly the
+// reviewer's own mixed-case spellings; mutation-verified by dropping the `i`
+// flag from any one of the three regexes above and watching this test die.
+test("the three attribute-based hidden-toggle idioms are recognized case-insensitively (HTML attribute names are case-insensitive)", () => {
+  const fixturePath = path.join(__dirname, ".tmp-case-insensitive-fixture.js");
+  writeFileSync(
+    fixturePath,
+    [
+      'const a = document.createElement("button");',
+      'a.className = "probe-set-upper";',
+      'a.setAttribute("HIDDEN", "");',
+      'const b = document.createElement("button");',
+      'b.className = "probe-remove-mixed";',
+      'b.removeAttribute("Hidden");',
+      'const c = document.createElement("button");',
+      'c.className = "probe-toggle-upper";',
+      'c.toggleAttribute("HIDDEN", true);',
+    ].join("\n"),
+  );
+  try {
+    const found = findHiddenToggledClasses([fixturePath], new Map());
+    assert.ok(found.has("probe-set-upper"), 'setAttribute("HIDDEN", ...) not recognized');
+    assert.ok(found.has("probe-remove-mixed"), 'removeAttribute("Hidden") not recognized');
+    assert.ok(found.has("probe-toggle-upper"), 'toggleAttribute("HIDDEN", ...) not recognized');
+  } finally {
+    rmSync(fixturePath, { force: true });
+  }
+});
+
+// Opus review nitpick, WP 4e.2 second fix round: the reviewer's own two
+// surviving probes — `el.hidden ||= true` (and the `??=` sibling) and
+// `el.toggleAttribute?.("hidden", true)` (optional chaining) — pinned
+// against the exact same throwaway-fixture pattern as every other idiom in
+// this file. Mutation-verified: reverting either regex above to its
+// pre-fix form (dropping `(?:\|\||\?\?)?` or `\??\.?`) makes the matching
+// assertion below fail by name.
+test("el.hidden ||=/??= and el.toggleAttribute?.(\"hidden\", ...) (optional chaining) are recognized as hidden-toggle sites", () => {
+  const fixturePath = path.join(__dirname, ".tmp-compound-operator-fixture.js");
+  writeFileSync(
+    fixturePath,
+    [
+      'const a = document.createElement("button");',
+      'a.className = "probe-or-equals";',
+      "a.hidden ||= true;",
+      'const b = document.createElement("button");',
+      'b.className = "probe-nullish-equals";',
+      "b.hidden ??= true;",
+      'const c = document.createElement("button");',
+      'c.className = "probe-toggle-optional-chain";',
+      'c.toggleAttribute?.("hidden", true);',
+    ].join("\n"),
+  );
+  try {
+    const found = findHiddenToggledClasses([fixturePath], new Map());
+    assert.ok(found.has("probe-or-equals"), "el.hidden ||= true not recognized");
+    assert.ok(found.has("probe-nullish-equals"), "el.hidden ??= true not recognized");
+    assert.ok(found.has("probe-toggle-optional-chain"), 'el.toggleAttribute?.("hidden", ...) not recognized');
+  } finally {
+    rmSync(fixturePath, { force: true });
   }
 });
 

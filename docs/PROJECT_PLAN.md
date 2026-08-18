@@ -1202,8 +1202,8 @@ column, so a 173×260 cover tile renders at a fixed 458×687 from 1280 to
 glyph, and roughly half of a 1920px viewport carries nothing. **User
 decision (2026-08-18): approved the full desktop-layout proposal, all
 divergences included** ("setze alles so um") — implemented as designed,
-not narrowed. See `docs/WORKPACKAGES.md`'s divergence register (D-1, D-4,
-D-11) for what each package diverges from the mockup and why.
+not narrowed. See `docs/WORKPACKAGES.md`'s divergence register (D-1, D-3,
+D-4, D-11) for what each package diverges from the mockup and why.
 
 - [x] Spatial tokens, breakpoints (BP-M ≥720px / BP-L ≥1024px / BP-XL
       ≥1800px, width-keyed; pointer affordances in a separate
@@ -1433,12 +1433,130 @@ D-11) for what each package diverges from the mockup and why.
       is therefore the number that actually matters for scaling, not a
       column-count framing — the gate this fixture exists to clear is
       already cleared)*
-- [ ] Auto-fill library grid using `--tile-min` (`repeat(auto-fill,
+- [x] Auto-fill library grid using `--tile-min` (`repeat(auto-fill,
       minmax(var(--tile-min),1fr))`), replacing the fixed 2/3/list switch at
       BP-L/BP-XL, and raising `--w-wall` past its currently-deferred 960px
       alongside it (in the SAME package — see the sequencing note above,
       widening one without the other is exactly the regression already
       caught and fixed once) — the D-4 fix
+      *(WP 4e.2, 2026-08-18, Opus round 1: FAIL — one blocker, five
+      should-fixes — fix round verified, re-verified live: `web/css/app.css`'s
+      BP-L block wires `.grid`/`.grid.cols3` to `repeat(auto-fill,minmax(
+      var(--tile-min),1fr))`, `--tile-min` split into a 176px "Comfortable"
+      default and a 150px "Compact" override (`.grid.cols3{--tile-min:150px}`,
+      operator-chosen values, see below) — the D-3 density relabeling in
+      `web/js/views/library.js` (`LAYOUT_LABEL`: "Two columns"/"Three columns"
+      -> "Comfortable"/"Compact", `docs/WORKPACKAGES.md`'s register, now in
+      proper bullet form). "Fix the tile, multiply the columns": `.grid.
+      cols3`'s mobile-only compact card typography (tuned for a ~113px
+      3-per-row phone tile) is reset back to the base card's own values at
+      BP-L, seven reset rules pinned by literal name (round 1's blocker-class
+      finding, S3: deleting the base `.grid`/`.grid.cols3` rules OR all of
+      the BP-L reset rules survived 456/456 — both now die by name, verified
+      by re-applying each mutation and watching the named test fail);
+      `.grid.list` needed no override at all (kept via CSS specificity,
+      pinned structurally). `--w-wall` raised to 1600px at BP-L (round 1
+      should-fix S2: this value is UNREACHABLE within BP-L's own range —
+      BP-L's widest viewport, 1799px, leaves a 1567px main column, 33px short
+      — so it functions purely as a guard against a future `--rail-w`/
+      breakpoint change, not as an active cap; the original comment's "lands
+      at ~186px @1920, capped" claim was wrong, since 1920px is BP-XL's range
+      where a SEPARATE 2000px value applies, fixed in both the code comment
+      and the test's assertion message) and 2000px at BP-XL (bounded, not
+      fully uncapped — argued against the brief's "topbar/reading measures
+      don't improve past ~1600" note: true of `--w-text` content, not of a
+      tile WALL, which keeps getting more columns from more room). `.bulk`
+      re-derived from `--w-wall` with `--rail-w + --gutter` / `--gutter`
+      insets — proven algebraically exact in both the capped and uncapped
+      regimes, confirmed live at ten widths total across both review rounds
+      with Δleft=Δwidth=0 throughout, including inside BP-XL. Search+chips
+      moved into a `.view-library` BP-L grid, search capped at the new
+      `--search-w:420px` token — round 1 should-fix S4: the cap and the
+      area-map row order were both asserted by NAME (declared) but not by
+      VALUE, so removing the cap (`1fr 1fr`) and swapping "search chips" to
+      "chips search" both survived; both mutations now die by name.
+      **Blocker B1 (round 1): `.empty` (the "no results" fallback, appended
+      as a direct child of `.grid`) had no `grid-column` rule, unlike
+      `.noresult` — under auto-fill it collapsed into a single track (an
+      8.5%-of-row-wide block hard left at 2560px), reachable one click away
+      via any zero-count filter chip (`renderChips` renders zero-count chips
+      too). Fixed with `grid-column:1/-1`, pinned, and confirmed safe for
+      `downloads.js`'s two other `.empty` uses (plain block containers, the
+      property is ignored there) — re-verified live via the exact
+      reproduction (the real "Downloading 0" chip on the 400-game fixture):
+      `.empty` now measures the full grid width, not a single track.**
+      **Should-fix S1 (round 1): operator-chosen `--tile-min` values,
+      176px Comfortable / 150px Compact**, replacing the coder's
+      first-shipped 210px/168px — measured live, 210px produced
+      225.6-246.0px tiles (1.30x-1.42x the 173px mockup tile), falsifying
+      the "no card here ever sees a size it wasn't designed for" claim.
+      150px restores Compact's original WP 4e.1 value.
+
+      **B2 (round 2, blocker): round 1's OWN S1 fix was still wrong.** It
+      asserted 176px keeps the range at "~176-205px (mockup ±18%)" — wrong
+      on both counts (a 4px-resolution sweep over 396 widths, 1024-2600px
+      plus 3440px, both densities, measured the real range: 177-222px,
+      1.02x-1.29x; 220/173 is +27%, not ±18%), and self-contradicted by the
+      SAME comment's own sawtooth example ten lines below (220.0px) sitting
+      under the 205px ceiling it had just asserted. Corrected in `theme.css`
+      (and in `docs/WORKPACKAGES.md`/`web/tests/README.md`, which repeated
+      the same wrong figure), WITH the load-bearing clause a bare
+      number-fix would have omitted: a <=205px ceiling at every width is
+      unachievable with `minmax(F,1fr)` at all — it would need F<=158px,
+      already below Compact's own 150px floor — so this was never a value
+      the token failed to find. The overshoot mechanism itself
+      (`max = F + (F+gap)/n`, worst at the fewest columns, tightening as
+      columns are added) is documented in theme.css's `--tile-min` comment,
+      along with the operator's sawtooth-not-smoothed decision (re-measured
+      example: 220.0px at a 1195px viewport drops to 177.6px at 1215px, a
+      ~19% shrink from a 20px WIDER window).
+
+      **S6 (operator decision, round 2):** narrowing the two floors this
+      close (176px/150px, a 1.17x ratio) to keep S1's corrected range
+      honest made Comfortable and Compact render IDENTICALLY — same column
+      count, same tile width within 0.2px — across several sub-1400px
+      bands (1024-1076, 1208-1238, ~1396px up). Accepted and documented
+      (`theme.css`, this entry) rather than narrowing Compact further: a
+      ~135px floor to force visible separation would sit 22% below the
+      mockup's design size, with no measurement behind it.
+
+      **S7 (round 2):** the round-1 B1 pin (`.empty{grid-column:1/-1}`) was
+      class-specific — generalised into a static-analysis test scanning
+      `library.js` for every class appended as a direct child of `.grid`
+      (excluding `buildCard`'s "card" output, the grid's actual content)
+      and requiring `grid-column` on each; mutation-verified against a
+      synthetic new `libnotice` class the same way the reviewer's own
+      reproduction worked. Also (round 2): B1's fix is a CORRECTION, not a
+      new divergence — the frozen mockup already applies
+      `style="grid-column:1/-1"` inline to this exact element
+      (`docs/design/vault-app-mockup.html:1826`); the WP 4a.3 port had
+      dropped it. And the fix's own call-site inventory was corrected: ONE
+      `emptyMessage()` caller in `downloads.js` (not two), plus
+      `settings.js:553`'s loading state, previously omitted entirely.
+
+      Nitpicks closed: the hidden-toggle lint's three attribute regexes
+      gained the `i` flag (case-insensitive, round 1) AND now also
+      recognise `el.hidden ||=`/`??=` and `el.toggleAttribute?.(`
+      (optional chaining, round 2 — both one character from an idiom
+      already covered, both probed and found surviving), with
+      `Object.assign(el, {hidden:true})` documented as a genuine, unclosed
+      gap rather than implied covered; `LAYOUT_LABEL[key]` is now the
+      single source `segButton` reads its title/aria-label from; the
+      redundant `.grid.cols3 .meta .size{font-size:11px}` reset line was
+      removed; the BP-XL comment's "1656px is 1920's natural column width"
+      corrected to name it as the CONTENT width (the column box itself is
+      1688px). Suite 462 green (451 WP 4e.1 baseline + 5 round-1 first pass
+      + 4 round-1 fix-round pins + 1 round-2 S7 test + 1 round-2
+      compound-operator/optional-chaining test). Rebased cleanly onto
+      `da7ceae` (WP 4h.1, api/-only) mid-review with no conflicts in `web/`.
+      Re-verified live against the demo 400-game fixture with the 176/150
+      values: six-width table (390/768/1280/1440/1920/2560) for both
+      densities (e.g. 1920px: 8 cols/194.6px Comfortable, 10 cols/153.3px
+      Compact; 2560px: 10 cols/186px Comfortable, 12 cols/153px Compact),
+      `.bulk` exact-pixel alignment reconfirmed, BP-M (768px) and base
+      (390px) still byte-identical to the pre-4e.2/pre-4e.1 baselines. 400-card
+      full grid rebuild measured 21-27ms (WP 4e.1 baseline: ~29-33ms — no
+      regression).)*
 - [ ] Overlay geometry at BP-L (detail sheet / notifications / clients sheet
       sizing and placement once the shell is no longer phone-width)
 - [ ] Downloads/Settings-specific desktop layout (both currently just

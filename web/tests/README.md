@@ -730,3 +730,229 @@ check has no headless equivalent in this suite (it is fundamentally a
 real-rendering/layout-engine question, same posture as every other item in
 WP 4a.8's "Honest list" above) — it must be repeated by hand for every
 future shell-layout-changing package, not assumed safe from CSS pins alone.
+
+### WP 4e.2 — Auto-fill library grid + toolbar band (Phase 4e, D-3/D-4)
+
+Same posture as WP 4e.1: CSS/breakpoint plumbing, not JS decision logic, so
+the new pins are structural static analysis of the source text, plus one
+small JS relabeling change with no headless test of its own (nothing in
+this suite exercises `library.js`'s DOM against jsdom — see the top of this
+file; the label strings are verified live, in the running app, alongside
+the geometry claims below).
+
+- `css-layout-foundation.test.js` — the two WP 4e.1 anti-regression pins
+  that asserted `--w-wall` stays flat at 960px everywhere are UPDATED (not
+  deleted, per the brief's own instruction) to the new, intentional
+  three-value progression this package ships (960px base -> 1600px BP-L ->
+  2000px BP-XL), pinned BY POSITION so a future reordering or drop still
+  fails loudly. First-pass new tests: the auto-fill wiring itself (`.grid`/
+  `.grid.cols3` both `repeat(auto-fill,minmax(var(--tile-min),1fr))` with
+  DIFFERENT `--tile-min` values, `.grid.list` deliberately left with no
+  BP-L override at all — relying on CSS specificity over the plain `.grid`
+  rule, asserted structurally rather than assumed); `.bulk`'s BP-L override
+  re-derived from `--w-wall`/`--rail-w`/`--gutter` instead of `--w-text`;
+  `.view-library`'s BP-L named-area grid assigning all six in-flow children
+  BY CLASS (`.view-library > .search` etc. — never `nth-child`); `--search-w`
+  declared in theme.css. One trap found and worked around while writing the
+  `.grid.cols3` pin: this file's own `ruleBody()` helper does a plain
+  `indexOf(selector + "{")`, and the combined selector `.grid, .grid.cols3{
+  ...}` rule (needed so both share one `grid-template-columns` formula)
+  already CONTAINS the substring `.grid.cols3{` right after the comma —
+  `ruleBody(block.body, ".grid.cols3")` would silently return THAT rule's
+  body instead of the intended standalone `--tile-min` override a few lines
+  below it. Worked around with a literal substring check on the exact
+  standalone rule text rather than a "preceded by a non-comma boundary"
+  regex (tried first — whitespace precedes both the comma-list's embedded
+  occurrence AND the standalone rule, so a boundary class that includes
+  plain whitespace cannot tell them apart either).
+
+  **Opus review round 1: FAIL — one blocker, five should-fixes, all fixed
+  and re-verified.** The first pass's structural pins asserted mechanisms
+  were DECLARED without asserting they were WIRED to the claimed VALUE —
+  four real mutations survived 456/456 as a result, all now killed by name:
+  (1) switching the BASE (phone) `.grid`/`.grid.cols3` rules to `auto-fill`
+  — the mockup-frozen surface the file's own header claims is untouched;
+  (2) deleting the BP-L `.grid.cols3` reset entirely — the "fix the tile
+  guarantee made concrete, not merely asserted" comment right above it in
+  app.css; (3) changing `.view-library`'s `grid-template-columns` from
+  `var(--search-w) 1fr` to `1fr 1fr` (the cap silently vanishes); (4)
+  swapping the area map's `"search chips"` row to `"chips search"`. Two new
+  tests close (1)/(2): a `.grid`/`.grid.cols3` base-rule pin (extending the
+  house pattern this file already used for `.nav`/`.chips`/`.app`) and a
+  literal restatement check of the seven BP-L reset rules (the file
+  originally shipped eight — a review nitpick found the eighth,
+  `.grid.cols3 .meta .size`, was restating a value already inherited from
+  the `.meta` reset one line above it, so it was removed rather than
+  pinned; the test asserts its absence explicitly so a "ninth rule quietly
+  missing" reading is impossible). (3)/(4) are closed by extending the
+  existing `.view-library` test with a `grid-template-columns` value
+  assertion and five literal area-row checks (head/check/search+chips/
+  cards/hint, in that exact order).
+
+  The two `--w-wall`-progression pins also carried a **wrong rationale**
+  (should-fix S2): the fix-round comment claimed BP-L's 1600px "lands at
+  ~186px @1920, capped" — false, since 1920px falls in BP-XL's own range,
+  where nothing is capped by the BP-L value at all (BP-L's widest possible
+  viewport is 1799px, whose main column, 1567px, never reaches 1600px in
+  the first place). Both the CSS comment and this test's assertion message
+  are corrected to state the real story: BP-L's cap is a deliberate guard
+  against a future `--rail-w`/breakpoint change, not an active constraint
+  today. `--tile-min`'s pinned value also changed, 210px -> 176px
+  (Comfortable) and 168px -> 150px (Compact) — the operator's decision
+  after a live measurement showed 210px producing tiles up to 1.42x the
+  mockup's own tile size (should-fix S1; see theme.css's `--tile-min`
+  comment for the `minmax(F,1fr)` overshoot mechanism this number has to
+  respect, and the sawtooth-not-smoothed decision that comes with it).
+
+  **Blocker B1**, pinned here too even though the fix lives in app.css: a
+  dedicated test asserts `.empty{grid-column:1/-1}` — see the app.css
+  section below for the bug itself.
+- `css-hygiene.test.js` — the display/hidden cross-reference lint gains a
+  fourth toggle idiom, `el.toggleAttribute("hidden", cond)` (and the bare
+  `el.toggleAttribute("hidden")` form) — the brief that shipped the
+  `setAttribute`/`removeAttribute` pair in WP 4e.1 explicitly named this as
+  the next gap. No file in `web/js/` uses it yet, so — unlike the sanity
+  test that exercises the other three forms against the real `.btn`/
+  `h4.sec`/`.onbnav` offenders — this is pinned against a throwaway fixture
+  file written to and removed from `web/tests/` inside the single test that
+  needs it (never `web/js/`, so it can never leak into the real scan),
+  proving the new regex recognizes both the two-argument and bare forms.
+  **Opus review nitpick, fix round:** all three attribute-based regexes
+  (`setAttribute`/`removeAttribute`/`toggleAttribute`) were case-SENSITIVE —
+  `toggleAttribute("HIDDEN", true)`/`setAttribute("Hidden", "")` both
+  genuinely set the `hidden` attribute in a real DOM (HTML attribute names
+  are case-insensitive by spec) and both survived the lint silently. Fixed
+  with an `i` flag on all three, pinned by a second fixture test exercising
+  the reviewer's own mixed-case spellings.
+
+  **Opus review round 2: FAIL — one blocker (B2), plus S6/S7 and further
+  nitpicks, all fixed and re-verified.**
+
+  **B2** was round 1's OWN should-fix S1 sentence, still wrong after being
+  "fixed" once: it claimed 176px keeps the range at "~176-205px (mockup
+  ±18%)", which is wrong on both the range and the percentage (a
+  4px-resolution sweep over 396 widths — 1024-2600px plus 3440px, both
+  densities — measured the real range: 177-222px, 1.02x-1.29x the mockup
+  tile; 220/173 is +27%, not ±18%) and directly self-contradicted by this
+  same comment's OWN sawtooth example ten lines below (220.0px, sitting
+  under the 205px ceiling the sentence right above it had just asserted).
+  Corrected in `theme.css` with the clause a bare number-fix would have
+  omitted: a <=205px ceiling at every width is unachievable with
+  `minmax(F,1fr)` at all — it would need F<=158px, already below Compact's
+  own 150px floor — so this was never a value the token failed to find.
+
+  **S6 (operator decision):** narrowing the two floors to 176px/150px (to
+  keep the corrected S1 range honest) made Comfortable and Compact render
+  IDENTICALLY — same column count, same tile width within 0.2px — across
+  several sub-1400px bands (1024-1076, 1208-1238, ~1396px up). Accepted and
+  documented in `theme.css` and the plan's D-3 entry rather than narrowing
+  Compact further (a ~135px floor to force visible separation would sit 22%
+  below the mockup's design size, with no measurement behind it).
+
+  **S7:** the round-1 B1 pin (`.empty{grid-column:1/-1}`, below) is
+  class-specific — a hypothetical future class appended into `.grid` with
+  no `grid-column` rule would reproduce the identical bug silently.
+  Generalised into a new test scanning `renderGrid()` for
+  `els.grid.appendChild(<call>)` sites, resolving each callee (excluding
+  `buildCard`, the grid's actual content) to its function definition in the
+  same file, and collecting every literal `className = "..."` it assigns.
+  Two classes exist today (`.noresult`, `.empty`) and both are already
+  correct — this closes the CLASS of bug, not just the one instance.
+  Mutation-verified against a synthetic new class (`libnotice`) inserted
+  into a copy of `library.js` and confirmed to fail the test by name, then
+  reverted.
+
+  Further nitpicks: the hidden-toggle lint's `.hidden = ` and
+  `toggleAttribute(` regexes were still one character away from two more
+  real idioms the reviewer's own probe found surviving — `el.hidden ||=
+  true` / `el.hidden ??= true` (the literal `\s*=` required the `=`
+  immediately, but `||=`/`??=` put extra characters in that gap) and
+  `el.toggleAttribute?.("hidden", true)` (optional chaining put `?.`
+  between the identifier and the call parenthesis). Both closed with a
+  small character class each, pinned against a new fixture test exercising
+  exactly those three forms, mutation-verified by reverting each regex in
+  isolation and watching the test fail by name. `Object.assign(el,
+  {hidden:true})` remains genuinely out of reach for a forward regex scan
+  (the identifier and the property name never sit next to each other in
+  the source) — documented as an acknowledged gap in the file's header
+  rather than silently implied covered by the four idioms actually scanned
+  for.
+
+#### app.css (B1, blocker — Opus review round 1; corrected round 2)
+
+`.empty` (the "no results" fallback `<p>`, appended as a direct child of
+`.grid` by `library.js`'s `renderEmptyState`) had no `grid-column` rule,
+unlike `.noresult` right above it in the same file. Under `.grid`'s BP-L
+`auto-fill` rule, `.empty` collapsed into a single auto-fill track instead
+of spanning the row — measured live: an 8.5%-of-row-wide block hard against
+the left edge at 2560px. Reachable one click away in practice, not a
+corner case: `renderChips` renders every filter chip including zero-count
+ones, so a library with zero failed downloads still shows a clickable,
+functioning "Failed 0" chip. Fixed with `grid-column:1/-1`, and re-verified
+live via the exact reproduction: the real "Downloading 0" chip on the
+400-game demo fixture now shows `.empty` measuring the grid's own full
+width, not a narrow left-aligned sliver.
+
+**This is a correction, not a new divergence (round 2):** the frozen
+mockup already applies `style="grid-column:1/-1"` inline to this exact
+element (`docs/design/vault-app-mockup.html:1826`), while its other two
+`.empty` uses (the Downloads "no download running" line, and the
+notifications-panel empty state) carry no such style — the WP 4a.3 port
+dropped the inline style when translating the mockup's markup into this
+stylesheet, so this restores mockup-faithful behaviour rather than
+inventing new behaviour.
+
+The fix's own "safe for every other `.empty` use" claim was also corrected
+(round 2): the real inventory is ONE `emptyMessage()` caller in
+`downloads.js` (its Active-section "no download running" fallback — an
+earlier version of this comment said two) plus `settings.js:553`'s
+`el("p", "empty", "Loading settings…")` loading state, omitted from the
+earlier count entirely. Both live inside plain block containers (never
+`display:grid`), where `grid-column` is simply ignored.
+
+#### Live verification (no jsdom/browser here — done against a running vault-api + the 400-game demo fixture, per the brief)
+
+Six-width table (390/768/1280/1440/1920/2560), both densities, plus `.bulk`
+alignment in multi-select with an active+paused job, plus the fixed/overlay
+surface re-check at 1024/1280/1920/2560 — see the coder's report (delivered
+alongside this package) for the full numbers. Headline results, RE-measured
+after the fix round with the operator's 176px/150px `--tile-min` values
+(the numbers below supersede the first pass's 210px/168px-based table): the
+cover tile is genuinely byte-identical to the WP 4e.1/pre-4e.1 baseline
+below BP-L (173.0×259.5 at 390px, 354.5×531.8 at 768px — this package
+changes NOTHING there); from BP-L up, both densities produce real,
+width-derived column counts (e.g. 8×194.6px "Comfortable" / 10×153.3px
+"Compact" at 1920px, 10×186px / 12×153px at the 2560px BP-XL cap); `.bulk`'s
+left edge matched `.view-root`'s own content-area left edge to the pixel at
+every one of 1024/1280/1440/1920/2560px, in both the `--w-wall`-capped and
+uncapped regimes, reconfirmed after the tile-min change (which does not
+affect `.bulk` at all — verified, not merely assumed); the toolbar band
+(search capped at 420px, chips alongside) only applies from BP-L up — at
+768px search and chips are still stacked, full width, byte-unaffected by
+this package. A full 400-card grid rebuild (toggling density) measured
+21-27ms, matching WP 4e.1's own ~29-33ms baseline within noise — column
+count changing arrangement, not node count, confirmed live rather than
+merely reasoned about.
+
+Also re-measured for the S2 fix: BP-L's 1600px `--w-wall` genuinely never
+binds within BP-L's own range — `cap binding?` false at 1024/1400/1700/
+1799px viewports, no exception — confirming the corrected comment/test
+message rather than the fix round's own first wrong claim. And for the S1
+sawtooth documentation: 220.0px at a 1195px viewport (4 columns) drops to
+177.6px at 1215px (5 columns), a ~19% shrink from a 20px WIDER window —
+replacing the first pass's stale 210px-based example numbers, which no
+longer applied once the token's value changed.
+
+One methodology note for whoever verifies this live next: a raw
+`document.dispatchEvent(new KeyboardEvent("keydown", {key:"Escape", ...}))`
+used to close the notifications sheet during this verification left `#app`
+stuck `inert` (the sheet's own close path evidently expects a real,
+trusted-adjacent event sequence this synthetic dispatch didn't fully
+replicate) — this blocked the NEXT click in the same session (the bulk
+delete button) with no console error, only "nothing happened" as the
+symptom. Recovered by clearing `#app`'s `inert` property directly and
+re-verified the underlying delete flow works correctly once unstuck; closing
+overlays via their actual UI controls (a real click on the panel's own close
+affordance, or a trusted keypress) avoids the issue entirely. Not a product
+bug — recorded here because it cost real time to diagnose and the next
+person driving this suite by hand should not have to rediscover it.

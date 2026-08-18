@@ -54,6 +54,21 @@
  * only wires a button click to it and a real API call, same posture as
  * every other decision-logic extraction in this codebase (job-partition.js,
  * gc-flow.js, ...).
+ *
+ * **WP 4e.2 (desktop layout, D-3/D-4):** the DOM this file builds does not
+ * change — the six `.lib-head`/`.lib-checkrow`/`.search`/`.chips`/`.grid`/
+ * `.hint` children (`.bulk` is a seventh, out-of-flow sibling) keep the
+ * exact same classes and append order they always had; `css/app.css`'s
+ * BP-L block now assigns each of them a named grid area BY CLASS, and
+ * turns `.grid` into a `repeat(auto-fill, minmax(var(--tile-min),1fr))`
+ * density grid instead of the fixed 2/3-column switch. What DOES change
+ * here is purely wording: `LAYOUT_LABEL` and the segmented control's own
+ * button titles/aria-labels, relabeled from a literal column count
+ * ("Two columns"/"Three columns") to an honest density description
+ * ("Comfortable"/"Compact") now that the actual on-screen column count is
+ * derived from viewport width, not fixed by this control — see the D-3
+ * comment at `LAYOUT_LABEL`'s definition and `docs/WORKPACKAGES.md`'s
+ * Phase 4a divergence register.
  */
 
 import { store } from "../store-singleton.js";
@@ -81,7 +96,20 @@ import { pushModal, popModal } from "../lib/modal-stack.js";
 
 const LAYOUT_STORAGE_KEY = "steamvault.libraryLayout";
 const LAYOUT_CLASS = { grid2: "", grid3: "cols3", list: "list" };
-const LAYOUT_LABEL = { grid2: "Two columns", grid3: "Three columns", list: "List" };
+// D-3 (docs/WORKPACKAGES.md, user-approved 2026-08-18): this control ships
+// literal column-count wording ("Two columns"/"Three columns") since the
+// WP 4a.3 mockup port, which was true only as long as the grid itself was a
+// fixed 2-or-3-column switch. WP 4e.2 makes the desktop column count derive
+// from viewport width via `auto-fill` (css/app.css's BP-L block) — "two
+// columns" stops being a true description of what pressing this button
+// does the moment a wide screen renders seven of them. Rather than ship an
+// aria-label that quietly lies at desktop widths (worse than a wording that
+// simply differs from Android's, which nothing pins as parity — see the
+// register entry), the control is honestly relabeled as what it actually
+// is below BP-L too, not just above it: a DENSITY choice (fewer, larger
+// tiles vs. more, smaller ones), not a literal count. "List" is unchanged —
+// it never claimed a column count.
+const LAYOUT_LABEL = { grid2: "Comfortable", grid3: "Compact", list: "List" };
 const ACTIVE_JOB_STATUSES = ["queued", "running", "paused"];
 
 // "Check & update", never "Check" (docs/PROJECT_PLAN.md §7 Phase 4c) —
@@ -714,10 +742,18 @@ async function confirmDelete() {
 // Static DOM construction (rebuilt fresh on every mount — see mounted())
 // ---------------------------------------------------------------------
 
-function segButton(layoutKey, title, svgMarkup) {
+// Takes the label from `LAYOUT_LABEL[layoutKey]` itself (Opus review
+// nitpick, WP 4e.2 fix round) rather than a separately-passed `title`
+// string: the three call sites used to spell "Comfortable"/"Compact"/"List"
+// out a second time by hand, with nothing pinning the two copies equal — a
+// wording change to `LAYOUT_LABEL` (D-3's whole point) could drift from the
+// segmented control's own title/aria-label with no test catching it. One
+// source of truth removes the drift surface entirely.
+function segButton(layoutKey, svgMarkup) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.dataset.layout = layoutKey;
+  const title = LAYOUT_LABEL[layoutKey];
   btn.title = title;
   btn.setAttribute("aria-label", title);
   btn.setAttribute("aria-pressed", String(state.layout === layoutKey));
@@ -753,17 +789,14 @@ function buildSection() {
   layoutSegs.append(
     segButton(
       "grid2",
-      "Two columns",
       '<svg width="16" height="16" viewBox="0 0 18 18" fill="currentColor"><rect x="2" y="3" width="6" height="12" rx="1.5"/><rect x="10" y="3" width="6" height="12" rx="1.5"/></svg>',
     ),
     segButton(
       "grid3",
-      "Three columns",
       '<svg width="16" height="16" viewBox="0 0 18 18" fill="currentColor"><rect x="2" y="3" width="3.6" height="12" rx="1.2"/><rect x="7.2" y="3" width="3.6" height="12" rx="1.2"/><rect x="12.4" y="3" width="3.6" height="12" rx="1.2"/></svg>',
     ),
     segButton(
       "list",
-      "List",
       '<svg width="16" height="16" viewBox="0 0 18 18" fill="currentColor"><rect x="2" y="3.4" width="14" height="2.6" rx="1.3"/><rect x="2" y="7.7" width="14" height="2.6" rx="1.3"/><rect x="2" y="12" width="14" height="2.6" rx="1.3"/></svg>',
     ),
   );

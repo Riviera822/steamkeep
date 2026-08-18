@@ -265,6 +265,13 @@ it above phone width. Three divergences land in this foundation package:
   `--w-wall` past 960px in the SAME change — this one only gives it the
   breakpoint/token plumbing to do so without re-litigating it, deliberately
   holding the width cap flat until then.
+  **RESOLVED by WP 4e.2 (2026-08-18):** the auto-fill grid landed, `--w-wall`
+  raised to 1600px (BP-L)/2000px (BP-XL), and the tile is no longer fixed at
+  458×687 — see that package's own register entry below for the shipped
+  numbers, the operator's `--tile-min` value decision (176px Comfortable/
+  150px Compact, after a review round found the first-shipped 210px/168px
+  produced tiles up to 1.42x the mockup's design size), and the sawtoothed-
+  not-smoothed tile-width decision.
 - **D-11 (nav DOM order).** `web/index.html`'s `<nav>` now precedes
   `<main id="view-root">` — reading/focus order matches the rail being
   visually first once BP-L applies, even though the mockup (phone-only,
@@ -293,10 +300,162 @@ it above phone width. Three divergences land in this foundation package:
   problem (a "skip to content" link is the natural fix if so). User veto
   welcome, same as every other entry in this register.
 
-The remaining Phase 4e divergences (auto-fill grid density, overlay
-geometry at BP-L, Downloads/Settings-specific layout, the pointer/keyboard
-model) belong to later packages in this phase and are deliberately NOT
-recorded here — this entry covers only what WP 4e.1 itself shipped.
+This entry covers only what WP 4e.1 itself shipped; the remaining Phase 4e
+divergences it deliberately left unrecorded — overlay geometry at BP-L,
+Downloads/Settings-specific layout, the pointer/keyboard model — are still
+open, still un-shipped, and still not recorded here for that reason. D-4's
+own auto-fill-grid divergence and D-3 below are recorded in the *next*
+package's own entry (WP 4e.2, immediately following) rather than here,
+since WP 4e.1 itself never shipped either.
+
+Recorded divergence (WP 4e.2, 2026-08-18, orchestrator decision — user
+approved the full desktop-layout proposal on 2026-08-18, "setze alles so
+um" — user veto welcome, same as every other entry in this register): one
+new divergence lands in this package.
+
+- **D-3 (segmented layout control relabeled from a column count to a
+  density control).** WP 4a.3 shipped the library's 2/3/list segmented
+  control worded "Two columns"/"Three columns"/"List" (title attribute +
+  `aria-label`, `web/js/views/library.js`'s `LAYOUT_LABEL`), true for as
+  long as the grid itself was a fixed 2-or-3-column switch. WP 4e.2 makes
+  the desktop column count derive from viewport width via `repeat(
+  auto-fill, minmax(var(--tile-min), 1fr))` (the D-4 fix, closed by this
+  same package — see D-4's entry above for the resolution note) — "two
+  columns" stops being a true description of the button's effect the
+  moment a 1920px screen renders seven or more of them. A false
+  `aria-label` is worse than one that reads differently from Android's own
+  wording (which nothing pins as cross-frontend parity — unlike the
+  status-kind wire names/theme hexes docs/LEARNINGS.md's "Android" section
+  calls out, this control's label was never literal-pinned on either side),
+  so the control is relabeled to what it actually is, in BOTH densities, at
+  every width (not conditionally by breakpoint — one JS-driven string, used
+  everywhere, and now the SAME string `segButton` reads for its title/
+  aria-label — Opus review nitpick, fix round: it used to be spelled out a
+  second time at each of the three call sites with nothing pinning the two
+  copies equal): `grid2` -> "Comfortable" (fewer, larger tiles), `grid3` ->
+  "Compact" (more, smaller tiles), `list` unchanged ("List" never claimed a
+  count). The segmented control's own icons (two/three rectangles) are left
+  as-is — they still read as a fewer-bigger vs. more-smaller metaphor under
+  the new wording.
+
+  **S6 addendum (operator decision, round 2 review — recorded here because
+  this entry's whole justification is that the label must be true of what
+  the control DOES):** across several sub-1400px viewport bands
+  (1024-1076, 1208-1238, ~1396px up), Comfortable and Compact render
+  IDENTICALLY — same column count, same tile width within 0.2px — a direct
+  consequence of the two `--tile-min` floors (176px/150px) needed to keep
+  the "fix the tile" tile-size guarantee honest (see theme.css's
+  `--tile-min` comment). Pressing "Compact" in those bands moves
+  `aria-pressed` and fires the "Compact layout" toast but changes nothing
+  on screen — the wording is still accurate (it describes the control's
+  DENSITY setting, which genuinely did change), but a user acting purely on
+  visual feedback at those specific widths would see no effect. Accepted:
+  the affected widths are all below 1400px, and the alternative (narrowing
+  Compact's floor further to force visible separation everywhere) would
+  push the card 22% below the mockup's design size with no measurement
+  behind it — a worse trade than an occasional no-visible-effect press.
+
+WP 4e.2 evidence (2026-08-18, Opus round 1: FAIL — one blocker, five
+should-fixes; fix round verified, re-verified live against a running
+vault-api + the 400-game demo fixture): `web/css/app.css`'s BP-L block wires
+`.grid`/`.grid.cols3` to `repeat(auto-fill,minmax(var(--tile-min),1fr))`;
+`--tile-min` split into 176px "Comfortable" / 150px "Compact" — the
+OPERATOR's decision (round 1 should-fix S1), replacing the coder's
+first-shipped 210px/168px after live measurement showed 210px producing
+225.6-246.0px tiles (1.30x-1.42x the 173px mockup tile), falsifying the
+"fix the tile" claim as shipped. `theme.css`'s `--tile-min` comment now
+documents the mechanism this number has to account for (`minmax(F,1fr)`
+overshoots to just under `max = F + (F+gap)/n` before adding a column,
+worst at the fewest columns) and the operator's second decision: tile width
+is sawtoothed across breakpoint thresholds (re-measured: 220.0px at 1195px
+viewport -> 177.6px at 1215px, a ~19% shrink from a WIDER window),
+documented rather than smoothed away. **Round 2 correction (Opus review B2,
+2026-08-18): round 1's own range claim for 176px — "~176-205px (mockup
+±18%)" — was itself wrong** (a 4px-resolution sweep over 396 widths
+measured 177-222px, 1.02x-1.29x the mockup tile; 220/173 is +27%, not
+±18%), and self-contradicted by this same comment's own sawtooth example
+(220.0px, sitting under the 205px ceiling just asserted ten lines above
+it). Corrected in `theme.css` with the clause a bare number-fix would have
+omitted: a <=205px ceiling at every width is unachievable with
+`minmax(F,1fr)` at all — it would need F<=158px, already below Compact's
+own 150px floor, so this was never a tuning miss to begin with. **S6
+(operator decision, round 2): Comfortable and Compact render IDENTICALLY**
+— same column count, same tile width within 0.2px — across several
+sub-1400px bands (1024-1076, 1208-1238, ~1396px up), an unavoidable
+consequence of picking two floors this close (176/150) to keep the "fix the
+tile" guarantee honest; accepted and documented (theme.css, this entry)
+rather than narrowing Compact further into territory with no measurement
+behind it (a ~135px floor would sit 22% below the mockup's design size).
+`--w-wall` raised to 1600px at BP-L (round 1 should-fix S2: this value is
+UNREACHABLE within BP-L's own range — its widest viewport, 1799px, leaves a
+1567px main column, 33px short of 1600 — so it is a guard against a future
+`--rail-w`/breakpoint change, not an active cap there; the code comment and
+the test's failure message both used to claim otherwise, fixed) and 2000px
+at BP-XL (a genuinely separate, bounded decision, argued against the
+brief's "topbar/reading measures don't improve past ~1600" note — true of
+`--w-text` content, not of a tile wall). `.bulk` re-derived from `--w-wall`
+with `--rail-w + --gutter` / `--gutter` insets, proven algebraically exact
+in both the capped and uncapped regimes and confirmed live at ten widths
+across both review rounds (Δleft = Δwidth = 0 throughout, including inside
+BP-XL). Search+chips moved into a `.view-library` BP-L named-area grid, all
+six in-flow children assigned by class; search capped at `--search-w:
+420px` (round 1 should-fix S4: the cap's VALUE and the area map's row order
+were asserted by name/declaration only, not by value — removing the cap
+and swapping "search chips"->"chips search" both survived; both now die by
+name).
+
+**Blocker B1 (round 1):** `.empty` (the "no results" fallback, a direct
+child of `.grid`, appended by `library.js`) had no `grid-column` rule,
+unlike `.noresult` right above it — under auto-fill it collapsed into a
+single track (measured: an 8.5%-of-row-wide block hard against the left
+edge at 2560px), reachable one click away via any zero-count filter chip
+(`renderChips` renders those too — a library with zero failed downloads
+still shows a clickable "Failed 0" chip). Fixed with `grid-column:1/-1`,
+re-verified live via the exact reproduction (the real "Downloading 0" chip
+on the 400-game fixture): `.empty` now measures the grid's own full width.
+**Correction, not a new divergence (round 2):** the frozen mockup already
+applies `style="grid-column:1/-1"` inline to this exact element
+(`docs/design/vault-app-mockup.html:1826`) — the WP 4a.3 port dropped the
+inline style when translating it into this stylesheet, so this restores
+mockup-faithful behaviour. **S7 (round 2):** the fix's own pin was
+class-specific (`.empty` only) — generalised into a real static-analysis
+test scanning `library.js` for every class appended as a direct child of
+`.grid` (excluding `buildCard`'s "card" output, the grid's actual content)
+and requiring `grid-column` on each; mutation-verified against a synthetic
+new class the same way the reviewer's own probe worked. The app.css
+call-site inventory this fix originally cited was also corrected (round
+2): ONE `emptyMessage()` caller in `downloads.js`, not two, plus
+`settings.js:553`'s loading-state use, previously omitted entirely.
+
+Also closed in round 1's fix round: the base `.grid`/`.grid.cols3` rules and
+the BP-L `.grid.cols3` reset (the "fix the tile guarantee made concrete, not
+merely asserted" comment) were both completely unpinned — deleting either
+survived 456/456 — now mutation-pinned by name in `css-layout-foundation.
+test.js`, re-verified by re-applying each mutation and watching the named
+test fail, then reverting; round 2 added three sharper variants (deleting a
+single reset rule, changing the base `cols3` column count, changing the
+base phone card typography), all killed. The hidden-toggle lint's three
+attribute regexes gained the `i` flag in round 1 (HTML attribute names are
+case-insensitive — `toggleAttribute("HIDDEN", ...)`/`setAttribute("Hidden",
+...)` both genuinely set the attribute in a real DOM and both survived
+silently before that fix) and, in round 2, `el.hidden ||=`/`??=` and
+`el.toggleAttribute?.(` (optional chaining) — both one character from an
+idiom already covered, both probed and found surviving; `Object.assign(el,
+{hidden:true})` is documented as a genuine, unclosed gap in the lint's
+header rather than implied covered. The BP-XL comment's "1656px is 1920's
+natural column width" was corrected (round 2) to name it as the CONTENT
+width — the column box itself is 1688px.
+
+Suite 462 green (451 WP 4e.1 baseline + 5 round-1 first pass + 4 round-1
+fix-round pins + 2 round-2 pins: the generalised S7 test, the compound-
+operator/optional-chaining lint probe). Rebased cleanly onto `da7ceae`
+(WP 4h.1, `api/`-only) mid-review with no conflicts in `web/`; docs
+conflicts in this file and `docs/PROJECT_PLAN.md` auto-merged clean.
+Re-verified live with the 176/150 values: six-width table re-measured at
+every width (e.g. 1920px: 8 cols/194.6px Comfortable, 10 cols/153.3px
+Compact; 2560px: 10 cols/186px Comfortable, 12 cols/153px Compact), `.bulk`
+alignment reconfirmed exact, BP-M/base unaffected. 400-card full rebuild:
+21-27ms (WP 4e.1 baseline ~29-33ms, no regression).
 
 ### WP 4a.1 — Static serving + app shell (api/ + web/) — **first, serial**
 - vault-api mounts `web/` (StaticFiles, SPA fallback, sane CSP/security
