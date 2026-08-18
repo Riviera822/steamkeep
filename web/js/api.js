@@ -165,6 +165,21 @@ export async function request(method, path, { body, params, signal } = {}) {
  * cannot answer "which OTHER apps map this depot". Called on demand (only
  * when a bulk-delete confirm is opened), never on a poll loop.
  *
+ * `prefillCached` (WP 4c-web) calls `POST /v1/prefill/cached` — the
+ * library-header "Check & update all cached games" trigger
+ * (`views/library.js`). **No body is ever sent** (`request()` above only
+ * adds a body/`Content-Type` when `body !== undefined`, and this call never
+ * passes one) — api/README.md is explicit that the route ignores any body
+ * anyway, so sending `{appids: [...]}` here by mistake would silently queue
+ * every cached app instead of the ids in that list; not passing one at all
+ * is the only way to avoid inviting that mistake later. No dedicated
+ * timeout: this repo has no `AbortController`-based timeout wired up for
+ * ANY request today (`GET /v1/cache/summary` included), so "give this call
+ * the same client timeout as GET /v1/cache/summary" (the WP brief) is
+ * satisfied by construction — both go through the same bare `fetch()` with
+ * no caller-supplied deadline — rather than by inventing a new mechanism
+ * for this one route alone.
+ *
  * `getSettings`/`patchSettings` and the `steam*` methods (WP 4a.6) back the
  * Settings view and the onboarding flow — see api/README.md's "Persisted
  * settings" and "Steam Web API relay" sections for the exact response
@@ -180,6 +195,7 @@ export const api = {
   jobs: (limit = 20) => request("GET", "/v1/jobs", { params: { limit } }),
   job: (id) => request("GET", `/v1/jobs/${id}`),
   prefill: (appids) => request("POST", "/v1/prefill", { body: { appids } }),
+  prefillCached: () => request("POST", "/v1/prefill/cached"),
   cancelJob: (id) => request("DELETE", `/v1/jobs/${id}`),
   pauseJob: (id) => request("POST", `/v1/jobs/${id}/pause`),
   resumeJob: (id) => request("POST", `/v1/jobs/${id}/resume`),

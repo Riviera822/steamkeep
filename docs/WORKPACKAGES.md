@@ -185,6 +185,25 @@ gap. User veto welcome; revisit if real use shows the two notification-
 only entry points (Settings button, bypass tap) are not discoverable
 enough.
 
+Recorded divergence (WP 4c-web, 2026-08-18, orchestrator decision — user
+veto welcome): the Library view gains a full-width header row below
+`.lib-head` for a "Check & update all cached games" button
+(`web/js/views/library.js`) — an element the frozen round-7 mockup does
+not have at all, because Phase 4c (`docs/PROJECT_PLAN.md` §7) is itself
+post-mockup scope: the mockup's `doRefresh()` only ever re-polls vault-api,
+it never contacts Steam or starts a download, so there was nothing in the
+mockup for this control to extend. Resolved alongside it, same WP: the
+`doRefresh()` divergence the plan asked this package to settle stays
+resolved as "kept separate" — `store.refreshNow()` (this app's `doRefresh()`
+equivalent, wired to pull-to-refresh's `visibilitychange` nudge in
+`web/js/store.js`) remains a passive re-poll only; the new button is a
+SEPARATE control calling `POST /v1/prefill/cached`, never folded into
+pull-to-refresh (the plan calls a refresh gesture that can start downloads
+a trap, and this WP agrees). The Android port (separate, still-open work
+package) should adopt both decisions verbatim: its own equivalent header/
+toolbar gains the same button, worded with the same "Check & update, never
+Check" rule, and its own pull-to-refresh equivalent stays passive-only.
+
 ### WP 4a.1 — Static serving + app shell (api/ + web/) — **first, serial**
 - vault-api mounts `web/` (StaticFiles, SPA fallback, sane CSP/security
   headers, no-cache for index). Router auth must NOT cover static assets;

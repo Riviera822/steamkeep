@@ -96,6 +96,14 @@
   display:block; font-size:11px; font-weight:500; color:var(--dim-2); letter-spacing:.3px;
 }
 .lib-tools{ display:flex; gap:4px; flex-wrap:nowrap; flex:none; align-items:center; }
+
+/* "Check & update all cached games" (Phase 4c, WP 4c-web) — its own
+   full-width row below .lib-head rather than squeezed into .lib-tools:
+   that row is icon-button-sized and flex-wrap:nowrap, with no room for this
+   button's full honest label ("Check & update", never just "Check" —
+   docs/PROJECT_PLAN.md §7 Phase 4c) at phone widths. */
+.lib-checkrow{ margin-bottom:10px; }
+.lib-checkrow .btn{ width:100%; }
 .iconbtn{
   width:32px; height:32px; border-radius:10px;
   display:grid; place-items:center; color:var(--dim);

@@ -847,12 +847,63 @@ available at any reasonable cost, and would be the less useful half anyway.
       cached games" for the full, corrected contract. Frontend trigger UI
       and the pull-to-refresh divergence below are separate, unticked,
       packages that consume this route)*
-- [ ] Trigger in both frontends: a library-header action over all cached
-      games, plus the existing per-game and multi-select paths
-- [ ] Mockup divergence to resolve in design: `doRefresh()`
+- [x] Trigger in the web frontend (WP 4c-web, 2026-08-17/18): a
+      library-header action over all cached games, plus the existing
+      per-game and multi-select paths
+      *(`web/js/views/library.js` gained a "Check & update all cached
+      games" button in its own full-width header row, calling the new
+      `api.prefillCached()` (`POST /v1/prefill/cached`, `web/js/api.js`).
+      Mixed-outcome partition/wording, the forced-run heads-up, the
+      mid-loop-5xx "re-read GET /v1/jobs" recovery signal, and the
+      in-flight guard are pure, DOM-free functions in `web/js/lib/
+      cached-prefill-outcome.js` (web/tests/cached-prefill-outcome.test.js):
+      a paused dedupe is never worded as queued/started and an empty
+      selection is never worded as a failure, both mutation-tested by name.
+      Demo mode (`web/js/demo-data.js`) gained the same route, refactored to
+      share the exact per-appid enqueue helper `POST /v1/prefill` already
+      used — no second enqueue mechanism — with dedicated fixtures for the
+      paused-dedupe and empty-selection cases
+      (web/tests/demo-data-cached-prefill.test.js). Opus round 1: FAIL (one
+      blocker, four should-fixes), all fixed and re-verified in round 2:
+      (blocker) the forced-run note was computed by the view from its OWN
+      `GET /v1/games` snapshot and appended unconditionally — live-
+      reproduced as `"Nothing cached to check. (1 forced...)"` with zero
+      jobs queued — composition moved into `cached-prefill-outcome.js`,
+      gated on the response's own `queued` bucket being non-empty and
+      scoped to only those appids, two named regression tests, both
+      mutation-verified against the reviewer's exact reproduction string;
+      (S1) a fourth bucket, `alreadyQueued` ("N already queued"), for a
+      dedupe against a job the worker has not yet claimed — the common
+      double-press case, previously mis-worded "already in progress" —
+      with a real demo fixture (pause then resume) exercising it end to
+      end; (S2) every string now says "check & update" in full ("queued for
+      check & update", "Checking & updating…", incl. the busy label's
+      accessible name); (S3) the divergence (new header row absent from
+      the frozen mockup; the `doRefresh()` resolution) recorded in
+      `docs/WORKPACKAGES.md`'s Phase 4a register alongside the project's
+      other recorded UI divergences; (S4) the in-flight-guard mutation test
+      now asserts synchronously so a broken guard fails in under 1ms
+      instead of hanging the suite. Suite 414 green (35 new tests). The
+      Android half of this trigger is a separate, still-open work
+      package.)*
+- [ ] Trigger in the Android frontend: the same action (separate work package)
+- [x] Mockup divergence to resolve in design: `doRefresh()`
       (`vault-app-mockup-NOTES.md`) only reloads what vault-api already
       knows. The update check asks Steam and must NOT be silently folded into
       pull-to-refresh — a gesture that can start downloads is a trap
+      *(Resolved on the web frontend, WP 4c-web, 2026-08-17: kept strictly
+      separate. `store.refreshNow()` (this app's `doRefresh()` equivalent,
+      wired to pull-to-refresh's `visibilitychange` nudge in
+      `web/js/store.js`) still only re-polls vault-api and never calls
+      `POST /v1/prefill/cached` — the new "Check & update" button is the
+      ONLY control that does. `refreshNow()` is still called AFTER a
+      successful check, same as every other mutating action in
+      `library.js`, purely to pull the resulting job rows onto screen
+      sooner — never as a substitute for the Steam-contacting call itself.
+      Decision recorded in `web/js/views/library.js`'s module header and
+      (review round 1, S3) `docs/WORKPACKAGES.md`'s Phase 4a divergence
+      register. Android's own pull-to-refresh gesture is that work
+      package's concern, unaffected by this WP.)*
 - [x] Guardrails (backend half, WP 4c-api): a user-initiated check
       deliberately bypasses the WP 3.11 miss-trigger cooldown (the user
       pressed the button) — structural, not conditional: `POST

@@ -26,6 +26,34 @@
  * animation of — a card whose displayed state hasn't changed). See the
  * `store.subscribe("games", ...)` / `store.subscribe("jobs", ...)` calls
  * near the bottom of this file for exactly what counts as a real change.
+ *
+ * **"Check & update all cached games" (Phase 4c, WP 4c-web) — the
+ * `doRefresh()` divergence, resolved.** `docs/design/vault-app-mockup-
+ * NOTES.md`'s `doRefresh()` (this app's `store.refreshNow()`, wired to the
+ * `visibilitychange` nudge in store.js and called after every mutating
+ * action below) only re-polls vault-api for what it already knows — it
+ * makes zero outbound requests to Steam and can never start a download.
+ * `docs/PROJECT_PLAN.md` §7 Phase 4c calls a refresh gesture that CAN start
+ * downloads a trap, and this WP keeps that boundary: the header button
+ * below is a SEPARATE control that calls the new `POST /v1/prefill/cached`
+ * (`api.prefillCached`), never folded into `store.refreshNow()`/pull-to-
+ * refresh. `onCheckAndUpdate()` calls `store.refreshNow()` itself only
+ * AFTER the real request already queued whatever it queued — same as every
+ * other action in this file, to pull the fresh job rows onto screen sooner,
+ * not as a substitute for the Steam-contacting call. Decision recorded here
+ * per the plan's request; `docs/PROJECT_PLAN.md` ticks the corresponding
+ * item, and `docs/WORKPACKAGES.md`'s Phase 4a divergence register (review
+ * round 1, S3) carries the same two facts — a mockup-absent full-width
+ * header row, and the `doRefresh()` resolution — for the user's veto and
+ * the Android port's benefit.
+ *
+ * The mixed-outcome partition/wording (including the forced-run heads-up,
+ * scoped and gated inside that module after review round 1's blocker —
+ * see its header) and the in-flight guard are pulled into
+ * `js/lib/cached-prefill-outcome.js` (DOM-free, unit-tested) — this file
+ * only wires a button click to it and a real API call, same posture as
+ * every other decision-logic extraction in this codebase (job-partition.js,
+ * gc-flow.js, ...).
  */
 
 import { store } from "../store-singleton.js";
@@ -40,6 +68,11 @@ import {
   classifyBulkDeleteEligibility,
 } from "../lib/bulk-plan.js";
 import { buildMultiPlan } from "../lib/multiplan.js";
+import {
+  summarizeCachedPrefillOutcome,
+  describeCachedPrefillError,
+  createCheckAndUpdateAction,
+} from "../lib/cached-prefill-outcome.js";
 import { planGamesUpdate } from "../lib/render-plan.js";
 import { formatBytesGB } from "../lib/format.js";
 import { onViewChange } from "../router.js";
@@ -50,6 +83,22 @@ const LAYOUT_STORAGE_KEY = "steamvault.libraryLayout";
 const LAYOUT_CLASS = { grid2: "", grid3: "cols3", list: "list" };
 const LAYOUT_LABEL = { grid2: "Two columns", grid3: "Three columns", list: "List" };
 const ACTIVE_JOB_STATUSES = ["queued", "running", "paused"];
+
+// "Check & update", never "Check" (docs/PROJECT_PLAN.md §7 Phase 4c) —
+// pressing this can consume real bandwidth; a label implying a read-only
+// check would misrepresent what happens. The busy label carries the SAME
+// rule (review round 1, S2): it is also this button's accessible name while
+// it is focused mid-action — the one string a screen-reader user hears
+// during the exact window the honesty mandate is about — so "Checking…"
+// alone (missing the "& update" half) is not good enough here either.
+const CHECK_UPDATE_LABEL = "Check & update all cached games";
+const CHECK_UPDATE_BUSY_LABEL = "Checking & updating…";
+// The paused-dedupe outcome is the one result that needs the user to go DO
+// something (resume or cancel) — toast.js's default 2.6s is tuned for
+// acknowledge-and-move-on messages, so this gets a longer, but still
+// auto-dismissing, window (toast.js has no sticky/manual-dismiss mode —
+// see the review-round-1 N3 note at this constant's one call site).
+const CHECK_UPDATE_WARN_TOAST_MS = 6000;
 
 function readStoredLayout() {
   try {
@@ -96,6 +145,12 @@ const state = {
 };
 
 let liveJobsByAppid = indexLiveJobsByAppid(state.jobs);
+
+// Module-level, not per-mount: an in-flight "Check & update" call must stay
+// locked across a navigate-away-and-back (buildSection() reads
+// checkAndUpdateAction.isInFlight() below to paint a freshly-built button's
+// initial state correctly), same posture as `state` above.
+const checkAndUpdateAction = createCheckAndUpdateAction({ fetcher: () => api.prefillCached() });
 
 /** The currently-mounted <section>, or null. Store-subscription callbacks
  * check this before touching the DOM so a background tick while a
@@ -237,6 +292,65 @@ async function onAction(appid, actionType) {
     store.refreshNow();
   } catch (err) {
     showToast(errorText(err), { warn: true });
+  }
+}
+
+// ---------------------------------------------------------------------
+// "Check & update all cached games" (Phase 4c, WP 4c-web) — see this file's
+// module header for the doRefresh() divergence this deliberately does NOT
+// fold into. The mixed-outcome wording, error classification and the
+// in-flight guard itself all live in js/lib/cached-prefill-outcome.js
+// (DOM-free, unit-tested); this function is the DOM-side glue: paint the
+// busy state, call the guarded action, paint the result.
+// ---------------------------------------------------------------------
+
+function paintCheckUpdateButton(busy) {
+  if (!mounted()) return;
+  els.checkUpdateBtn.disabled = busy;
+  els.checkUpdateBtn.textContent = busy ? CHECK_UPDATE_BUSY_LABEL : CHECK_UPDATE_LABEL;
+}
+
+async function onCheckAndUpdate() {
+  // Belt: the real button is already `disabled` the instant this handler
+  // starts (see the click listener in buildSection()), so a second click
+  // cannot even reach here while one is in flight. Suspenders: the guard
+  // itself lives in cached-prefill-outcome.js's createCheckAndUpdateAction,
+  // independent of any button state — `run()` below no-ops if it is
+  // already busy regardless of how it was invoked.
+  paintCheckUpdateButton(true);
+  const result = await checkAndUpdateAction.run();
+  paintCheckUpdateButton(false);
+
+  if (result.skipped) return; // already running — this press changed nothing
+
+  if (result.ok) {
+    // The forced-run note (if any) is composed INSIDE summarizeCachedPrefillOutcome
+    // now, gated on the response's OWN `queued` bucket and scoped to only
+    // those appids — review round 1 blocker: this used to be computed here
+    // from `state.games` regardless of what the server actually queued,
+    // which could (and did, live-reproduced) claim forced work was starting
+    // on an empty or all-deduplicated outcome. `state.games` is passed
+    // through only as the best-effort `needs_force` lookup table; the
+    // module itself decides whether it applies at all.
+    const summary = summarizeCachedPrefillOutcome(result.refs, state.games);
+    // N3 (review round 1 nitpick): `summary.warn` means "the user needs to
+    // go DO something" (a paused dedupe — resume or cancel it) — the one
+    // outcome of this whole action that requires a follow-up action, not
+    // just a status update. toast.js's default 2.6 s auto-dismiss is tuned
+    // for "acknowledge and move on" messages; this one gets the longer
+    // duration the component already supports rather than a new surface.
+    showToast(summary.message, {
+      warn: summary.warn,
+      duration: summary.warn ? CHECK_UPDATE_WARN_TOAST_MS : undefined,
+    });
+    store.refreshNow();
+  } else {
+    const desc = describeCachedPrefillError(result.err);
+    showToast(desc.message, { warn: true });
+    // README's mid-loop-5xx honesty rule: re-read GET /v1/jobs rather than
+    // implying the press did nothing — describeCachedPrefillError sets
+    // `refresh` only for that one error kind.
+    if (desc.refresh) store.refreshNow();
   }
 }
 
@@ -651,6 +765,24 @@ function buildSection() {
   tools.append(layoutSegs, selectBtn);
   head.append(titles, tools);
 
+  // "Check & update all cached games" (Phase 4c, WP 4c-web) — a plain
+  // labeled button, not an icon (module header: the visible wording IS the
+  // honesty guarantee — "Check & update", never "Check" — so this cannot be
+  // reduced to a glyph + aria-label the way the icon buttons above are).
+  // Its own full-width row rather than squeezed into `.lib-tools`'
+  // icon-button row: that row is `flex-wrap:nowrap` and already tight with
+  // the layout segments + select button, no room for this button's full
+  // honest label at phone widths.
+  const checkRow = document.createElement("div");
+  checkRow.className = "lib-checkrow";
+  const checkUpdateBtn = document.createElement("button");
+  checkUpdateBtn.type = "button";
+  checkUpdateBtn.className = "btn ghost sm";
+  const startsBusy = checkAndUpdateAction.isInFlight();
+  checkUpdateBtn.disabled = startsBusy;
+  checkUpdateBtn.textContent = startsBusy ? CHECK_UPDATE_BUSY_LABEL : CHECK_UPDATE_LABEL;
+  checkRow.appendChild(checkUpdateBtn);
+
   const searchWrap = document.createElement("div");
   searchWrap.className = "search";
   const mag = document.createElement("span");
@@ -728,12 +860,13 @@ function buildSection() {
   // block near the top of this file (WP 4a.8: it must be a `document.body`
   // sibling of `#app`, not a child of this per-mount `<section>`, or
   // marking `#app` inert would also make the dialog itself inert).
-  section.append(head, searchWrap, chips, grid, hint, bulkBar);
+  section.append(head, checkRow, searchWrap, chips, grid, hint, bulkBar);
 
   els = {
     sub,
     layoutSegs,
     selectBtn,
+    checkUpdateBtn,
     searchWrap,
     searchInput,
     qClear,
@@ -776,6 +909,9 @@ function buildSection() {
     if (state.selecting) exitSelect();
     else enterSelect(null);
   });
+
+  checkUpdateBtn.addEventListener("click", onCheckAndUpdate);
+
   bulkCancel.addEventListener("click", exitSelect);
 
   bulkPrimary.addEventListener("click", async () => {

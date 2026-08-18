@@ -30,6 +30,16 @@
  * the real router/relay use client-side (`lib/steamid.js`,
  * `lib/steam-key-form.js`) so a demo rejection and a real `422` agree on
  * shape, without duplicating the grammar a third time.
+ *
+ * WP 4c-web extends this with `POST /v1/prefill/cached` (Phase 4c, WP
+ * 4c-api's server contract) so the Library view's "Check & update all
+ * cached games" trigger has a real code path in demo mode — see
+ * web/tests/demo-data-cached-prefill.test.js. `enqueuePrefillForAppid` below
+ * is the ONE enqueue mechanism both `POST /v1/prefill` and this route call
+ * (mirrors the real API's "no second enqueue mechanism" rule), and the seed
+ * data's already-`running` job (900001, Driftwood Signal) is left in place
+ * on purpose — it means a fresh call to the new route exercises the
+ * "already running" dedupe branch with zero extra setup.
  */
 
 import { ApiError, ERROR_KINDS } from "./errors.js";
@@ -644,6 +654,68 @@ function findJob(id) {
   return jobs.find((j) => j.id === id);
 }
 
+/** Enqueue-or-dedupe ONE appid — the single enqueue mechanism shared by both
+ * `POST /v1/prefill` and `POST /v1/prefill/cached` (WP 4c-web), mirroring
+ * the real `jobs.enqueue_prefill` being the one function BOTH real routes
+ * call (api/README.md "Check & update all cached games": "No new enqueue
+ * mechanism"). Dedupes against any job for this appid that is
+ * `queued`/`running`/`paused`, same rule either route follows. */
+function enqueuePrefillForAppid(appid) {
+  const existing = jobs.find(
+    (j) => j.appid === appid && ["queued", "running", "paused"].includes(j.status),
+  );
+  if (existing) {
+    return { appid, job_id: existing.id, status: existing.status, deduplicated: true };
+  }
+  const game = findGame(appid);
+  const job = {
+    id: nextJobId++,
+    appid,
+    type: "prefill",
+    status: "queued",
+    created_at: new Date().toISOString(),
+    started_at: null,
+    finished_at: null,
+    updated: null,
+    up_to_date: null,
+    summary_parse_ok: null,
+    gc_execute: null,
+    paused_at: null,
+    stop_request: null,
+    log_excerpt: "[vault-api] queued.",
+    _demoTicksLeft: 3,
+  };
+  jobs.unshift(job);
+  if (!game) {
+    games.push(makeGame({ appid, name: `App ${appid}`, status: "idle", depots: [] }));
+  }
+  // First tick already flips it to "running" so a demo poll shortly after
+  // enqueueing sees visible progress, matching the mockup's "job start"
+  // transition rather than sitting at "queued" forever (this module has no
+  // real worker draining a queue).
+  job.status = "running";
+  job.started_at = job.created_at;
+  return { appid, job_id: job.id, status: job.status, deduplicated: false };
+}
+
+/** Every appid that currently "has cache content" in this demo model —
+ * `POST /v1/prefill/cached`'s selection (WP 4c-web). The real route selects
+ * from disk-and-mapping truth: any app mapping at least one depot with
+ * bytes on disk right now (api/README.md "Selection: disk-and-mapping
+ * truth, one query"). This demo model keeps "mapping" and "on-disk size" as
+ * ONE list per game (`makeGame()`'s header) rather than the real schema's
+ * two separate facts, so the equivalent truth here is simply "this game's
+ * `depots` array is non-empty" — an app with no depots (never cached, or
+ * fully deleted) contributes nothing, exactly like an app whose every depot
+ * has zero bytes contributes nothing on the real endpoint. Sorted ascending
+ * by appid, matching the real route's deterministic order. */
+function selectCachedAppids() {
+  return games
+    .filter((g) => g.depots.length > 0)
+    .map((g) => g.appid)
+    .sort((a, b) => a - b);
+}
+
 /** Advance one running job a step closer to "done" (see _demoTicksLeft above).
  * Branches on `job.type` (WP 4a.4 addition) — a "gc" job never touches
  * `apps.status`/`last_prefill_at` (api/README.md "Garbage collection": "What
@@ -843,43 +915,26 @@ export async function demoRequest(method, path, { body, params } = {}) {
         throw validationError(`invalid appid ${appid}`);
       }
     }
-    return appids.map((appid) => {
-      const existing = jobs.find(
-        (j) => j.appid === appid && ["queued", "running", "paused"].includes(j.status),
-      );
-      if (existing) {
-        return { appid, job_id: existing.id, status: existing.status, deduplicated: true };
-      }
-      const game = findGame(appid);
-      const job = {
-        id: nextJobId++,
-        appid,
-        type: "prefill",
-        status: "queued",
-        created_at: new Date().toISOString(),
-        started_at: null,
-        finished_at: null,
-        updated: null,
-        up_to_date: null,
-        summary_parse_ok: null,
-        gc_execute: null,
-        paused_at: null,
-        stop_request: null,
-        log_excerpt: "[vault-api] queued.",
-        _demoTicksLeft: 3,
-      };
-      jobs.unshift(job);
-      if (!game) {
-        games.push(makeGame({ appid, name: `App ${appid}`, status: "idle", depots: [] }));
-      }
-      // First tick already flips it to "running" so a demo poll shortly
-      // after enqueueing sees visible progress, matching the mockup's
-      // "job start" transition rather than sitting at "queued" forever
-      // (this module has no real worker draining a queue).
-      job.status = "running";
-      job.started_at = job.created_at;
-      return { appid, job_id: job.id, status: job.status, deduplicated: false };
-    });
+    return appids.map(enqueuePrefillForAppid);
+  }
+
+  // WP 4c-web: POST /v1/prefill/cached — the "check & update every cached
+  // game" convenience route (Phase 4c, WP 4c-api; api/README.md "Check &
+  // update all cached games"). Two rules mirrored exactly from that
+  // contract, both load-bearing for the frontend's honesty:
+  //   1. **No enqueue mechanism of its own.** Selection below hands every
+  //      chosen appid to the SAME `enqueuePrefillForAppid` helper
+  //      `POST /v1/prefill` uses just above — identical dedupe, identical
+  //      response shape (`PrefillJobRef`) — there is exactly one place in
+  //      this demo model that creates a prefill job.
+  //   2. **`body` is read nowhere below.** The real route declares no body
+  //      parameter and silently ignores whatever was sent, INCLUDING an
+  //      `{"appids": [...]}` payload that would look like it belongs here —
+  //      that would queue every cached app, not the ids in the list. Not
+  //      touching `body` at all is what makes that true here too, rather
+  //      than a conditional that could later "helpfully" start reading it.
+  if (method === "POST" && path === "/v1/prefill/cached") {
+    return selectCachedAppids().map(enqueuePrefillForAppid);
   }
 
   if (method === "DELETE" && (m = path.match(JOB_ID_RE))) {

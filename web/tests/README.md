@@ -510,3 +510,111 @@ Android session:
   vault-agent on the LAN during this pass).
 - Performance/rendering with a real, large (400+ game) library — the live
   server had exactly one game; demo mode has six.
+
+### WP 4c-web — "Check & update all cached games" (Phase 4c)
+
+Same posture as every prior WP: the DOM-building trigger itself
+(`views/library.js`'s new header button) is not unit-tested directly — the
+mixed-outcome wording, the forced-run heads-up composition, the mid-loop-5xx
+recovery signal, and the in-flight button lock are pulled into a DOM-free
+`web/js/lib/cached-prefill-outcome.js` and tested here, plus a demo-mode
+extension for the new route. **Round 1 review (Opus): FAIL — one blocker,
+four should-fixes, all fixed in this round** — see the inline notes below
+for what changed and how each fix was mutation-verified.
+
+- `cached-prefill-outcome.test.js` — `web/js/lib/cached-prefill-outcome.js`:
+  - `partitionCachedPrefillOutcome`: sorts a `POST /v1/prefill/cached`
+    response into `queued`/`alreadyQueued`/`alreadyRunning`/`alreadyPaused`
+    regardless of input order; empty/non-array input treated as empty; a
+    deduplicated entry with an unexpected non-`queued`/non-`paused`
+    in-flight status still lands in `alreadyRunning` rather than vanishing
+    (same "unknown routes somewhere honest, never oblivion" posture as
+    `job-partition.js`'s status handling). **S1 (round 1 should-fix):**
+    `alreadyQueued` is its OWN bucket, not folded into `alreadyRunning` —
+    `enqueue_prefill` returns an existing job with ITS OWN status, and a
+    double-press before the single worker claims anything is the COMMON
+    case, not an edge case; mutation-verified by folding the `queued`
+    branch back into `alreadyRunning` and watching 4 tests fail by name.
+  - `summarizeCachedPrefillOutcome` — the mutation-worthy pins the WP brief
+    named, each verified by reverting the fix and watching the named test
+    fail, then restoring it: (1) *"a paused dedupe is NEVER worded as
+    queued/started"* — wording the paused count with "queued for
+    check & update" instead of "paused — resume or cancel..." fails this
+    test (and others) by name; (2) *"empty selection reads as a normal
+    outcome, not a failure"* — wording the empty case as a failure fails
+    this test by name. **S1:** a `queued`-status dedupe is worded
+    "N already queued", distinct from `alreadyRunning`'s "N already in
+    progress" — a job still waiting in the FIFO queue is not "in progress".
+    **S2 (round 1 should-fix):** every string carries the full "check &
+    update" wording ("N queued for check & update", not "N queued for
+    checking") — the plan's honesty rule applies to the whole action's
+    language, not just the button label. **Blocker (round 1, live-
+    reproduced in headless Chrome): the forced-run note used to be composed
+    by the CALLER from its own `GET /v1/games` snapshot, unconditionally —
+    "Nothing cached to check. (1 forced...)" claimed work that provably did
+    not start.** Composition now lives entirely in this function, gated on
+    `partition.queued.length > 0` and scoped to ONLY those appids
+    (`countForcedCachedGames`'s new `queuedRefs` parameter, never the whole
+    snapshot) — two named regression tests (`BLOCKER REGRESSION: empty
+    response + a stale needs_force game...`, `BLOCKER REGRESSION:
+    all-deduplicated response + a forced game...`) pin both shapes,
+    mutation-verified by reverting the gate/scoping to the exact pre-fix
+    behaviour and watching both reproduce the reviewer's literal string
+    (`'Nothing cached to check. (1 forced — ...)'`) before being restored.
+  - `describeCachedPrefillError` — the mid-loop-5xx honesty rule
+    (api/README.md: each app is enqueued in its own committed transaction,
+    so a `5xx` partway through can leave earlier apps durably `queued`):
+    only `ERROR_KINDS.SERVER` sets `refresh: true` (the signal `library.js`
+    maps to `store.refreshNow()`); every other kind (401, 422/409-folded
+    `validation`, network, `not_found`, `unknown`) does not force a
+    refresh, since those genuinely mean nothing was queued by that call.
+    Prefers the server's `detail` text when present, never throws on a
+    non-`ApiError` input.
+  - `countForcedCachedGames(queuedRefs, games)` — **re-scoped in round 1**
+    from a whole-`games`-snapshot count to only the appids present in
+    `queuedRefs` (the `queued` bucket) that also carry `needs_force: true`
+    in `games`; an appid in `queuedRefs` with no matching `games` entry is
+    not counted (fails safe, never guesses).
+  - `createCheckAndUpdateAction` — the in-flight guard, DOM-free by
+    construction: a `run()` call while a manually-gated fetcher's promise
+    is still pending returns `{skipped: true}` WITHOUT invoking the fetcher
+    a second time; a `run()` after the previous one settles (success OR
+    rejection) calls the fetcher again; a rejected fetch still clears the
+    in-flight flag so the guard is usable immediately afterward. **S4
+    (round 1 should-fix): the no-op assertion is now SYNCHRONOUS** —
+    asserted on the fetcher's call count immediately after issuing both
+    `run()` calls, before either promise is awaited or the deferred fetch
+    is resolved. The original version awaited the second `run()` first,
+    so a broken guard (removed `if (inFlight)` check) made that `await`
+    hang on the SAME never-yet-resolved deferred instead of failing —
+    mutation-verified: removing the guard now fails this test in under 1ms
+    (`calls === 1` assertion, `2 !== 1`) with no `--test-timeout` needed.
+- `demo-data-cached-prefill.test.js` extends `demo-data.js`'s coverage with
+  the new `POST /v1/prefill/cached` route: selects every game whose `depots`
+  array is non-empty (this demo model's stand-in for "has cache content on
+  disk", `makeGame()`'s header), sorted ascending, excluding the one seed
+  game with no depots at all; response shape matches `PrefillJobRef`
+  exactly; a brand-new job dedupes `false`; the seed data's already-`running`
+  job dedupes onto itself with no second job created; pausing that job first
+  and re-calling the route dedupes onto it with `status: "paused"` — the job
+  itself stays paused afterward, proving this route never resumes it.
+  **S1 fixture (round 1):** pausing then RESUMING that job (a real,
+  reachable sequence — `POST /v1/jobs/{id}/resume` genuinely returns
+  `status: "queued"`, api/README.md "Job control") then re-calling the
+  route dedupes onto it with `status: "queued"`, exercising the
+  `alreadyQueued` bucket end to end through the actual demo route rather
+  than only via hand-built fixtures. Also: any request body (including a
+  bogus `{"appids": [...]}`) is silently ignored, never read as an explicit
+  id list; the empty-selection case after clearing every game's cache
+  (reusing the shared-depot two-call dance `demo-data.test.js` already
+  exercises) returns `[]`; and that this route shares the exact SAME
+  per-appid enqueue helper `POST /v1/prefill` uses (`enqueuePrefillForAppid`,
+  extracted from that route in this WP) rather than a second,
+  potentially-drifting enqueue mechanism. **N1/N2 (round 1 nitpicks,
+  documented in the test file's header, not fixed — both pre-existing,
+  neither a two-line change):** a brand-new demo job flips straight to
+  `"running"` on creation (the real contract allows `deduplicated: false`
+  to arrive as `"queued"`, which this demo model never produces at that
+  moment); demo selection keys on `depots.length > 0` while the real grid
+  keys on `size_bytes > 0` (agree on every current fixture, but are not the
+  same predicate).
