@@ -483,4 +483,60 @@
     <string name="detail_load_error_fallback">Could not load this game</string>
     <string name="detail_toast_freed">Freed %1$s</string>
     <string name="detail_zero_bytes_label">0 GB</string>
+
+    <!-- Clients sheet (WP 4b.10). Kotlin port of web/js/components/
+         clients-sheet.js + web/js/lib/clients-view.js — Clients stays a
+         SHEET, not a nav item, per the WP 4a.1 decision restated in
+         nav_library/nav_downloads/nav_settings's comment above. Reached
+         from Settings' "View clients" button and from a bypass
+         notification tap (notifications/NotificationRouting.kt), same two
+         entry points clients-sheet.js's own kdoc documents for the web
+         twin (bypass banner "Details" / a bypass row in the notifications
+         panel — this app has no persistent bypass banner, out of this WP's
+         scope, see ClientsController.kt's kdoc).
+         ClientsCrossFrontendContractTest literal-pins every wording string
+         below against clients-view.js's own hand-transcribed text, per
+         docs/LEARNINGS.md's "a derived round-trip is circular" rule. -->
+    <string name="clients_sheet_title">Clients</string>
+    <string name="clients_sheet_intro">Machines running vault-agent, matched against what actually arrived at the cache.</string>
+    <string name="clients_empty">No clients have reported yet.</string>
+    <string name="clients_section_bypassing">Bypassing</string>
+    <string name="clients_section_healthy">Healthy</string>
+    <string name="clients_load_error">Could not reach vault-api: %1$s</string>
+    <string name="clients_load_error_fallback">Could not load clients</string>
+
+    <!-- Verbatim port of clients-view.js's BYPASS_EXPLANATION — the
+         backend's own "fails toward NOT accusing" posture
+         (vault_api/routers/clients.py's module docstring), never a verdict
+         like "your DNS is broken". -->
+    <string name="clients_bypass_explanation">This does not necessarily mean anything is wrong. Common causes: DNS-over-HTTPS in the browser or OS, the machine resolving Steam\'s CDN over IPv6 (bypassing vault-dns), or simply nothing downloaded yet in the current reporting window.</string>
+
+    <!-- Per-row stats line (clients-view.js's describeHealthyClient/
+         describeBypassClient), assembled in ClientsSheet.kt from
+         ui/clients/logic/ClientsView.kt's plain data with " · " joins —
+         same pattern DownloadsScreen.kt's downloadsSubtitle uses. -->
+    <plurals name="clients_games_reported">
+        <item quantity="one">%1$d game reported</item>
+        <item quantity="other">%1$d games reported</item>
+    </plurals>
+    <string name="clients_games_unknown">game count unknown</string>
+    <string name="clients_bytes_served">%1$s served</string>
+    <string name="clients_bytes_none">nothing served yet</string>
+    <string name="clients_hit_rate">%1$d%% hit</string>
+    <string name="clients_hit_rate_none">no cache requests yet</string>
+    <string name="clients_addresses_unknown">no known address</string>
+    <!-- States the OBSERVATION only, never a cause — the cause-agnostic
+         explanation (clients_bypass_explanation above) is shown separately,
+         under EVERY bypass-suspected row (ClientsSheet.kt; see
+         ui/clients/logic/ClientsView.kt's kdoc for why this is NOT "once
+         per section" despite clients-view.js's own comment claiming so). -->
+    <string name="clients_bypass_note">none of its downloads have reached the cache recently</string>
+
+    <!-- Settings' entry point (WP 4b.10 closes the WP 4b.8 routing gap:
+         bypass notifications used to land on Settings with no clients
+         detail to show; this button is the discoverable path for a user
+         who reaches this screen without a notification at all). -->
+    <string name="settings_section_clients">Clients</string>
+    <string name="settings_clients_desc">See which machines have reported to this vault, and whether any of them appear to be bypassing the cache.</string>
+    <string name="settings_clients_open_button">View clients</string>
 </resources>

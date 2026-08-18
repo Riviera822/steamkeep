@@ -24,10 +24,24 @@ import dev.steamvault.app.repo.SteamIdentityState
  * out, or the signed-in SteamID64/persona plus a sign-out button and a
  * library COUNT PREVIEW only (the brief's explicit boundary -- the real
  * library grid is WP 4b.4's job, this screen only proves the repository
- * wiring works end to end). Wired into `MainActivity` in place of the WP
- * 4b.1 debug gallery screen; real navigation between multiple screens
- * (library/downloads/settings) is still out of scope until the WPs that
- * add it (4b.4/4b.5/4b.7).
+ * wiring works end to end).
+ *
+ * **Unreachable from the UI since WP 4b.7** (superseded by
+ * `ui/settings/SettingsScreen.kt`'s Steam identity section -- see that
+ * file's kdoc and `MainActivity.kt`'s), same "kept but unreachable"
+ * treatment WP 4b.3/4b.4 already gave `ui.gallery.GalleryScreen`.
+ *
+ * **Moved to `src/debug/` (WP 4b.9 carry-over, `docs/WORKPACKAGES.md`
+ * Phase 4b header).** Same reasoning `ui/gallery/GalleryScreen.kt`'s own
+ * kdoc gives for its WP 4b.4 move: `src/debug/` is AGP's standard
+ * mechanism for "compiled for debug builds only", so this now-unreferenced
+ * screen is excluded from the `release` variant by construction rather
+ * than shipping dead code into a signed artefact. No test referenced this
+ * file directly before or after the move (`IdentityScreen` was never
+ * unit-tested on its own -- the state/logic it renders,
+ * `dev.steamvault.app.repo.SteamIdentityState`/`SteamIdentityRepository`,
+ * is covered by `SteamIdentityRepositoryTest`, which is untouched by this
+ * move since it lives under `net/`/`repo/`, not `ui/`).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

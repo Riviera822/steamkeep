@@ -35,11 +35,15 @@ import dev.steamvault.app.notifications.NotificationRouting
 import dev.steamvault.app.repo.SteamIdentityRepository
 import dev.steamvault.app.repo.SteamIdentityRepositoryImpl
 import dev.steamvault.app.repo.VaultCacheRepository
+import dev.steamvault.app.repo.VaultClientsRepository
 import dev.steamvault.app.repo.VaultGamesRepository
 import dev.steamvault.app.repo.VaultJobsRepository
 import dev.steamvault.app.repo.VaultMappingRepository
 import dev.steamvault.app.storage.EncryptedCredentialStore
 import dev.steamvault.app.storage.SharedPreferencesLibraryPreferences
+import dev.steamvault.app.ui.clients.AndroidClientsStrings
+import dev.steamvault.app.ui.clients.ClientsController
+import dev.steamvault.app.ui.clients.ClientsSheet
 import dev.steamvault.app.ui.downloads.DownloadsScreen
 import dev.steamvault.app.ui.downloads.logic.countPending
 import dev.steamvault.app.ui.library.LibraryScreen
@@ -108,6 +112,15 @@ class MainActivity : ComponentActivity() {
      * identity outside Compose's `remember`, for the same reason
      * [onboardingController] does). */
     private var settingsControllerState by mutableStateOf<SettingsController?>(null)
+
+    /** WP 4b.10: the clients sheet's controller -- rebuilt alongside
+     * [vaultApiClientState]/[settingsControllerState], for the same reason
+     * [settingsControllerState] needs a stable, outside-composition
+     * identity (`handleNotificationTap` opens it directly on a bypass
+     * notification tap, per [ClientsController]'s kdoc: this sheet is
+     * hoisted at this level, not owned by any one [Destination], since
+     * "Clients is a sheet, not a nav item" per `ui/nav/Destination.kt`). */
+    private var clientsControllerState by mutableStateOf<ClientsController?>(null)
 
     private var showOnboarding by mutableStateOf(false)
     private var onboardingMode by mutableStateOf(OnboardingMode.FIRST_RUN)
@@ -182,7 +195,15 @@ class MainActivity : ComponentActivity() {
                             BottomNavBar(
                                 current = destination,
                                 pendingJobsCount = pendingJobsCount,
-                                onSelect = { destination = it },
+                                onSelect = {
+                                    destination = it
+                                    // Mockup rule: navigation dismisses transient
+                                    // surfaces (docs/design/vault-app-mockup-NOTES.md
+                                    // -- the clients sheet is explicitly named
+                                    // alongside the detail sheet and the
+                                    // notifications panel).
+                                    clientsControllerState?.close()
+                                },
                             )
                         },
                     ) { innerPadding ->
@@ -192,6 +213,17 @@ class MainActivity : ComponentActivity() {
                                 Destination.DOWNLOADS -> DownloadsDestinationContent()
                                 Destination.SETTINGS -> SettingsDestinationContent()
                             }
+                        }
+                    }
+
+                    // WP 4b.10: hoisted at this level, not inside any one
+                    // [Destination]'s content -- see [clientsControllerState]'s
+                    // kdoc. Only composed (and only then polling, see
+                    // ClientsSheet.kt) while a connection exists and the
+                    // sheet is actually open.
+                    clientsControllerState?.let { controller ->
+                        if (controller.isOpen) {
+                            ClientsSheet(controller = controller)
                         }
                     }
                 }
@@ -221,6 +253,9 @@ class MainActivity : ComponentActivity() {
         vaultApiClientState = client
         settingsControllerState = client?.let {
             SettingsController(it, credentialStore, identityRepository, AndroidSettingsStrings(resources))
+        }
+        clientsControllerState = client?.let {
+            ClientsController(VaultClientsRepository(it), AndroidClientsStrings(resources))
         }
         // Review fix (N3): a stale pip count from the connection that just
         // disappeared (Settings' Disconnect) must not linger on the bottom
@@ -288,6 +323,7 @@ class MainActivity : ComponentActivity() {
                 openOnboarding(OnboardingMode.FIRST_RUN)
             },
             onRequestNotificationPermission = { requestNotificationPermission() },
+            onOpenClientsClick = { clientsControllerState?.open(lifecycleScope) },
         )
     }
 
@@ -350,14 +386,29 @@ class MainActivity : ComponentActivity() {
      * `PendingIntent` from a previous app version's differently-named enum
      * constant is a real, if unlikely, forward-compat edge case worth not
      * crashing on).
+     *
+     * WP 4b.10: [NotificationRouting.EXTRA_OPEN_CLIENTS_SHEET] is checked
+     * independently of [NotificationRouting.EXTRA_DESTINATION] -- a bypass
+     * event carries the sheet extra and NO destination extra at all (see
+     * `NotificationRouting.destinationFor`'s kdoc: bypass events no longer
+     * switch [Destination]), so neither branch below early-returns on the
+     * other being absent; a plain launch [Intent] (neither extra set)
+     * degrades to two no-ops, same net effect the old single early-return
+     * had for that case.
      */
     private fun handleNotificationTap(intent: Intent?) {
-        val destinationName = intent?.getStringExtra(NotificationRouting.EXTRA_DESTINATION) ?: return
-        if (showOnboarding) return
-        destination = try {
-            Destination.valueOf(destinationName)
-        } catch (_: IllegalArgumentException) {
-            return
+        if (intent == null || showOnboarding) return
+
+        intent.getStringExtra(NotificationRouting.EXTRA_DESTINATION)?.let { destinationName ->
+            try {
+                destination = Destination.valueOf(destinationName)
+            } catch (_: IllegalArgumentException) {
+                // unrecognized/forward-compat value -- ignored, see kdoc above.
+            }
+        }
+
+        if (intent.getBooleanExtra(NotificationRouting.EXTRA_OPEN_CLIENTS_SHEET, false)) {
+            clientsControllerState?.open(lifecycleScope)
         }
     }
 

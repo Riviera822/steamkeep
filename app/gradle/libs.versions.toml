@@ -30,9 +30,35 @@
 ## - androidx.security:security-crypto 1.1.0-alpha06 is pinned over the
 ##   older stable 1.0.0 specifically for the `MasterKey` builder API used
 ##   in EncryptedCredentialStore.kt — 1.0.0's `MasterKeys` helper is
-##   deprecated in favour of it. No stable 1.1.0 GA exists yet; this is a
-##   documented exception to "stable only", not an oversight (there is no
-##   non-deprecated stable alternative for EncryptedSharedPreferences today).
+##   deprecated in favour of it. This WAS a documented exception to
+##   "stable only" (no GA 1.1.0 existed at WP 4b.2's time), not an
+##   oversight.
+##
+##   WP 4b.9 carry-over re-check (docs/WORKPACKAGES.md Phase 4b header):
+##   a GA release now EXISTS -- androidx.security:security-crypto:1.1.0
+##   (Google's Maven metadata, dl.google.com/dl/android/maven2/androidx/
+##   security/security-crypto/maven-metadata.xml: <release>1.1.0</release>,
+##   lastUpdated 2025-07-30), and its classes.jar carries the identical
+##   API surface this app depends on --
+##   androidx.security.crypto.{MasterKey, MasterKey$Builder,
+##   EncryptedSharedPreferences} are all present, verified by downloading
+##   the 1.1.0 .aar and listing classes.jar (not just trusting the version
+##   number, per docs/LEARNINGS.md's "verify empirically" rule). This is
+##   NOT bumped here -- the WP 4b.9 brief is explicit ("report, recommend,
+##   do not silently bump a security dependency") and bumping a
+##   credential-storage dependency deserves its own reviewed change, not a
+##   drive-by inside a packaging/carry-over WP.
+##
+##   RECOMMENDATION: bump to 1.1.0 in a dedicated follow-up change once a
+##   device/emulator is available to re-run EncryptedCredentialStore
+##   against a real Android Keystore on the new artifact before trusting
+##   it in production (this environment has never been able to exercise
+##   that path at all -- see app/README.md's "No instrumented test of
+##   EncryptedCredentialStore" note, unchanged by this finding). The
+##   change itself is expected to be a one-line version bump with no
+##   source changes (class list unchanged), but "expected" is not
+##   "verified on-device", and a credential-storage dependency is exactly
+##   the wrong place to skip that step.
 ##
 ## WP 4b.3 addition (Steam identity — OpenID + GetOwnedGames on-device):
 ## - androidx.browser 1.8.0 is the current stable release, used ONLY for

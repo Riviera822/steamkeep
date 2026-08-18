@@ -60,6 +60,7 @@ fun SettingsScreen(
     onReconnectClick: () -> Unit,
     onDisconnected: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
+    onOpenClientsClick: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     LaunchedEffect(controller) { controller.load() }
@@ -87,6 +88,8 @@ fun SettingsScreen(
             SteamIdentitySection(controller, onSignInSteamClick)
             HorizontalDivider()
             NotificationsSection(onRequestNotificationPermission)
+            HorizontalDivider()
+            ClientsSection(onOpenClientsClick)
             HorizontalDivider()
             ConnectionSection(controller, onReconnectClick, onDisconnected)
         }
@@ -122,6 +125,32 @@ private fun NotificationsSection(onRequestNotificationPermission: () -> Unit) {
     )
     OutlinedButton(onClick = onRequestNotificationPermission) {
         Text(stringResource(R.string.settings_notifications_enable_button))
+    }
+}
+
+// ---------------------------------------------------------------------
+// Clients section (WP 4b.10)
+// ---------------------------------------------------------------------
+
+/**
+ * The discoverable entry point into the clients sheet
+ * (`ui/clients/ClientsSheet.kt`) for a user who reaches Settings WITHOUT a
+ * bypass notification to tap -- the sheet itself is hoisted at
+ * `MainActivity` level (see `ClientsController.kt`'s kdoc: "Clients is a
+ * sheet, not a nav item"), so this section is just a button, same minimal
+ * shape [NotificationsSection] above already establishes for "one button
+ * plus context, no live state read here".
+ */
+@Composable
+private fun ClientsSection(onOpenClientsClick: () -> Unit) {
+    Text(stringResource(R.string.settings_section_clients), style = MaterialTheme.typography.titleMedium)
+    Text(
+        stringResource(R.string.settings_clients_desc),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.bodySmall,
+    )
+    OutlinedButton(onClick = onOpenClientsClick) {
+        Text(stringResource(R.string.settings_clients_open_button))
     }
 }
 

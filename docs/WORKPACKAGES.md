@@ -136,9 +136,12 @@ does; unknown statuses deliberately do NOT count toward the nav pip
 (an unknown terminal status must not pin an uncloseable badge; an
 unknown active status self-corrects and stays visible in History).
 BACKPORT NOTE for the web: adopt the same routing in job-partition.js —
-candidate for the WP 4a.8 polish pass. Shared test gap to close on both
-sides then: the log-excerpt truncation marker must be pinned to
-position 0 (startsWith, not contains).
+candidate for the WP 4a.8 polish pass. The log-excerpt truncation-marker
+pin (startsWith, not contains) named here as a shared test gap is CLOSED
+on both sides as of WP 4b.5 (Kotlin, `LogExcerptTest`'s named mutation
+pin) and WP 4a.8 (web) — re-verified during WP 4b.9's carry-over pass;
+this line stayed stale after 4a.8 landed and is corrected here rather than
+left to mislead the next reader.
 
 Recorded divergences (WP 4a.7, 2026-08-11, reviewer-endorsed): (1) the
 notification bell lives in the app-shell topbar, not the mockup's
@@ -167,6 +170,20 @@ would misreport an operator action. Also recorded for the 4a.8 polish
 pass: job cards ship without the mockup's decorative mini cover
 thumbnail (no information lost; mockup itself hides all content inside
 `.thumb`).
+
+Recorded divergence (WP 4b.10, 2026-08-17, reviewer-endorsed): the ANDROID
+clients sheet has no persistent app-shell bypass banner, unlike web's
+WP 4a.7 banner (`web/js/components/bypass-banner.js`, present on every
+view as a third entry point alongside the notifications panel and the
+Settings button this WP adds). Deliberately not ported: the WorkManager
+background differ (WP 4b.8) already covers the PUSH half of bypass
+awareness independently of any banner, and adding a new persistent,
+always-visible surface is itself a frozen-mockup-scope decision (same
+class as the WP 4a.1 "Clients is a sheet, not a nav item" ruling), not
+something to slip in as a side effect of closing the notification-routing
+gap. User veto welcome; revisit if real use shows the two notification-
+only entry points (Settings button, bypass tap) are not discoverable
+enough.
 
 ### WP 4a.1 — Static serving + app shell (api/ + web/) — **first, serial**
 - vault-api mounts `web/` (StaticFiles, SPA fallback, sane CSP/security
@@ -236,15 +253,46 @@ OpenID in a Custom Tab; the PHONE fetches the library from Valve
 - **WP 4b.7** Onboarding + settings — branch-parallel after 4b.3.
 - **WP 4b.8** Notifications (polling via WorkManager, respecting Doze) —
   serial after 4b.5.
+- **WP 4b.10** Clients/bypass detail surface (`GET /v1/clients` sheet,
+  closing the WP 4b.8 recorded routing gap: bypass notifications land on
+  the sheet directly instead of Settings) — serial after 4b.8. **DONE
+  2026-08-17** — see `docs/PROJECT_PLAN.md` §7 Phase 4b evidence notes and
+  `app/README.md`'s "Clients sheet (WP 4b.10)" section.
 - **WP 4b.9** Release build + signing docs, APK distribution (no Play
-  Store requirement; F-Droid long-term) — last. Carry-over items from
-  reviews: move the unreferenced GalleryScreen (4b.1) and IdentityScreen
-  (4b.3, superseded by SettingsScreen in 4b.7) to src/debug/ keeping
-  their tests; re-check the security-crypto 1.1.0-alpha pin for a GA
-  release; the OpenID state parameter landed in 4b.7 (residual closed);
-  pin the Kotlin LogExcerpt truncation marker to position 0 (web side
-  pinned in 4a.8; the 4b.5 twin is still open); release notification
-  icon art (4b.8 reuses the launcher monochrome).
+  Store requirement; F-Droid long-term) — last. **DONE 2026-08-17** — see
+  `docs/PROJECT_PLAN.md` §7 Phase 4b evidence notes and `app/README.md`'s
+  "Release build, signing, distribution, and carry-over cleanup (WP 4b.9)"
+  section. Carry-over items from reviews, each individually re-verified
+  against the code before acting (not assumed from this list's own
+  wording):
+  - move the unreferenced GalleryScreen (4b.1) and IdentityScreen (4b.3,
+    superseded by SettingsScreen in 4b.7) to src/debug/ keeping their
+    tests — **done**; GalleryScreen had already moved during WP 4b.4
+    itself (this list was never updated to drop it), IdentityScreen moved
+    in WP 4b.9;
+  - re-check the security-crypto 1.1.0-alpha pin for a GA release — **done
+    (reported, not bumped)**: a GA 1.1.0 now exists and is API-compatible
+    (verified via the downloaded .aar's class list); the WP 4b.9 brief
+    explicitly required reporting + recommending rather than silently
+    bumping a security dependency — see `gradle/libs.versions.toml`'s
+    comment for the finding and the recommendation to bump in its own
+    reviewed change once a device is available to re-verify
+    EncryptedCredentialStore against the new artifact;
+  - the OpenID state parameter landed in 4b.7 (residual closed) — already
+    marked closed before this WP, unchanged;
+  - pin the Kotlin LogExcerpt truncation marker to position 0 (web side
+    pinned in 4a.8; the 4b.5 twin is still open) — **turned out to already
+    be closed since WP 4b.5** (`startsWith`, not `contains`, with its own
+    named mutation-pin test in `LogExcerptTest`; `docs/PROJECT_PLAN.md`
+    §7's own WP 4b.5 evidence note already said so) — this list entry was
+    stale, not open work;
+  - release notification icon art (4b.8 reuses the launcher monochrome) —
+    **decided for v1**: kept, as a deliberate final decision rather than a
+    standing "revisit" pointer — the launcher's monochrome layer is
+    already the flat white-on-transparent silhouette Android's own
+    notification-icon guidance asks for, not merely convenient reuse; a
+    bespoke glyph is a general future art-pass item, not a WP 4b.9
+    blocker.
 
 ---
 
@@ -296,7 +344,7 @@ dispatchable in branches:  3.9 (api, new-module isolation)   5.1 (.github)   5.2
 after 3.12 merges:         3.11 (api)  → then 3.13 (api)
 after 3.10+3.11+3.12+3.13: Phase 3 COMPLETE
 4a: 4a.1 → 4a.2 → {4a.3, 4a.5, 4a.6(decision pending)} → 4a.4, 4a.7 → 4a.8
-4b: 4b.1 → 4b.2 → {4b.3, 4b.4, 4b.5} → 4b.6, 4b.7, 4b.8 → 4b.9
+4b: 4b.1 → 4b.2 → {4b.3, 4b.4, 4b.5} → 4b.6, 4b.7, 4b.8 → 4b.10 → 4b.9
 5.3 after api/core freeze · 5.5/5.6 gated on user
 4a and 4b tracks are independent of each other and of Phase-3 remainder
 (they consume the HTTP API only) — but 4a.5/4b.5 want 3.12's semantics

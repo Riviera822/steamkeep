@@ -705,6 +705,12 @@ app/app/src/main/java/dev/steamvault/app/
     └── IdentityScreen.kt               # sign-in / signed-in + sign-out + count preview
 ```
 
+(This tree reflects the layout AS OF WP 4b.3. `IdentityScreen.kt` was later
+moved to `app/app/src/debug/java/dev/steamvault/app/ui/identity/
+IdentityScreen.kt` in WP 4b.9, once WP 4b.7 had made it unreachable from
+the UI — see this file's own "Carry-over cleanup (WP 4b.9)" section below
+for why and its current, correct path.)
+
 `storage/CredentialStore.kt` gained three fields (`steamId64`,
 `steamPersonaName`, `steamWebApiKey`) plus `clearSteamIdentity()` — a
 narrower sign-out than `clear()`, which stays reserved for "forget this
@@ -1666,3 +1672,487 @@ device-territory that a future on-device pass must verify:
   than commissioning a dedicated glyph — it is already a pure white-on-
   transparent silhouette, exactly the shape a status-bar icon needs;
   revisit in the WP 4b.9 release-art pass if a dedicated asset is wanted.
+
+## Clients sheet (WP 4b.10)
+
+Serial after 4b.8 per `docs/WORKPACKAGES.md` Phase 4b. Closes the recorded
+routing gap that WP 4b.8's own README section above documents ("Recorded
+routing gap... bypass_suspected/bypass_resolved land on Destination
+.SETTINGS, not a clients surface") and the matching PARTIAL item in
+`docs/PROJECT_PLAN.md` §7: a real `GET /v1/clients` screen, Kotlin port of
+`web/js/components/clients-sheet.js` + `web/js/lib/clients-view.js`.
+
+```
+app/app/src/main/java/dev/steamvault/app/
+├── ui/clients/
+│   ├── logic/ClientsView.kt      # partitionClients, hitRatePercent, ClientRowModel
+│   ├── ClientsController.kt      # state + the foreground-only poll loop
+│   ├── ClientsStrings.kt         # the one Resources-backed fallback string
+│   └── ClientsSheet.kt           # the ModalBottomSheet composable
+├── notifications/NotificationRouting.kt  # destinationFor now nullable + opensClientsSheetFor
+├── notifications/NotificationPoster.kt   # sets EXTRA_OPEN_CLIENTS_SHEET
+├── ui/settings/SettingsScreen.kt         # new "Clients" section/button
+└── MainActivity.kt                       # hoists ClientsController, wires both entry points
+```
+
+**Clients stays a sheet, not a nav item — `ui/nav/Destination.kt`'s kdoc and
+the WP 4a.1 decision it restates are binding here too.** `ClientsController`
+is therefore hoisted at `MainActivity` level next to `settingsControllerState`
+(same reasoning that class's own kdoc gives), not owned by the Library/
+Downloads/Settings screen it happens to render over — the mockup rule
+"navigation dismisses transient surfaces" is honoured at the bottom nav's
+`onSelect` call site (`clientsControllerState?.close()`), same place the
+game detail sheet's dismissal precedent lives conceptually, generalized to
+a sheet that is not scoped to any one destination's own `remember` block.
+
+**Two entry points, matching `clients-sheet.js`'s own kdoc exactly:**
+Settings' new "Clients" button (`SettingsScreen.kt`'s `ClientsSection`, for
+a user who never got a notification), and a `bypass_suspected`/
+`bypass_resolved` notification tap. The web twin also has a persistent
+app-shell bypass banner as a third entry point — **deliberately not ported
+here** (out of this WP's scope; the WorkManager background poll already
+covers the notification half independently, and adding a persistent banner
+is a real UI-surface decision matching the frozen-mockup discipline this
+project holds Phase-4 UI to, not something to slip in as a side effect of
+closing the routing gap).
+
+### The routing gap, actually closed (`notifications/NotificationRouting.kt`)
+
+`destinationFor(event: NotificationEvent): Destination?` is now nullable,
+returning `null` for both bypass events (previously `Destination.SETTINGS`
+— the recorded gap). A new `opensClientsSheetFor(event): Boolean` is `true`
+for exactly those two events. `AndroidNotificationPoster` sets a new intent
+extra, `EXTRA_OPEN_CLIENTS_SHEET`, only when `opensClientsSheetFor` says so,
+and omits `EXTRA_DESTINATION` entirely when `destinationFor` is `null` — no
+more forcing a bypass tap onto Settings at all. `MainActivity
+.handleNotificationTap` checks the two extras independently (neither
+early-returns on the other's absence), so a bypass tap now opens the
+clients sheet directly, on top of whatever screen the user is currently on,
+mirroring `web/js/components/notifications.js`'s own per-event
+`target.kind` dispatch (a `"clients"` target calls `openClientsSheet()`
+directly, never switching view first) rather than re-deriving a
+destination-based approximation of it.
+`NotificationRoutingTest`'s `bypass_suspected`/`bypass_resolved` cases now
+assert BOTH `destinationFor(event) == null` (mutation target: distinct from
+asserting `!= Destination.SETTINGS`, which alone would not catch a
+regression to some OTHER wrong destination) and
+`opensClientsSheetFor(event) == true` — either assertion alone would miss
+half of a regression back toward the old behaviour.
+
+### Model stability (`ui/clients/logic/ClientsView.kt`)
+
+The WP brief's explicit ask ("follow the pattern the 4b.5 reviewer
+endorsed — a tick that changes only a drift field must not rebuild the
+row") is ported as a genuine, if differently-shaped, claim on this
+platform — see that file's kdoc for the full reasoning: Compose's
+`LazyColumn`/keyed recomposition has no imperative "rebuild the DOM" step
+to avoid the way `web/js/lib/clients-render-plan.js`'s `full`/`patch`/
+`rebuild` verdict exists for, so this WP does not port a redundant
+render-plan diff object. What *is* still a real, testable claim is
+`ClientRowModel`'s field split: [`ClientRowStats`] is the ONLY field a poll
+tick may change while `clientId`/`bypassSuspected`/`addresses` stay put —
+i.e. a stats-only tick can never also silently move a client to the other
+section, and a section flip can never hide inside what looks like a stats
+update. `ClientsViewTest` pins both directions with the same
+`a.copy(volatileField = b.volatileField) == b` technique
+`JobCardModelTest` uses for the `stop_request`-only diff.
+
+### Wording contract (`ClientsCrossFrontendContractTest`)
+
+Per the WP brief ("cross-frontend drift here is a defect — hold that
+standard", referencing the 12/12 parity-mutation bar 4b.4/4b.5/4b.6 already
+cleared), every section heading, fallback phrase, and the not-accusing
+`BYPASS_EXPLANATION` sentence is literal-pinned against
+`web/js/lib/clients-view.js`'s own hand-transcribed text by reading
+`strings.xml` structurally (the same `readResFile`/`extractStringResource`
+technique `StatusIconCrossFrontendContractTest` already established for the
+status-word table) — never derived from the resource under test itself.
+
+**A real finding from actually reading the web source, not trusting its own
+comment (`docs/LEARNINGS.md` "verify empirically over believing docs"):**
+`clients-view.js`'s header comment claims `BYPASS_EXPLANATION` is "shown
+once per section rather than repeated per row", but `clients-sheet.js
+::buildRow` actually appends a fresh hint paragraph inside its `if (bypass)`
+branch for EVERY card it builds — once per bypassing client, not once per
+section. `ClientsSheet.kt`'s `ClientRow` ports the code (an explanation
+paragraph under every bypass-suspected row), not the stale comment; both
+`ClientsView.kt`'s and `strings.xml`'s comments record the correction so a
+future reader does not re-trust the same stale line.
+
+### Tests (WP 4b.10)
+
+16 new/changed JVM unit tests (550 total with WP 4b.8's 534 baseline: +10
+`ClientsViewTest`, +5 `ClientsCrossFrontendContractTest`, net +1 in
+`NotificationRoutingTest` — 2 old bypass-routes-to-Settings cases replaced
+by 2 new bypass-opens-sheet cases plus 1 new `EXTRA_OPEN_CLIENTS_SHEET`
+literal pin), no Robolectric/emulator dependency. `ClientsController`
+itself is intentionally NOT given its own test file — same "thin glue,
+tested only through its `logic/` pure functions" treatment
+`DownloadsController`/`DetailController`/`SettingsController` already get
+(none of the four has a dedicated `*ControllerTest.kt`); its `refreshOnce`/
+`open`/`pollForever` are direct, un-branchy wiring around
+`ClientsRepository`/`partitionClients`, with no idempotency or ordering
+claim sharp enough to warrant the exception `OnboardingControllerTest`
+earns for the field-clearing pin its own WP brief explicitly asked for.
+
+Verified command + output tail:
+
+```
+$ ./gradlew.bat test lintDebug assembleDebug
+...
+BUILD SUCCESSFUL in 53s
+74 actionable tasks: 37 executed, 37 up-to-date
+```
+
+550/0/0 (summed from the `testDebugUnitTest`/`testReleaseUnitTest` XML
+reports' `tests=`/`failures=`/`errors=` attributes);
+`app/app/build/reports/lint-results-debug.txt`: "No issues found."
+
+### What WP 4b.10 deliberately did NOT do — the honest device-test list adds
+
+Everything above the Android-framework boundary is unit-tested exactly like
+every earlier UI WP; what remains real, uncovered device territory:
+
+1. **`ModalBottomSheet` rendering, scroll, and dismiss gestures for the
+   clients sheet specifically** — same class of item every earlier sheet/
+   screen WP has recorded (`IdentityScreen`, `GameDetailSheet`), never
+   exercised outside a JVM test.
+2. **A real `bypass_suspected` transition observed live**, end to end from
+   a genuine `vault-agent` report through `GET /v1/clients` into the sheet
+   and the notification tap — `NotificationDifferTest`/`ClientsViewTest`
+   prove the two halves independently, but not the seam between a live
+   device notification tap and the sheet actually opening on top of
+   whatever screen was showing.
+3. **No persistent bypass banner** (unlike `web`'s app-shell banner) — see
+   this section's own "Two entry points" note above for why that is a
+   scope decision, not a gap this WP failed to close.
+4. **`clearAndSetSemantics` on the badge icon has not been heard by a real
+   screen reader** — proven only by inspection that the equivalent web
+   `aria-hidden` treatment exists for the same reason, same honest caveat
+   every other icon-decorative-vs-accessible-text call in this app carries
+   until a device pass.
+
+## Release build, signing, distribution, and carry-over cleanup (WP 4b.9)
+
+Last per `docs/WORKPACKAGES.md` Phase 4b ("4b.9 — last"). Two independent
+halves: a real release-signing story (never a secret in the repo), and the
+carry-over list `docs/WORKPACKAGES.md`'s Phase 4b header names by name.
+
+**Opus review verdict: PASS, no blockers (joint review with WP 4b.10).**
+The key-material audit (extension sweep, ignored files,
+`app/app/build/`, `app/.gradle/`, every git-object-store ref including
+unreachable blobs, stash, staged, `~/.android/`, the toolchain dir) found
+no keystore, signed artefact, password, alias, or store path anywhere in
+the tree or its history. Four should-fixes landed, called out inline at
+each fix site below (S1: `packageRelease`/`packageReleaseBundle` bypassed
+the signing guard; S2: the missing persistent bypass banner needed its
+own recorded-divergence entry, see the WP 4b.10 checkbox note and
+`docs/WORKPACKAGES.md`'s Phase 4a divergence cluster; S3: `.gitignore`
+widened for `*.p12`/`*.pfx`/`*.bks` plus a root-level belt; S4: the
+self-contradictory "no keystore, anywhere, ever" line below), plus a
+handful of nits (stale KDoc cross-references, an AGP v2/v3-default
+overclaim, a stale WORKPACKAGES.md truncation-marker line, `IdentityScreen
+.kt`'s WP 4b.3 directory tree left un-annotated after its WP 4b.9 move).
+
+### Release signing (`app/app/build.gradle.kts`, `app/keystore.properties.example`)
+
+**Never a secret in the repo, by construction, not by discipline.** Values
+come from a gitignored `app/keystore.properties` file (the pattern was
+already reserved in `app/.gitignore` since WP 4b.1 — `*.jks`/`*.keystore`/
+`keystore.properties` — this WP is the first to actually wire it up) or
+from environment variables (`VAULT_RELEASE_STORE_FILE`/
+`VAULT_RELEASE_STORE_PASSWORD`/`VAULT_RELEASE_KEY_ALIAS`/
+`VAULT_RELEASE_KEY_PASSWORD`) as a CI-style fallback — the properties file
+wins when both are present (`releaseSigningValue`'s Elvis chain). This
+app **never generates a keystore itself** — see the walkthrough below for
+the `keytool` command the user runs. No keystore, password, or alias
+appears anywhere in this tree, in a test fixture, or in git history from
+this WP.
+
+**A missing/incomplete config is an immediate, actionable build failure —
+never a crash, never a silently unsigned APK.** `assembleDebug` needs
+none of this and is completely unaffected (debug builds keep using AGP's
+own auto-generated debug keystore, untouched); `gradle.taskGraph.whenReady`
+checks specifically for `assembleRelease`/`bundleRelease`/`installRelease`/
+`packageRelease`/`packageReleaseBundle` in the resolved task graph (by
+NAME, not by any looser "contains Release" match —
+`test`/`testReleaseUnitTest`/`lintDebug`/`compileReleaseKotlin` all need no
+signing config at all and must keep working with zero keystore setup) and
+throws a `GradleException` with the exact fix (create the properties file
+from the committed template, or set the four env vars) before any
+compilation or packaging work starts.
+
+**Review round 1 finding (Opus), fixed here.** The first version of this
+guard only listed `assembleRelease`/`bundleRelease`/`installRelease` —
+`assembleRelease`/`bundleRelease` are aggregate lifecycle tasks that
+DEPEND ON `packageRelease`/`packageReleaseBundle`, but running
+`./gradlew packageRelease` (or `packageReleaseBundle`) DIRECTLY bypassed
+the guard entirely: measured, `BUILD SUCCESSFUL`, producing
+`app/build/outputs/apk/release/app-release-unsigned.apk`. Severity was
+bounded even before the fix — the artefact is self-labelled `-unsigned`,
+`apksigner` refuses it, and there is no silent fallback to the debug key —
+but the absolute claim above was falsifiable in one command, exactly the
+`docs/LEARNINGS.md` pattern this project keeps re-learning ("Entry-point
+docs describe SHIPPED behavior... grep the code... before claiming it
+works"). Both task names are now in the guarded set; `installRelease`
+stays listed too even though it is currently inert on its own (AGP will
+not even create an install task for an unsignable variant, and once
+signing IS configured this guard can never fire for it) — kept as a
+forward-compat belt, not a live guarded path today. Re-verified after the
+fix, directly against the exact task that bypassed the guard before:
+
+```
+$ ./gradlew.bat packageRelease            # no keystore.properties, no env vars
+...
+FAILURE: Build failed with an exception.
+* What went wrong:
+Release signing is not configured -- refusing to build an unsigned release artefact.
+...
+BUILD FAILED in 15s
+$ ./gradlew.bat packageReleaseBundle      # no keystore.properties, no env vars
+...
+FAILURE: Build failed with an exception.
+* What went wrong:
+Release signing is not configured -- refusing to build an unsigned release artefact.
+...
+BUILD FAILED in 1s
+```
+
+Verified empirically, not just by reading the script (`docs/LEARNINGS.md`
+"verify empirically"):
+
+```
+$ ./gradlew.bat assembleRelease          # no keystore.properties, no env vars
+...
+FAILURE: Build failed with an exception.
+* What went wrong:
+Release signing is not configured -- refusing to build an unsigned release artefact.
+...
+BUILD FAILED in 1s
+```
+
+— fails in ~1 second, before `compileReleaseKotlin` even runs. With a
+throwaway test keystore (`keytool`-generated, used ONLY for this
+verification and deleted immediately afterward, never committed):
+
+```
+$ ./gradlew.bat assembleRelease          # app/keystore.properties present
+...
+BUILD SUCCESSFUL in 20s
+48 actionable tasks: 33 executed, 15 up-to-date
+$ apksigner verify --verbose app/app/build/outputs/apk/release/app-release.apk
+Verifies
+Verified using v2 scheme (APK Signature Scheme v2): true
+Number of signers: 1
+```
+
+— a genuinely signed APK, confirmed with `apksigner` (the AGP-bundled
+`build-tools` verifier), not just "the task didn't error".
+`./gradlew.bat assembleDebug test lintDebug` was re-run with NO keystore
+configured immediately after, green (74 actionable tasks, 37 executed / 37
+up-to-date), proving the debug/test/lint paths are genuinely unaffected by
+any of this rather than accidentally passing because the test keystore was
+still in place.
+
+**Creating the keystore (the user runs this, once, and keeps the file and
+its passwords somewhere durable and backed up — losing it means every
+future release build can never again be recognized as an update to the
+same app by any device that installed an earlier signed build):**
+
+```bash
+keytool -genkeypair -v \
+  -keystore /absolute/path/to/steamvault-release.jks \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -alias steamvault
+```
+
+`keytool` (bundled with any JDK — this project's own pinned JDK 17 works)
+prompts for a keystore password, a key password, and the certificate's
+distinguished-name fields (name/org/city/state/country) — none of it needs
+to be a real identity; it is a self-signed certificate purely to prove
+"every release build claiming to be this app came from the same key",
+which is all Android's package-signature check actually verifies. `-validity
+10000` (~27 years) avoids the certificate itself expiring mid-project;
+Android does not currently reject an expired signing certificate for
+already-installed apps, but starting fresh with a long validity avoids the
+question entirely.
+
+**Building and verifying a release APK:**
+
+1. Copy `app/keystore.properties.example` to `app/keystore.properties`,
+   fill in `storeFile`/`storePassword`/`keyAlias`/`keyPassword` from what
+   `keytool` just created (or export the four `VAULT_RELEASE_*` env vars
+   instead — see the properties file's own comment for the exact names).
+2. `./gradlew.bat assembleRelease` from `app/` (the same wrapper every
+   other command in this README uses). The signed APK lands at
+   `app/app/build/outputs/apk/release/app-release.apk`.
+3. Verify the signature independently of Gradle's own claim:
+   `<sdk>/build-tools/<version>/apksigner verify --verbose app-release.apk`
+   should print `Verifies` and `Verified using v2 scheme (APK Signature
+   Scheme v2): true` — measured against this project's own pinned AGP
+   8.7.3/compileSdk 35 defaults (v3/v3.1/v4 all report `false` on the
+   verification transcript below; do not expect them without explicitly
+   opting in via `signingConfigs`). A bare `jarsigner -verify` also works
+   but only checks the older v1/JAR scheme, which this build does not
+   produce at all (`Verified using v1 scheme (JAR signing): false`) —
+   `apksigner` is the correct tool, not `jarsigner`, for exactly that
+   reason.
+
+**No Play Store requirement; F-Droid is a long-term goal, per
+`docs/WORKPACKAGES.md` Phase 4b's own line item ("APK build docs; no Play
+Store requirement; F-Droid long-term").** This WP ships a signed,
+side-loadable APK and the documentation to build one — it does NOT set up
+a Play Console listing (Google account, store presence, review process —
+an account-level, with-the-user decision this project's own working
+agreement reserves for the user, same class of decision as WP 5.5's GitHub
+org move) or an F-Droid metadata/build-recipe submission (F-Droid's own
+reproducible-build requirements are a real, separate piece of work — a
+future WP once the app is otherwise stable, not a WP 4b.9 packaging
+after-thought). Distribution for now is: build the signed APK per the
+steps above, transfer it to a device (ADB, a file share, a self-hosted
+download link — the user's choice), and install with "install unknown
+apps" allowed for that source, the standard side-load flow for any
+Android app outside a store.
+
+### Carry-over cleanup (`docs/WORKPACKAGES.md` Phase 4b header)
+
+Each item below was individually re-verified against the actual code
+before doing anything — `docs/LEARNINGS.md`'s standing rule ("Entry-point
+docs describe SHIPPED behavior... grep the code... before claiming it
+works") applies just as much to a carry-over TODO list as to a README.
+
+1. **Move the unreferenced `GalleryScreen` (4b.1) and `IdentityScreen`
+   (4b.3, superseded by `SettingsScreen` in 4b.7) to `src/debug/`, keeping
+   their tests working.** `GalleryScreen` was **already moved** to
+   `app/app/src/debug/java/dev/steamvault/app/ui/gallery/GalleryScreen.kt`
+   during WP 4b.4 itself (that WP's own review nit — see the file's kdoc,
+   unchanged by this WP; `git log` confirms the move landed in the WP 4b.4
+   commit, not here) — the carry-over list was simply not updated to drop
+   it once done. **`IdentityScreen` is moved by this WP**, to
+   `app/app/src/debug/java/dev/steamvault/app/ui/identity/IdentityScreen.kt`
+   — `src/debug/` is AGP's standard "compiled for debug builds only"
+   source set (already proven correct by `GalleryScreen`'s own move; no
+   `sourceSets {}` block is needed in `build.gradle.kts`, AGP wires
+   `src/debug/java` to the debug variant by convention), so this
+   now-unreferenced screen is excluded from the signed `release` variant
+   by construction rather than shipping dead UI code into it. **No test
+   referenced `IdentityScreen` directly, before or after the move** — it
+   was never unit-tested on its own (only `dev.steamvault.app.repo
+   .SteamIdentityState`/`SteamIdentityRepository`, which live under
+   `repo/`, untouched by this move, and are covered by
+   `SteamIdentityRepositoryTest`) — so "keeping tests working" was
+   satisfied by construction; `./gradlew.bat test` (550/0/0, see below)
+   confirms nothing broke.
+2. **Re-check the `security-crypto` 1.1.0-alpha pin for a GA release —
+   report, recommend, do not silently bump.** A GA release now exists:
+   `androidx.security:security-crypto:1.1.0` (verified against Google's
+   Maven metadata AND by downloading the `.aar` and listing its
+   `classes.jar` — `MasterKey`/`MasterKey.Builder`/
+   `EncryptedSharedPreferences` are all present, the same classes
+   `EncryptedCredentialStore.kt` already depends on). **Not bumped here**
+   — see `gradle/libs.versions.toml`'s expanded comment for the full
+   finding and the explicit recommendation (bump in its own reviewed
+   change once a device is available to re-verify
+   `EncryptedCredentialStore` against a real Keystore on the new artifact
+   — this environment has never been able to run that check at all, for
+   any version, and a credential-storage dependency bump is exactly the
+   wrong place to skip it).
+3. **Pin the Kotlin `LogExcerpt` truncation marker to position 0
+   (`startsWith`, not `contains`) — the web twin was pinned in 4a.8, this
+   is the open half.** Verified against the actual code: this was
+   **already correct and already pinned** —
+   `ui/downloads/logic/LogExcerpt.kt`'s `selectExcerptDisplay` has used
+   `text.startsWith(TRUNCATION_MARKER)` since WP 4b.5 (never `contains`),
+   and `LogExcerptTest`'s `` `a truncation marker appearing mid-stream, not
+   at position 0, is not treated as truncation` `` test already exercises
+   the exact `startsWith`-vs-`contains` mutation this carry-over item
+   describes, with the MUTATION TARGET comment spelling out why. This
+   matches `docs/PROJECT_PLAN.md` §7's own WP 4b.5 entry, which already
+   says "truncation marker pinned to position 0" in its evidence note —
+   the carry-over line in `docs/WORKPACKAGES.md` was stale from before
+   that fix landed and was never removed once it did. **No code change
+   needed; the carry-over list entry is removed below as closed.**
+4. **Notification icon art: 4b.8 reuses the launcher monochrome — either
+   provide something better, or record explicitly why reuse is acceptable
+   for v1.** No image-generation/design tooling exists in this
+   environment to "provide something better" honestly, so this WP makes
+   the earlier WP 4b.8 note a FINAL decision rather than leaving it as a
+   deferred "revisit" pointing at this exact WP: **kept for v1.**
+   Rationale, restated as a decision and not just an observation: the
+   launcher's monochrome layer (`ic_launcher_monochrome.xml`) is already a
+   pure white-on-transparent silhouette at exactly the visual weight a
+   status-bar/notification small icon needs — Android's own guidance for
+   notification icons IS a flat white silhouette, which is precisely what
+   this asset already is, not merely a convenient reuse of unrelated art.
+   A bespoke glyph remains a legitimate future polish item (tracked as a
+   general "art pass" item, not a blocking WP 4b.9 carry-over) but is not
+   needed for a correct, guideline-compliant v1 notification.
+
+### Updated honest on-device list
+
+WP 4b.10 adds (see that section above for the full list): `ModalBottomSheet`
+rendering/dismiss for the clients sheet specifically, a real
+`bypass_suspected` transition observed end to end from a live device
+notification tap into the sheet, and `clearAndSetSemantics`'s screen-reader
+behaviour on the badge icon.
+
+WP 4b.9 adds exactly one item, and it is unavoidable in this environment:
+**the entire release-signing walkthrough above (`keytool` keystore
+creation, `assembleRelease`, `apksigner verify`) has been run and proven
+end-to-end in THIS environment with a throwaway test keystore — but never
+with a real device installing the resulting APK.** Everything Gradle/
+`apksigner` can attest to (the artefact is genuinely signed, with the
+right scheme, and the failure path is a clean Gradle error rather than a
+crash or a silent unsigned build) is proven above; whether the resulting
+APK actually installs and launches on a real device (`adb install`, "install
+unknown apps" permission flow, first-launch behaviour) is not, for the same
+"no emulator/device available" reason every earlier 4b.x WP records.
+
+### Tests (WP 4b.9)
+
+No new test files — this WP is packaging/build-config/doc/reorg work, not
+a new logic module. `LogExcerptTest` and `SteamIdentityRepositoryTest`
+(both pre-existing) continue to cover the two carry-over items that turned
+out to already be closed; the `IdentityScreen` move touches no test file
+at all (see carry-over item 1 above). Full suite, run from a clean state
+after the `IdentityScreen` move and the signing-config change, with no
+`keystore.properties` present:
+
+```
+$ ./gradlew.bat test lintDebug assembleDebug
+...
+BUILD SUCCESSFUL in 24s
+74 actionable tasks: 21 executed, 53 up-to-date
+```
+
+550/0/0 (same count as WP 4b.10's — this WP adds no new JVM tests, and the
+`IdentityScreen` move/signing-config work changes zero existing test
+outcomes); `app/app/build/reports/lint-results-debug.txt`: "No issues
+found." `assembleRelease` behaviour (fail-without-keystore, succeed-and-
+verify-with-one) is proven separately above rather than folded into this
+count, since it is a build-configuration property, not a JVM test.
+
+### What WP 4b.9 deliberately did NOT do
+
+- **No keystore is generated by the build, ever** — the whole point of the
+  design; the `keytool` command above is written for the USER to run,
+  with their own passwords, on their own machine. Review fix (S4): the one
+  throwaway keystore behind the verification transcript above was created
+  OUTSIDE the repo, used only to prove the signing path works, and deleted
+  in-session — reworded here because the original "anywhere, ever"
+  phrasing was a literally false statement about the one section a reader
+  consults for exactly this question, even though the intent (the SHIPPED
+  build/config never generates one) was always correct.
+- **No Play Store listing, no F-Droid submission** — see the "No Play
+  Store requirement" note above for why both are separate, later,
+  with-the-user (or metadata-heavy) efforts, not this WP's job.
+- **No bespoke notification icon art** — decided, not merely deferred
+  again (see carry-over item 4); revisit only if a future design pass
+  wants one, not because v1 is missing something guideline-required.
+- **No `security-crypto` version bump** — reported and recommended, per
+  the brief's explicit instruction not to silently bump a security
+  dependency; see carry-over item 2 and `gradle/libs.versions.toml`'s
+  comment for the full finding.
+- **No on-device install/launch verification of the signed release APK**
+  — see "Updated honest on-device list" above; unreachable in this
+  environment for the same reason every earlier 4b.x WP records.

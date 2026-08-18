@@ -2,8 +2,8 @@
 
 A Steam game cache with true per-game management — self-hosted, Docker-first.
 
-Status: IMPLEMENTATION — Phases 0–3 and 4a complete, Phase 4b at 4b.8 of
-4b.9; pre-release (see §11 Next Steps) · License: Apache-2.0
+Status: IMPLEMENTATION — Phases 0–3, 4a, and 4b (4b.1–4b.10) complete;
+pre-release (see §11 Next Steps) · License: Apache-2.0
 
 > SteamVault is a community project and is not affiliated with Valve Corporation.
 > "Steam" is a trademark of Valve Corporation.
@@ -594,14 +594,23 @@ Zeus-scale library) — the Zeus rollout session covers it.
       tests, 13-mutation review set killed; suite 1375 green; Opus
       FAIL→fix→PASS. Web-UI consumption follows in WP 4a.6)*
 
-#### Phase 4b — Android App — 4b.1–4b.8 MERGED 2026-08-11
+#### Phase 4b — Android App — 4b.1–4b.10 MERGED 2026-08-17
 
-Open: WP 4b.9 (release build/signing/APK docs + the review carry-over list
-in `docs/WORKPACKAGES.md`), tsnet (post-v1 by decision), a clients/bypass
-detail surface (4b.8 routes bypass notifications to Settings for now), and
-the honest on-device list in `app/README.md` — no emulator or phone was
-available in any implementation session. Suite at close: 534 JVM tests,
-lint clean, `assembleDebug` green.
+Open: tsnet (post-v1 by decision) and the honest on-device list in
+`app/README.md` — no emulator or phone was available in any implementation
+session, including the WP 4b.9 signing work (proven with a throwaway test
+keystore against Gradle/`apksigner` only, never against a real device
+install). WP 4b.10 closed the clients/bypass detail surface (4b.8 had
+routed bypass notifications to Settings for lack of one — see the PARTIAL
+checkbox below); WP 4b.9 closed the release-signing/APK-docs item and the
+`docs/WORKPACKAGES.md` review carry-over list (one item — the `security-
+crypto` GA re-check — resolved as "report + recommend, do not bump", per
+its own explicit instruction; the LogExcerpt truncation-marker carry-over
+item turned out to already be closed since WP 4b.5, a stale list entry
+rather than open work). Suite at close: 550 JVM tests, lint clean,
+`assembleDebug` green, `assembleRelease` verified both to fail actionably
+without a keystore and to produce a genuinely `apksigner`-verified APK with
+one.
 
 - [x] Kotlin/Compose project, Steam Web API integration (library + covers)
       *(WP 4b.1 done 2026-08-10: self-contained app/ Gradle project —
@@ -697,12 +706,27 @@ lint clean, `assembleDebug` green.
       192-bit CSPRNG state in return_to, single-use consume before any
       network call, mutation-pinned in all directions; 492 JVM tests;
       Opus PASS 8/8 mutations + nit round)*
-- [ ] Bypass warnings surfaced in the UI — PARTIAL: WP 4b.8 ships the
-      bypass_suspected/resolved notifications (both directions), but the app
-      has no clients/bypass detail surface yet (the web UI's clients sheet
-      from WP 4a.7 has no Android twin), so tapping the notification routes
-      to Settings. Closing this needs a small `GET /v1/clients` screen —
-      carry-over, candidate for 4b.9's window
+- [x] Bypass warnings surfaced in the UI
+      *(WP 4b.10 done 2026-08-17: closes the routing gap the WP 4b.8 note
+      below records ("recorded routing gap bypass→Settings until a clients
+      surface exists") — a real
+      `ui/clients/ClientsSheet.kt` backed by `GET /v1/clients`, Kotlin port
+      of `web/js/components/clients-sheet.js` + `lib/clients-view.js`'s
+      bypassing/healthy grouping and not-accusing wording, literal-pinned
+      against the web source (`ClientsCrossFrontendContractTest`); the WP
+      4b.8 bypass notification now opens this sheet directly
+      (`NotificationRouting.opensClientsSheetFor`) instead of routing to
+      Settings (`destinationFor` returns `null` for bypass events now, not
+      `Destination.SETTINGS`); a "Clients" button in Settings is the
+      second, non-notification entry point; `ClientRowModel`'s stats/
+      section field split pins the WP 4b.5-style "a drift-only tick must
+      not move the row" stability claim; 16 new/changed JVM tests (550
+      total). Recorded divergence (`docs/WORKPACKAGES.md` Phase 4a
+      cluster): unlike web's WP 4a.7 app-shell bypass banner, Android has
+      no persistent third entry point — the WorkManager differ already
+      covers the push half, and a banner is its own frozen-mockup-scope
+      decision, not a side effect of closing this routing gap; Opus PASS
+      (joint review with WP 4b.9, 4 should-fixes addressed))*
       *(WP 4b.8 done 2026-08-11: background notifications via
       WorkManager — 15-min constrained PeriodicWorkRequest with UPDATE
       policy, Doze respected by design (no exact alarms/foreground
@@ -716,7 +740,51 @@ lint clean, `assembleDebug` green.
       catch-all worker with CancellationException rethrow; recorded
       routing gap bypass→Settings until a clients surface exists; 534
       JVM tests; Opus PASS 8/9 mutations + fix round)*
-- [ ] Document APK build (no Play Store requirement; F-Droid as a long-term goal)
+- [x] Document APK build (no Play Store requirement; F-Droid as a long-term goal)
+      *(WP 4b.9 done 2026-08-17: release signing config reading
+      storeFile/storePassword/keyAlias/keyPassword from a gitignored
+      `app/keystore.properties` (template committed at
+      `app/keystore.properties.example`) or four `VAULT_RELEASE_*` env
+      vars, never generating a keystore itself; a missing/incomplete
+      config fails `assembleRelease`/`bundleRelease`/`packageRelease`/
+      `packageReleaseBundle` immediately via `gradle.taskGraph.whenReady`
+      with an actionable Gradle error (review round 1 finding: the first
+      version only guarded the two aggregate tasks, and `packageRelease`
+      run directly bypassed it, producing a self-labelled
+      `app-release-unsigned.apk` with no `META-INF` signature and no
+      debug-key fallback — bounded severity, fixed by widening the
+      guarded set; `installRelease` stays listed too as a forward-compat
+      belt even though it is currently inert on its own); verified: fails
+      in ~1s with no keystore, and a throwaway `keytool`-generated test
+      keystore produced an APK independently confirmed signed via
+      `apksigner verify --verbose` (`Number of signers: 1`, v2 scheme);
+      `assembleDebug`/`test`/`lintDebug` proven unaffected either way
+      (re-run green with no keystore.properties present after the
+      signing-config change landed). `app/README.md`'s new "Release
+      build, signing, and distribution" section documents the `keytool`
+      command, the properties file, and the verification step; states
+      plainly no Play Store listing exists and F-Droid stays a long-term
+      goal, per this line item. Also closed the `docs/WORKPACKAGES.md`
+      Phase 4b carry-over list in the same pass: moved `IdentityScreen`
+      to `src/debug/` (GalleryScreen had already moved in WP 4b.4);
+      re-checked `security-crypto` 1.1.0-alpha — a GA 1.1.0 now exists
+      and is API-compatible (verified via the downloaded `.aar`'s
+      classes), reported + recommended in `gradle/libs.versions.toml`'s
+      comment, deliberately NOT bumped per the brief's own instruction;
+      found the LogExcerpt truncation-marker item already closed since
+      WP 4b.5 (stale carry-over entry, not open work); made the WP 4b.8
+      notification-icon-reuse note a final v1 decision rather than a
+      standing "revisit" pointer. 550 JVM tests (unchanged from WP
+      4b.10 — no new test files, packaging/config/doc work only), lint
+      clean, `assembleDebug` green; Opus PASS, no blockers (joint review
+      with WP 4b.10) — 4 should-fixes addressed (S1 above; S2 the
+      recorded-divergence note on the checkbox above; S3 `.gitignore`
+      widened to `*.p12`/`*.pfx`/`*.bks` plus a root-level `keystore
+      .properties` belt; S4 reworded a self-contradictory "no keystore,
+      anywhere, ever" README line to distinguish the shipped build from
+      the throwaway verification keystore), plus nit fixes (stale KDoc
+      links, the AGP v2/v3-default overclaim, a stale WORKPACKAGES.md
+      truncation-marker line))*
 
 #### Phase 4c — Manual update check (both frontends, user decision 2026-08-10)
 
@@ -1196,9 +1264,10 @@ Phases 1–3 plus 4a shipped. Rewritten 2026-08-17 to reflect the real state.
    where the honest still-open lists in `web/tests/README.md` and
    `app/README.md` get verified — real screen reader, phone browser cover
    art, GC against real on-disk chunks, real multi-client bypass detection.
-3. [ ] **WP 4b.9** Android release build + signing docs + APK distribution
+3. [x] **WP 4b.9** Android release build + signing docs + APK distribution
    (keystore creation is a user action), plus the review carry-over list in
-   `docs/WORKPACKAGES.md`.
+   `docs/WORKPACKAGES.md` — done 2026-08-17, together with WP 4b.10 (the
+   clients/bypass detail surface); see §7 Phase 4b's evidence notes.
 4. [ ] **Phase 4c / 4d** frontend halves: the manual "check & update" trigger
    in both UIs, and the opt-in "keep the cache current" sweep mode (its
    auto-GC prerequisite is shipped — see §7 Phase 3).

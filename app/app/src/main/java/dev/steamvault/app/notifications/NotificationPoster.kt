@@ -77,7 +77,10 @@ class AndroidNotificationPoster(
 
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            putExtra(NotificationRouting.EXTRA_DESTINATION, NotificationRouting.destinationFor(event).name)
+            NotificationRouting.destinationFor(event)?.let { putExtra(NotificationRouting.EXTRA_DESTINATION, it.name) }
+            if (NotificationRouting.opensClientsSheetFor(event)) {
+                putExtra(NotificationRouting.EXTRA_OPEN_CLIENTS_SHEET, true)
+            }
         }
         val notificationId = NotificationRouting.notificationId(event)
         val pendingIntent = PendingIntent.getActivity(

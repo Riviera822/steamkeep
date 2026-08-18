@@ -66,4 +66,14 @@ agent/go/**/*.test
 # top. deploy/VERIFICATION-*.md is deliberately NOT ignored: like poc/RESULTS-*,
 # it is committed evidence of a real container run.
 
+# Android app release-signing secrets (WP 4b.9, app/app/build.gradle.kts).
+# app/.gitignore already covers keystore.properties/*.jks/*.keystore/*.p12/
+# *.pfx/*.bks scoped to app/ (where the signing config actually reads
+# `keystore.properties` from, via `rootProject.file(...)` = app/keystore
+# .properties) -- this root-level rule is belt-and-suspenders for the same
+# filename accidentally created at the repo root instead (a no-slash
+# pattern matches at any depth, same reasoning the .env rule above already
+# documents).
+keystore.properties
+
 

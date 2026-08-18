@@ -2,7 +2,10 @@ package dev.steamvault.app.notifications
 
 import dev.steamvault.app.ui.nav.Destination
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -21,6 +24,7 @@ class NotificationRoutingTest {
         val event = NotificationEvent.JobFinished(jobId = 1, appid = 42, jobType = "prefill")
         assertEquals("downloads", NotificationRouting.channelFor(event).id)
         assertEquals(Destination.DOWNLOADS, NotificationRouting.destinationFor(event))
+        assertFalse(NotificationRouting.opensClientsSheetFor(event))
     }
 
     @Test
@@ -28,6 +32,7 @@ class NotificationRoutingTest {
         val event = NotificationEvent.JobFailed(jobId = 1, appid = 42, jobType = "prefill")
         assertEquals("downloads", NotificationRouting.channelFor(event).id)
         assertEquals(Destination.DOWNLOADS, NotificationRouting.destinationFor(event))
+        assertFalse(NotificationRouting.opensClientsSheetFor(event))
     }
 
     @Test
@@ -35,25 +40,47 @@ class NotificationRoutingTest {
         val event = NotificationEvent.UpdateReady(appid = 42, name = "Aurora Cascade")
         assertEquals("updates", NotificationRouting.channelFor(event).id)
         assertEquals(Destination.LIBRARY, NotificationRouting.destinationFor(event))
+        assertFalse(NotificationRouting.opensClientsSheetFor(event))
     }
 
+    // -----------------------------------------------------------------
+    // WP 4b.10 closes the WP 4b.8 recorded routing gap: bypass events used
+    // to route to Destination.SETTINGS with no clients detail to show
+    // there. MUTATION TARGET: destinationFor must be null (not SETTINGS,
+    // not any other Destination) AND opensClientsSheetFor must be true --
+    // either one alone regressing to the old Settings-routing behaviour
+    // must fail one of these two assertions.
+    // -----------------------------------------------------------------
+
     @Test
-    fun `bypass_suspected routes to the bypass channel and the Settings destination`() {
+    fun `bypass_suspected opens the clients sheet directly and names no destination`() {
         val event = NotificationEvent.BypassSuspected(clientId = "workshop-pc")
         assertEquals("bypass", NotificationRouting.channelFor(event).id)
-        assertEquals(Destination.SETTINGS, NotificationRouting.destinationFor(event))
+        assertNull(NotificationRouting.destinationFor(event))
+        assertNotEquals(Destination.SETTINGS, NotificationRouting.destinationFor(event))
+        assertTrue(NotificationRouting.opensClientsSheetFor(event))
     }
 
     @Test
-    fun `bypass_resolved routes to the bypass channel and the Settings destination`() {
+    fun `bypass_resolved opens the clients sheet directly and names no destination`() {
         val event = NotificationEvent.BypassResolved(clientId = "workshop-pc")
         assertEquals("bypass", NotificationRouting.channelFor(event).id)
-        assertEquals(Destination.SETTINGS, NotificationRouting.destinationFor(event))
+        assertNull(NotificationRouting.destinationFor(event))
+        assertNotEquals(Destination.SETTINGS, NotificationRouting.destinationFor(event))
+        assertTrue(NotificationRouting.opensClientsSheetFor(event))
     }
 
     @Test
     fun `EXTRA_DESTINATION is the pinned literal string`() {
         assertEquals("dev.steamvault.app.notification.destination", NotificationRouting.EXTRA_DESTINATION)
+    }
+
+    @Test
+    fun `EXTRA_OPEN_CLIENTS_SHEET is the pinned literal string`() {
+        assertEquals(
+            "dev.steamvault.app.notification.open_clients_sheet",
+            NotificationRouting.EXTRA_OPEN_CLIENTS_SHEET,
+        )
     }
 
     @Test

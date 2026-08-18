@@ -24,9 +24,19 @@ captures/
 .externalNativeBuild/
 .cxx/
 
-# Local dev signing / secrets (none exist yet — reserved for WP 4b.9
-# release-signing work; keep the pattern ready so a keystore never lands
-# here by accident).
+# Local dev signing / secrets (WP 4b.9 release-signing work landed this
+# WP; keep the pattern here so a keystore never lands in the repo by
+# accident). Review fix (S3): *.jks/*.keystore alone missed every OTHER
+# keystore format keytool can produce — `keytool -genkeypair` defaults to
+# PKCS12 as of modern JDKs (no `-storetype` needed to get one), so an
+# operator naming their store e.g. `steamvault.p12` next to the project
+# would otherwise be trackable. This is the one finding class that is
+# unrecoverable after a push (the private key itself, not just a
+# password), so the extensions below are covered even though nothing here
+# uses them today.
 *.jks
 *.keystore
+*.p12
+*.pfx
+*.bks
 keystore.properties
