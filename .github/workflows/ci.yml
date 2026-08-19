@@ -1,10 +1,10 @@
 name: CI
 
-# WP 5.1 (Phase 5, release track) + WP CI-1. Two tiers:
+# WP 5.1 (Phase 5, release track) + WP CI-1 + WP CI-2. Two tiers:
 #
 #   1. Fast build/test gates on every push/PR: api-tests, agent-go,
-#      core-nginx-config, powershell-syntax, web-tests. NO image publishing
-#      and NO ghcr.io here -- that is WP 5.5, user-gated
+#      core-nginx-config, powershell-syntax, web-tests, android-tests. NO
+#      image publishing and NO ghcr.io here -- that is WP 5.5, user-gated
 #      (docs/WORKPACKAGES.md).
 #
 #   2. verify-stack: the real-Docker, real-Steam-CDN integration suite
@@ -56,13 +56,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The five jobs below are the fast PR gate: push, pull_request, and a
+  # The six jobs below are the fast PR gate: push, pull_request, and a
   # manual workflow_dispatch run all trigger them (unchanged from before
   # WP CI-1 for push/pull_request; workflow_dispatch is new -- it lets a
   # human re-run the whole fast suite on demand). The nightly `schedule`
-  # event does NOT match this guard, so these five do not re-run overnight
+  # event does NOT match this guard, so these six do not re-run overnight
   # -- every push/PR already exercises them, so a nightly re-run would add
-  # no signal, only cost.
+  # no signal, only cost. android-tests (WP CI-2) belongs here, not with
+  # verify-stack below: it is a deterministic JVM unit-test + lint run (no
+  # device/emulator, no flaky external service). It DOES fetch dependencies
+  # from services.gradle.org / Google Maven / Maven Central on a cold cache
+  # (measured: ~1.15 GB, recurring on every change to a `*.gradle*` file,
+  # `gradle-wrapper.properties`, or the version catalog -- all part of the
+  # cache key below -- and on the cache's 7-day eviction) -- so "fully
+  # offline" would overstate it. What actually matters for tier placement is
+  # narrower and still true: those are the same class of package-registry
+  # dependency api-tests (PyPI), agent-go (Go module proxy) and web-tests
+  # (npm via setup-node) already have in this fast tier, not the real Steam
+  # CDN that is specifically what makes verify-stack unsafe to gate a PR on.
   api-tests:
     name: api / pytest
     runs-on: ubuntu-latest
@@ -168,6 +179,77 @@ jobs:
         # documents that `node --test web/tests` (no glob) fails hard with a
         # CJS MODULE_NOT_FOUND instead of discovering the files inside it.
         run: node --test "web/tests/*.test.js"
+
+  android-tests:
+    name: app / gradle unit tests + lint
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    # Cold-cache Gradle (wrapper distribution + AGP/Kotlin/Compose dependency
+    # resolution, none of it warm on a fresh runner) is slower than the
+    # pytest/go/node jobs above, though nowhere near verify-stack's
+    # build-four-images-and-run-a-live-stack scope -- 20 minutes gives a cold
+    # run headroom without reaching into the heavier tier's 30.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          # Temurin 17, matching the major version app/README.md's pinned
+          # local toolchain uses. ubuntu-latest's own default JDK happens to
+          # be this exact build today (actions/runner-images Ubuntu 24.04
+          # readme, Java section: Temurin 17.0.20+8) but `java-version: "17"`
+          # itself only floats within the 17.x line, same looseness as this
+          # file's own python-version/go-version-file/node-version pins --
+          # pinned explicitly anyway so a future runner-image default bump
+          # can't silently change what this job builds with.
+          distribution: temurin
+          java-version: "17"
+          # setup-java's own built-in Gradle cache: ~/.gradle/caches +
+          # ~/.gradle/wrapper, keyed on a hash that includes
+          # gradle/libs.versions.toml (the version catalog) alongside every
+          # other *.gradle*/gradle-wrapper.properties file, and restored via
+          # an EXACT key match only -- setup-java sets no `restoreKeys`
+          # fallback, so a version bump anywhere in that key can only ever
+          # produce a cache MISS (a fresh, correct download), never a stale
+          # HIT masquerading as current. This repo's Gradle build itself has
+          # no build cache configured (no `org.gradle.caching`, confirmed by
+          # every task reporting `executed`, never `FROM-CACHE`, on both a
+          # cold and a warm run) -- so this cache can only shorten dependency
+          # downloads, it can never skip compiling or running a single test.
+          # One residual worth naming: a cache HIT restores the wrapper
+          # distribution and dependency jars without re-verifying
+          # `distributionSha256Sum` or Gradle's dependency-verification
+          # metadata (that check only runs against what was actually
+          # downloaded) -- bounded, since only the same branch's own prior
+          # writes populate this cache and a fork PR cannot write to it, but
+          # it is a real, narrower integrity bar than a cold run gets.
+          cache: gradle
+      - name: gradlew assembleDebug testDebugUnitTest testReleaseUnitTest lintDebug
+        # bash, not `./gradlew` -- same "invoke the interpreter explicitly"
+        # convention core-nginx-config's and verify-stack's own script steps
+        # above/below already follow, and load-bearing here specifically:
+        # the checked-out gradlew file carries no executable bit (git blob
+        # mode 100644, a Windows-authored repo), so `./gradlew` alone would
+        # fail with Permission denied on this Linux runner. No
+        # app/local.properties is generated or needed: ubuntu-latest
+        # ships its Android SDK preinstalled with ANDROID_HOME/
+        # ANDROID_SDK_ROOT already pointing at it and android-35 (rev 2) +
+        # build-tools 35.0.0 already installed (same readme as above) --
+        # exactly the compileSdk/targetSdk 35 + build-tools 35.0.0 app/ pins
+        # -- so gradlew resolves the SDK from those env vars the same way it
+        # was verified to do locally with local.properties absent. The task
+        # list matches app/README.md's own WP 4h.4 verification command
+        # (`testDebugUnitTest testReleaseUnitTest lintDebug`) plus
+        # `assembleDebug`: the one task here that actually packages an APK,
+        # catching a dex-merge/manifest-merge/resource-packaging regression
+        # the three test/lint tasks never touch. It needs no keystore --
+        # app/app/build.gradle.kts's `gradle.taskGraph.whenReady` guard only
+        # fires for `assembleRelease`/`bundleRelease`/`installRelease`/
+        # `packageRelease`/`packageReleaseBundle`, and debug builds use
+        # AGP's own auto-generated debug key regardless -- verified locally
+        # (no keystore.properties present, no prompt or failure).
+        working-directory: app
+        run: bash gradlew assembleDebug testDebugUnitTest testReleaseUnitTest lintDebug --console=plain
 
   verify-stack:
     name: deploy / verify-stack
