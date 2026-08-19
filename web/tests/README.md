@@ -1894,6 +1894,12 @@ at all, with the rest of the card's content simply one sibling higher, and
 the one visible move is whenever that error arrives (typically fast); a
 slow-loading title never moves anything, ever.
 
+**Superseded by WP 4h.5, below** — the operator watched this exact
+reserve-then-shrink shape collapse visibly on a phone and asked for
+"default off, and load it in if there is one" instead. This paragraph is
+left as the historical record of what WP 4h.3 shipped; see the WP 4h.5
+section for the design that replaced it.
+
 - `header-art.test.js` (new, 8) — three behavioural pins against
   `components/header-art.js` (via `fake-dom.js`): the `<img>` src is
   `headerArtUrl(appid)`, proven to vary with the appid given (a hardcoded
@@ -1944,3 +1950,87 @@ Verified live in a running instance (see the coder's report) rather than
 here: the actual visual result (a real Steam title's banner rendering
 inside the reserved box at BP-L's 680px card width, and a fabricated/
 unknown appid collapsing cleanly with no broken-image icon).
+
+### WP 4h.5 — header art: load-then-reveal, no reserved band (polish of WP 4h.3)
+
+Revises the "Absence/loading resolution" design WP 4h.3 shipped (above):
+reserve-then-shrink (aspect-ratio held open from insertion, wrapper removed
+outright on a 404) is replaced with load-then-reveal — nothing about
+`.header-art` occupies layout until its `<img>` has actually loaded, so a
+404/delisted title now reserves and reveals NOTHING (no band ever appears,
+so there is nothing to collapse), and a real image grows into its true
+460:215 box once it is known-good.
+
+**CSS mechanism (`css/app.css`):** `.header-art` is a one-row/one-column
+grid starting at `grid-template-rows:0fr` with `opacity:0` and
+`margin-bottom:0` — genuinely zero height, not a 1px seam, because
+`overflow:hidden` on the wrapper plus `min-height:0` on the `<img>`
+together let the track actually collapse instead of being floored by the
+image's own aspect-ratio-derived minimum. `components/header-art.js` adding
+the `.loaded` class flips the row to `1fr`, opacity to `1`, and
+margin-bottom to `12px`, animating open over `.2s` — the modern
+`grid-template-rows: 0fr -> 1fr` accordion technique, chosen because
+`height:auto` is not animatable and this keeps the expanded size exactly
+the `<img>`'s own true `aspect-ratio:460/215` box (now declared on the
+`<img>` itself, not the wrapper) rather than a second, independently-tuned
+number. The transition carries no `!important`, so the standing whole-app
+`prefers-reduced-motion` wildcard (`theme.css`, pinned in
+`keyboard-pointer-model.test.js`) already forces it instant for users who
+ask for less motion — no separate reduced-motion rule needed here.
+
+**JS mechanism (`components/header-art.js`):** `img.decode()` is preferred
+over the bare `load` event as the reveal trigger where available — it
+settles only once the image is actually ready to paint (fully loaded AND
+decoded), avoiding a reveal on a half-decoded first frame for a slow/large
+image; its rejection (which also fires on a genuine load failure) is
+swallowed on purpose, since the `error` listener already owns that path.
+Engines without `img.decode` — and this codebase's `fake-dom.js` harness,
+whose `FakeElement` has no `decode` method — fall back to the `load` event,
+which still reveals correctly, just without the paint-readiness guarantee.
+`src` is assigned before `decode()` is called (decode() operates on the
+element's "current request," which only exists once a src is set — calling
+it first would reject immediately with nothing to decode). The one visible
+movement in the whole flow — the grow-in — is only ever seen when the image
+genuinely arrives after the wrapper has already been painted at zero
+height (a cold cache or a slow CDN round trip); when decode/load resolves
+before the browser's next paint (the common case, e.g. a warm cache), the
+zero-height frame is never painted at all, so the header simply appears
+already-expanded with no visible motion.
+
+- `header-art.test.js` (12, +4 from WP 4h.3's 8) — the three original
+  behavioural pins (URL via `headerArtUrl`, varying with appid; an `error`
+  event removes the whole wrapper; decorative empty `alt`) plus the
+  source-grep call-site pin, all unchanged and still green (the call-site
+  invariant `game-detail-sheet.js`'s header names — `contentEl.
+  replaceChildren()` first on every full render, `patchVolatile()` never
+  touching `.header-art` — was preserved by construction: the wrapper is
+  still appended synchronously in the same place, only its CSS starting
+  state changed). Two new behavioural pins: the wrapper carries no
+  `.loaded` class synchronously right after `buildHeaderArt` returns
+  (nothing is revealed before the image is known-good); a `load` event on
+  the `<img>` (the fallback path this harness exercises, since
+  `fake-dom.js` has no `decode()`) adds `.loaded` to the wrapper. Six CSS
+  pins, replacing WP 4h.3's four: `.header-art`'s base rule has no
+  `aspect-ratio`/`height`/`min-height` at all (the mutation that would
+  silently reintroduce WP 4h.3's premature reservation); its row starts at
+  `grid-template-rows:0fr`; `.header-art.loaded` reveals via
+  `grid-template-rows:1fr` and `opacity:1`; `.header-art img` carries the
+  real `aspect-ratio:460/215` (moved from the wrapper); `.header-art`
+  declares a `transition` with no `!important` (so the reduced-motion
+  wildcard governs it unconditionally); `.header-art img` is `display:block`
+  with `object-fit:cover` and `min-height:0`. Every mutation this WP's
+  pins target (reserve `aspect-ratio` on the base rule, wrong ratio on the
+  `<img>`, `!important` on the transition, dropped error handler, dropped
+  reveal listener, hardcoded URL) was applied by hand, run, confirmed to
+  kill exactly the named test with the exact quoted assertion failure shown
+  in the coder's report, and reverted.
+- `docs/WORKPACKAGES.md` D-17 is amended in place (not a new entry) to
+  record the supersession and drop WP 4h.3's phone-width band concern,
+  which no longer applies once nothing is reserved.
+
+**Not covered, by design:** the actual browser-rendered timing of "does the
+grow-in visibly animate or not" (a cold-cache vs. warm-cache race,
+inherently environment-dependent, same class of claim
+`docs/LEARNINGS.md`'s nginx event-log timing entry already names as
+real-but-non-deterministic) is not asserted here — this file pins the CSS
+mechanism and the JS reveal trigger structurally, not a live paint timing.

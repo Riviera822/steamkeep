@@ -1028,23 +1028,44 @@ body.onboarding .nav{ display:none; }
    doesn't already own the name.
    ============================================================ */
 
-/* Header/hero art (WP 4h.3) — sits above .dhead, full width of the card's
-   own content box (so it inherits the BP-L centred card's --w-sheet-l
-   width for free, no separate token needed — see docs/WORKPACKAGES.md
-   D-13). `aspect-ratio` is the ONLY reservation mechanism, on purpose: it
-   holds the box open from insertion through a successful load (nothing
-   moves — the image paints into an already-sized box), and disappears
-   completely the moment components/header-art.js removes the whole
-   wrapper on a load failure. Deliberately NOT paired with a min-height —
-   that would recreate the exact permanent empty band the 404 case must
-   avoid. 460/215 is Steam's own header.jpg pixel ratio. No transition
-   anywhere here (standing "no motion on overlays" rule, D-13) — an image
-   that finishes loading just appears, it does not fade. */
+/* Header/hero art (WP 4h.3, load-then-reveal design superseded to this
+   shape by WP 4h.5 — see docs/WORKPACKAGES.md D-17). Sits above .dhead,
+   full width of the card's own content box (so it inherits the BP-L
+   centred card's --w-sheet-l width for free, no separate token needed).
+   The operator saw WP 4h.3's reserve-then-shrink shape (aspect-ratio
+   reserved up front, wrapper removed outright on a 404) collapse visibly
+   on a phone and asked for "default off, and load it in if there is one"
+   instead: NOTHING is reserved before the image is known-good.
+   `.header-art` is a one-row/one-column grid whose row starts at `0fr`
+   (genuinely zero height, not a 1px seam — `overflow:hidden` here plus
+   `min-height:0` on the `<img>` below is what lets the track actually
+   collapse instead of being floored by the image's own aspect-ratio-
+   derived minimum) and fades/grows to `1fr` once
+   components/header-art.js's `buildHeaderArt` adds the `.loaded` class —
+   the modern `grid-template-rows: 0fr -> 1fr` technique, chosen because
+   `height:auto` is not animatable and this keeps the expanded size
+   exactly the `<img>`'s own true 460/215 box rather than a second,
+   independently-guessed number. A 404/delisted title never reaches
+   `.loaded` at all — components/header-art.js removes the whole wrapper
+   on the image's `error` event, and because nothing was ever reserved,
+   that removal moves nothing (no band ever appeared to begin with).
+   `margin-bottom` is likewise 0 until `.loaded`, so even the 12px gap
+   below this element is not reserved early. This is the ONE deliberate
+   exception to the rest of this card's "no motion" posture (D-13 governs
+   overlays/dialogs, not this in-flow grow); the transition below carries
+   no `!important`, so the standing whole-app `prefers-reduced-motion`
+   wildcard (theme.css) already forces it instant for users who ask for
+   less motion, with nothing extra needed here. */
 .header-art{
-  aspect-ratio:460/215; border-radius:var(--r-m); overflow:hidden;
-  background:var(--raised); margin-bottom:12px;
+  display:grid; grid-template-rows:0fr; opacity:0; margin-bottom:0;
+  transition:grid-template-rows .2s ease, opacity .2s ease, margin-bottom .2s ease;
+  border-radius:var(--r-m); overflow:hidden; background:var(--raised);
 }
-.header-art img{ display:block; width:100%; height:100%; object-fit:cover; }
+.header-art.loaded{ grid-template-rows:1fr; opacity:1; margin-bottom:12px; }
+.header-art img{
+  display:block; width:100%; min-height:0;
+  aspect-ratio:460/215; object-fit:cover;
+}
 
 .dhead{ display:flex; gap:13px; align-items:flex-start; margin-bottom:6px; }
 .dhead .cap{ width:78px; flex:none; }

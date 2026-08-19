@@ -1344,19 +1344,38 @@ every later phase's history.
    fixed by WP 4f itself — `web/` was occupied by WP 4e.1 at review time, and
    the reviewer is closing this once 4e.1 merges.
 
-### D-17 — header art in the detail card (WP 4h.3, 2026-08-19)
+### D-17 — header art in the detail card (WP 4h.3, 2026-08-19; superseded by WP 4h.5, 2026-08-19)
 
 The frozen mockup's detail sheet body starts with `.dhead`
 (`docs/design/vault-app-mockup.html:1993-1994`) — no hero image at any
 width, and the new rule is not breakpoint-scoped, so this changes the
 phone shape the mockup does define. Plan-authorized (the 4h.3 item calls
 for header art explicitly); recorded per the D-12/D-15 precedent that
-plan-driven-but-mockup-absent visuals get a register entry. Design:
-aspect-ratio 460/215 is the only space reservation, and on error the
-whole wrapper is removed (deliberately unlike the grid's cover fallback
-— no tile underneath here). Honest shift wording, corrected in review:
-the collapse happens once per FULL RENDER, not once per sheet-open — a
-structural tick (job status change) rebuilds the card and re-runs the
-404 request/collapse for delisted titles. Known, accepted: at the
-mockup's 390px frame the banner is ~165px tall above `.dhead` — operator
-glance at phone width recommended before release (review S4).
+plan-driven-but-mockup-absent visuals get a register entry.
+
+**Original WP 4h.3 design (superseded, kept for the record):**
+aspect-ratio 460/215 was the only space reservation, held open from the
+instant the wrapper was inserted (before the image had even started
+loading); on error the whole wrapper was removed, collapsing that
+reservation in one step. Known, accepted at the time: at the mockup's
+390px frame the banner reserved ~165px above `.dhead` before a 404's
+collapse fired — operator glance at phone width recommended before
+release (review S4).
+
+**Superseded by WP 4h.5: the operator took that glance and rejected the
+result.** The reserve-then-shrink shape was seen collapsing visibly on a
+real phone — a delisted title showed the ~165px band above, then it
+snapped shut once the 404 arrived. The operator's own framing: "default
+off, and load it in if there is one." WP 4h.5 replaces the design
+outright: `.header-art` now reserves NOTHING before the image is known
+good (a `grid-template-rows:0fr` box, no `aspect-ratio`/`height` on the
+wrapper itself), and grows open to the `<img>`'s own true 460/215 box only
+once `img.decode()` (or, as a fallback, the `load` event) confirms the
+image is ready to paint. A 404/delisted title now reserves and reveals
+nothing at all — there is no band to collapse, because none ever
+appeared. Consequently the phone-width concern recorded above no longer
+applies and is not carried forward: under load-then-reveal, a delisted
+title at any width shows no banner and no reserved space, ever; a real
+image grows in, once, only if it arrives after the sheet is already
+visible. See `web/tests/README.md`'s WP 4h.5 section for the CSS/JS
+mechanism and its test pins.
