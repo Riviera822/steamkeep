@@ -88,21 +88,76 @@ volume layout, not general tuning knobs, and a wrong value here silently
 loses persistence (no volume backs an arbitrary path) rather than merely
 picking a different valid number. If you have a genuine reason to move
 either — e.g. redirecting the manifest archive off the `vault-db` volume
-onto its own mount — a Compose override file is still the right tool:
+onto its own mount — a Compose override file is still the right tool.
+
+**`VAULT_STEAMPREFILL_CACHE_DIR` CANNOT relocate where SteamPrefill writes —
+review round 3 correction, because round 2's version of this section got
+that backwards and the recipe it gave was actively harmful, not just
+inert.** Grepped, not assumed: `prefill.py`'s child-process launch
+(`subprocess.Popen(command, cwd=workdir, ...)`) passes SteamPrefill no
+`env=`, no `HOME`/`XDG_*` override and no cache-directory flag — nothing in
+this codebase ever tells the SteamPrefill BINARY where to put its manifest
+temp-cache. `VAULT_STEAMPREFILL_CACHE_DIR` is read in exactly one place,
+`manifest_ingest.py`'s scan step, and its default
+(`config._default_steamprefill_cache_dir`) is explicitly documented as a
+**guess** at where SteamPrefill's OWN, independent logic decides to write
+(mirroring the same `$HOME`-relative computation SteamPrefill itself uses
+internally) — vault-api never forwards this value anywhere, it only reads
+FROM the path it names. Setting it to a custom path — on one service or
+both, identically — does not move SteamPrefill's writes there; it only
+moves where vault-api's ingestion step LOOKS, and if that no longer matches
+where SteamPrefill actually writes (still `$HOME/.cache/SteamPrefill/v1`,
+unconditionally, no matter what this variable says), you get the exact
+silent "ingestion finds nothing" failure the paragraph above this one
+warns about — self-inflicted this time, by the very override meant to avoid
+it.
+
+**The default (unset, on both services) is correct precisely because it is
+the one value guaranteed to track wherever SteamPrefill really writes** —
+both resolve the same `$HOME`-relative computation, and `deploy/compose.yaml`
+already mounts the SAME `vault-steamprefill-home` volume at the SAME
+`/opt/steamprefill/home` path on both `vault-api` and `vault-runner` for
+exactly this reason (see that file's own comment on the mount). **If you
+have a genuine reason to move this data onto a dedicated disk, the movable
+thing is the VOLUME, not the path `VAULT_STEAMPREFILL_CACHE_DIR` names** —
+leave that variable unset on both services, and instead replace what backs
+`/opt/steamprefill/home` itself:
 
 ```yaml
 # deploy/compose.override.yaml (not tracked by git -- your local addition)
 services:
   vault-api:
     environment:
-      VAULT_MANIFEST_ARCHIVE_DIR: "/data/manifests"          # default: sibling of VAULT_DB_PATH
-      VAULT_STEAMPREFILL_CACHE_DIR: "/opt/steamprefill/home/.cache/SteamPrefill/v1"  # default: under HOME
-    # ...and a matching volume/mount for wherever you point these, or the
-    # data simply isn't persisted across a container recreate.
+      VAULT_MANIFEST_ARCHIVE_DIR: "/data/manifests"  # default: sibling of VAULT_DB_PATH
+    volumes:
+      - /srv/steamvault-manifest-cache:/opt/steamprefill/home
+  vault-runner:
+    volumes:
+      # Same host path as vault-api's above -- both services must still
+      # agree on ONE underlying location for /opt/steamprefill/home, exactly
+      # as the shipped vault-steamprefill-home volume already does. Nothing
+      # about VAULT_STEAMPREFILL_CACHE_DIR needs to change: it stays unset,
+      # its default computation is still $HOME-relative, and $HOME is still
+      # /opt/steamprefill/home regardless of what physically backs it.
+      - /srv/steamvault-manifest-cache:/opt/steamprefill/home
 ```
+
+Create and `chown -R 101:101` the host directory first, same as the
+dedicated-cache-disk recipe in section 1 — and note this relocates ALL of
+`/opt/steamprefill/home`, not only the manifest temp-cache subdirectory
+under it (there is little else there in practice, but it is the whole
+directory that moves, not a scoped piece of it).
+
+`VAULT_MANIFEST_ARCHIVE_DIR` does not have any of this two-service concern:
+manifest *archiving* (copying a `.bin` file out durably, as opposed to the
+temp-cache SteamPrefill itself writes and vault-api merely scans) happens
+entirely on `vault-api`, in every mode, unaffected by the runner split — set
+it on `vault-api` alone, as shown above, exactly as earlier revisions of
+this document already had it.
 
 `docker compose` picks up a file named `compose.override.yaml` (or
 `docker-compose.override.yml`) next to `compose.yaml` automatically — no
 extra `-f` flag needed. Most deployments never need this section at all:
 both defaults already resolve inside volumes the stack mounts anyway
-(`vault-db` and `vault-steamprefill-home` respectively).
+(`vault-db` and, as of WP S-2, the now-shared `vault-steamprefill-home`
+respectively).

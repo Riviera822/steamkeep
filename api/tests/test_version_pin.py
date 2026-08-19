@@ -20,7 +20,7 @@ only ``deploy/compose.yaml`` and both this module's own docstring and
 | Site | Pinned here? | Why |
 |---|---|---|
 | ``api/vault_api/__init__.py``'s ``__version__`` | n/a (the source of truth) | Everything else is compared AGAINST this |
-| ``deploy/compose.yaml`` (3x ``image:`` lines) | YES | in this pin's footprint, checked at startup-config time |
+| ``deploy/compose.yaml`` (4x ``image:`` lines, one per service — WP S-2 added ``vault-runner``'s) | YES | in this pin's footprint, checked at startup-config time |
 | ``api/Dockerfile``'s ``org.opencontainers.image.version`` LABEL | YES | in ``api/``, this pin's footprint; a build-time literal that cannot read a Python module |
 | ``deploy/tests/verify-stack.sh``'s ``TAG=${VAULT_IMAGE_TAG:-...}`` | YES | in ``deploy/``, same conceptual value as compose's default |
 | ``deploy/.env.example``'s ``#VAULT_IMAGE_TAG=...`` example line | YES | in ``deploy/``, same conceptual value as compose's default |
@@ -39,6 +39,24 @@ Mutation-verified in both directions for every **YES** row above (bump
 ``vault_api.__version__`` alone; bump each site's own value alone) — each
 failure is a DIFFERENT named test below, so a reader immediately knows which
 side of which comparison drifted.
+
+**Review round 2, WP S-2 blocker B1.** ``deploy/compose.yaml`` gained a
+FOURTH ``image:`` line (``vault-runner``, ADR-0012's runner split) that
+deliberately reuses the exact same image name as ``vault-api``
+(``steamvault/vault-api`` — same codebase, same tag, different ``command:``,
+no separate build). The pre-fix version of this file's extraction keyed its
+result dict by IMAGE NAME (the value inside ``steamvault/<name>:...``), not
+by which COMPOSE SERVICE the line lives under — so with two lines both
+naming the image ``vault-api``, a plain ``{image_name: default}`` dict
+comprehension let vault-runner's occurrence silently overwrite vault-api's
+own, making vault-api's line invisible to every comparison below it.
+Measured: mutating ONLY line 133 (vault-api's own image: default) to
+``0.2.0`` left the full 1743-test suite green — the two tests that should
+have caught it never saw that line at all. The fix keys extraction by
+SERVICE NAME instead (``_compose_service_image_tags``), so vault-api's and
+vault-runner's lines are two independent dict entries; each is now
+mutation-verified alone (see ``test_vault_api_version_matches_compose_image_tag_default``
+and ``test_vault_runner_image_tag_default_matches_vault_api_version``).
 """
 
 from __future__ import annotations
@@ -56,16 +74,87 @@ API_DOCKERFILE_PATH = REPO_ROOT / "api" / "Dockerfile"
 VERIFY_STACK_PATH = REPO_ROOT / "deploy" / "tests" / "verify-stack.sh"
 ENV_EXAMPLE_PATH = REPO_ROOT / "deploy" / ".env.example"
 
-#: Matches `image: steamvault/<service>:${VAULT_IMAGE_TAG:-<default>}` lines
-#: exactly as they appear in deploy/compose.yaml today (vault-core, vault-api,
-#: vault-dns) -- deliberately narrow, like
-#: test_p1_compose_env_defaults.py's `_parsed_env_defaults` regex, so a line
-#: that does not match this exact `${VAR:-default}` shape is correctly absent
-#: rather than misparsed.
+#: Matches `image: steamvault/<name>:${VAULT_IMAGE_TAG:-<default>}` lines
+#: exactly as they appear in deploy/compose.yaml today -- deliberately
+#: narrow, like test_p1_compose_env_defaults.py's `_parsed_env_defaults`
+#: regex, so a line that does not match this exact `${VAR:-default}` shape
+#: is correctly absent rather than misparsed. Applied to ONE SERVICE's
+#: block text at a time (see `_service_blocks`/`_compose_service_image_tags`
+#: below) -- never to the whole file at once, which is the B1 fix: the
+#: captured group here is the IMAGE NAME, which is NOT unique per service
+#: since WP S-2 (vault-runner intentionally reuses `steamvault/vault-api`).
 _IMAGE_TAG_PATTERN = re.compile(
     r"^\s*image:\s*steamvault/([a-z-]+):\$\{VAULT_IMAGE_TAG:-([^}]+)\}\s*$",
     re.MULTILINE,
 )
+
+#: A top-level compose SERVICE key -- exactly 2-space indented, e.g.
+#: "  vault-api:". Same indentation contract
+#: test_p1_compose_env_defaults.py's `_extract_service_environment_block`
+#: already relies on for this same file.
+_SERVICE_HEADER_PATTERN = re.compile(r"^  ([a-z][a-z0-9-]*):\s*$")
+
+
+def _service_blocks(text: str) -> dict[str, str]:
+    """Split the WHOLE compose.yaml file into per-2-space-indented-key
+    blocks, keyed by that key's name, each block spanning from the key's own
+    header line (exclusive) to the next such header or the next top-level
+    (0-indent) key (exclusive).
+
+    Round 3 docstring correction: this does NOT special-case the `services:`
+    section boundary -- it walks the entire file by indentation alone, so
+    the top-level `volumes:` block's own 2-space-indented children
+    (`vault-cache:`, `vault-db:`, ...) get collected as entries too, exactly
+    like `vault-api:`/`vault-runner:` do. Harmless for every caller in this
+    file (those entries are always empty -- a bare `  vault-cache:` line has
+    no body, so no `image:` line is ever found inside one), but "splits
+    compose.yaml's `services:` section" (the pre-round-3 wording) overstated
+    what this function actually knows: it has no concept of `services:` as
+    a boundary, only of indentation.
+
+    Generalized (review round 2, B1 fix) from
+    test_p1_compose_env_defaults.py's `_extract_service_environment_block`,
+    which isolates only a service's `environment:` sub-block; this isolates
+    the WHOLE body under each collected key (`image:`, `environment:`,
+    `volumes:`, ...) because the B1 fix needs the `image:` line specifically,
+    which lives above `environment:`, not inside it.
+    """
+    blocks: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        header = _SERVICE_HEADER_PATTERN.match(line)
+        if header:
+            current = header.group(1)
+            blocks[current] = []
+            continue
+        if re.match(r"^[A-Za-z]", line):
+            # A top-level key (e.g. `volumes:` following the last service,
+            # or `name:`/`x-vault-logging:` before `services:` even starts)
+            # ends whatever service scope was open, if any.
+            current = None
+            continue
+        if current is not None:
+            blocks[current].append(line)
+    return {name: "\n".join(body) for name, body in blocks.items()}
+
+
+def _compose_service_image_tags() -> dict[str, tuple[str, str]]:
+    """{service_name: (image_name, default_tag)} — one entry per COMPOSE
+    SERVICE with an `image: steamvault/<name>:${VAULT_IMAGE_TAG:-<default>}`
+    line, keyed by the SERVICE the line lives under (never by the image name
+    in its value — see the B1 fix note in this module's docstring for why
+    that distinction is the whole point: vault-runner intentionally reuses
+    vault-api's exact image name, so keying by image name collapses two
+    independent hand-typed lines into one dict entry, silently hiding
+    whichever one is not last).
+    """
+    text = COMPOSE_PATH.read_text(encoding="utf-8")
+    result: dict[str, tuple[str, str]] = {}
+    for service, body in _service_blocks(text).items():
+        match = _IMAGE_TAG_PATTERN.search(body)
+        if match:
+            result[service] = (match.group(1), match.group(2))
+    return result
 
 #: Matches ONLY the real LABEL assignment (`="0.1.0"`) — deliberately
 #: requires the `="..."` shape immediately after the key name, so a comment
@@ -82,14 +171,6 @@ _VERIFY_STACK_TAG_PATTERN = re.compile(
 
 #: The commented-out example line in .env.example, e.g. `#VAULT_IMAGE_TAG=0.1.0`.
 _ENV_EXAMPLE_TAG_PATTERN = re.compile(r"^#VAULT_IMAGE_TAG=(.+)$", re.MULTILINE)
-
-
-def _compose_image_tag_defaults() -> dict[str, str]:
-    """{service_name: default_tag} for every `image:` line in compose.yaml
-    that falls back to a `${VAULT_IMAGE_TAG:-...}` default.
-    """
-    text = COMPOSE_PATH.read_text(encoding="utf-8")
-    return {service: default for service, default in _IMAGE_TAG_PATTERN.findall(text)}
 
 
 def _dockerfile_oci_version() -> str | None:
@@ -121,27 +202,49 @@ def _env_example_tag_default() -> str | None:
 
 
 def test_compose_has_the_expected_image_tag_lines() -> None:
-    found = _compose_image_tag_defaults()
-    assert set(found) == {"vault-core", "vault-api", "vault-dns"}, (
+    """WP S-2 (ADR-0012, review round 2 B1 fix): `vault-runner` joins the
+    expected set. Its `image:` line is a real, independent hand-typed
+    occurrence of the exact same string as vault-api's — reusing the same
+    image name is WHY the B1 blocker existed (see this module's docstring).
+    """
+    found = _compose_service_image_tags()
+    assert set(found) == {"vault-core", "vault-api", "vault-runner", "vault-dns"}, (
         f"deploy/compose.yaml: expected exactly the vault-core/vault-api/"
-        f"vault-dns image lines to carry a ${{VAULT_IMAGE_TAG:-...}} default, "
-        f"found {sorted(found)} -- the extraction regex in this test file and "
-        "compose.yaml's actual layout have diverged."
+        f"vault-runner/vault-dns image lines to carry a "
+        f"${{VAULT_IMAGE_TAG:-...}} default, found {sorted(found)} -- the "
+        "extraction regex in this test file and compose.yaml's actual "
+        "layout have diverged."
+    )
+
+
+def test_vault_runner_uses_the_vault_api_image_name() -> None:
+    """WP S-2 (ADR-0012 §S2): vault-runner deliberately reuses vault-api's
+    exact image (same codebase, `command:` override only, no separate
+    `build:` block) rather than building its own. Pinned by name so a future
+    edit that accidentally gives it its own image (defeating the "one image,
+    two entrypoints" design) is caught here, not silently.
+    """
+    tags = _compose_service_image_tags()
+    image_name, _default = tags.get("vault-runner", (None, None))
+    assert image_name == "vault-api", (
+        f"deploy/compose.yaml's vault-runner service has image name "
+        f"{image_name!r}, expected 'vault-api' -- WP S-2 (ADR-0012) "
+        "deliberately reuses vault-api's image rather than a separate build."
     )
 
 
 def test_all_compose_image_tag_default_occurrences_agree() -> None:
-    """vault-core, vault-api and vault-dns share ONE conceptual release
-    number -- a hand-edit that bumped only one of the three `image:` lines
-    (typo, partial find-and-replace) must fail here, distinctly from the
-    `__version__`-vs-compose comparison below, so a reader immediately knows
-    which of the two possible drifts happened.
+    """vault-core, vault-api, vault-runner and vault-dns share ONE conceptual
+    release number -- a hand-edit that bumped only one of the four `image:`
+    lines (typo, partial find-and-replace) must fail here, distinctly from
+    the `__version__`-vs-compose comparisons below, so a reader immediately
+    knows which of the two possible drifts happened.
     """
-    defaults = _compose_image_tag_defaults()
-    distinct = set(defaults.values())
+    tags = _compose_service_image_tags()
+    distinct = {default for _image, default in tags.values()}
     assert len(distinct) == 1, (
-        f"deploy/compose.yaml's three image: lines disagree on the "
-        f"VAULT_IMAGE_TAG default: {defaults} -- they must all carry the "
+        f"deploy/compose.yaml's four image: lines disagree on the "
+        f"VAULT_IMAGE_TAG default: {tags} -- they must all carry the "
         "same release number."
     )
 
@@ -179,15 +282,41 @@ def test_env_example_has_a_vault_image_tag_default() -> None:
 def test_vault_api_version_matches_compose_image_tag_default() -> None:
     """Mutation-verified in both directions (see this file's module
     docstring) -- bumping either side alone, without the other, fails this
-    exact assertion.
+    exact assertion. Reads ONLY vault-api's own service block (B1 fix,
+    review round 2) -- before the fix, this looked up the value in a dict
+    keyed by IMAGE NAME, and vault-runner's line (added by WP S-2, same
+    image name, parsed LATER in file order) silently overwrote vault-api's
+    own entry there, making a solo mutation of vault-api's line invisible
+    to this test. Measured: reverting to that shape and mutating ONLY this
+    service's default left the full suite green.
     """
-    compose_default = _compose_image_tag_defaults().get("vault-api")
+    compose_default = _compose_service_image_tags().get("vault-api", (None, None))[1]
     assert compose_default == VAULT_API_VERSION, (
-        f"deploy/compose.yaml's VAULT_IMAGE_TAG default is "
-        f"{compose_default!r}, but vault_api.__version__ is "
+        f"deploy/compose.yaml's vault-api service's VAULT_IMAGE_TAG default "
+        f"is {compose_default!r}, but vault_api.__version__ is "
         f"{VAULT_API_VERSION!r} -- one of the two changed without the "
         "other. Bump both together (api/vault_api/__init__.py AND every "
         "image: line in deploy/compose.yaml)."
+    )
+
+
+def test_vault_runner_image_tag_default_matches_vault_api_version() -> None:
+    """WP S-2 (ADR-0012), review round 2 B1 fix. vault-runner's `image:`
+    line is a SEPARATE hand-typed occurrence of the exact same string as
+    vault-api's — there is no shared YAML anchor tying the two together —
+    so it must be checked independently, exactly like
+    `test_vault_api_version_matches_compose_image_tag_default` above.
+    Before the fix this service's default was not checked against
+    `vault_api.__version__` at all (the old dict, keyed by image name,
+    could only ever expose ONE of the two "vault-api"-named entries).
+    """
+    runner_default = _compose_service_image_tags().get("vault-runner", (None, None))[1]
+    assert runner_default == VAULT_API_VERSION, (
+        f"deploy/compose.yaml's vault-runner service's VAULT_IMAGE_TAG "
+        f"default is {runner_default!r}, but vault_api.__version__ is "
+        f"{VAULT_API_VERSION!r} -- one of the two changed without the "
+        "other. Bump both together (api/vault_api/__init__.py AND every "
+        "image: line in deploy/compose.yaml, including vault-runner's)."
     )
 
 

@@ -139,6 +139,39 @@ services:
       VAULT_LOG_LEVEL: ${VAULT_LOG_LEVEL:-INFO}
       VAULT_PREFILL_TIMEOUT_SECONDS: ${VAULT_PREFILL_TIMEOUT_SECONDS:-14400}
       VAULT_WORKER_POLL_SECONDS: ${VAULT_WORKER_POLL_SECONDS:-1.0}
+      # WP S-2 (ADR-0012): the api-side half of the runner split's mode
+      # switch. **Deliberately NOT the same default as vault_api/config.py's
+      # own built-in one** (that default is 'subprocess', see
+      # api/README.md "Queue mode" and DEFAULT_PREFILL_MODE-equivalent
+      # constant PREFILL_MODE_SUBPROCESS) -- this compose file SHIPS queue
+      # mode, because the vault-runner service a few blocks down only does
+      # anything useful once vault-api actually hands work off to it, and
+      # because EG-1's whole point (locking vault-api's container to
+      # LAN-only egress) only works once every deployment that uses this
+      # compose file already runs in queue mode. The bare-metal/native dev
+      # path (api/README.md's "Quickstart") has no second process to run a
+      # runner in at all, and keeps config.py's own 'subprocess' default by
+      # never setting this variable -- that divergence is intentional, not
+      # drift, and is pinned by api/tests/test_p1_compose_env_defaults.py's
+      # own comment on this key. Must also be set on vault-runner below
+      # (identical value): vault-api needs it to know to hand jobs off,
+      # vault-runner's Settings loader parses/validates the same variable
+      # through the same code path even though prefill_runner.py's own logic
+      # never branches on it (Settings.from_env is one loader for every
+      # setting, ADR-0012 §2's "one validation path" reasoning) -- a queue
+      # hand-off with no runner listening, and a runner with no hand-offs
+      # to claim, are both real misconfigurations, which is why the value is
+      # required on both sides rather than inferred from one.
+      VAULT_PREFILL_MODE: ${VAULT_PREFILL_MODE:-queue}
+      # Queue mode only (ADR-0012 §4): how stale vault-runner's lease
+      # (jobs.run_heartbeat_at) must be before vault-api's worker gives up
+      # waiting on it and fails the job. Consumed ONLY here -- vault-runner
+      # itself never reads this value (it writes the heartbeat on its own
+      # VAULT_RUNNER_HEARTBEAT_SECONDS cadence below; deciding when a
+      # heartbeat counts as stale is vault-api's call to make, the same side
+      # that is actually waiting). Default matches config.py's own default
+      # byte-for-byte.
+      VAULT_RUNNER_LEASE_TIMEOUT_SECONDS: ${VAULT_RUNNER_LEASE_TIMEOUT_SECONDS:-30.0}
       VAULT_SIZE_CACHE_TTL: ${VAULT_SIZE_CACHE_TTL:-60.0}
       VAULT_AGENT_REPORT_KEEP: ${VAULT_AGENT_REPORT_KEEP:-20}
       # Manifest-based GC (WP 3.8b/3.12, api/README.md "The recently-stored
@@ -288,17 +321,50 @@ services:
       - ${VAULT_CACHE_PATH:-vault-cache}:/vault
       # SQLite database (mapping, jobs, agent reports). Small; back this up.
       - vault-db:/data
-      # SteamPrefill's Config/ -- the Steam SESSION lives here after the one-time
-      # interactive login (deploy/README.md "First run"). Treat it as sensitive:
-      # it is a logged-in Steam session. vault-api itself never sees credentials
-      # (ADR-0004).
-      - vault-steamprefill:/opt/steamprefill/Config
-      # HOME for the container user. NOT optional plumbing: SteamPrefill's
-      # AppConfig static constructor creates a directory under HOME before it
-      # parses a single argument, so an unwritable HOME kills every SteamPrefill
-      # invocation with a TypeInitializationException (WP 1.9 review blocker,
-      # see api/Dockerfile). Volume-backed so the manifest cache it builds there
-      # survives restarts instead of being rebuilt into the container layer.
+      # SteamPrefill's Config/ (the Steam SESSION) is NOT mounted here anymore
+      # as of WP S-2 (ADR-0012 §5) -- it moved to the vault-runner service
+      # below. Evidence, not assumption: in VAULT_PREFILL_MODE=queue (this
+      # file's shipped default), PrefillWorker._run_prefill_via_queue calls
+      # only jobs.handoff_run + prefill_queue.await_run_result
+      # (vault_api/worker.py) -- neither touches prefill.run_prefill,
+      # prefill.resolve_executable, or anything under Config/; the ONLY
+      # caller of resolve_executable/run_prefill left in queue mode is
+      # vault_api/prefill_runner.py, running in the OTHER container. So
+      # vault-api genuinely has no remaining use for VAULT_STEAMPREFILL_PATH
+      # or a Config/ mount once queue mode is the shipped default -- keeping
+      # the credential-bearing volume here too would just be a second copy
+      # of a Steam session with no reader, which is a strictly worse
+      # posture for EG-1's upcoming egress lock to inherit than not having
+      # it at all. (settings_store.py's EnvOnlySpec("steamprefill_path", ...)
+      # still reflects the env value through GET/PATCH /v1/settings for
+      # operator visibility -- that is a string round-trip, not filesystem
+      # access, and needs no volume.)
+      #
+      # HOME for the container user IS still mounted here, and this is new
+      # reasoning as of WP S-2, not a leftover: SteamPrefill's own manifest
+      # temp-cache directory (VAULT_STEAMPREFILL_CACHE_DIR, WP 3.2) defaults
+      # to a path UNDER HOME (config._default_steamprefill_cache_dir --
+      # "$HOME/.cache/SteamPrefill/v1" on Linux), and manifest ingestion
+      # (vault_api/manifest_ingest.py's ingest_after_prefill, called from
+      # worker.py's _finalize_prefill_result) stays vault-api-side even in
+      # queue mode (ADR-0012 §1: only the run_prefill CALL moves). SteamPrefill
+      # now WRITES those .bin files from inside vault-runner's container, so
+      # vault-api can only read them back if this volume is the SAME one
+      # mounted at the SAME path in both containers -- exactly the
+      # filesystem-equivalence argument ADR-0012 §3 already makes for the
+      # shared SQLite file, applied here to a plain file read instead of a
+      # WAL-mode database. Dropping this mount from EITHER service silently
+      # breaks manifest ingestion for every queue-mode prefill from then on
+      # (manifest_ingest.py's own cache_dir_unavailable path: "not found or
+      # unreadable... Not an error" -- it warns into the job log and moves
+      # on, it does not fail the job, which is exactly why this is easy to
+      # miss without the check verify-stack.sh now has for it). Also still
+      # NOT optional plumbing for the reason WP 1.9 found originally:
+      # SteamPrefill's AppConfig static constructor creates a directory under
+      # HOME before it parses a single argument, so an unwritable HOME kills
+      # every SteamPrefill invocation with a TypeInitializationException
+      # (that binary now runs in vault-runner, but the same fact applies
+      # there -- see this same volume on that service below).
       - vault-steamprefill-home:/opt/steamprefill/home
     security_opt:
       - no-new-privileges:true
@@ -306,6 +372,213 @@ services:
       # Runs as uid 101 on an unprivileged port and touches nothing but its own
       # volumes -- it needs no Linux capabilities at all.
       - ALL
+    logging: *vault-logging
+
+  # ===========================================================================
+  # vault-runner -- the SteamPrefill runner (WP S-2, ADR-0012). Broad Steam
+  # CM/CDN egress lives HERE now, not in vault-api, so EG-1 can later lock
+  # vault-api's own container to LAN-only without breaking prefill. Same
+  # image, same codebase as vault-api (`python -m vault_api.prefill_runner`
+  # is a second entrypoint into it, api/vault_api/prefill_runner.py) --
+  # deliberately no separate `build:` block: vault-api's build above already
+  # produces this exact image tag, and this service just runs it with a
+  # different CMD. No ports: this process never serves HTTP, never
+  # authenticates a request, and has no legitimate use for VAULT_API_KEY
+  # (api/README.md "Queue mode": Settings.from_env(require_api_key=False) --
+  # see api/vault_api/config.py's docstring on that parameter for the full
+  # argument). Started unconditionally, like every other service here: it is
+  # a genuine no-op, idling on its poll loop, on an install that still has
+  # VAULT_PREFILL_MODE=subprocess on the vault-api side above (nothing is
+  # ever handed off for it to claim in that mode) -- see
+  # vault_api/prefill_runner.py's own module docstring.
+  # ===========================================================================
+  vault-runner:
+    image: steamvault/vault-api:${VAULT_IMAGE_TAG:-0.1.0}
+    command: ["python", "-m", "vault_api.prefill_runner"]
+    restart: unless-stopped
+    # A stable, project-scoped name for the one documented interactive step
+    # that targets this container directly (deploy/README.md "First run":
+    # `docker exec` into it for the one-time SteamPrefill login,
+    # ADR-0012 §5). Deliberately NOT a bare "vault-runner" literal:
+    # ${COMPOSE_PROJECT_NAME} is how Compose exposes the ALREADY-RESOLVED
+    # project name (the `name: steamvault` key at the top of this file, or
+    # whatever `-p`/COMPOSE_PROJECT_NAME overrides it to) back into this
+    # file's own variable interpolation -- confirmed empirically with
+    # `docker compose config` both with no override (renders
+    # "steamvault-vault-runner") and with `-p steamvault-verify` (renders
+    # "steamvault-verify-vault-runner"). A literal container_name would
+    # collide across two Compose projects on the same host, which is exactly
+    # the isolation deploy/tests/verify-stack.sh's own header comment
+    # promises ("uses its own Compose project name ... so it can never touch
+    # a real deployment's containers or volumes") -- container_name is a
+    # HOST-global namespace, unlike the project-scoped names Compose picks
+    # on its own for every service that (like the other three in this file)
+    # has no explicit container_name, so a real deployment and a verify run
+    # on the same host would otherwise fight over one literal name.
+    container_name: ${COMPOSE_PROJECT_NAME:-steamvault}-vault-runner
+    # Empirically found running this package (not a hypothetical): on a
+    # genuinely FRESH `vault-db` volume, vault-api's schema creation
+    # (vault_api/db.py's init_db, called from create_app() BEFORE uvicorn
+    # ever binds its port -- so /v1/health can only ever succeed once it has
+    # already run) races vault-runner's first poll tick. Observed directly,
+    # real containers, real fresh volume: vault-runner's first `claim_run`
+    # hit `sqlite3.OperationalError: no such table: jobs`, crashed (uncaught
+    # -- this is not a retry loop), and only came up clean on Docker's
+    # `restart: unless-stopped` retry a moment later, once vault-api had
+    # caught up. Self-healing, but a needless crash-and-alarming-traceback
+    # on every first-ever start otherwise. `condition: service_healthy`
+    # removes the race entirely rather than papering over it with a fixed
+    # delay: vault-api's healthcheck cannot report healthy before init_db
+    # has already completed, by construction, so this is a real ordering
+    # guarantee, not a timing guess.
+    depends_on:
+      vault-api:
+        condition: service_healthy
+    environment:
+      VAULT_LOG_LEVEL: ${VAULT_LOG_LEVEL:-INFO}
+      # See the long comment on this same key over on vault-api above --
+      # this is the identical variable, required on BOTH services. Settings
+      # here does not need require_api_key, but it does go through the same
+      # strict-enum validation as vault-api's copy (config.py's single
+      # Settings.from_env loader, ADR-0012 §2).
+      VAULT_PREFILL_MODE: ${VAULT_PREFILL_MODE:-queue}
+      # Consumed directly by prefill_runner.py's _execute -> prefill.run_prefill
+      # (the timeout that used to apply to vault-api's OWN subprocess call now
+      # applies to this container's). Same variable, same default, as
+      # vault-api's copy above -- both need to agree with each other, since an
+      # operator tuning one without the other would get a confusing mismatch
+      # between "the worker's queue-mode wait" (bounded by
+      # VAULT_RUNNER_LEASE_TIMEOUT_SECONDS on vault-api, not this) and "how
+      # long SteamPrefill itself is allowed to run" (this one, here).
+      VAULT_PREFILL_TIMEOUT_SECONDS: ${VAULT_PREFILL_TIMEOUT_SECONDS:-14400}
+      # Queue mode only. How often this process refreshes its lease
+      # (jobs.run_heartbeat_at) while a job is running, piggybacked on
+      # prefill.run_prefill's existing 0.2s subprocess poll tick and
+      # throttled to this interval (prefill_runner.py's
+      # stop_request_with_heartbeat). vault-api's copy of the RELATED
+      # staleness margin (VAULT_RUNNER_LEASE_TIMEOUT_SECONDS) lives on the
+      # vault-api service above, not here -- see that key's own comment for
+      # why deciding staleness is the waiting side's job, not the heartbeat
+      # writer's. Default matches config.py's own default byte-for-byte.
+      VAULT_RUNNER_HEARTBEAT_SECONDS: ${VAULT_RUNNER_HEARTBEAT_SECONDS:-5.0}
+      # How often this process polls the jobs table for a hand-off to claim
+      # when idle. Runner-only by design (api/README.md "Queue mode":
+      # vault-api's worker reuses VAULT_WORKER_POLL_SECONDS for its OWN
+      # wait-on-hand-off loop instead of this variable) -- setting this on
+      # vault-api above would be silently ignored, so it is deliberately not
+      # duplicated there. Default matches config.py's own default
+      # byte-for-byte.
+      VAULT_RUNNER_POLL_SECONDS: ${VAULT_RUNNER_POLL_SECONDS:-1.0}
+      # Deliberately NOT forwarded here: VAULT_API_KEY (this process never
+      # serves HTTP or authenticates anything -- see the section header
+      # comment above and Settings.from_env's require_api_key=False). Also
+      # deliberately NOT forwarded: VAULT_WORKER_POLL_SECONDS,
+      # VAULT_RUNNER_LEASE_TIMEOUT_SECONDS and every setting below the
+      # prefill/queue-mode ones on vault-api's block above (size cache,
+      # agent reports, manifest archive/GC tuning, scheduler, auto-GC,
+      # cache-event sweep, webhooks, the Steam relay privacy gate, the
+      # settings-API hard-lock) -- none of them are read by
+      # vault_api/prefill_runner.py, which imports nothing from worker.py
+      # and touches none of that job-lifecycle logic (ADR-0012 §1).
+      # VAULT_DB_PATH, VAULT_CACHE_ROOT, VAULT_STEAMPREFILL_PATH and
+      # VAULT_WEB_DIR are baked into the image exactly as they are for
+      # vault-api (see api/Dockerfile) -- same reasoning as vault-api's own
+      # comment on this: they describe the image's own layout, not a
+      # per-deployment choice, and this service uses the identical image.
+      # (VAULT_CACHE_ROOT is still parsed and non-blank-validated by
+      # Settings.from_env here even though prefill_runner.py's own logic
+      # never reads settings.cache_root -- one validation path for every
+      # setting, ADR-0012 §2 -- but the baked image default already
+      # satisfies that check with no compose-level override needed.)
+    volumes:
+      # Deliberately NOT mounted here (review round 2, should-fix S3):
+      # ${VAULT_CACHE_PATH:-vault-cache}:/vault, the depot cache vault-core
+      # and vault-api share, is intentionally ABSENT from vault-runner.
+      # Evidence check run for this package, stated plainly: neither
+      # prefill_runner.py nor prefill.py's run_prefill reads
+      # VAULT_CACHE_ROOT or touches anything under it directly --
+      # SteamPrefill talks to vault-core over HTTP, and scanning depot
+      # signatures before/after a run (prefill.scan_depots) is worker.py's
+      # job, staying vault-api-side in every mode -- so this container has
+      # no FUNCTIONAL need for it. An earlier draft of this file mounted it
+      # anyway "for consistency" and called that harmless; that argument
+      # only weighed ownership (uid 101 agrees on both sides regardless),
+      # never BLAST RADIUS -- and blast radius is the one property that
+      # actually matters here, once EG-1 locks this container to broad
+      # Steam CM/CDN egress (the entire reason the runner split exists,
+      # ADR-0012). A read-write mount of the ENTIRE served cache inside the
+      # one deliberately broad-egress container turns a SteamPrefill-side
+      # compromise into cache poisoning of everything this LAN downloads --
+      # a strictly worse posture than the diagnostic convenience
+      # (`docker exec vault-runner ls /vault/cache`) it bought. Use
+      # `docker exec vault-api ...` for that instead; vault-api still has
+      # this mount and always will (it is the one that deletes from and
+      # sizes the cache, plan §3/§4).
+      # jobs.claim_run / record_run_heartbeat / record_run_result all write
+      # here (vault_api/prefill_runner.py's whole reason for existing) --
+      # the SAME sqlite file vault-api's worker reads/writes, verified as a
+      # genuine two-real-process WAL race in
+      # api/tests/test_sqlite_wal_multiprocess.py (ADR-0012 §3).
+      - vault-db:/data
+      # SteamPrefill's Config/ -- the Steam SESSION now lives HERE, not on
+      # vault-api (ADR-0012 §5, moved from that service above this WP).
+      # Treat it as sensitive: it is a logged-in Steam session, and this is
+      # now the ONE container that holds it. vault-api itself still never
+      # sees or stores Steam credentials either way (ADR-0004) -- nothing
+      # about that guarantee changes, only which container the already-
+      # authenticated CLI's own session directory lives in.
+      - vault-steamprefill:/opt/steamprefill/Config
+      # HOME for this container's uid 101, and now SHARED with vault-api
+      # (same volume, same path, mounted on vault-api above too) -- see the
+      # long comment on vault-api's copy of this line for why: SteamPrefill
+      # (running HERE now) writes its manifest temp-cache under this
+      # directory, and vault-api's manifest-ingestion step (which stays
+      # vault-api-side, ADR-0012 §1) can only read those files back if both
+      # containers agree on the same underlying volume. Still also the
+      # WP 1.9 HOME-must-be-real-and-writable requirement unchanged by the
+      # split: SteamPrefill's AppConfig static constructor throws before
+      # parsing a single argument if HOME is not writable, and that binary
+      # runs HERE now.
+      - vault-steamprefill-home:/opt/steamprefill/home
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      # Same posture as vault-api: runs as uid 101, needs no Linux
+      # capability to do its job. EG-1 (not this package) is what actually
+      # restricts this container's NETWORK egress -- this is the orthogonal,
+      # already-uncontroversial half of "runs with the least it needs".
+      - ALL
+    # Bounded time to shut down cleanly on SIGTERM (docker compose stop /
+    # down, or a restart), reviewed here because ADR-0012 §4's own nitpick
+    # asks for it explicitly: an orphaned SteamPrefill behind a stopped
+    # runner is only bounded by CONTAINER lifecycle, so that lifecycle must
+    # actually give the in-process shutdown path time to run rather than
+    # racing it. prefill_runner.py's main() already installs a SIGTERM
+    # handler (signal.signal(signal.SIGTERM, _handle_signal) -> runner.stop()
+    # -> the run_forever loop's threading.Event) -- this is not a "no
+    # handler exists" gap. The worst-case teardown budget it needs, added up
+    # from prefill.py's own constants: up to _POLL_INTERVAL_SECONDS (0.2s)
+    # before the current wait tick notices should_abort() is True, then
+    # _stop_process()'s terminate()-wait-kill-wait sequence, each half
+    # bounded by _TERMINATE_GRACE_SECONDS (5.0s) -- 0.2 + 5.0 + 5.0 = 10.2s
+    # worst case before the child is reaped and record_run_result can write.
+    # Docker Compose's own default stop_grace_period is 10s, which does not
+    # comfortably clear that budget (a slow WAL fsync or a loaded host could
+    # push the real number past it), so a SIGKILL could arrive mid-teardown
+    # and turn a clean "aborted" result into a hard kill with nothing
+    # recorded. 20s gives roughly 2x the computed worst case.
+    stop_grace_period: 20s
+    # The image's baked HEALTHCHECK (api/Dockerfile) probes
+    # http://127.0.0.1:8080/v1/health -- this process never listens on that
+    # port or serves HTTP at all, so inheriting it unmodified would make
+    # `docker compose ps` show this container permanently unhealthy despite
+    # working correctly, which is worse than no healthcheck (a real failure
+    # would be indistinguishable from this expected-false-positive noise).
+    # Liveness for this service is proven differently -- by its own poll-tick
+    # log line (see deploy/tests/verify-stack.sh's smoke check) -- rather
+    # than by a probe with nothing meaningful to ask over HTTP.
+    healthcheck:
+      disable: true
     logging: *vault-logging
 
   # ===========================================================================

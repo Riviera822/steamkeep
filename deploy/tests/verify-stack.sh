@@ -314,6 +314,8 @@ rendered_default=$(dc --profile dns config 2>/dev/null)
 # lines even if it happens to be the last one rendered.
 core_block=$(printf '%s\n' "$rendered_default" | awk '/^  vault-core:/{f=1;next} f && (/^  [A-Za-z0-9_-]+:/ || /^[A-Za-z]/){exit} f')
 api_block=$(printf '%s\n' "$rendered_default" | awk '/^  vault-api:/{f=1;next} f && (/^  [A-Za-z0-9_-]+:/ || /^[A-Za-z]/){exit} f')
+# WP S-2 (ADR-0012): the runner's own block, same isolation logic.
+runner_block=$(printf '%s\n' "$rendered_default" | awk '/^  vault-runner:/{f=1;next} f && (/^  [A-Za-z0-9_-]+:/ || /^[A-Za-z]/){exit} f')
 
 # Precondition, checked BEFORE the emptiness check below means anything:
 # `assert_eq "" "$event_log_val"` also reads as "pass" if VAULT_EVENT_LOG is
@@ -382,8 +384,121 @@ do
     assert_eq "$expected" "$val" "vault-api: $key default ($expected) passes through"
 done
 
+# WP S-2 (ADR-0012): the runner split's own env-forwarding audit. Same
+# precondition-then-value pattern as the B1 loop above, but now checking
+# TWO service blocks per variable where the variable appears on both sides
+# (api/tests/test_p1_compose_env_defaults.py's own extension, mirrored here
+# for the Docker-dependent cross-check this script exists to provide).
+# VAULT_PREFILL_MODE's "queue" expected value is a DELIBERATE divergence
+# from vault_api/config.py's own built-in default ('subprocess') -- see
+# deploy/compose.yaml's comment on that key and
+# test_config_py_own_prefill_mode_default_is_still_subprocess in the Python
+# test file for the other half of that divergence's pin.
+step "3f. WP S-2 (ADR-0012): vault-runner service exists in the rendered config, on both required sides"
+say 'A missing vault-runner: block fails every check in this step at the'
+say 'precondition stage, before any value comparison -- this is also the named'
+say 'check that dies if the whole service is ever dropped from compose.yaml.'
+runner_block_nonempty=$([ -n "$runner_block" ] && echo yes || echo no)
+assert_eq "yes" "$runner_block_nonempty" "vault-runner: service block is present in the rendered config"
+
+for pair in \
+    "VAULT_PREFILL_MODE:queue" \
+    "VAULT_RUNNER_LEASE_TIMEOUT_SECONDS:30.0"
+do
+    key=${pair%%:*}
+    expected=${pair#*:}
+    count=$(printf '%s\n' "$api_block" | grep -c "${key}:")
+    assert_eq "1" "$count" "vault-api: $key key is present exactly once in the rendered block (precondition)"
+    val=$(printf '%s\n' "$api_block" | grep "${key}:" | head -1 | sed -e "s/^[[:space:]]*${key}:[[:space:]]*//" -e 's/"//g')
+    assert_eq "$expected" "$val" "vault-api: $key default ($expected) passes through"
+done
+
+for pair in \
+    "VAULT_LOG_LEVEL:INFO" \
+    "VAULT_PREFILL_MODE:queue" \
+    "VAULT_PREFILL_TIMEOUT_SECONDS:14400" \
+    "VAULT_RUNNER_HEARTBEAT_SECONDS:5.0" \
+    "VAULT_RUNNER_POLL_SECONDS:1.0"
+do
+    key=${pair%%:*}
+    expected=${pair#*:}
+    count=$(printf '%s\n' "$runner_block" | grep -c "${key}:")
+    assert_eq "1" "$count" "vault-runner: $key key is present exactly once in the rendered block (precondition)"
+    val=$(printf '%s\n' "$runner_block" | grep "${key}:" | head -1 | sed -e "s/^[[:space:]]*${key}:[[:space:]]*//" -e 's/"//g')
+    assert_eq "$expected" "$val" "vault-runner: $key default ($expected) passes through"
+done
+
+# The other direction of the "both sides must agree" mutation bar: a
+# hand-off with no runner listening is caught by vault-api's own
+# VAULT_PREFILL_MODE presence check above; a runner with no hand-offs is
+# caught by vault-runner's copy just above. Neither one alone would catch
+# the OTHER service's line being dropped -- both loops are required.
+
+step "3g. WP S-2: VAULT_API_KEY is never forwarded to vault-runner"
+say 'ADR-0012 S2 / api/README.md "Queue mode": this process never serves HTTP'
+say 'and never authenticates a request, so it has no legitimate use for the'
+say 'LAN control-plane secret -- Settings.from_env(require_api_key=False) is'
+say 'the code-side half of this; this checks the compose-side half, against'
+say "the runner's own rendered block (which already includes everything"
+say "between its service header and the next service/top-level key, not just"
+say 'its environment: section -- the same awk extraction used for api_block/'
+say 'core_block above).'
+runner_apikey_key_count=$(printf '%s\n' "$runner_block" | grep -c 'VAULT_API_KEY:' || true)
+assert_eq "0" "${runner_apikey_key_count:-0}" "vault-runner's rendered block does not set VAULT_API_KEY"
+
+step "3h. WP S-2: the Config/ (Steam session) volume mounts on exactly one service, and it is vault-runner"
+say 'ADR-0012 S5: the credential-bearing volume moved from vault-api to'
+say 'vault-runner. First checked against the RAW file, anchored to an actual'
+say 'mount-target SHAPE (a sequence item ending ":/opt/steamprefill/Config"),'
+say 'not a bare substring match -- the same anchoring style as step 6h below,'
+say 'for the same reason (a comment merely MENTIONING the path must not'
+say 'satisfy this check) -- then cross-checked against the RENDERED config'
+say '(long-form "target: ..." syntax) attributed to each service by name, so'
+say 'a mount on the wrong service is caught even if the raw-file count alone'
+say 'stays at 1 (e.g. moved to vault-core instead of vault-runner by mistake).'
+config_mount_lines=$(grep -nE '^[[:space:]]*-[[:space:]]*[^[:space:]]*:/opt/steamprefill/Config(:|[[:space:]]*$)' "$compose_file" || true)
+config_mount_count=$(printf '%s\n' "$config_mount_lines" | grep -c . || true)
+assert_eq "1" "${config_mount_count:-0}" "exactly one service in compose.yaml mounts /opt/steamprefill/Config"
+config_target_in_api=$(printf '%s\n' "$api_block" | grep -c 'target: /opt/steamprefill/Config' || true)
+config_target_in_runner=$(printf '%s\n' "$runner_block" | grep -c 'target: /opt/steamprefill/Config' || true)
+assert_eq "0" "${config_target_in_api:-0}" "vault-api's rendered block does NOT mount /opt/steamprefill/Config (moved out in WP S-2)"
+assert_eq "1" "${config_target_in_runner:-0}" "vault-runner's rendered block mounts /opt/steamprefill/Config"
+
+step "3i. WP S-2: the HOME (/opt/steamprefill/home) volume is now shared by BOTH vault-api and vault-runner"
+say 'Not a leftover -- new reasoning for WP S-2 (see compose.yaml comment on'
+say "this mount): SteamPrefill's manifest temp-cache lives under this"
+say 'directory, SteamPrefill now writes it from vault-runner, and manifest'
+say 'ingestion (still vault-api-side, ADR-0012 §1) can only read those files'
+say 'back if both containers share the SAME volume at the SAME path. Dropping'
+say 'this from either service silently breaks manifest ingestion for every'
+say 'queue-mode prefill from then on -- see 6k below for the live,'
+say 'cross-container proof (a file written from one side, read from the'
+say 'other), not just this static config check.'
+home_target_in_api=$(printf '%s\n' "$api_block" | grep -c 'target: /opt/steamprefill/home' || true)
+home_target_in_runner=$(printf '%s\n' "$runner_block" | grep -c 'target: /opt/steamprefill/home' || true)
+assert_eq "1" "${home_target_in_api:-0}" "vault-api's rendered block mounts /opt/steamprefill/home"
+assert_eq "1" "${home_target_in_runner:-0}" "vault-runner's rendered block mounts /opt/steamprefill/home"
+
+step "3i2. WP S-2 (review round 2, should-fix S3): vault-runner does NOT mount the depot cache volume"
+say 'Deliberately absent -- neither prefill_runner.py nor prefill.py reads'
+say 'VAULT_CACHE_ROOT (evidence in the compose.yaml comment on vault-api'
+say 'above), and mounting it anyway would be a read-write hole onto the'
+say 'ENTIRE served cache inside the one deliberately broad-egress container'
+say '(ADR-0012) once EG-1 locks it down -- blast radius, not ownership, is'
+say 'the argument. vault-api and vault-core keep this mount unchanged.'
+cache_target_in_runner=$(printf '%s\n' "$runner_block" | grep -c 'target: /vault$' || true)
+assert_eq "0" "${cache_target_in_runner:-0}" "vault-runner's rendered block does NOT mount /vault (the depot cache)"
+
+step "3j. WP S-2: a stable container_name renders for vault-runner, scoped to THIS run's isolated project"
+say 'Confirms the ${COMPOSE_PROJECT_NAME}-vault-runner expression (compose.yaml'
+say "comment on this key) resolves to THIS script's own isolated project name"
+say "($PROJECT), not a bare literal that would collide with a real deployment"
+say 'sharing this host -- exactly the isolation this script promises in its own'
+say 'header comment.'
+assert_contains "$rendered_default" "container_name: $PROJECT-vault-runner" "rendered config's vault-runner container_name is project-scoped to $PROJECT"
+
 # =============================================================================
-section "4. Stack up (vault-core + vault-api)"
+section "4. Stack up (vault-core + vault-api + vault-runner)"
 # =============================================================================
 run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' up -d"
 
@@ -401,12 +516,55 @@ say "vault-core health: $core_h    vault-api health: $api_h"
 assert_eq "healthy" "$core_h" "vault-core container healthcheck"
 assert_eq "healthy" "$api_h"  "vault-api container healthcheck"
 
+step "3.5-runner. WP S-2: vault-runner comes up clean once vault-api is healthy (the depends_on ordering fix)"
+say 'vault-runner has NO container HEALTHCHECK (deploy/compose.yaml explains'
+say 'why: it never serves HTTP, so the .State.Health field this script uses'
+say 'for the other two services does not exist here at all) -- readiness is'
+say '.State.Status == running PLUS zero restarts, not a health status string.'
+say ''
+say 'This is also where an EMPIRICAL finding from writing this package lives:'
+say 'on a genuinely fresh vault-db volume, without depends_on, vault-runner'
+say "would race vault-api's schema creation (init_db, called from create_app()"
+say 'before uvicorn ever binds its port) and crash on its very first poll tick'
+say '("no such table: jobs") -- self-healing via restart: unless-stopped, but'
+say 'a needless crash-and-traceback on every first-ever start. The'
+say "depends_on: vault-api: condition: service_healthy fix removes the race"
+say 'entirely (vault-api cannot report healthy before init_db has already run,'
+say 'by construction) -- this step is what would catch a regression of that'
+say 'fix (RestartCount would climb above 0 again).'
+i=0
+while [ "$i" -lt 30 ]; do
+    runner_status=$(docker inspect --format '{{.State.Status}}' "$(dc ps -q vault-runner)" 2>/dev/null || echo missing)
+    [ "$runner_status" = "running" ] && break
+    i=$((i + 1))
+    sleep 2
+done
+say "vault-runner status: $runner_status"
+assert_eq "running" "$runner_status" "vault-runner container is running"
+runner_restarts=$(docker inspect --format '{{.RestartCount}}' "$(dc ps -q vault-runner)" 2>/dev/null || echo -1)
+say "vault-runner restart count: $runner_restarts"
+assert_eq "0" "$runner_restarts" "vault-runner started clean with zero restarts (no schema-creation race)"
+
 step "4a. vault-core boot log (preflight output)"
 run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' logs vault-core"
 
 step "4b. Container users and the shared cache volume"
 run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' exec -T vault-core sh -c 'ps -o user,args | head -4; echo; stat -c \"%n %U:%G %a\" /vault /vault/cache /vault/cache/depot /vault/tmp'"
-run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' exec -T vault-api sh -c 'id; stat -c \"%n %u:%g\" /vault/cache /data /opt/steamprefill/Config'"
+say 'vault-api no longer mounts /opt/steamprefill/Config as of WP S-2 (moved to'
+say 'vault-runner, ADR-0012 §5) -- stat-ing it here would just prove a negative'
+say "removal, so this now checks vault-api's remaining mounts (/vault/cache,"
+say '/data, and the now-SHARED /opt/steamprefill/home) plus vault-runner'
+say "OWN mounts, Config/ included, in the SAME step so the split is visible"
+say 'side by side. vault-runner is deliberately NOT stat-ed on /vault/cache'
+say '(review round 2, should-fix S3): that mount was removed from this'
+say 'service on purpose -- see deploy/compose.yaml'"'"'s comment on its'
+say 'volumes: for the blast-radius argument (a read-write mount of the'
+say 'entire served cache inside the one deliberately broad-egress container'
+say 'is a strictly worse posture than the diagnostic convenience it bought).'
+say 'Step 6k below asserts the ABSENCE explicitly; this step only exercises'
+say "what vault-runner actually has."
+run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' exec -T vault-api sh -c 'id; stat -c \"%n %u:%g\" /vault/cache /data /opt/steamprefill/home'"
+run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' exec -T vault-runner sh -c 'id; stat -c \"%n %u:%g\" /data /opt/steamprefill/Config /opt/steamprefill/home'"
 
 # =============================================================================
 section "5. vault-core behaviour"
@@ -741,6 +899,93 @@ regcheck_health=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$API_URL
 assert_eq "200" "$regcheck_health" "GET /v1/health still returns 200 after the build-context change"
 regcheck_games=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "X-Api-Key: $TEST_API_KEY" "$API_URL/v1/games")
 assert_eq "200" "$regcheck_games" "GET /v1/games (authed) still returns 200 after the build-context change"
+
+step "6k. vault-runner (WP S-2, ADR-0012): the empirical runner-split checks"
+say 'Everything above this step in section 6 predates the runner split and'
+say 'still exercises vault-api only, unchanged. This step is the new'
+say "service's own behavioural evidence -- container identity, the secret it"
+say "must NOT have, the env forwarding it DOES have, the poll-loop log line"
+say 'that is its liveness proof (it has no HTTP healthcheck, see step'
+say '3.5-runner above), and a REAL cross-container file write proving the'
+say 'shared HOME volume (step 3i) actually does what its comment claims,'
+say 'not just that the mount is declared.'
+
+say ''
+say '--- container identity: the stable, project-scoped container_name ---'
+runner_cid=$(dc ps -q vault-runner)
+runner_name=$(docker inspect --format '{{.Name}}' "$runner_cid" | sed 's#^/##')
+say "    container_name (live): $runner_name"
+assert_eq "$PROJECT-vault-runner" "$runner_name" "the running container's actual name matches the stable, project-scoped container_name"
+
+say ''
+say '--- S3 (review round 2): the depot cache volume is NOT mounted on the running container ---'
+say 'Checked via `docker inspect`'"'"'s real Mounts list, not `stat` -- the'
+say 'image itself pre-creates /vault/cache/depot at build time (api/Dockerfile,'
+say 'for the OTHER service that DOES need it), so a bare `stat /vault/cache`'
+say 'would succeed on vault-runner too even with no volume mounted there,'
+say 'proving nothing. Mounts is the ground truth for whether a NAMED VOLUME'
+say 'is actually attached at that path.'
+runner_vault_mount=$(docker inspect --format '{{range .Mounts}}{{.Destination}} {{end}}' "$runner_cid" | tr ' ' '\n' | grep -c '^/vault$' || true)
+say "    mount destinations: $(docker inspect --format '{{range .Mounts}}{{.Destination}} {{end}}' "$runner_cid")"
+assert_eq "0" "${runner_vault_mount:-0}" "the running vault-runner container has no /vault mount (depot cache excluded, per S3's blast-radius argument)"
+
+say ''
+say '--- liveness proof: no HTTP surface to probe, so the poll-tick log line is the evidence ---'
+runner_logs=$(dc logs --no-log-prefix vault-runner 2>/dev/null)
+say "$runner_logs" | sed 's/^/    /'
+assert_contains "$runner_logs" "starting (poll every" "vault-runner logged its startup/poll-loop line"
+assert_contains "$runner_logs" "SteamPrefill path '/opt/steamprefill/SteamPrefill'" "the logged startup line names the real SteamPrefill path (not an empty/misconfigured one)"
+
+say ''
+say '--- env forwarding: VAULT_PREFILL_MODE reaches BOTH processes; VAULT_API_KEY reaches NEITHER runner ---'
+say 'Same printenv-exit-code pattern as step 6i above (present-even-if-empty'
+say 'is exit 0; absent is exit 1) -- proving the RUNNING container'
+say "environment, not just the rendered YAML text steps 3f/3g already pinned."
+run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' exec -T vault-runner sh -c 'printenv VAULT_PREFILL_MODE; echo \"exit=\$?\"; printenv VAULT_API_KEY >/dev/null 2>&1; echo \"exit=\$?\"'"
+runner_prefillmode_defined=$(dc exec -T vault-runner sh -c 'printenv VAULT_PREFILL_MODE >/dev/null 2>&1; echo "exit=$?"')
+runner_apikey_defined=$(dc exec -T vault-runner sh -c 'printenv VAULT_API_KEY >/dev/null 2>&1; echo "exit=$?"')
+api_prefillmode_defined=$(dc exec -T vault-api sh -c 'printenv VAULT_PREFILL_MODE >/dev/null 2>&1; echo "exit=$?"')
+assert_contains "$runner_prefillmode_defined" "exit=0" "VAULT_PREFILL_MODE is a defined env var inside the running vault-runner container"
+assert_contains "$api_prefillmode_defined" "exit=0" "VAULT_PREFILL_MODE is a defined env var inside the running vault-api container (both sides, per compose.yaml's comment)"
+assert_not_contains "$runner_apikey_defined" "exit=0" "VAULT_API_KEY is NOT a defined env var inside the running vault-runner container (require_api_key=False has nothing to read)"
+
+say ''
+say '--- the shared HOME volume, proven live: a file written from vault-runner is visible from vault-api ---'
+say 'This is the step 3i config-level mount check turned into a real filesystem'
+say 'proof -- the actual failure this package is guarding against'
+say '(manifest_ingest.py silently finding nothing to ingest) would NOT be'
+say 'caught by the mount merely being declared on both services if, say, one'
+say 'side pointed at a DIFFERENT volume of the same name in a mistyped override.'
+probe_name="wp-s2-verify-shared-home-$$"
+run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' exec -T vault-runner sh -c 'touch /opt/steamprefill/home/$probe_name'"
+home_probe_seen=$(dc exec -T vault-api sh -c "ls /opt/steamprefill/home/ 2>/dev/null" | tr -d '\r')
+assert_contains "$home_probe_seen" "$probe_name" "a file vault-runner wrote under /opt/steamprefill/home is visible from vault-api (the SAME volume, not two same-named ones)"
+dc exec -T vault-runner sh -c "rm -f /opt/steamprefill/home/$probe_name" >/dev/null 2>&1 || true
+
+say ''
+say '--- the documented login path (deploy/README.md "First run") actually reaches SteamPrefill, credential-free ---'
+say 'Same shape as step 6f above (which runs the binary directly via'
+say '`compose run` regardless of VAULT_PREFILL_MODE, and still exercises the'
+say "SteamPrefill-boots-cleanly regression it always did -- but 6f's Config/"
+say 'directory is now just an ephemeral, non-persistent path inside'
+say "vault-api's OWN writable layer, since that volume moved to vault-runner"
+say 'in WP S-2; this step is the one that actually reaches a PERSISTENT'
+say 'Config/ volume). Reaching the username prompt IS the pass here too; no'
+say 'credentials are entered, here or ever in this script.'
+sp_runner_exec=$(dc exec -T vault-runner \
+            /opt/steamprefill/SteamPrefill select-apps < /dev/null 2>&1 | strip_ansi | head -8)
+say ''
+say '    $ docker exec <container_name> /opt/steamprefill/SteamPrefill select-apps'
+printf '%s\n' "$sp_runner_exec" | sed 's/^/    /'
+assert_not_contains "$sp_runner_exec" "TypeInitializationException" "vault-runner exec: no TypeInitializationException"
+assert_not_contains "$sp_runner_exec" "UnauthorizedAccessException" "vault-runner exec: no UnauthorizedAccessException reaching for HOME"
+assert_contains     "$sp_runner_exec" "account is required in order to prefill apps" "vault-runner exec reaches SteamPrefill's login logic -- this is the deploy/README.md-documented login container as of WP S-2"
+
+say ''
+say '--- stop_grace_period actually renders on the container, not only in compose.yaml text ---'
+runner_stop_timeout=$(docker inspect --format '{{.Config.StopTimeout}}' "$runner_cid")
+say "    StopTimeout: ${runner_stop_timeout}s"
+assert_eq "20" "$runner_stop_timeout" "vault-runner's container has the 20s stop_grace_period applied (ADR-0012 §4 nitpick: teardown budget margin)"
 
 # =============================================================================
 section "7. vault-dns (--profile dns)"

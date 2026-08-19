@@ -875,13 +875,16 @@ never be locked down to LAN-only egress without also breaking prefill. Queue
 mode moves the one thing that needs the wider internet into its own process,
 so a separate container running `prefill_runner` can be the only one with
 that access — see `docs/adr/0012-*.md` for the full design and the two
-rejected alternatives (an HTTP sidecar; a Docker-socket mount). **This work
-package (S-1) only ships the api-side code.** Wiring `prefill_runner` into
-`deploy/compose.yaml` as its own service, with its own `Config/`/cache volume
-mounts, is WP S-2; the egress lock itself is EG-1. Until S-2 lands, `queue`
-mode is usable for native/manual testing (run both processes yourself,
-pointed at the same `VAULT_DB_PATH` and `VAULT_CACHE_ROOT`) but has no
-supported Compose story yet.
+rejected alternatives (an HTTP sidecar; a Docker-socket mount). **WP S-1
+shipped only the api-side code; WP S-2 (landed) wires `prefill_runner` into
+`deploy/compose.yaml` as its own `vault-runner` service** — see
+`deploy/README.md`'s service table and "First run" section. The egress lock
+itself is EG-1, still to come. `deploy/compose.yaml` now SHIPS `queue` mode
+by default (`vault-runner`'s own `environment:` block, plus the matching
+`Config/`/`vault-steamprefill-home` volumes it mounts); `queue` mode is also
+still usable for native/manual testing outside Compose (run both processes
+yourself, pointed at the same `VAULT_DB_PATH` and `VAULT_CACHE_ROOT`) for
+anyone not using the shipped compose file at all.
 
 **vault-api's worker keeps owning everything except the subprocess call.**
 Claiming a job, deciding `--force`, applying the depot mapping, manifest
@@ -906,12 +909,16 @@ mode, SteamPrefill's binary and its `Config/` (the Steam session) live in the
 too:**
 
 ```
-docker exec -it <prefill_runner container> SteamPrefill select-apps
+docker compose exec vault-runner /opt/steamprefill/SteamPrefill select-apps
 ```
 
-(the exact container name is S-2's to name once it exists). vault-api itself
-still never sees or stores Steam credentials either way — nothing about that
-guarantee changes.
+(the full path is required — measured: `SteamPrefill` alone is not on
+`$PATH` in this image, only `/opt/steamprefill/SteamPrefill` is executable
+there; the bare-name form fails with "command not found", not a login
+prompt.) `deploy/README.md`'s "First run" section has the full walkthrough,
+including the stable `container_name` WP S-2 gives this service for a
+plain `docker exec` outside Compose. vault-api itself still never sees or
+stores Steam credentials either way — nothing about that guarantee changes.
 
 **`prefill_runner` does NOT need `VAULT_API_KEY`.** It calls
 `Settings.from_env(require_api_key=False)` — the one exception to the "no

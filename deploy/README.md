@@ -1,12 +1,27 @@
 # Deploying SteamVault (Phase 1, WP 1.9)
 
-Docker Compose deployment for the three server-side components:
+Docker Compose deployment for the four server-side components:
 
-| Service      | What it is                                        | Port  | Enabled |
-|--------------|---------------------------------------------------|-------|---------|
-| `vault-core` | nginx `proxy_store` cache, path-faithful depot storage | 80 (HTTP) | always |
-| `vault-api`  | FastAPI + SQLite control plane, runs SteamPrefill | 8080  | always |
-| `vault-dns`  | optional dnsmasq that redirects `*.steamcontent.com` | 53 (UDP+TCP) | `--profile dns` |
+| Service        | What it is                                        | Port  | Enabled |
+|----------------|---------------------------------------------------|-------|---------|
+| `vault-core`   | nginx `proxy_store` cache, path-faithful depot storage | 80 (HTTP) | always |
+| `vault-api`    | FastAPI + SQLite control plane                    | 8080  | always |
+| `vault-runner` | the SteamPrefill runner (WP S-2, ADR-0012) — same image as `vault-api`, runs `python -m vault_api.prefill_runner` instead | none (no HTTP) | always |
+| `vault-dns`    | optional dnsmasq that redirects `*.steamcontent.com` | 53 (UDP+TCP) | `--profile dns` |
+
+**`vault-api` no longer runs SteamPrefill itself.** As of WP S-2, this
+compose file ships `VAULT_PREFILL_MODE=queue` (ADR-0012): vault-api hands a
+prefill job off through the database, and the separate `vault-runner`
+container claims and executes it. This is what makes it possible to lock
+vault-api's own container down to LAN-only egress later (EG-1) without also
+cutting off the one thing that genuinely needs the wider internet — see
+`docs/adr/0012-prefill-runner-split.md` for the full design. `vault-runner`
+has no port mapping and serves nothing: it polls the same database vault-api
+uses, runs SteamPrefill for the job it claims, and reports the result back
+the same way. The bare-metal/native dev setup (`api/README.md`
+"Quickstart") is unaffected and keeps the older `subprocess` mode, where
+vault-api runs SteamPrefill in its own process — there is no second process
+to run a runner in outside a container, and nothing here changes that path.
 
 Everything is LAN-only. Nothing here should ever be reachable from the
 internet — see [Security posture](#security-posture) before you expose
@@ -86,6 +101,7 @@ actually matters for that service, not merely that a process exists:
 |---|---|---|---|
 | `vault-core` | `wget -q -O /dev/null http://127.0.0.1/health` | `GET http://<server>/health` → `ok` | nginx is up and serving. Local-only location: no Host allowlist entry needed, no upstream contact — a liveness probe, *not* an "is the internet reachable" probe |
 | `vault-api`  | `python -c "urllib.request.urlopen('http://127.0.0.1:8080/v1/health')"` (no extra packages in the image) | `GET http://<server>:8080/v1/health` → `{"status":"ok"}` | the app is serving. The **one** unauthenticated route by design (`api/README.md` "Auth"): fixed body, no data, meant for exactly this |
+| `vault-runner` | **disabled** (`deploy/compose.yaml`'s `healthcheck: disable: true`) | n/a | nothing over HTTP — this process never listens on a port at all, so inheriting the image's baked-in `/v1/health` probe unmodified would make `docker compose ps` show it permanently *unhealthy* despite working correctly. Liveness is instead proven by its own poll-tick log line (`docker compose logs vault-runner`, look for `"prefill_runner ... starting (poll every ...)"` right after start, and a `"claimed job ..."` line once something is actually handed off) — see `deploy/tests/verify-stack.sh`'s smoke check for the exact pattern |
 | `vault-dns`  | `nslookup -type=a healthcheck.steamcontent.com 127.0.0.1` must answer `$CACHE_IP` | `dig +short A <any>.steamcontent.com @<server>` | the **redirect is live**, not just that dnsmasq is running — a resolver answering the wrong address would pass a process check and fail this one |
 
 Interval 30 s, 3 retries; start period 5 s (core, dns) / 10 s (api).
@@ -102,14 +118,36 @@ default is a shipped vulnerability.
 
 ## First run: the one-time SteamPrefill login
 
-vault-api drives SteamPrefill as a subprocess, and SteamPrefill needs a Steam
-session. That session is created **once, interactively, by you** — vault-api
-never sees, stores, transmits or logs Steam credentials (ADR-0004), and no
-login ever happens during an image build.
+SteamPrefill needs a Steam session, created **once, interactively, by you** —
+vault-api never sees, stores, transmits or logs Steam credentials (ADR-0004),
+and no login ever happens during an image build.
+
+**As of WP S-2 (ADR-0012 §5), this runs against the `vault-runner` container,
+not `vault-api`.** This compose file ships `VAULT_PREFILL_MODE=queue`
+(see the service table above): SteamPrefill's binary and its `Config/`
+session directory now live in `vault-runner`, so that is where the
+interactive login has to happen too — vault-api itself has nothing left to
+log into. `vault-runner` is a long-running service (it is always polling for
+handed-off jobs, same as every other container here), so this is `docker
+compose exec` into the already-running container, not `compose run`:
 
 ```bash
 cd deploy
-docker compose run --rm --no-deps -it vault-api \
+docker compose up -d          # make sure vault-runner is actually running first
+docker compose exec -it vault-runner \
+    /opt/steamprefill/SteamPrefill select-apps
+```
+
+`docker compose exec` resolves `vault-runner` to whichever container is
+actually running for this Compose project, so the command above works
+regardless of project name. If you need the container's literal name for
+some other tool (`docker exec` without going through Compose, log
+aggregation, ...), `deploy/compose.yaml` gives it a stable one:
+`<project>-vault-runner` — `steamvault-vault-runner` for a default
+deployment (the `name: steamvault` at the top of `compose.yaml`):
+
+```bash
+docker exec -it steamvault-vault-runner \
     /opt/steamprefill/SteamPrefill select-apps
 ```
 
@@ -118,6 +156,22 @@ exit the app selector (vault-api overwrites the app selection per job anyway —
 `Config/selectedAppsToPrefill.json` is how it tells SteamPrefill which app to
 prefill, see `api/README.md`). The session lands in the `vault-steamprefill`
 volume at `/opt/steamprefill/Config` and survives restarts and image upgrades.
+
+**If you have set `VAULT_PREFILL_MODE=subprocess`** (reverting to the
+pre-WP-S-2 shape, vault-api running SteamPrefill itself — see
+`deploy/.env.example`): log in against `vault-api` instead, the same way
+this section used to document:
+
+```bash
+docker compose run --rm --no-deps -it vault-api \
+    /opt/steamprefill/SteamPrefill select-apps
+```
+
+Note that `vault-api`'s `Config/` volume mount was removed in WP S-2 (queue
+mode has no use for it — see `deploy/compose.yaml`'s comment on that
+service's volumes for the evidence), so this fallback command only produces
+a persistent session if you also restore that mount; the supported path for
+this compose file is the `vault-runner` login above.
 
 Until you do this, everything else works — `/v1/games`, `/v1/mapping`,
 `/v1/cache/*`, the cache itself — and only *prefill jobs* fail, with an
@@ -138,13 +192,23 @@ layouts, not both. Read to the end before adding anything to your setup.
 
 ### The real detection mechanism (four candidates, not one)
 
-SteamPrefill runs *inside* the `vault-api` container as a subprocess, and it
-does **not** simply trust the Windows client's hosts-file hostname. Per its
-own source (confirmed by this project's own read, `poc/steamprefill/
-PROTOCOL.md` §0 "SteamPrefill's cache-detection contract", and independently
-confirmed by scanning the shipped SteamPrefill binary itself for embedded
-strings), it tries, **in this order**, resolving each to an
-RFC1918-or-loopback IPv4 address:
+**As of WP S-2 (ADR-0012), SteamPrefill runs inside the `vault-runner`
+container, not `vault-api`** — this whole section originally described
+`vault-api`, back when it ran SteamPrefill itself; every command below now
+targets `vault-runner` instead, and every finding in this section has been
+RE-VERIFIED, not just find-and-replaced, against a real `vault-runner`
+container on this same Compose network (same fixed-literal gateway result,
+same `VAULT_CORE_BIND`-dependent trap, same fix — see the re-run evidence
+inline below). If you are running the older `VAULT_PREFILL_MODE=subprocess`
+fallback instead, substitute `vault-api` back in everywhere below; that path
+still runs SteamPrefill exactly where this section originally described.
+
+SteamPrefill does **not** simply trust the Windows client's hosts-file
+hostname. Per its own source (confirmed by this project's own read,
+`poc/steamprefill/PROTOCOL.md` §0 "SteamPrefill's cache-detection contract",
+and independently confirmed by scanning the shipped SteamPrefill binary
+itself for embedded strings), it tries, **in this order**, resolving each to
+an RFC1918-or-loopback IPv4 address:
 
 1. `lancache.steamcontent.com` (DNS — the same name the Windows client and
    vault-agent's hosts mode use)
@@ -167,14 +231,14 @@ It stops at the first candidate that passes. If none does, SteamPrefill
 quietly downloads straight from Valve instead: **the job still finishes and
 reports success, and the cache stays empty.** No error, no red job status —
 the same silent-failure shape requirement A12 is scoped to catch for
-*client* traffic, except here it is vault-api's own prefill traffic
+*client* traffic, except here it is vault-runner's own prefill traffic
 bypassing itself.
 
 ### Whether this bites you depends entirely on `VAULT_CORE_BIND`
 
 **Default layout (`VAULT_CORE_BIND` unset, i.e. `0.0.0.0`): candidate 3
 already succeeds, DNS-independently, even though `172.17.0.1` is not
-`vault-api`'s own network's gateway.** `deploy/compose.yaml` puts every
+`vault-runner`'s own network's gateway.** `deploy/compose.yaml` puts every
 service on its own Compose-managed bridge network (a DIFFERENT subnet from
 the classic default bridge — `172.19.0.0/16` in one measured run, not
 `172.17.0.0/16`), so `172.17.0.1` is not directly reachable the way a
@@ -182,18 +246,22 @@ same-network address would be. It works anyway, for a specific, checked
 reason: Docker publishes vault-core's port 80 on **every** host interface
 when bound to `0.0.0.0`, including the classic default bridge's own gateway
 address `172.17.0.1` (that bridge always exists on a Docker host, used or
-not). A packet from `vault-api`'s container aimed at `172.17.0.1` leaves via
-its own network's gateway, arrives at the HOST, and the host — which has a
-direct, local route to `172.17.0.0/16` via its own `docker0` interface —
+not). A packet from `vault-runner`'s container aimed at `172.17.0.1` leaves
+via its own network's gateway, arrives at the HOST, and the host — which has
+a direct, local route to `172.17.0.0/16` via its own `docker0` interface —
 forwards it the rest of the way to vault-core's published port. This is
 ordinary host-level routing between two of the host's own interfaces, not
 container-to-container traffic crossing Docker's inter-network isolation
-(which does block THAT). Measured directly, from inside a real Compose
-stack's `vault-api` container whose OWN network gateway is `172.19.0.1`,
-probing the literal `172.17.0.1` regardless:
+(which does block THAT).
+
+**Re-measured for WP S-2** (this used to say `vault-api` throughout, back
+when it ran SteamPrefill itself — this is a real re-run against
+`vault-runner`, not a find-and-replace): a fresh `docker compose up` with
+`VAULT_CORE_BIND`/`VAULT_CORE_PORT` left at their defaults, probing the
+literal `172.17.0.1` from inside the real `vault-runner` container:
 
 ```
-$ docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://172.17.0.1/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
+$ docker exec steamvault-vault-runner python3 -c "import urllib.request as u; r=u.urlopen('http://172.17.0.1/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
 200 steamvault
 ```
 
@@ -209,44 +277,47 @@ dedicated address** — the port-80-conflict recipe above, and exactly what
 [the TrueNAS guide](examples/truenas-scale-dockge.md) instructs whenever
 something else already owns port 80. Binding to one specific address means
 Docker publishes port 80 **only** there — not on `172.17.0.1`, not on
-loopback. Measured, same command, this time against a stack with
-`VAULT_CORE_BIND` set to a dedicated address instead of `0.0.0.0`:
+loopback. Re-measured for WP S-2, same command, against `vault-runner` this
+time, on a stack with `VAULT_CORE_BIND` set to a dedicated (in this
+re-check, loopback) address instead of `0.0.0.0`:
 
 ```
-$ docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://172.17.0.1/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
+$ docker exec steamvault-vault-runner python3 -c "import urllib.request as u; r=u.urlopen('http://172.17.0.1/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
 [...]
 urllib.error.URLError: <urlopen error [Errno 111] Connection refused>
-
-$ docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://127.0.0.1/lancache-heartbeat',timeout=5); print(r.status)"
-[...]
-urllib.error.URLError: <urlopen error [Errno 111] Connection refused>
-
-$ docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://192.168.1.50/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
-200 steamvault
 ```
 
 (`[...]` above elides the Python traceback's middle frames for readability —
 the meaningful line is the final `URLError`/`ConnectionRefusedError`; nothing
 is hidden except stack-frame noise, and the exit still happened with no
-response.) Candidates 2 and 3 both refuse; candidate 1 (DNS) is your only
-remaining chance, and only if your resolver rewrites the zone for the
-CONTAINER too (not a given — see the earlier DNS section). If it doesn't,
-this is exactly where prefill jobs silently fill nothing.
+response.) Candidate 3 refuses here exactly as it did for `vault-api` before
+the split; candidate 2 (`127.0.0.1`/`localhost`) refuses too, for the same
+reason it always did — it is `vault-runner`'s OWN loopback, never
+vault-core's, regardless of which container SteamPrefill runs in. Candidate
+1 (DNS) is your only remaining chance in this layout, and only if your
+resolver rewrites the zone for the CONTAINER too (not a given — see the
+earlier DNS section). If it doesn't, this is exactly where prefill jobs
+silently fill nothing. (The third, LAN-address probe from the pre-split
+version of this section — `http://192.168.1.50/lancache-heartbeat` —
+is illustrative of your own dedicated `VAULT_CORE_BIND` value, not something
+reproducible on a throwaway dev host with no such address; the mechanism is
+identical to the fixed-literal probe just re-measured above once you
+substitute your own address.)
 
 ### Check it
 
-Probe the heartbeat directly, from inside `vault-api` — a DNS lookup
+Probe the heartbeat directly, from inside `vault-runner` — a DNS lookup
 answers the wrong question, since candidates 2–4 never involve DNS at all.
-**`curl` and `ip` are not installed in the `vault-api` image** (it's
-`python:3.13-slim`, not vault-core's nginx/Alpine image) — use `python3`,
-which is:
+**`curl` and `ip` are not installed in the `vault-runner` image** (it's the
+same `python:3.13-slim`-based image as `vault-api`, not vault-core's
+nginx/Alpine one) — use `python3`, which is:
 
 ```bash
 # the fixed-literal candidate (works out of the box on the default 0.0.0.0 bind):
-docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://172.17.0.1/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
+docker compose exec vault-runner python3 -c "import urllib.request as u; r=u.urlopen('http://172.17.0.1/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
 
 # the address you actually bound VAULT_CORE_BIND to, if you set one:
-docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://<VAULT_CORE_BIND value>/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
+docker compose exec vault-runner python3 -c "import urllib.request as u; r=u.urlopen('http://<VAULT_CORE_BIND value>/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
 ```
 
 A line printing `200 steamvault` means that candidate works. A traceback
@@ -256,8 +327,10 @@ the first command already prints `200 steamvault`, you are done — skip the
 fix below. (If you'd rather probe from vault-core's own shell instead,
 vault-core's Alpine/nginx image does have `curl` — but that checks
 vault-core's OWN reachability of an address, a related but different
-question from what `vault-api` can reach; the commands above check the
-right container.)
+question from what `vault-runner` can reach; the commands above check the
+right container. If you are running `VAULT_PREFILL_MODE=subprocess` instead
+of the shipped `queue` default, substitute `vault-api` back in — that is
+where SteamPrefill runs in that mode.)
 
 ### Fix it (only needed with a dedicated `VAULT_CORE_BIND`)
 
@@ -266,11 +339,13 @@ here would break setups where the container already finds the cache without
 it):
 
 1. **Preferred, DNS-independent, and confirmed sufficient on its own:**
-   pin `lancache.steamcontent.com` directly via `extra_hosts` on `vault-api`
-   only, in a `deploy/compose.override.yaml` you create yourself:
+   pin `lancache.steamcontent.com` directly via `extra_hosts` on
+   `vault-runner` only (the container that actually resolves it, in the
+   shipped `queue` mode — `vault-api` in `subprocess` mode instead), in a
+   `deploy/compose.override.yaml` you create yourself:
    ```yaml
    services:
-     vault-api:
+     vault-runner:
        extra_hosts:
          - "lancache.steamcontent.com:192.168.1.50"   # vault-core's own address
    ```
@@ -289,14 +364,18 @@ it):
    rewriting DNS server instead:
    ```yaml
    services:
-     vault-api:
+     vault-runner:
        dns:
          - 192.168.1.50   # your AdGuard Home / Pi-hole / vault-dns address
    ```
-   Caveat: this makes vault-api resolve *everything* (Steam login, the
-   manifest oracle if enabled, webhook URLs) through that resolver too — the
-   `extra_hosts` route above changes nothing except this one hostname, which
-   is why it is the preferred fix.
+   Caveat: this makes vault-runner resolve *everything* it looks up through
+   that resolver too — for this container that is just Steam's own CM/CDN
+   hostnames during login and depot fetches (WP S-2: vault-runner never
+   makes a manifest-oracle or webhook request, unlike vault-api — those stay
+   vault-api-side regardless of `VAULT_PREFILL_MODE`, so this caveat is
+   narrower here than it is for a `vault-api`-targeted override under
+   `subprocess` mode). The `extra_hosts` route above changes nothing except
+   this one hostname either way, which is why it is the preferred fix.
 
 Re-run the heartbeat probe above after either change to confirm it actually
 took.
@@ -376,10 +455,10 @@ see ["Using a dedicated cache mount"](#using-a-dedicated-cache-mount) above):
 
 | Volume               | Mounted at                 | Contains | Back up? |
 |----------------------|----------------------------|----------|----------|
-| `vault-cache` (or `VAULT_CACHE_PATH` if set) | `/vault` in **both** vault-core and vault-api | the depot cache (`cache/depot/…`) plus nginx's `tmp/` | **No** — it is a cache; large, and re-fillable by prefilling again |
-| `vault-db`           | `/data` in vault-api       | `vault.db` — depot→app mapping, jobs, agent reports | **Yes** — small, and it is the knowledge the cache cannot rebuild |
-| `vault-steamprefill` | `/opt/steamprefill/Config` in vault-api | SteamPrefill's Steam **session** and selection state | **Yes**, and treat it as a secret |
-| `vault-steamprefill-home` | `/opt/steamprefill/home` in vault-api | `HOME` for the container user — SteamPrefill's manifest/depot cache | **No** — regenerable, and it grows |
+| `vault-cache` (or `VAULT_CACHE_PATH` if set) | `/vault` in vault-core, vault-api **and** vault-runner (WP S-2) | the depot cache (`cache/depot/…`) plus nginx's `tmp/` | **No** — it is a cache; large, and re-fillable by prefilling again |
+| `vault-db`           | `/data` in **both** vault-api and vault-runner (WP S-2) | `vault.db` — depot→app mapping, jobs, agent reports | **Yes** — small, and it is the knowledge the cache cannot rebuild |
+| `vault-steamprefill` | `/opt/steamprefill/Config` in **vault-runner** (moved here from vault-api in WP S-2, ADR-0012 §5 — see "First run" above) | SteamPrefill's Steam **session** and selection state | **Yes**, and treat it as a secret |
+| `vault-steamprefill-home` | `/opt/steamprefill/home` in **both** vault-api and vault-runner (WP S-2 — see `deploy/compose.yaml`'s comment on this mount for why vault-api still needs it even though SteamPrefill itself now runs in vault-runner: manifest ingestion stays vault-api-side and reads the `.cache/SteamPrefill/v1` files vault-runner writes under this same shared directory) | `HOME` for the container user — SteamPrefill's manifest/depot cache | **No** — regenerable, and it grows |
 
 ```bash
 # back up the two small ones
@@ -402,11 +481,12 @@ so the cache it builds there survives restarts.
 
 Two practical consequences:
 
-- **Don't override `HOME`** for `vault-api` in `.env` or an override file, and
-  don't drop the `vault-steamprefill-home` mount. The image asserts both
-  definitions agree at build time, and `deploy/tests/verify-stack.sh` re-checks
-  it plus a credential-free SteamPrefill smoke run on all three invocation
-  paths.
+- **Don't override `HOME`** for `vault-api` OR `vault-runner` in `.env` or an
+  override file, and don't drop the `vault-steamprefill-home` mount from
+  EITHER service (WP S-2: it is shared between them now, not vault-api-only —
+  see the volumes table above). The image asserts both definitions agree at
+  build time, and `deploy/tests/verify-stack.sh` re-checks it plus a
+  credential-free SteamPrefill smoke run on all three invocation paths.
 - **It is safe to delete this volume** to reclaim space; SteamPrefill rebuilds
   it. Deleting `vault-steamprefill` instead logs you out — that is the one you
   back up.
@@ -581,6 +661,27 @@ single job worker and, at startup, fails any job still marked `running` as a
 crash orphan — a second instance would kill the first one's live prefill
 (`api/README.md` "Worker lifecycle"). `docker compose up --scale vault-api=2`
 is not supported.
+
+**`vault-runner` is a different story (WP S-2, ADR-0012 §3):** its atomic
+claim (`jobs.claim_run`'s `BEGIN IMMEDIATE` compare-and-swap plus a
+`WHERE run_claimed_by IS NULL` guard, TWO independent mechanisms either
+alone sufficient) is measured safe under real concurrent OS processes racing
+to claim the same job — the ADR's own review round re-ran it 8-way and got
+exactly one winner every time. `docker compose up --scale vault-runner=2` is
+not a documented or tested deployment shape for this compose file. Measured
+directly (review round 3, Compose 2.40.3, re-checked after an earlier
+piped measurement mis-reported the exit code as 0 — the pipe's own last
+command was what was actually being checked, not `docker compose`):
+`docker compose up -d --scale vault-runner=2 vault-runner` **exits 1**. It
+prints `WARNING: The "vault-runner" service is using the custom container
+name "<name>" ... Remove the custom name to scale the service`, creates no
+`vault-runner` container at all (not one, not two), and — because this
+form names `vault-runner` as the target, pulling in only `vault-api` as its
+`depends_on` dependency — `vault-api` itself gets no further than `Created`
+either; nothing in this form reaches a running state. The underlying claim
+mechanism is not the reason not to scale it, either way — if you have a
+real multi-runner use case, drop the
+`container_name` override in your own `compose.override.yaml` first.
 
 Bumping a base image or the pinned SteamPrefill release is a deliberate edit to
 the relevant `Dockerfile` (tag **and** digest together) — nothing here tracks

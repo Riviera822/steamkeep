@@ -2217,8 +2217,16 @@ why 0012 precedes it in time): split first, then lock.
       rounds 1-2 (FAIL: queue-mode pause→resume was an inescapable dead
       end, found by live probe; fixed + integration-pinned → PASS).
       1672→1729 api tests. 2026-08-19.
-- [ ] **S-2 (deploy)** — the runner as its own compose service (broad
-      egress profile, volumes, login-path docs, verify-stack checks).
+- [x] **S-2 (deploy)** — DONE 2026-08-19: vault-runner service (same
+      image, queue mode on both sides, health-gated against a
+      fresh-volume race found empirically), credential volume moved off
+      vault-api, HOME volume shared (CI-pinned — the silent-forever
+      ingestion case), unused cache mount dropped from the broad-egress
+      container on review. verify-stack 112→149 checks, api tests
+      1729→1747. Opus rounds 1-3 (version-pin guard silently disabled by
+      the duplicate image line — re-keyed by service; a tuned-setup
+      recipe asserting a mechanism the code lacks — rewritten to move the
+      volume, not the variable).
 - [ ] **EG-1 (deploy, resumed)** — the egress lock as decided 2026-08-18:
       vault-api loses its default route, allowlist proxy as shipped
       default, VAULT_EGRESS_ALLOW, meticulous verify-in-five-minutes docs,

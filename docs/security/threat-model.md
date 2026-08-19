@@ -241,8 +241,10 @@ directly, not taken on faith:
   API relay key (below) — neither is a Steam account password.
 - **The one-time interactive login is real, and happens outside vault-api's
   own code.** `deploy/README.md:110-114` documents the actual command an
-  operator runs: `docker compose run --rm --no-deps -it vault-api
-  /opt/steamprefill/SteamPrefill select-apps` — this hands the terminal
+  operator runs: `docker compose exec -it vault-runner
+  /opt/steamprefill/SteamPrefill select-apps` (since WP S-2 the session
+  volume and the login live in the dedicated `vault-runner` service, not
+  vault-api — `deploy/README.md`'s login section) — this hands the terminal
   directly to SteamPrefill's own login prompt; nothing in `vault_api/*.py`
   is on that call path. `deploy/README.md:105-108` states the resulting
   claim in the docs: "vault-api never sees, stores, transmits or logs Steam
@@ -256,7 +258,7 @@ itself — this project's own Phase-0 research supports the checkable claim
 that what gets persisted afterward is "not raw credentials," `poc/
 steamprefill/PROTOCOL.md:176`; see the closing gap list for the stronger
 claim this document does *not* make) is written by SteamPrefill into
-`/opt/steamprefill/Config`, which `deploy/compose.yaml:295` mounts from the
+`/opt/steamprefill/Config`, which `deploy/compose.yaml::vault-runner` (the `vault-steamprefill:/opt/steamprefill/Config` mount — moved off vault-api by WP S-2) mounts from the
 named Docker volume `vault-steamprefill`. `deploy/README.md:119-120,
 126-127` names this directly: "The session lands in the
 `vault-steamprefill` volume at `/opt/steamprefill/Config`… **Treat the
@@ -292,7 +294,7 @@ operator generates on Valve's site — stored server-side once the operator
 enters it in Settings. Verified in the schema: `steam_relay_key.api_key` is
 a plain `TEXT` column with no encryption-at-rest of its own
 (`api/vault_api/db.py:523-527`) inside the `vault-db` SQLite file
-(`deploy/compose.yaml:290`). It never appears in a `GET` response body in
+(`deploy/compose.yaml`'s `vault-db:/data` mount on vault-api). It never appears in a `GET` response body in
 full — `GET /v1/steam/key` returns only whether one is configured plus the
 last four characters (`api/vault_api/steam_relay.py:35-36`, docstring
 verified against the router's actual response shape) — and is cleared from
@@ -593,7 +595,7 @@ covered in full elsewhere, named here only so this section is not read as
 an exhaustive substitute for them: `vault-core` proxying an inbound cache
 MISS to Steam's real CDN (§1/§2 — the point of the project, and a HIT never
 leaves the LAN at all), and SteamPrefill's own login/prefill traffic to
-Valve's servers from inside the `vault-api` container (§3 — the whole
+Valve's servers from inside the `vault-runner` container since WP S-2 — the split that makes vault-api egress-lockable at all (§3 — the whole
 reason the project exists, and the one flow that legitimately carries a
 real Steam session). Beyond those two, `api/vault_api/oracle.py`'s own
 privacy section stakes out a claim worth checking precisely because it is
