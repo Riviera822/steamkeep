@@ -1,23 +1,50 @@
 name: CI
 
-# WP 5.1 (Phase 5, release track). Scope, deliberately: build/test gates only.
-# NO image publishing and NO ghcr.io here -- that is WP 5.5, user-gated
-# (docs/WORKPACKAGES.md). Real-Steam-CDN / real-machine tests
-# (core/tests/test-core.ps1, agent/packaging/windows/tests/
-# test-install-uninstall.ps1, agent/tests/sandbox/*, dns/tests/
-# test-dnsmasq-config.ps1) are intentionally NOT run here -- they need the
-# real network / a real machine's Task Scheduler and are documented as
-# local-only, run-by-hand harnesses at their own doc comments. Skipping
-# them is therefore not a CI gap to "fix": there is nothing in this repo's
-# test suites today that needs a pytest/go-test skip marker to stay honest
-# about it (see the WP 5.1 coder report for the audit that confirmed this).
-# The two PowerShell ones are still parse-checked (never executed) by the
+# WP 5.1 (Phase 5, release track) + WP CI-1. Two tiers:
+#
+#   1. Fast build/test gates on every push/PR: api-tests, agent-go,
+#      core-nginx-config, powershell-syntax, web-tests. NO image publishing
+#      and NO ghcr.io here -- that is WP 5.5, user-gated
+#      (docs/WORKPACKAGES.md).
+#
+#   2. verify-stack: the real-Docker, real-Steam-CDN integration suite
+#      (deploy/tests/verify-stack.sh -- see its own header for the full
+#      rationale). It builds all four images, brings up a live compose
+#      stack, and talks to the ACTUAL Steam CDN and a public resolver --
+#      there is no mock, by design. That makes it valuable signal, but also
+#      means it can fail on Steam-side or network flakiness this repo does
+#      not control, which is exactly the kind of failure a PR gate must not
+#      depend on (an innocent PR must never go red on a Steam-CDN hiccup).
+#      It therefore runs on its OWN schedule (nightly cron, the `schedule:`
+#      trigger below) and via `workflow_dispatch` (the manual "Run
+#      workflow" button) ONLY -- see that job's own `if:` guard -- and
+#      NEVER on push or pull_request.
+#
+# Real-MACHINE tests that need a real Windows box (Task Scheduler, the
+# system hosts file, or a WSL2-hosted dnsmasq instance) -- core/tests/
+# test-core.ps1, agent/packaging/windows/tests/test-install-uninstall.ps1,
+# agent/tests/sandbox/*, dns/tests/test-dnsmasq-config.ps1 -- are a
+# DIFFERENT case from verify-stack above: unlike verify-stack, nothing in
+# this workflow runs them, not even on the nightly schedule; they stay
+# local-only, run-by-hand harnesses, documented at their own doc comments.
+# (core/tests/test-core.ps1 in particular exercises the same real-Steam-CDN
+# nginx behaviour as verify-stack's own section 5, natively on Windows
+# rather than in a Linux container -- verify-stack running nightly does not
+# make this one redundant to keep local-only, since it is the only place
+# that native-Windows-plus-real-CDN combination is exercised at all.) The
+# two PowerShell ones are still parse-checked (never executed) by the
 # powershell-syntax job below.
 
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # 04:00 UTC -- outside US/EU business hours, when both the real Steam
+    # CDN and shared GitHub-hosted-runner capacity are quieter. Only
+    # verify-stack listens for this event; see its `if:` guard below.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
 
 # Only the read access every job below actually needs (checkout). No job
 # publishes anything, so nothing needs write permissions anywhere.
@@ -29,9 +56,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The five jobs below are the fast PR gate: push, pull_request, and a
+  # manual workflow_dispatch run all trigger them (unchanged from before
+  # WP CI-1 for push/pull_request; workflow_dispatch is new -- it lets a
+  # human re-run the whole fast suite on demand). The nightly `schedule`
+  # event does NOT match this guard, so these five do not re-run overnight
+  # -- every push/PR already exercises them, so a nightly re-run would add
+  # no signal, only cost.
   api-tests:
     name: api / pytest
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,6 +86,7 @@ jobs:
 
   agent-go:
     name: agent / go (${{ matrix.os }})
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -78,6 +114,7 @@ jobs:
   core-nginx-config:
     name: core / nginx -t (rendered container config)
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -91,6 +128,7 @@ jobs:
   powershell-syntax:
     name: agent / PowerShell 5.1 syntax
     runs-on: windows-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -111,3 +149,47 @@ jobs:
         # image. See verify-ps-analyze.ps1's header for the full reasoning.
         shell: pwsh
         run: ./.github/scripts/verify-ps-analyze.ps1
+
+  web-tests:
+    name: web / node --test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # web/tests/README.md: verified on Node v24.12.0 (v24.x, "Krypton"
+          # LTS) -- "24" resolves to the newest available v24.x on the
+          # runner, matching that family exactly.
+          node-version: "24"
+      - name: node --test
+        # The explicit glob, not the bare-directory form: web/tests/README.md
+        # documents that `node --test web/tests` (no glob) fails hard with a
+        # CJS MODULE_NOT_FOUND instead of discovering the files inside it.
+        run: node --test "web/tests/*.test.js"
+
+  verify-stack:
+    name: deploy / verify-stack
+    runs-on: ubuntu-latest
+    # Nightly cron + manual workflow_dispatch ONLY -- never push or
+    # pull_request. See the top-of-file header for why: this suite talks to
+    # the real Steam CDN and a public resolver, and a PR gate must not
+    # depend on infrastructure this repo does not control. (Do not add
+    # continue-on-error here instead -- the point is that a Steam-side
+    # hiccup never touches a PR's status at all, not that it touches it
+    # softly.)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Builds four images from scratch and exercises a live stack against the
+    # real Steam CDN -- deliberately slower than the other jobs above.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: deploy/tests/verify-stack.sh
+        # The script computes its own repo_root from $0 (deploy/tests/../..),
+        # so running it from the repo root -- this job's default working
+        # directory -- is exactly its documented usage. ubuntu-latest ships
+        # Docker, the Compose v2 plugin, dnsutils (dig) and Python 3
+        # preinstalled, which is everything the script needs; no extra
+        # package installs.
+        run: bash deploy/tests/verify-stack.sh
