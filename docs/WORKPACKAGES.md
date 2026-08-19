@@ -1104,6 +1104,44 @@ lands in this package, the last of Phase 4e.
   neither view's DOM needed restructuring for a plain container-width cap,
   so `web/js/views/downloads.js`/`web/js/views/settings.js` are untouched.
 
+- **D-16 (WP 4h.2 brief drift, caught and corrected — process note, per the
+  coordinator's own request to record it here in one sentence).** The WP
+  4h.2 brief narrowed `docs/PROJECT_PLAN.md`:1867-1869's requirement (a
+  right-hand column at BP-XL AND a collapsible card below that width) down
+  to "BP-XL only, absent below it" from memory, and specified a mutation pin
+  that would have killed the plan's own second presentation; the coder
+  stopped and reported the conflict instead of guessing, and the plan won —
+  both presentations were built from one component, per the coordinator's
+  follow-up guidance (see the coder's report for the full build). Recorded
+  here as the process working as designed, the same posture
+  `docs/LEARNINGS.md`'s "Process" section already takes toward earlier
+  pipeline incidents.
+
+  **Should-fix S5 (Opus review, fix round): the trade-off this two-
+  presentation decision actually costs, named out loud rather than left
+  implicit.** Making the panel a normal, DOM-last `<aside>` (not a modal,
+  not a live-region-only announcement) means its two buttons — collapse and
+  dismiss — are the LAST two tab stops in the entire application, after
+  D-14's own ~590-stop inventory of everything else in the shell. That is a
+  real discoverability cost for a keyboard-only user: reaching either
+  control means tabbing through the whole Library grid first, every time,
+  on every page load the panel is visible. Accepted anyway, for two
+  reasons: (1) the alternative most naturally suggesting itself —
+  rendering the panel EARLY in DOM order (near the top of the Library view,
+  so it is a near-immediate tab stop) while keeping it VISUALLY last (via
+  CSS `order`/grid placement, the same decoupling `.nav`'s own `order:1`
+  already uses elsewhere in this file) — is REJECTED specifically because
+  that is the exact divergence Opus review blocker B1 produced BY ACCIDENT
+  in this same package: DOM-first-but-visually-elsewhere is precisely what
+  auto-placement did to this element before the B1 fix, and D-14's whole
+  point is that visual order and reading/focus order should agree, not
+  diverge on purpose in the other direction. (2) a supplementary jump
+  affordance (a skip-link, or surfacing the panel's dismiss control earlier
+  via `aria-owns`/a duplicated reachable control) would need its own
+  interaction design and testing this package's scope did not include —
+  named here as a real, legitimate follow-up rather than silently absorbed
+  into "done".
+
 ### WP 4a.1 — Static serving + app shell (api/ + web/) — **first, serial**
 - vault-api mounts `web/` (StaticFiles, SPA fallback, sane CSP/security
   headers, no-cache for index). Router auth must NOT cover static assets;

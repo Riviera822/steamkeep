@@ -27,6 +27,10 @@ import "./components/bypass-banner.js";
 // `store-singleton.js` role), which is why it needs the store/api imports
 // below rather than a bare `import "./components/rail-panel.js";`.
 import { createRailPanel } from "./components/rail-panel.js";
+// WP 4h.2 — same DI-factory posture as rail-panel.js just above (see that
+// import's comment): decision-panel.js has no import-time side effects, so
+// it needs the real DOM/store/router handed in here.
+import { createDecisionPanel } from "./components/decision-panel.js";
 import { store } from "./store-singleton.js";
 import { api, getStoredApiKey, isDemoMode } from "./api.js";
 
@@ -72,6 +76,20 @@ createRailPanel({
   apiClient: api,
   getStoredApiKey,
   isDemoMode,
+});
+createDecisionPanel({
+  elements: {
+    rootEl: document.getElementById("decision-panel"),
+    bodyEl: document.getElementById("dp-body"),
+    collapseBtn: document.getElementById("dp-collapse"),
+    dismissBtn: document.getElementById("dp-dismiss"),
+    appEl: document.getElementById("app"),
+    createElement: (tag) => document.createElement(tag),
+  },
+  store,
+  onViewChange,
+  getCurrentView: currentView,
+  storage: window.localStorage,
 });
 renderView(currentView());
 // WP 4a.6: shows the 3-step onboarding overlay on top of whatever view just

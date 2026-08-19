@@ -573,3 +573,19 @@ These are not style preferences; each entry cost a review round to learn.
   exact form documented. "Pin the mechanism that actually kills the
   mutation" (WP 4a.6) extends to the prose describing it (WP 4h.4
   rounds 1-3, 2026-08-19).
+- A viewport-width column-count claim is meaningless without naming the
+  ELEMENT and the SCROLLBAR STATE: .view-root border-box, .grid content-box
+  and viewport-minus-tokens differ by 47px (32 padding + 15 classic
+  scrollbar) — enough to straddle an auto-fill track floor and produce two
+  irreconcilable, individually-correct measurements (WP 4h.2, three review
+  rounds). State the box, state the page state, and record the decisive
+  intermediate (grid content-box width) next to the count so the next
+  dispute checks one number.
+- A DOM-last child of a display:grid container with named areas has NO
+  defined visual position: auto-placement drops it into whatever cell is
+  vacant, and which cell is vacant can depend on a SIBLING's runtime state
+  (.banner-wrap's [hidden] toggled the failure between above-the-content
+  and a 148px rail-column sliver). Text-only CSS pins cannot see it; a
+  vertical-only live pin catches one of the two states. New grid children
+  get an explicit grid-area in EVERY breakpoint block that defines a
+  template (WP 4h.2 blocker, browser-measured both states).

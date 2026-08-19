@@ -156,13 +156,28 @@ test("MUTATION PIN: 409-unconfigured is checked even with a syntactically valid 
 });
 
 test("GET /v1/steam/owned-games answers 200 with a game list once configured", async () => {
+  // WP 4h.2 fix (baseline-test edit, named per the brief): this used to
+  // assert `"playtime_forever" in g` for every game — the shape of a
+  // NON-default ADR-0010 gate state (both relay_expose_playtime/
+  // relay_expose_last_played on), while the real DEFAULT (both off, WP
+  // 4h.0) omits the key entirely (`response_model_exclude_unset=True`).
+  // The demo fixture was wrong, not this test in isolation, but the
+  // assertion baked the wrong shape in — per docs/LEARNINGS.md ("demo
+  // fixtures are a shipped surface, shapes 1:1 with the real API"), the
+  // fixture is corrected (web/js/demo-data.js's `DEMO_OWNED_GAMES` now
+  // ships keys-absent by default) and this baseline test now asserts the
+  // DEFAULT shape instead of the accidentally-endorsed non-default one; the
+  // enabled-gate shape is covered separately in
+  // web/tests/demo-data-relay-privacy.test.js.
   await demoRequest("PUT", "/v1/steam/key", { body: { key: VALID_KEY } });
   const out = await demoRequest("GET", "/v1/steam/owned-games", { params: { steamid: VALID_STEAMID } });
   assert.equal(out.configured, true);
   assert.ok(out.game_count > 0);
   assert.ok(Array.isArray(out.games));
   for (const g of out.games) {
-    assert.ok("appid" in g && "name" in g && "playtime_forever" in g);
+    assert.ok("appid" in g && "name" in g);
+    assert.equal("playtime_forever" in g, false, "the DEFAULT gate (both ADR-0010 keys off) must omit playtime_forever entirely, never a fabricated 0");
+    assert.equal("rtime_last_played" in g, false, "the DEFAULT gate must omit rtime_last_played entirely");
   }
 });
 

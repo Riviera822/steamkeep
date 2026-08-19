@@ -1591,3 +1591,268 @@ was corrected in place rather than left stale.
   file of its own beyond the shared CSS pins above (same "DOM-building
   views are not unit-tested directly" posture every prior Phase-4e/WP-4a
   package in this file already documents).
+
+### WP 4h.2 — Suggestions panel (Phase 4h)
+
+Plan-vs-brief conflict resolved before any code was written (recorded as
+D-16, `docs/WORKPACKAGES.md`): `docs/PROJECT_PLAN.md`:1867-1869 requires
+BOTH a right-hand column at BP-XL (>=1800px) AND a collapsible card below
+that width, ONE component with two CSS presentations — the brief had
+narrowed this to "BP-XL only" from memory, with a mutation pin that would
+have killed the plan's own second presentation. Same "pull the decision
+logic into `lib/`, keep the DOM-building file untested directly" posture as
+every prior WP, extended (like WP 4e.6's `rail-panel.js`) with a
+dependency-injected wiring component specifically so its localStorage/
+visibility glue is provable headlessly too.
+
+- `decision-support.test.js` (new, 25) — `web/js/lib/decision-support.js`'s
+  pure statement-selection logic, no DOM: the four accepted statement
+  families' exact wording and gating (`PLAYABLE_NOW` requires a REAL,
+  explicit zero playtime — never a fabricated one for absent/negative/non-
+  finite input — AND real cached bytes; `STALE_CONFIRMATION`'s 30-day
+  threshold boundary, including a clock-skewed future timestamp never
+  producing a negative-day claim; `CHANGED_RECENTLY`/`STABLE` reading WP
+  4h.1's `manifest_change_frequency` correctly, with `"insufficient_data"`
+  and `null` BOTH producing no statement, never conflated with `"stable"`);
+  one game qualifying for two families returns only the highest-priority
+  one; `buildSuggestions`' ranking (PLAYABLE_NOW > STALE_CONFIRMATION >
+  CHANGED_RECENTLY > STABLE, ties broken by ascending appid), `limit`, and
+  the three-way tier ladder (`"full"` whenever a PLAYABLE_NOW item is
+  present, `"frequency"` when items exist without one, `"insufficient_data"`
+  — the honest empty-panel state — when nothing qualifies at all, including
+  for a non-array/undefined snapshot). **The negative privacy pin** (the
+  plan's binding "no number held up to someone else in the living room"
+  stance, structurally enforced): a broad sweep of non-zero playtime values
+  never triggers `PLAYABLE_NOW` and never lets the raw number leak into any
+  statement text; `rtime_last_played` is never read into a statement however
+  it is spelled on the input object; every statement family, across a wide
+  input sweep, is checked against a judgemental-pattern regex list
+  (`haven't played`, `never played`, a played-time NUMBER, `last played`) and
+  none ever matches.
+- `decision-panel-wiring.test.js` (new, 17) —
+  `web/js/components/decision-panel.js`'s DOM wiring, same `fake-dom.js` +
+  dependency-injection posture as `rail-panel-wiring.test.js` (a
+  `createDecisionPanel({elements, store, onViewChange, getCurrentView,
+  storage})` factory takes every real dependency, including a fake
+  `storage` object standing in for `window.localStorage`). Also pins that
+  the collapse button's `aria-label` flips between "Expand suggestions"/
+  "Collapse suggestions" with state, not just `aria-expanded` — a
+  screen-reader user needs the ACTION the button performs, not only whether
+  it is currently expanded. Covers:
+  Library-view-only visibility (hidden on every other view, and hidden with
+  zero games at all — "nothing to react to yet"); the `insufficient_data`
+  empty state rendering an honest message rather than hiding the panel or
+  showing an empty box, once at least one game exists; dismiss (persists
+  `steamvault.decisionPanelDismissed=1`, hides both presentations, and — the
+  precedent pin, `bypass-banner.test.js`'s "dismissed stays dismissed across
+  an unrelated poll tick", adapted from that in-memory banner's auto-clear
+  model to this module's read-once-into-state localStorage model) survives
+  an unrelated `"games"` poll tick without being resurrected; collapse
+  (defaults to collapsed on a first visit, toggles its OWN
+  `steamvault.decisionPanelCollapsed` key, independently of dismiss — a
+  named pin constructs the `collapsed:false, dismissed:true` combination and
+  confirms dismiss still wins for visibility without the two keys aliasing);
+  `#app`'s `has-decision-panel` class tracks visibility exactly (required so
+  `css/app.css`'s BP-XL grid never reserves a permanent empty third column
+  for a dismissed/off-Library panel); a failed `{error}` games tick leaves
+  the last real render untouched; a throwing `storage.setItem` never blocks
+  the in-memory dismiss action (same posture as `api.js`'s localStorage
+  helpers).
+- `decision-panel-layout.test.js` (new, 11) — same structural, no-jsdom
+  posture as `css-layout-foundation.test.js`, pinning the plan's two-
+  presentation requirement itself: exactly one `<aside id="decision-panel">`
+  in `index.html`, `[hidden]` by default, positioned AFTER `<main
+  id="view-root">` (the D-14 constraint this WP inherits — sitting after the
+  Library view's entire flow trivially satisfies "no new focusable content
+  between the filter row and the first card", since this is later than all
+  of it). Two named **mutation targets**, one per presentation: `.decision-
+  panel{ grid-area:panel }` and the `.app.has-decision-panel` 3-column
+  template both found ONLY inside the bare `min-width:1800px` block (never
+  at top level, never in any other breakpoint block — the "render the
+  column below BP-XL" mutation); `.dp-collapse` (the card-only collapse
+  toggle) is `display:none` ONLY inside that same block, proving it — and
+  therefore the card itself — is a real, working, non-hidden presentation
+  below BP-XL (the "render the card at BP-XL"/"remove the card entirely"
+  mutations). A sanity pin confirms `.decision-panel` carries no author
+  `display:` rule anywhere at all (top level or any media block) — by
+  `css-hygiene.test.js`'s own documented rule (the `.rail-version` sanity
+  pin), this means no `.decision-panel[hidden]` guard is required, since the
+  UA's built-in `[hidden]{display:none}` never fights an author rule here
+  (verified: `css-hygiene.test.js`'s own suite, unedited, still passes with
+  zero new guard demands). A final pin confirms the panel's BP-XL rules live
+  in the SAME bare block `css-layout-foundation.test.js`'s `--w-wall` pin
+  already anchors to, not a second, independently-added block — the
+  structural precondition for "the panel takes width from the wall" being
+  something a reader can actually verify by inspection.
+- `demo-data-relay-privacy.test.js` (new, 10) and one **named baseline-test
+  edit** to `demo-data-settings.test.js` — two of the three carried-over
+  defects from the WP 4h.0 review (both prior WPs landed `api/`-only,
+  leaving `web/js/demo-data.js` diverged — see that module's own comments):
+  (1) `DEMO_OWNED_GAMES`'s DEFAULT shape now omits `playtime_forever`/
+  `rtime_last_played` entirely (both ADR-0010 keys ship off by default) —
+  the previous fixture carried `playtime_forever` on every entry
+  unconditionally, the shape of a NON-default gate state masquerading as the
+  baseline. The enabled-gate shape is a separate, explicit fixture
+  (`DEMO_OWNED_GAMES_PLAYTIME`) reached only via `resetDemoData({
+  relayExposePlaytime, relayExposeLastPlayed })`, demo mode's analogue of
+  "set the env var and restart" (there is no PATCH path, in demo mode or the
+  real one) — including a deliberate case (appid 3300100) where playtime is
+  exposed but no last-played value exists for it at all, proving the gate
+  never fabricates one just because the SETTING is on. `demo-data-settings
+  .test.js`'s pre-existing "GET /v1/steam/owned-games answers 200..." test
+  is the one allowed edit: it used to assert `"playtime_forever" in g` for
+  every game (the wrong, non-default shape baked into a baseline test); it
+  now asserts the DEFAULT shape (both keys absent) instead, named and
+  justified in its own comment per docs/LEARNINGS.md's "demo fixtures are a
+  shipped surface, shapes 1:1 with the real API" rule. (2) `ENV_ONLY_DEMO`
+  gains `relay_expose_playtime`/`relay_expose_last_played` as two more
+  informational rows (read via a `get value()` getter off the same mutable
+  state `resetDemoData()` sets, since — unlike every other env-only row here
+  — these two have a demo-reachable "restart" analogue), and `PATCH` on
+  either now answers the byte-identical "environment-only" 422 detail
+  string `api/vault_api/routers/settings.py`'s `_ENV_ONLY_DETAIL_TEMPLATE`
+  uses (cross-checked against that file, not guessed) instead of falling
+  through to "unrecognised setting key". Fixing the ONE template (it was
+  wrong for all nine env-only keys, not just these two) is pinned to also
+  correct the pre-existing seven's message, verified by name for `db_path`.
+- `demo-data-change-frequency.test.js` (new, 7) — a fourth fixture
+  correction, the coder's own addition (not one of the brief's three named
+  defects, same drift class): `GET /v1/games`/`GET /v1/games/{appid}` never
+  projected WP 4h.1's `manifest_change_frequency`/`manifest_observation_
+  days`/`manifest_days_since_last_change` fields at all. Now projected from
+  the seed object on both routes, with three curated seed games (Aurora
+  Cascade: `"stable"`; Driftwood Signal: `"changed"`; Frostline Convoy:
+  `"insufficient_data"`, deliberately distinct from `null` per WP 4h.1's own
+  pin 2) demonstrating all three real states plus the `null` default the
+  rest keep — an end-to-end sanity test confirms `buildSuggestions()` finds
+  a real, non-`"insufficient_data"`-tier suggestion from this fixture, not
+  just that the fields are present.
+
+**Not wired in this package, stated rather than silently implied
+(`decision-panel.js`'s own module header carries the same note):** the
+panel's "full" (playtime-inclusive) tier is real, tested code in
+`lib/decision-support.js`, but nothing in `web/js/` currently supplies a
+`playtimeByAppid` map to it in production — there is no persisted Steam
+identity anywhere in this codebase (`onboarding.js`/`views/settings.js`'s
+"Library preview" lookup is a deliberate one-off, never stored) to poll
+`GET /v1/steam/owned-games` against on a recurring basis. The panel
+therefore always operates in the `"frequency"`/`"insufficient_data"` tier in
+the shipped product today; wiring a persisted identity + its own poll
+loop/cadence decision is real, separate, unscoped work for a future package,
+not silently promised here.
+
+587 baseline (after WP 4e.5's fast-forward onto `origin/main`) → 657 green,
+25+17+11+10+7 = 70 new tests, first pass, one existing-test edit (named
+above), no test file other than that one edit touched.
+
+**Opus review round 1: FAIL — one blocker (B1), five should-fixes (S1-S5),
+all fixed and re-verified in this round. 665 green (78 new: 28+19+14+10+7).**
+
+- **B1 (blocker, measured live in headless Chrome at 1280px, both bypass-
+  banner states).** `.decision-panel` is a fifth in-flow child of `#app`
+  with no explicit `grid-area` before this fix — CSS grid auto-placement
+  dropped it into whichever cell it found first vacant once `#app` becomes
+  a grid at BP-L: the empty `"banner"` cell (banner hidden), rendering it
+  ABOVE the library grid while still DOM-last — the exact visual-vs-
+  reading-order divergence D-14 exists to prevent; or an implicit row
+  inside the RAIL's own 148px column (banner visible). Both measured live
+  and reproduced BEFORE the fix, confirmed gone AFTER it, and reproduced
+  AGAIN under the revert-as-mutation the review asked for (both banner
+  states, each time) — see `decision-panel-layout.test.js`'s two new "B1"
+  mutation pins for the structural half (a fourth `"rail panel"` row in
+  BP-L's `.app` template; an explicit, unconditional
+  `.decision-panel{ grid-area:panel }` there) and the coder's report for
+  the live bounding-rect numbers (before/after/mutated, both states) this
+  file cannot itself check (no jsdom in this suite). Fixing this also
+  surfaced a SECOND, independent bug live: `margin:20px auto 32px` alone
+  does not centre a grid item that also needs to STRETCH-then-cap — per
+  the CSS box-alignment spec, an `auto` margin on a grid item overrides its
+  default `justify-self:stretch`, so the box shrank to its own content
+  width (188px) instead of filling toward `max-width:760px` before centring
+  it. Fixed with an explicit `width:100%` (the same property
+  `.view-root`/`.banner-wrap` already carry for the identical reason,
+  discovered only by re-measuring live, not by reasoning about the
+  declaration).
+- **S1** — `theme.css`'s `--panel-w` comment claimed no visible tile-column
+  shrink at 1920-2560px; measured live, with vs. without the panel present
+  at the same viewport, on a SCROLLING page (`.grid`'s own resolved
+  `grid-template-columns` track count — this panel only ever renders next
+  to a library with enough games to scroll, `css-layout-foundation
+  .test.js`'s own `SCROLLBAR_PX` convention): 1800px 8→6 (Δ2), 1920px 9→7
+  (Δ2), 2200px **10→8 (Δ2)**, 2300px 10→9 (Δ1), 2395px 10→10 (Δ0, the real
+  crossover — 2394px is still 9), 2560px 10→10 (Δ0). **Round 3 settled a
+  genuine round-2 disagreement — both rigs had measured correctly, just
+  two different quantities.** The decisive number at 2200px is **1673px**:
+  `.grid`'s CONTENT-box width on the shipped, scrolling-page condition,
+  below even the 9-track floor (1680px) — not the 1720px the coder
+  reported in round 2, which was real but answered a different question
+  (`.view-root`'s BORDER-box width on a page with NO scrollbar). Chain:
+  `2200 - 180(--rail-w) - 300(--panel-w) = 1720px` (`.view-root`'s outer
+  box) `- 15px` (the classic scrollbar, present once the page actually
+  scrolls) `- 32px` (`.view-root`'s own left+right padding) `= 1673px`.
+  Floors (`--tile-min:176px`, 12px gap): 8 tracks need >=1492px, 9 need
+  >=1680px, 10 need >=1868px. The two-tile-column cost at 1800-2200px (not
+  just 1800-1920px) is accepted and stated, not engineered away.
+- **S6** — the B1/S2 fix round's `width:100%` on the TOP-LEVEL
+  `.decision-panel` rule (needed there because an `auto` margin on a grid
+  item overrides `justify-self:stretch`, forcing content-sized shrink
+  instead — see S2 above) made the BP-XL-scoped rule's OWN
+  `margin-right:16px` inert once it won the cascade: `width:100%` fills
+  the entire track regardless of margin, so the card sat flush against the
+  track's right edge at every BP-XL width — measured, `panel.right ===
+  clientWidth` at 1800/1920/2200/2560px. Fixed with `width:auto` inside
+  `.app.has-decision-panel .decision-panel` specifically — that rule's own
+  margin has no `auto` component, so it needs the OTHER width algorithm
+  (stretch-minus-margin), not the "fill regardless of margin" one the
+  auto-margin rule needed. Re-verified live at 1900px AND 2200px after the
+  fix: a real 16px gutter (`panel.right = clientWidth - 16`), the card's
+  own BORDER box **284px** wide (`--panel-w:300px` is the TRACK width; 284
+  + 16px margin = the full 300px track, not the card itself). This one,
+  too, was invisible on the first live check after the S2 fix because of a
+  stale, un-busted stylesheet `<link>` in the measurement rig — a
+  forced-fresh reload was what actually exposed it. (The pin for this fix
+  lives inside the test named `"MUTATION PIN (S3): the BP-XL column-only
+  rules are scoped under '.app.has-decision-panel'..."` in
+  `decision-panel-layout.test.js` — the assertion is correct, the test's
+  own name predates S6 and does not mention it.)
+- **S2** — `.decision-panel`'s margin used a fixed `var(--gutter)` left
+  inset instead of centring; measured live, a 108px stair-step against
+  `.view-root`'s own centred edge at 1023px. Fixed (`margin:20px auto
+  32px`, plus the `width:100%` B1's fix round also needed — see above);
+  `decision-panel-layout.test.js` gained a named pin.
+- **S3** — `buildSuggestions()`'s `tier` had zero production callers, and
+  the BP-XL column reserved `--panel-w` even for an `"insufficient_data"`
+  result (a fresh vault showing one static sentence in a 300px sidebar for
+  ~14 days). `decision-panel.js` now keys `#app`'s `has-decision-panel`
+  class on `tier !== "insufficient_data"` (wiring the dead caller and
+  fixing the cost in the same change) — the BP-XL block's three
+  column-only rules are now scoped under `.app.has-decision-panel` rather
+  than bare selectors, so an empty result falls through to the BP-L row
+  placement (with a working collapse toggle) instead of keeping the
+  column's "no collapse, force-expanded" treatment with no column behind
+  it. New pins in both `decision-panel-layout.test.js` (the scoping) and
+  `decision-panel-wiring.test.js` (the JS predicate, including a tick that
+  flips a result from empty to real without re-navigating).
+- **S4** — `manifest_days_since_last_change`/`manifest_observation_days`
+  had no numeric sanitation beyond `typeof === "number"` — true for `NaN`/
+  negatives/fractions/`Infinity` too; probed and confirmed rendering
+  (`"Last changed NaN days ago."`, `-5`, `3.7`, `Infinity`) before this fix.
+  `lib/decision-support.js` gained `realNonNegativeIntOrNull` (mirrors
+  `realPlaytimeForeverOrNull`'s contract; `Number.isSafeInteger`, not
+  merely `Number.isInteger`, additionally rejects a pathologically large
+  integral value like `1e+21`, also probed) — two new mutation pins in
+  `decision-support.test.js` sweep both fields against the full bad-value
+  set, plus a pin confirming a real `0` still renders (never falsy-
+  rejected).
+- **S5** — `docs/WORKPACKAGES.md`'s D-16 extended: the discoverability-vs-
+  keyboard-cost trade-off (the panel's two buttons are the last two tab
+  stops in the whole app, after D-14's ~590) named explicitly, and the
+  rejected alternative (DOM-early/visually-last via `order`) named as
+  rejected specifically because it IS the B1 divergence, produced on
+  purpose instead of by accident.
+
+Three shipped comments claiming "a normal-flow card, last child of #app,
+after `<main>`" (app.css, index.html, and this file's own header comment)
+were corrected in the same round — DOM order and visual order are related
+but not identical claims, and the fix round is what actually makes the
+weaker, correct claim ("DOM order; CSS decides visual order") true.

@@ -1864,7 +1864,15 @@ surface (playtime and last-played now flow through the API response).
       own addition: every migrated row starts at one observation, so on Zeus
       the panel legitimately shows `insufficient_data` for every game until
       two post-upgrade observations plus a 14-day window exist.)*
-- [ ] **4h.2 (web)** — the panel itself: a right-hand column at BP-XL
+- [x] **4h.2 (web)** — DONE 2026-08-19: both modes shipped (BP-XL right
+      column + collapsible card below, one statement module), privacy stance
+      structurally pinned (negative pin survived adversarial probing), demo
+      fixtures corrected to the shipped default gate. Opus review, FOUR
+      rounds: grid auto-placement blocker (browser-measured), a
+      measurement dispute settled by full-chain measurement (both rigs
+      right, different elements/page states — see LEARNINGS), the column
+      released when there is nothing to say. 587→665 web tests. D-16.
+      Original bullet: **4h.2 (web)** — the panel itself: a right-hand column at BP-XL
       (>=1800px), a collapsible card below that width. Serves the statements
       above. Depends on 4h.1's fields and on Phase 4e's breakpoints.
 - [ ] **4h.3 (web)** — header art in the detail drawer. Nearly free: a

@@ -76,6 +76,22 @@ function makeGame({
   // run that actually changed depots leaves it untouched, so most demo
   // games are honestly "never confirmed" even while `status: "done"`.
   lastManifestCheck = null,
+  // WP 4h.2 fix (coder's own addition, named — not one of the three defects
+  // the brief called out by name, but the same drift class: WP 4h.1 added
+  // `manifest_change_frequency`/`manifest_observation_days`/
+  // `manifest_days_since_last_change` to the REAL GameSummary/GameDetail
+  // models `api/`-only, per docs/PROJECT_PLAN.md's own note that WP 4h.1
+  // landed with "no conflicts in web/" — meaning this fixture never grew
+  // them at all, and the suggestions panel this WP ships has no way to
+  // demo its CHANGED_RECENTLY/STABLE statement families without them).
+  // Same "set on a small subset, most games stay honestly null" posture as
+  // `lastManifestCheck` just above — WP 4h.1's own null-vs-"insufficient_data"
+  // distinction (a game with manifest data recorded at all vs. one that
+  // has never been observed) is exercised by leaving most seed games at the
+  // `null` default rather than inventing a fourth game per state.
+  manifestChangeFrequency = null,
+  manifestObservationDays = null,
+  manifestDaysSinceLastChange = null,
   // WP 4a.4 demo-only: bytes a GC dry run "discovers" as reclaimable for
   // this app, purely so the GC flow has something to show in demo mode —
   // never serialized into any response (see gcHandler below). Real
@@ -105,6 +121,9 @@ function makeGame({
     last_prefill_at: status === "idle" ? null : isoAgo(3 * 3_600_000),
     last_manifest_check: lastManifestCheck,
     needs_force: needsForce,
+    manifest_change_frequency: manifestChangeFrequency,
+    manifest_observation_days: manifestObservationDays,
+    manifest_days_since_last_change: manifestDaysSinceLastChange,
     // Doubles as both "mapping rows" and "cache state" for this depot in the
     // demo model (the real vault-api keeps those two facts separately —
     // api/README.md "Per-game deletion": deletion clears cache content, not
@@ -130,6 +149,10 @@ function buildCuratedGames() {
       // Gives the GC dry-run flow something honest to find on the first
       // check (WP 4a.4 live-verification fixture) — see makeGame()'s header.
       gcReclaimableBytes: 120_000_000,
+      // WP 4h.2 fix: exercises the suggestions panel's STABLE family —
+      // enough observation days, no observed change.
+      manifestChangeFrequency: "stable",
+      manifestObservationDays: 120,
     }),
     makeGame({
       appid: 2010020,
@@ -150,6 +173,11 @@ function buildCuratedGames() {
       name: "Driftwood Signal",
       status: "running",
       depots: [{ depotid: 2010031, shared: false, size_bytes: 1_100_000_000 }],
+      // WP 4h.2 fix: exercises the suggestions panel's CHANGED_RECENTLY
+      // family — "changed", past tense, with a real days-since-last-change.
+      manifestChangeFrequency: "changed",
+      manifestObservationDays: 45,
+      manifestDaysSinceLastChange: 2,
     }),
     makeGame({
       appid: 2010040,
@@ -174,6 +202,13 @@ function buildCuratedGames() {
       // Exercises lib/detail-wording.js's CONFIRMED branch ("Confirmed
       // current at X").
       lastManifestCheck: isoAgo(3_600_000),
+      // WP 4h.2 fix: exercises "insufficient_data" — SOME manifest data
+      // exists (unlike the null default most seed games below keep), but
+      // the observation window is under 4h.1's own 14-day honesty floor.
+      // Deliberately distinct from `null` (WP 4h.1 pin 2: "we never looked"
+      // vs. "we looked, but not long enough" are different honest answers).
+      manifestChangeFrequency: "insufficient_data",
+      manifestObservationDays: 5,
     }),
     makeGame({
       appid: 2010070,
@@ -416,15 +451,26 @@ let nextJobId = 900002;
  * `librarySize` falls back to `readLibrarySizePreference()`, which itself
  * always returns `DEFAULT_LIBRARY_SIZE` outside a browser (`window` is
  * undefined in every bare-Node test in web/tests/).
- * @param {{ librarySize?: number }} [options]
+ *
+ * WP 4h.2: `relayExposePlaytime`/`relayExposeLastPlayed` are demo mode's
+ * "restart with the env var set" analogue for the two ADR-0010 relay-privacy
+ * settings — see `ENV_ONLY_DEMO`'s own comment. Both default to `false`
+ * (every existing call site, including every test written before this WP,
+ * gets the DEFAULT gate-off shape unchanged — `playtime_forever`/
+ * `rtime_last_played` simply absent from every owned-games entry, matching
+ * the real relay's `response_model_exclude_unset` behaviour, not a fabricated
+ * `0`/`null`).
+ * @param {{ librarySize?: number, relayExposePlaytime?: boolean, relayExposeLastPlayed?: boolean }} [options]
  */
-export function resetDemoData({ librarySize } = {}) {
+export function resetDemoData({ librarySize, relayExposePlaytime: rp = false, relayExposeLastPlayed: rl = false } = {}) {
   games = buildGames(librarySize ?? readLibrarySizePreference());
   jobs = buildJobs();
   clients = buildClients();
   nextJobId = 900002;
   resetDemoSettings();
   resetDemoSteamRelay();
+  relayExposePlaytime = rp;
+  relayExposeLastPlayed = rl;
 }
 
 // ---------------------------------------------------------------------
@@ -468,6 +514,22 @@ const SETTINGS_APPLIES = {
   webhook_events: "restart-required",
 };
 
+// WP 4h.2 fix (carried over BY NAME from the WP 4h.0 review — this module
+// diverged from the real API when 4h.0 landed api/-only, WP 4h.1 same):
+// `relay_expose_playtime`/`relay_expose_last_played` (ADR-0010,
+// settings_store.ENV_ONLY_INFO_KEYS's WP 4h.0 addendum) are two MORE
+// env-only, informational settings rows the real `GET /v1/settings` has
+// carried since WP 4h.0 that this fixture never grew. Read dynamically
+// (`get value()`, not a static literal like every other row below) because,
+// unlike every other env-only key here, these two have a demo-reachable
+// "restart" analogue: `resetDemoData({ relayExposePlaytime,
+// relayExposeLastPlayed })` is demo mode's stand-in for "set the env var and
+// restart", the same one-way, boot-time-only knob ADR-0010 requires of the
+// real server (there is deliberately no PATCH path for either, in demo mode
+// or the real one).
+let relayExposePlaytime = false;
+let relayExposeLastPlayed = false;
+
 // Mirrors settings_store.ENV_ONLY_INFO_KEYS — informational-only rows a
 // settings screen shows as "this exists but only the environment controls
 // it" (api/README.md "Env-only keys"). `vault_api_key` is excluded here
@@ -481,6 +543,8 @@ const ENV_ONLY_DEMO = [
   { key: "manifest_archive_dir", value: "/vault/manifest-archive" },
   { key: "web_dir", value: "/app/web" },
   { key: "settings_readonly", value: false },
+  { key: "relay_expose_playtime", get value() { return relayExposePlaytime; } },
+  { key: "relay_expose_last_played", get value() { return relayExposeLastPlayed; } },
 ];
 const ENV_ONLY_KEYS = new Set(["vault_api_key", ...ENV_ONLY_DEMO.map((e) => e.key)]);
 
@@ -569,10 +633,19 @@ function describeDemoSettings() {
     });
   }
   for (const entry of ENV_ONLY_DEMO) {
+    // The two ADR-0010 relay-privacy keys report "env" whenever
+    // resetDemoData() turned them on, mirroring the real server's
+    // `_env_var_is_set(...)` check — every other row here has no demo
+    // "restart" analogue at all, so it stays "default" the way it always
+    // has (unchanged by this fix).
+    const source =
+      (entry.key === "relay_expose_playtime" || entry.key === "relay_expose_last_played") && entry.value === true
+        ? "env"
+        : "default";
     infos.push({
       key: entry.key,
       effective: entry.value,
-      source: "default",
+      source,
       fallback: entry.value,
       applies: "restart-required",
       env_only: true,
@@ -618,7 +691,15 @@ function handlePatchSettings(body) {
   const toClear = [];
   for (const [key, value] of Object.entries(body || {})) {
     if (ENV_ONLY_KEYS.has(key)) {
-      throw validationError(`'${key}' is environment-only and cannot be changed via the API.`);
+      // WP 4h.2 fix: byte-identical to routers/settings.py's
+      // `_ENV_ONLY_DETAIL_TEMPLATE` (read at that file's own definition, not
+      // guessed) — the previous, shorter demo string was already wrong for
+      // the seven pre-existing env-only keys, not just the two ADR-0010
+      // relay ones this fix set out to add; fixing the ONE template fixes
+      // parity for all nine at once.
+      throw validationError(
+        `'${key}' is environment-only and cannot be changed via the API; set its environment variable and restart instead.`,
+      );
     }
     if (!(key in SETTINGS_BASE)) {
       throw validationError(`'${key}' is not a recognised setting.`);
@@ -658,13 +739,61 @@ function resetDemoSteamRelay() {
 // library's demo games above: this is what "the Steam Web API says this
 // account owns", which in real life is almost always a much bigger,
 // unrelated set from what happens to be cached.
+//
+// WP 4h.2 fix (named per the review that carried this defect forward): this
+// is now the DEFAULT-GATE shape — `playtime_forever`/`rtime_last_played`
+// keys ABSENT, matching `api/vault_api/routers/steam.py`'s
+// `response_model_exclude_unset=True` behaviour when both ADR-0010 env keys
+// are off (the shipped default, WP 4h.0). The previous version of this
+// fixture carried `playtime_forever` on every entry unconditionally, which
+// was the shape of a NON-default gate state masquerading as the baseline —
+// exactly the "demo fixtures are a shipped surface, shapes 1:1 with the real
+// API" rule (docs/LEARNINGS.md) applied to the gate dimension, not just the
+// field list. The enabled-gate shape is `DEMO_OWNED_GAMES_PLAYTIME` below,
+// an explicit second table merged in only when `resetDemoData()` was told to
+// turn the corresponding key on — never the baseline.
 const DEMO_OWNED_GAMES = [
-  { appid: 2010010, name: "Aurora Cascade", playtime_forever: 4312, img_icon_url: "" },
-  { appid: 2010040, name: "Emberreach", playtime_forever: 118, img_icon_url: "" },
-  { appid: 3300100, name: "Sable Undertow", playtime_forever: 972, img_icon_url: "" },
-  { appid: 3300200, name: "Halcyon Foundry", playtime_forever: 26, img_icon_url: "" },
-  { appid: 3300300, name: "Quietbrook", playtime_forever: 0, img_icon_url: "" },
+  { appid: 2010010, name: "Aurora Cascade", img_icon_url: "" },
+  { appid: 2010040, name: "Emberreach", img_icon_url: "" },
+  { appid: 3300100, name: "Sable Undertow", img_icon_url: "" },
+  { appid: 3300200, name: "Halcyon Foundry", img_icon_url: "" },
+  { appid: 3300300, name: "Quietbrook", img_icon_url: "" },
 ];
+
+// The enabled-gate fixture (WP 4h.2) — keyed by appid, consulted only when
+// `relayExposePlaytime`/`relayExposeLastPlayed` is true. Deliberately
+// includes one appid (3300100) with `playtime_forever` but no
+// `rtime_last_played` at all, exercising the two ADR-0010 keys' independence
+// (an operator may expose the aggregate hour count while still refusing the
+// exact last-played date) even when BOTH gate settings are on — a caller
+// that turned on `relayExposeLastPlayed` must not see a fabricated
+// last-played value for an app this fixture never recorded one for.
+const DEMO_OWNED_GAMES_PLAYTIME = {
+  2010010: { playtime_forever: 4312, rtime_last_played: 1_755_000_000 },
+  2010040: { playtime_forever: 118, rtime_last_played: 1_754_000_000 },
+  3300100: { playtime_forever: 972 },
+  3300200: { playtime_forever: 26, rtime_last_played: 1_753_000_000 },
+  3300300: { playtime_forever: 0 }, // real, explicit "never played" — not absence
+};
+
+/** One `DEMO_OWNED_GAMES` entry -> the wire shape for the CURRENT gate
+ * state — mirrors `routers/steam.py`'s `_owned_game_out` outermost-
+ * conversion gate (ADR-0010): each field is added to the object only when
+ * its OWN setting is on AND this fixture actually has a value for it; never
+ * a fabricated `0`/`null` standing in for "on but no data", and never
+ * present at all when the gate is off, so `JSON.stringify` behaves exactly
+ * like the real `response_model_exclude_unset=True` response. */
+function demoOwnedGameForCurrentGate(base) {
+  const extra = {};
+  const pt = DEMO_OWNED_GAMES_PLAYTIME[base.appid];
+  if (relayExposePlaytime && pt && typeof pt.playtime_forever === "number") {
+    extra.playtime_forever = pt.playtime_forever;
+  }
+  if (relayExposeLastPlayed && pt && typeof pt.rtime_last_played === "number") {
+    extra.rtime_last_played = pt.rtime_last_played;
+  }
+  return { ...base, ...extra };
+}
 
 function demoPlayerSummary(steamid) {
   return {
@@ -734,6 +863,13 @@ function gameSummary(g) {
     depot_count: g.depots.length,
     size_bytes: appSizeBytes(g.depots),
     needs_force: g.needs_force,
+    // WP 4h.2 fix: this projection never carried WP 4h.1's three fields at
+    // all (see makeGame()'s own comment on the same gap) — added here
+    // straight from the seed object, same as every other pass-through field
+    // on this line.
+    manifest_change_frequency: g.manifest_change_frequency,
+    manifest_observation_days: g.manifest_observation_days,
+    manifest_days_since_last_change: g.manifest_days_since_last_change,
   };
 }
 
@@ -744,6 +880,9 @@ function gameDetail(g) {
     status: g.status,
     last_prefill_at: g.last_prefill_at,
     last_manifest_check: g.last_manifest_check,
+    manifest_change_frequency: g.manifest_change_frequency,
+    manifest_observation_days: g.manifest_observation_days,
+    manifest_days_since_last_change: g.manifest_days_since_last_change,
     depots: g.depots.map(({ depotid, shared, size_bytes }) => ({
       depotid,
       shared,
@@ -1370,7 +1509,8 @@ export async function demoRequest(method, path, { body, params } = {}) {
   if (method === "GET" && path === "/v1/steam/owned-games") {
     requireSteamConfigured();
     requireValidSteamId(params?.steamid);
-    return { configured: true, game_count: DEMO_OWNED_GAMES.length, games: DEMO_OWNED_GAMES.map((g) => ({ ...g })) };
+    const gatedGames = DEMO_OWNED_GAMES.map(demoOwnedGameForCurrentGate);
+    return { configured: true, game_count: gatedGames.length, games: gatedGames };
   }
   if (method === "GET" && path === "/v1/steam/player-summaries") {
     requireSteamConfigured();
