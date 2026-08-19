@@ -1223,3 +1223,119 @@ def test_connections_are_thread_confined_by_default(tmp_path) -> None:
     conn.close()
 
     assert not failures, failures
+
+
+def test_init_db_upgrades_a_v14_database_to_v15_in_place(tmp_path) -> None:
+    """v14 -> v15 (WP S-1, ADR-0012) adds the seven ``jobs.run_*`` columns.
+
+    Recreated in its exact pre-v15 shape (same reason every other ALTER test
+    in this file does: DROP COLUMN rewrites the stored CREATE TABLE text, so
+    the fixture has to be a hand-written pre-upgrade table, not today's
+    ``jobs`` with columns dropped off it).
+    """
+    db_path = str(tmp_path / "vault.db")
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute("DROP TABLE jobs")
+        conn.execute(
+            """
+            CREATE TABLE jobs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                appid       INTEGER NOT NULL,
+                type        TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'idle',
+                created_at  TEXT NOT NULL,
+                started_at  TEXT,
+                finished_at TEXT,
+                log_excerpt TEXT,
+                updated           INTEGER,
+                up_to_date        INTEGER,
+                summary_parse_ok  INTEGER,
+                gc_execute        INTEGER,
+                paused_at         TEXT,
+                stop_request      TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO jobs (id, appid, type, status, created_at) "
+            "VALUES (1, 440, 'prefill', 'done', '2026-08-09T00:00:00Z')"
+        )
+        conn.execute("UPDATE schema_version SET version = 14")
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_db(db_path)
+    init_db(db_path)  # idempotent: must not raise 'duplicate column name'
+
+    conn = get_connection(db_path)
+    try:
+        (version,) = conn.execute("SELECT version FROM schema_version").fetchone()
+        types = {row["name"]: row["type"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        row = conn.execute("SELECT * FROM jobs WHERE id = 1").fetchone()
+    finally:
+        conn.close()
+
+    assert version == SCHEMA_VERSION
+    run_columns = {
+        "run_use_force": "INTEGER",
+        "run_before_json": "TEXT",
+        "run_claimed_by": "TEXT",
+        "run_claimed_at": "TEXT",
+        "run_heartbeat_at": "TEXT",
+        "run_completed_at": "TEXT",
+        "run_result_json": "TEXT",
+    }
+    for name, expected_type in run_columns.items():
+        assert types[name] == expected_type, (name, types[name])
+        assert row[name] is None
+
+
+def test_a_fresh_database_and_a_v14_upgrade_agree_on_the_jobs_columns(tmp_path) -> None:
+    """Same drift guard as ``test_a_fresh_database_and_an_upgraded_one_agree_on_the_jobs_columns``
+    above, specifically for the v15 (WP S-1) bump."""
+    fresh_path = str(tmp_path / "fresh.db")
+    init_db(fresh_path)
+
+    old_path = str(tmp_path / "old.db")
+    init_db(old_path)
+    conn = get_connection(old_path)
+    try:
+        conn.execute("DROP TABLE jobs")
+        conn.execute(
+            """
+            CREATE TABLE jobs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                appid       INTEGER NOT NULL,
+                type        TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'idle',
+                created_at  TEXT NOT NULL,
+                started_at  TEXT,
+                finished_at TEXT,
+                log_excerpt TEXT,
+                updated           INTEGER,
+                up_to_date        INTEGER,
+                summary_parse_ok  INTEGER,
+                gc_execute        INTEGER,
+                paused_at         TEXT,
+                stop_request      TEXT
+            )
+            """
+        )
+        conn.execute("UPDATE schema_version SET version = 14")
+        conn.commit()
+    finally:
+        conn.close()
+    init_db(old_path)
+
+    def job_columns(path: str) -> list[tuple[str, str]]:
+        conn = get_connection(path)
+        try:
+            return [(row["name"], row["type"]) for row in conn.execute("PRAGMA table_info(jobs)")]
+        finally:
+            conn.close()
+
+    assert job_columns(old_path) == job_columns(fresh_path)

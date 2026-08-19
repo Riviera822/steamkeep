@@ -109,6 +109,10 @@ Copy `.env.example` to `.env` and adjust:
 | `VAULT_STEAMPREFILL_PATH`       | no*      | *(empty)*    | Path to the SteamPrefill executable; *required to run prefill jobs* |
 | `VAULT_PREFILL_TIMEOUT_SECONDS` | no       | `14400`      | Hard time budget for one SteamPrefill run (hang backstop)           |
 | `VAULT_WORKER_POLL_SECONDS`     | no       | `1.0`        | Worker sleep between polls of an empty queue                        |
+| `VAULT_PREFILL_MODE`            | no       | `subprocess` | `subprocess` (vault-api runs SteamPrefill itself, unchanged pre-WP-S-1 behaviour) \| `queue` (hand execution off to a separate `prefill_runner` process — see "Queue mode" below). Any other value is refused at startup |
+| `VAULT_RUNNER_HEARTBEAT_SECONDS` | no      | `5.0`        | `queue` mode only: how often `prefill_runner` refreshes its lease while executing; **must be > 0** |
+| `VAULT_RUNNER_LEASE_TIMEOUT_SECONDS` | no  | `30.0`       | `queue` mode only: how stale a runner's lease must be before it is presumed dead; **must be > 0** |
+| `VAULT_RUNNER_POLL_SECONDS`     | no       | `1.0`        | `prefill_runner` only: how often it polls for a job to claim when idle. Set on the `prefill_runner` process/container's own environment, not vault-api's — vault-api's worker reuses `VAULT_WORKER_POLL_SECONDS` for its own wait-on-hand-off loop in `queue` mode; **must be > 0** |
 | `VAULT_SIZE_CACHE_TTL`          | no       | `60`         | TTL (seconds) for the in-process per-game size cache; **must be > 0** (see below) |
 | `VAULT_AGENT_REPORT_KEEP`       | no       | `20`         | Agent report snapshots kept per `client_id`; **must be >= 2** (see "Agent reports") |
 | `VAULT_STEAMPREFILL_CACHE_DIR`  | no       | platform default (see below) | SteamPrefill's own manifest temp-cache directory, scanned after a successful prefill job (see "Manifest ingestion") |
@@ -134,17 +138,21 @@ Copy `.env.example` to `.env` and adjust:
 | `VAULT_MANIFEST_ORACLE_URL`     | no       | `https://api.steamcmd.net/v1/info` | Base URL the oracle asks (`<base>/<appid>`). Point it at your own mirror to keep the queries on your network. Must be `http`/`https`; redirects away from it are never followed |
 | `VAULT_MANIFEST_ORACLE_TIMEOUT` | no       | `10`         | Socket timeout (seconds) for one oracle request; **must be > 0**. A timeout is an ordinary "no data" outcome, never an error the API surfaces |
 
-**All sixteen numeric settings are parsed strictly (WP 3.12).** Twelve take a
+**All nineteen numeric settings are parsed strictly (WP 3.12).** Twelve take a
 whole number (`VAULT_PREFILL_TIMEOUT_SECONDS`, `VAULT_AGENT_REPORT_KEEP`,
 `VAULT_MANIFEST_KEEP`, `VAULT_GC_GRACE_DAYS`,
 `VAULT_SCHEDULE_INTERVAL_MINUTES`, `VAULT_SCHEDULE_CLIENT_STALE_DAYS`,
 and WP 3.11's `VAULT_EVENT_SWEEP_INTERVAL_MINUTES`,
 `VAULT_MISS_TRIGGER_COOLDOWN_MINUTES`, `VAULT_MISS_TRIGGER_MAX_PER_SWEEP`,
 `VAULT_BYPASS_WINDOW_DAYS`, `VAULT_CLIENT_STATS_KEEP`,
-`VAULT_EVENT_LOG_MAX_BYTES`) and four take a decimal
+`VAULT_EVENT_LOG_MAX_BYTES`) and seven take a decimal
 (`VAULT_WORKER_POLL_SECONDS`, `VAULT_SIZE_CACHE_TTL`, WP 3.13's
-`VAULT_WEBHOOK_TIMEOUT_SECONDS`, and WP 3.9's
-`VAULT_MANIFEST_ORACLE_TIMEOUT` — all through the same `_env_float`).
+`VAULT_WEBHOOK_TIMEOUT_SECONDS`, WP 3.9's
+`VAULT_MANIFEST_ORACLE_TIMEOUT`, and WP S-1's `VAULT_RUNNER_HEARTBEAT_SECONDS`/
+`VAULT_RUNNER_LEASE_TIMEOUT_SECONDS`/`VAULT_RUNNER_POLL_SECONDS` — all through
+the same `_env_float`). `VAULT_PREFILL_MODE` follows the separate strict-enum
+rule `VAULT_AUTO_GC`/`VAULT_MANIFEST_ORACLE` already use (see "Queue mode"
+below) rather than the numeric grammar.
 Each family goes through exactly one validator, with the same house rule:
 
 | | Accepted grammar | Examples that pass | Examples that are now refused |
@@ -236,7 +244,7 @@ an operator asks for *off*, so a non-empty value is an explicit request for a
 feature, and a typo in it must not quietly look like it worked. Once the
 oracle is running, every failure it can have is soft — see below.
 
-## Database schema (v14)
+## Database schema (v15)
 
 Created idempotently at startup by `vault_api/db.py::init_db` (safe to call
 on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
@@ -247,7 +255,7 @@ on every process start — uses `CREATE TABLE IF NOT EXISTS` and only seeds
 | `schema_version` | `version`                                                                                   | Single-row marker for future migrations |
 | `apps`           | `appid` (PK), `name`, `status`, `last_prefill_at`, `last_manifest_check`, `needs_force`     | One row per tracked Steam app. `needs_force` (**v5**, WP 3.4) is ADR-0006 decision 2's per-app flag — see "needs_force" below |
 | `depot_app_map`  | `depotid`, `appid`, PK `(depotid, appid)`                                                   | Depot→app mapping; a depot can map to multiple apps (shared depots, plan §4) |
-| `jobs`           | `id` (PK autoincrement), `appid`, `type`, `status`, `created_at`, `started_at`, `finished_at`, `log_excerpt`, `updated`, `up_to_date`, `summary_parse_ok`, `gc_execute`, `paused_at`, `stop_request` | Prefill/GC job queue (plan §3, §6). `updated`/`up_to_date`/`summary_parse_ok` (**v4**, WP 3.3) are SteamPrefill's own summary-table counters — see "Job outcome honesty" above. `gc_execute` (**v7**, WP 3.8) is the GC dry-run/execute bit: `NULL` for every non-GC job, `0` = report only, `1` = delete — see "Garbage collection" below. `paused_at`/`stop_request` (**v8**, WP 3.12) are job control: when the job was last suspended, and the operator's pending `cancel`/`pause` request against a *running* job — see "Job control" below |
+| `jobs`           | `id` (PK autoincrement), `appid`, `type`, `status`, `created_at`, `started_at`, `finished_at`, `log_excerpt`, `updated`, `up_to_date`, `summary_parse_ok`, `gc_execute`, `paused_at`, `stop_request`, `run_use_force`, `run_before_json`, `run_claimed_by`, `run_claimed_at`, `run_heartbeat_at`, `run_completed_at`, `run_result_json` | Prefill/GC job queue (plan §3, §6). `updated`/`up_to_date`/`summary_parse_ok` (**v4**, WP 3.3) are SteamPrefill's own summary-table counters — see "Job outcome honesty" above. `gc_execute` (**v7**, WP 3.8) is the GC dry-run/execute bit: `NULL` for every non-GC job, `0` = report only, `1` = delete — see "Garbage collection" below. `paused_at`/`stop_request` (**v8**, WP 3.12) are job control: when the job was last suspended, and the operator's pending `cancel`/`pause` request against a *running* job — see "Job control" below. The seven `run_*` columns (**v15**, WP S-1, ADR-0012) are queue-mode's job hand-off to a separate `prefill_runner` process — `NULL` for every job that never goes through queue mode (any GC job, any prefill job run in the default `subprocess` mode). See "Queue mode" below |
 | `agent_reports`  | `client_id`, `reported_at`, `appids` (JSON array of ints), `source_addr`                     | One row per agent report — a full installed-app-ID snapshot at that timestamp (ADR-0002: the agent is stateless/dumb, always reports the complete list). vault-api derives additions/removals by diffing the two most recent rows per `client_id`. `source_addr` (**v9**, WP 3.11) is the address the report arrived FROM — the only key correlating a `client_id` with the event log's addresses; `NULL` for pre-v9 rows, which is why such a client is never `bypass_suspected` |
 | `depot_manifests` | `appid`, `containing_appid`, `depotid`, `manifestid` (TEXT), `chunk_count`, `total_bytes`, `recorded_at`, `source`, `first_seen_at`, `manifest_changed_at`, `observation_count`, PK `(appid, depotid)` | **Latest**-known manifest state per (app, depot) — WP 3.2, ADR-0006 decision 3. `first_seen_at`/`manifest_changed_at`/`observation_count` (**v14**, WP 4h.1) are the change-frequency bookkeeping — see "Manifest ingestion" and "Change frequency" below |
 | `oracle_app_state` | `appid` (PK), `buildid`, `checked_at`, `source`, `depot_count`, `branch_count` | **v10**, WP 3.9. One row per app the opt-in oracle has been asked about: when, by which oracle (`source` provenance), and what it said the public build id is. See "Manifest oracle" below |
@@ -402,6 +410,17 @@ so the per-column loop is skipped entirely in that case and the unconditional
 v14 column already `NOT NULL` and nothing to backfill. Covered by
 `tests/test_db.py`'s v13→v14 upgrade test plus its idempotent-if-called-twice
 sibling, and by `tests/test_depot_manifests.py`'s upsert-semantics tests.
+
+**v14 → v15 (WP S-1, ADR-0012) reuses the v4/v7/v8 per-column `jobs` step
+again, for seven columns this time.** `run_use_force`, `run_before_json`,
+`run_claimed_by`, `run_claimed_at`, `run_heartbeat_at`, `run_completed_at`,
+`run_result_json` are all nullable with no default, so they join
+`db._POST_V1_JOB_COLUMNS`/`db._add_missing_job_columns` rather than needing a
+fourth mechanism — the same guarded loop that already knows how to bring a
+`jobs` table at any version from v1 to v14 up to date now also knows about
+these seven. Covered by
+`tests/test_db.py::test_init_db_upgrades_a_v14_database_to_v15_in_place` and
+`..._a_fresh_database_and_a_v14_upgrade_agree_on_the_jobs_columns`.
 
 **Ordering fix (WP 1.5 carry-over from the WP 1.4 review):** `init_db` now
 creates only the `schema_version` table, reads the stored version, and checks
@@ -752,6 +771,13 @@ One background thread, started by the FastAPI lifespan
 4. **On success only:** the shared `SizeCache` (WP 1.5, see "Per-game size
    calculation" below) is invalidated so `GET /v1/games` reflects the new
    disk content immediately instead of waiting out `VAULT_SIZE_CACHE_TTL`.
+5. **`VAULT_PREFILL_MODE=queue` only (WP S-1, ADR-0012):** step 2's "run" is a
+   hand-off through the `jobs` table to a separate `prefill_runner` process
+   instead of an in-process `prefill.run_prefill` call — see "Queue mode"
+   below. Every other step above, including step 1's stale-job recovery
+   (narrowed for a job already handed off — the runner is a SEPARATE
+   process and a vault-api restart says nothing about whether it died too),
+   is unchanged in shape.
 
 `PrefillWorker` previously carried a `_finished` event that was set on exit
 but never read anywhere (WP 1.4 review carry-over) — removed in WP 1.5 rather
@@ -829,6 +855,93 @@ future Steam Guard prompt variant is not.
 
 **vault-api never sees, stores, transmits or logs Steam credentials.** The
 session lives in SteamPrefill's own `Config/` directory next to the executable.
+
+### Queue mode: the `prefill_runner` process (WP S-1, ADR-0012)
+
+Everything above this section describes `VAULT_PREFILL_MODE=subprocess` (the
+default): vault-api's worker calls `prefill.run_prefill` directly, in its own
+process — unchanged by this work package, byte for byte. Set
+`VAULT_PREFILL_MODE=queue` to hand execution off to a separate process
+instead:
+
+```
+python -m vault_api.prefill_runner
+```
+
+**Why this exists.** SteamPrefill needs broad Steam CM/CDN network access;
+vault-api's control-plane role does not. As long as vault-api's own process
+spawns the SteamPrefill subprocess directly, vault-api's *container* can
+never be locked down to LAN-only egress without also breaking prefill. Queue
+mode moves the one thing that needs the wider internet into its own process,
+so a separate container running `prefill_runner` can be the only one with
+that access — see `docs/adr/0012-*.md` for the full design and the two
+rejected alternatives (an HTTP sidecar; a Docker-socket mount). **This work
+package (S-1) only ships the api-side code.** Wiring `prefill_runner` into
+`deploy/compose.yaml` as its own service, with its own `Config/`/cache volume
+mounts, is WP S-2; the egress lock itself is EG-1. Until S-2 lands, `queue`
+mode is usable for native/manual testing (run both processes yourself,
+pointed at the same `VAULT_DB_PATH` and `VAULT_CACHE_ROOT`) but has no
+supported Compose story yet.
+
+**vault-api's worker keeps owning everything except the subprocess call.**
+Claiming a job, deciding `--force`, applying the depot mapping, manifest
+ingestion, webhooks, auto-GC and every status transition all still happen in
+vault-api — `prefill_runner` imports nothing from `worker.py` and touches
+none of that. It only: polls the `jobs` table for a job vault-api has handed
+off, calls the exact same `prefill.run_prefill` function vault-api used to
+call directly, and reports a result back. See `vault_api/prefill_queue.py`
+(the encode/decode + wait-loop glue shared by both sides) and
+`vault_api/prefill_runner.py` (the CLI entrypoint) for the mechanics, and
+`docs/adr/0012-*.md` for the full crash-semantics reasoning (a dead runner's
+job fails cleanly; there is no lease-stealing reclaim, so a job vault-api has
+already declared dead can never be silently resurrected by a second runner
+instance).
+
+**The one-time interactive login moves containers.** ADR-0004 decision 1's
+"log in once, interactively, in SteamPrefill's own prompt" still applies
+unchanged — only WHERE you run it changes. In `subprocess` mode, that is
+still `docker exec` (or a native shell) wherever vault-api runs. **In `queue`
+mode, SteamPrefill's binary and its `Config/` (the Steam session) live in the
+`prefill_runner` process/container instead, so the login step moves there
+too:**
+
+```
+docker exec -it <prefill_runner container> SteamPrefill select-apps
+```
+
+(the exact container name is S-2's to name once it exists). vault-api itself
+still never sees or stores Steam credentials either way — nothing about that
+guarantee changes.
+
+**`prefill_runner` does NOT need `VAULT_API_KEY`.** It calls
+`Settings.from_env(require_api_key=False)` — the one exception to the "no
+default, fails loudly if absent" rule `Settings.from_env()` otherwise
+enforces. This process never serves HTTP and never authenticates a request,
+so it has no legitimate use for the LAN control-plane secret that gates every
+other vault-api endpoint; requiring it there anyway would mean the one
+broad-egress container this split exists to isolate also holds the one
+secret that guards everything else, for no functional benefit. Every OTHER
+setting `prefill_runner` reads (`VAULT_DB_PATH`, `VAULT_STEAMPREFILL_PATH`,
+`VAULT_PREFILL_TIMEOUT_SECONDS`, the three `VAULT_RUNNER_*` tunables) still
+goes through the same `Settings`/`.env` mechanism vault-api uses.
+
+**Crash semantics, briefly (full reasoning in the ADR):**
+
+- *Runner dies mid-prefill:* its lease (`jobs.run_heartbeat_at`) goes stale;
+  vault-api's worker — which is the one actively waiting on the job — notices
+  on its own poll tick and fails the job through the same branch a timeout or
+  a non-zero exit code already uses. The depot mapping is left untouched, the
+  same as every other prefill failure.
+- *vault-api restarts while the runner keeps going:* the job is left exactly
+  `running` (queue mode's `jobs.recover_stale_jobs` narrowing) and the new
+  process's worker thread resumes waiting on it on its very first tick
+  (`jobs.find_active_run`) — the runner finishes normally, the restart is
+  invisible to the eventual outcome.
+- *No runner is running at all* (queue mode enabled, but nothing has claimed
+  the job): the SAME staleness check fires once `VAULT_RUNNER_LEASE_TIMEOUT_SECONDS`
+  has elapsed since the job started, so this is a visible `error` — not a
+  silent, permanent `running` badge — even with no runner process to blame it
+  on.
 
 ### Job outcome honesty (WP 3.3, ADR-0006 decision 1)
 

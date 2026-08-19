@@ -2196,6 +2196,30 @@ platform actually wants to react to.
       At-most-once is the right hardness for homelab notifications
       (`webhooks.py` module docstring)
 
+### Runner split & egress enforcement (S-track, decided 2026-08-19)
+
+Operator decision after WP EG-1's first attempt STOPPED pre-implementation
+(the coder proved the egress lock's promise unkeepable while SteamPrefill
+runs as a subprocess of vault-api — network namespaces are per container;
+ADR-0011 is reserved for the egress lock's ADR when EG-1 lands, which is
+why 0012 precedes it in time): split first, then lock.
+
+- [x] **S-1 (api)** — prefill runner split: VAULT_PREFILL_MODE
+      subprocess|queue, schema v15 lease columns, atomic claim (two
+      independent sufficient mechanisms, measured as 8 OS processes),
+      no-lease-stealing crash semantics, bounded stale-lease tests after a
+      mutation class was shown to wedge CI silently. ADR-0012. Opus review
+      rounds 1-2 (FAIL: queue-mode pause→resume was an inescapable dead
+      end, found by live probe; fixed + integration-pinned → PASS).
+      1672→1729 api tests. 2026-08-19.
+- [ ] **S-2 (deploy)** — the runner as its own compose service (broad
+      egress profile, volumes, login-path docs, verify-stack checks).
+- [ ] **EG-1 (deploy, resumed)** — the egress lock as decided 2026-08-18:
+      vault-api loses its default route, allowlist proxy as shipped
+      default, VAULT_EGRESS_ALLOW, meticulous verify-in-five-minutes docs,
+      .env.example completeness pin. Topology pre-verified in sandboxes
+      during the stopped first attempt. Produces ADR-0011.
+
 ---
 
 ## 8. Repository Structure (Monorepo)

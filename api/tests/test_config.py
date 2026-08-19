@@ -17,6 +17,34 @@ def test_from_env_raises_when_api_key_blank(monkeypatch: pytest.MonkeyPatch) -> 
         Settings.from_env()
 
 
+def test_from_env_allows_a_missing_api_key_when_not_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WP S-1 round-2 (review S2): ``prefill_runner`` never serves HTTP and
+    never authenticates a request, so it has no legitimate use for the LAN
+    control-plane secret — ``require_api_key=False`` is what lets it load
+    the rest of ``Settings`` (db_path, steamprefill_path, the runner
+    tunables) without also needing VAULT_API_KEY injected into its
+    environment."""
+    monkeypatch.delenv("VAULT_API_KEY", raising=False)
+
+    settings = Settings.from_env(require_api_key=False)
+
+    assert settings.vault_api_key == ""
+
+
+def test_from_env_still_defaults_to_requiring_the_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default must stay strict — only prefill_runner's explicit opt-out
+    may skip this check; vault-api's own boot path (``create_app`` ->
+    ``Settings.from_env()`` with no arguments) must not accidentally relax."""
+    monkeypatch.delenv("VAULT_API_KEY", raising=False)
+
+    with pytest.raises(RuntimeError, match="VAULT_API_KEY"):
+        Settings.from_env()
+
+
 def test_from_env_uses_defaults_when_optional_vars_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VAULT_API_KEY", "some-key")
     monkeypatch.delenv("VAULT_DB_PATH", raising=False)
@@ -1160,3 +1188,84 @@ def test_validate_webhook_url_rejects_non_http_schemes(bad: str) -> None:
 
     with pytest.raises(ValueError):
         validate_webhook_url(bad)
+
+
+# -- WP S-1 (ADR-0012): VAULT_PREFILL_MODE and the runner tuning knobs -------
+
+
+def test_prefill_mode_defaults_to_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Byte-preservation: an install that never sets this stays on the
+    behaviour that existed before this work package."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.delenv("VAULT_PREFILL_MODE", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.prefill_mode == "subprocess"
+    assert settings.prefill_mode_queue is False
+
+
+@pytest.mark.parametrize(
+    ("value", "queue"),
+    [("subprocess", False), ("queue", True), ("QUEUE", True), ("  Queue  ", True)],
+)
+def test_prefill_mode_accepts_the_two_modes(
+    monkeypatch: pytest.MonkeyPatch, value: str, queue: bool
+) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_PREFILL_MODE", value)
+
+    settings = Settings.from_env()
+
+    assert settings.prefill_mode_queue is queue
+
+
+@pytest.mark.parametrize("bad", ["subproccess", "async", "true", "1", "sidecar"])
+def test_a_bad_prefill_mode_fails_at_startup(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    """A typo here is a security-relevant misunderstanding (an operator
+    believing an egress lock is in effect while vault-api quietly still runs
+    SteamPrefill itself), not a cosmetic one — see docs/adr/0012-*.md."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_PREFILL_MODE", bad)
+
+    with pytest.raises(RuntimeError, match="VAULT_PREFILL_MODE"):
+        Settings.from_env()
+
+
+def test_runner_tuning_knobs_have_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    for name in (
+        "VAULT_RUNNER_HEARTBEAT_SECONDS",
+        "VAULT_RUNNER_LEASE_TIMEOUT_SECONDS",
+        "VAULT_RUNNER_POLL_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.runner_heartbeat_seconds == 5.0
+    assert settings.runner_lease_timeout_seconds == 30.0
+    assert settings.runner_poll_seconds == 1.0
+
+
+def test_runner_tuning_knobs_read_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_RUNNER_HEARTBEAT_SECONDS", "1.5")
+    monkeypatch.setenv("VAULT_RUNNER_LEASE_TIMEOUT_SECONDS", "10")
+    monkeypatch.setenv("VAULT_RUNNER_POLL_SECONDS", "0.1")
+
+    settings = Settings.from_env()
+
+    assert settings.runner_heartbeat_seconds == 1.5
+    assert settings.runner_lease_timeout_seconds == 10.0
+    assert settings.runner_poll_seconds == 0.1
+
+
+def test_bad_runner_tuning_knobs_fail_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_RUNNER_LEASE_TIMEOUT_SECONDS", "nan")
+
+    with pytest.raises(RuntimeError, match="VAULT_RUNNER_LEASE_TIMEOUT_SECONDS"):
+        Settings.from_env()

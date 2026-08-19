@@ -1034,16 +1034,17 @@ STALE_JOB_MESSAGE = (
 )
 
 
-def recover_stale_jobs(conn: sqlite3.Connection) -> int:
-    """Fail every job left in ``running`` at startup. Returns how many.
+def recover_stale_jobs(conn: sqlite3.Connection, queue_mode: bool = False) -> int:
+    """Fail every orphaned job left in ``running`` at startup. Returns how many.
 
-    **The rule, stated plainly:** vault-api runs exactly ONE job worker inside
-    exactly ONE process (plan §3). A ``running`` row can therefore only be
-    owned by the current process's worker — and at startup that worker has not
-    claimed anything yet. So any ``running`` row is by definition an orphan
-    from a previous process that died mid-job, and is failed here rather than
-    being left to sit "running" forever (which would also block the app's
-    dedupe: ``POST /v1/prefill`` would keep handing out that dead job id).
+    **The rule, stated plainly (unchanged from before WP S-1):** vault-api
+    runs exactly ONE job worker inside exactly ONE process (plan §3). A
+    ``running`` row can therefore only be owned by the current process's
+    worker — and at startup that worker has not claimed anything yet. So any
+    ``running`` row is by definition an orphan from a previous process that
+    died mid-job, and is failed here rather than being left to sit "running"
+    forever (which would also block the app's dedupe: ``POST /v1/prefill``
+    would keep handing out that dead job id).
 
     The consequence of that rule, honestly stated: **do not point two vault-api
     processes at the same database.** The second one's startup would fail the
@@ -1064,16 +1065,48 @@ def recover_stale_jobs(conn: sqlite3.Connection) -> int:
     pauses a 60 GB download on Friday must still be able to resume it after
     Monday's container restart. Widening this query to include ``paused``
     would eat every paused job on every restart; a test mutation-pins it.
+
+    **``queue_mode`` (WP S-1, ADR-0012) narrows the rule's premise for
+    prefill jobs specifically.** "Exactly ONE worker owns this job" stops
+    being true the moment execution is handed off to a *separate*
+    ``prefill_runner`` process — vault-api restarting says nothing about
+    whether that process (a different container) is still alive. So in queue
+    mode, a ``running`` prefill job that has already been handed off
+    (``run_use_force IS NOT NULL`` — see ``handoff_run``) is left completely
+    untouched here, no matter how it looks: ``PrefillWorker._run`` finds it
+    again via ``find_active_run`` on its very first tick and resumes waiting
+    on it exactly as if the process had never restarted, applying the same
+    live heartbeat-staleness check (``run_is_stale``) it always would. That is
+    the ONE reconciliation path this project has for "is the runner still
+    there" — deliberately not duplicated here, so a stale-lease bug only has
+    one place to hide instead of two disagreeing ones.
+    A ``running`` prefill job that was never handed off (``run_use_force IS
+    NULL`` — the narrow window between ``claim_next_job`` and ``handoff_run``)
+    is a genuine single-process orphan even in queue mode, exactly like every
+    other job type, and is failed here as before. GC jobs never go through the
+    runner split at all (worker.py still runs them in-process, ADR-0012 is
+    prefill-only) and are always covered by the blanket rule regardless of
+    ``queue_mode``.
     """
     with immediate_transaction(conn):
         rows = conn.execute(
-            "SELECT id, appid FROM jobs WHERE status = ?", (STATUS_RUNNING,)
+            "SELECT id, appid, type, run_use_force FROM jobs WHERE status = ?",
+            (STATUS_RUNNING,),
         ).fetchall()
         if not rows:
             return 0
 
         finished_at = utcnow_iso()
+        recovered = 0
         for row in rows:
+            if (
+                queue_mode
+                and str(row["type"]) == JOB_TYPE_PREFILL
+                and row["run_use_force"] is not None
+            ):
+                # Handed off to a runner that may still be alive in a
+                # separate process — not this function's call to make.
+                continue
             conn.execute(
                 """
                 UPDATE jobs SET status = ?, finished_at = ?, log_excerpt = ?
@@ -1085,4 +1118,277 @@ def recover_stale_jobs(conn: sqlite3.Connection) -> int:
                 "UPDATE apps SET status = ? WHERE appid = ? AND status = ?",
                 (STATUS_ERROR, int(row["appid"]), STATUS_RUNNING),
             )
-        return len(rows)
+            recovered += 1
+        return recovered
+
+
+# --------------------------------------------------------------------------
+# Queue-mode job hand-off (WP S-1, ADR-0012): vault-api's worker keeps owning
+# job lifecycle/state transitions; these functions are the ONLY thing that
+# changes when ``VAULT_PREFILL_MODE=queue`` — execution moves to a separate
+# ``prefill_runner`` process, coordinated through the seven ``run_*`` columns
+# below (schema v15) instead of an in-process ``subprocess.Popen`` call. See
+# ``vault_api/prefill_queue.py`` for the encode/decode helpers and the
+# wait-loop that ties these together, and ``worker.py`` for the caller.
+#
+# There is deliberately NO lease-stealing reclaim here: once a runner's
+# heartbeat goes stale (``run_is_stale``), the caller (worker.py) fails the
+# JOB — it leaves 'running' entirely — rather than letting a second runner
+# instance silently take over the same row. That is what makes
+# ``claim_run``'s plain ``run_claimed_by IS NULL`` check sufficient for
+# mutual exclusion on its own: a terminal job can never satisfy
+# ``status = 'running'`` again, so nothing can claim it after the fact. See
+# ADR-0012 §4 for the two-runners-racing scenario this rejects.
+# --------------------------------------------------------------------------
+
+#: Columns queue-mode helpers below read together. Deliberately its own
+#: tuple, not folded into ``_JOB_COLUMNS`` above: the API-facing job dict
+#: shape (``GET /v1/jobs`` etc.) is out of this work package's footprint, and
+#: ``run_result_json``/``run_before_json`` can be several KB of raw
+#: SteamPrefill output — exactly the "not in the polling surface" reasoning
+#: ``list_jobs`` already applies to ``log_excerpt``.
+_RUN_COLUMNS = (
+    "id, appid, type, status, started_at, run_use_force, run_before_json, "
+    "run_claimed_by, run_claimed_at, run_heartbeat_at, run_completed_at, "
+    "run_result_json"
+)
+
+
+def get_run_row(conn: sqlite3.Connection, job_id: int) -> dict[str, object] | None:
+    """One job's queue-mode hand-off columns (``_RUN_COLUMNS``), or ``None``."""
+    row = conn.execute(
+        f"SELECT {_RUN_COLUMNS} FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    return None if row is None else _row_to_dict(row)
+
+
+def handoff_run(
+    conn: sqlite3.Connection, job_id: int, use_force: bool, before_json: str
+) -> None:
+    """Record a FRESH execution request for this job. Unconditional — every
+    call is a new attempt, not a one-time write.
+
+    **Round-2 review fix (WP S-1 blocker B1).** An earlier version of this
+    function only wrote on the FIRST call for a job id (a ``WHERE
+    run_use_force IS NULL`` guard), reasoning about the wrong scenario: the
+    restart-reattach case (``PrefillWorker._resume_prefill``) does NOT call
+    this function AT ALL — by design, it reads the row's existing
+    ``run_use_force``/``run_before_json`` back instead, exactly because that
+    in-flight run must not be re-decided (see ``_resume_prefill``'s own
+    docstring). This function's only real caller in the whole codebase is
+    the fresh-claim path (``PrefillWorker._run_prefill_via_queue``), called
+    exactly once per ``_execute_prefill`` invocation — so the write-once
+    guard's only OBSERVABLE effect in production was blocking the SECOND,
+    genuinely NEW run of the SAME job row that ``POST /v1/jobs/{id}/resume``
+    produces: the second call silently no-opped, the STALE
+    ``run_completed_at``/``run_result_json`` left over from the run BEFORE
+    the pause were never cleared, and the resumed job's own
+    ``await_run_result`` call immediately "completed" with that OLD
+    (``paused``) result — a resumed queue-mode job never actually re-ran at
+    all (measured end-to-end: ``argv.json`` was never recreated,
+    ``run_completed_at`` was byte-identical before and after resume). A
+    zero-legitimate-caller guard whose only real effect was a bug — see
+    docs/LEARNINGS.md's "documented mechanism with zero callers" class.
+
+    **The fix.** Every hand-off — first attempt or Nth, after a pause/resume
+    or not — is a full fresh-attempt write: besides ``run_use_force``/
+    ``run_before_json``, it explicitly resets every RUNNER-OWNED column
+    (``run_claimed_by``, ``run_claimed_at``, ``run_heartbeat_at``,
+    ``run_completed_at``, ``run_result_json``) to ``NULL`` in the SAME
+    statement, so ``claim_run`` sees a genuinely unclaimed job again and
+    ``await_run_result`` can never observe a stale result left over from a
+    previous attempt at this job id. This is safe for the restart-reattach
+    case specifically because that case never calls this function.
+    """
+    conn.execute(
+        """
+        UPDATE jobs
+        SET run_use_force = ?, run_before_json = ?,
+            run_claimed_by = NULL, run_claimed_at = NULL,
+            run_heartbeat_at = NULL, run_completed_at = NULL,
+            run_result_json = NULL
+        WHERE id = ?
+        """,
+        (int(use_force), before_json, job_id),
+    )
+    conn.commit()
+
+
+def claim_run(conn: sqlite3.Connection, runner_id: str) -> dict[str, object] | None:
+    """Atomically claim the oldest handed-off, unclaimed prefill job.
+
+    The compare-and-swap that makes "two concurrent claimers, one job ->
+    exactly one wins" true: the ``UPDATE ... WHERE run_claimed_by IS NULL``
+    runs inside ``BEGIN IMMEDIATE``, so competing callers (a second runner
+    replica, or the same runner racing its own retry) serialize on SQLite's
+    write lock and only the first one's ``UPDATE`` matches a row — every
+    later one sees ``rowcount == 0`` and gets ``None`` back, exactly the same
+    shape ``claim_next_job`` already uses for the analogous race between two
+    hypothetical vault-api workers.
+
+    Only considers jobs already handed off (``run_use_force IS NOT NULL`` —
+    see ``handoff_run``) and not yet completed (``run_completed_at IS
+    NULL``); ``status = 'running'`` excludes anything vault-api has since
+    finalized (including a job this same function's caller declared dead via
+    staleness — see the module-level note above for why that is what makes
+    this safe without a lease-stealing reclaim).
+    """
+    with immediate_transaction(conn):
+        row = conn.execute(
+            f"""
+            SELECT id FROM jobs
+            WHERE status = ? AND type = ?
+              AND run_use_force IS NOT NULL
+              AND run_claimed_by IS NULL
+              AND run_completed_at IS NULL
+            ORDER BY id
+            LIMIT 1
+            """,
+            (STATUS_RUNNING, JOB_TYPE_PREFILL),
+        ).fetchone()
+        if row is None:
+            return None
+
+        job_id = int(row["id"])
+        now = utcnow_iso()
+        cursor = conn.execute(
+            """
+            UPDATE jobs SET run_claimed_by = ?, run_claimed_at = ?, run_heartbeat_at = ?
+            WHERE id = ? AND run_claimed_by IS NULL
+            """,
+            (runner_id, now, now, job_id),
+        )
+        if cursor.rowcount == 0:  # pragma: no cover - only with >=2 real racers
+            return None
+
+        claimed = conn.execute(
+            f"SELECT {_RUN_COLUMNS} FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        return None if claimed is None else _row_to_dict(claimed)
+
+
+def record_run_heartbeat(conn: sqlite3.Connection, job_id: int, runner_id: str) -> bool:
+    """Refresh ``run_heartbeat_at`` for the job THIS runner instance holds.
+
+    Guarded by both ``run_claimed_by = ?`` and ``status = 'running'`` so a
+    runner that vault-api has already declared dead (staleness detected,
+    job failed and no longer 'running') cannot resurrect its own bookkeeping
+    on a terminal row — the write is a silent no-op (``False``) rather than
+    an error, matching ``record_run_result``'s same guard below and the
+    project's existing "a too-late signal is logged, not fought over" house
+    style (``worker.py``'s late-stop-request handling).
+    """
+    cursor = conn.execute(
+        """
+        UPDATE jobs SET run_heartbeat_at = ?
+        WHERE id = ? AND run_claimed_by = ? AND status = ?
+        """,
+        (utcnow_iso(), job_id, runner_id, STATUS_RUNNING),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def record_run_result(
+    conn: sqlite3.Connection, job_id: int, runner_id: str, result_json: str
+) -> bool:
+    """Store the runner's finished result. Returns whether the write applied.
+
+    Same ``run_claimed_by = ? AND status = 'running'`` guard as
+    ``record_run_heartbeat`` — if vault-api already declared this job's
+    runner dead and failed it (the job is no longer 'running'), this is a
+    no-op: the bytes SteamPrefill already wrote stay on disk regardless (the
+    same "the cache is the progress store" property job control's
+    cancel/pause already relies on), but nothing here would resurrect a
+    job whose outcome vault-api has already recorded.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE jobs SET run_completed_at = ?, run_result_json = ?
+        WHERE id = ? AND run_claimed_by = ? AND status = ?
+        """,
+        (utcnow_iso(), result_json, job_id, runner_id, STATUS_RUNNING),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def find_active_run(conn: sqlite3.Connection) -> dict[str, object] | None:
+    """The one queue-mode prefill job still awaiting a runner's result.
+
+    Read-only reattachment lookup for ``PrefillWorker._run`` after a vault-api
+    restart (ADR-0012's "worker dies while runner runs" crash-semantics case):
+    a job that was handed off (``run_use_force IS NOT NULL``) and has not yet
+    completed (``run_completed_at IS NULL``) is still ``status = 'running'``
+    from before the restart — ``claim_next_job`` alone would never see it
+    again (it only claims ``'queued'`` rows), so without this the worker would
+    silently abandon it and go claim something else while the runner keeps
+    working unheard. Staleness is judged by the CALLER (via ``run_is_stale``),
+    not here — this function only answers "is there one", not "is it still
+    alive", so there is exactly one place that decides that.
+
+    At most one row can exist under the project's one-job-at-a-time invariant;
+    ``LIMIT 1`` is defensive, not load-bearing.
+    """
+    row = conn.execute(
+        f"""
+        SELECT {_RUN_COLUMNS} FROM jobs
+        WHERE status = ? AND type = ?
+          AND run_use_force IS NOT NULL AND run_completed_at IS NULL
+        ORDER BY id
+        LIMIT 1
+        """,
+        (STATUS_RUNNING, JOB_TYPE_PREFILL),
+    ).fetchone()
+    return None if row is None else _row_to_dict(row)
+
+
+def run_is_stale(
+    run_row: Mapping[str, object], lease_timeout_seconds: float, now: datetime | None = None
+) -> bool:
+    """Is this queue-mode job's runner presumed dead?
+
+    The one signal used everywhere this question is asked (``worker.py``'s
+    live wait loop, ``find_active_run``'s reattach path) — a single function
+    so a lease-timeout bug has only one place to hide, per docs/LEARNINGS.md's
+    "two call sites computing the same domain predicate WILL diverge" finding.
+
+    Falls back through THREE timestamps, in order of trust:
+
+    1. ``run_heartbeat_at`` — the runner is actively executing and refreshing
+       it (the common case once claimed).
+    2. ``run_claimed_at`` — the runner claimed the job but died before its
+       first heartbeat tick (a crash in the gap between claim and the first
+       poll of ``prefill.run_prefill``'s subprocess loop).
+    3. ``started_at`` — the job has not been claimed by any runner at all yet
+       (``run_claimed_by IS NULL``). This is the "is a runner even running"
+       case: if nothing has claimed a handed-off job within the lease window
+       of when it started running, that is exactly as actionable as a dead
+       runner — an operator needs to know either way, and a job with no
+       runner talking to it should not wait forever any more than one with a
+       dead one should.
+
+    A completed run (``run_completed_at`` set) is never stale — it has a
+    result waiting to be collected, not a dead runner. A row with none of the
+    three timestamps (should not happen for anything that ever reached
+    ``status = 'running'``) is treated as NOT stale — the fail-toward-"don't
+    declare a job dead on missing data" direction, same house style as
+    ``routers/clients.py``'s bypass-detection default.
+    """
+    if run_row.get("run_completed_at"):
+        return False
+
+    candidate = (
+        run_row.get("run_heartbeat_at")
+        or run_row.get("run_claimed_at")
+        or run_row.get("started_at")
+    )
+    if not candidate:
+        return False
+
+    parsed = parse_utc_iso(str(candidate))
+    if parsed is None:
+        return False
+
+    reference = now if now is not None else datetime.now(timezone.utc)
+    return (reference - parsed).total_seconds() > lease_timeout_seconds

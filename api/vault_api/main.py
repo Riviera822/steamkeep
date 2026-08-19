@@ -64,7 +64,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     conn = get_connection(settings.db_path)
     try:
-        recovered = recover_stale_jobs(conn)
+        # WP S-1 (ADR-0012): in queue mode, a 'running' prefill job already
+        # handed off to a separate prefill_runner process is left untouched
+        # here — this vault-api process restarting says nothing about
+        # whether that OTHER process died too. PrefillWorker._run's own
+        # reattach check (jobs.find_active_run) picks it back up on its
+        # first tick. See recover_stale_jobs's docstring for the full rule.
+        recovered = recover_stale_jobs(conn, queue_mode=settings.prefill_mode_queue)
     finally:
         conn.close()
     if recovered:

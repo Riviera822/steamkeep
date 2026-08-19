@@ -40,6 +40,23 @@ run. What each request turns into once honored:
   local HITs (ADR-0001) — the cache is the progress store.
 - **either, too late**: a run that finished on its own before the request was
   noticed keeps its real outcome; the log says the request arrived too late.
+
+Queue mode (WP S-1, ADR-0012)
+------------------------------
+This thread ALWAYS owns prefill job lifecycle (claim, ``--force`` decision,
+mapping, manifest ingestion, webhooks, auto-GC). What changes with
+``VAULT_PREFILL_MODE=queue`` is only how the ``PrefillResult`` for step 2 of
+the lifecycle above is obtained: instead of calling ``prefill.run_prefill``
+directly (the default ``subprocess`` mode, unchanged), it hands the job off
+through the ``jobs`` table (``jobs.handoff_run``) to a separate
+``prefill_runner`` process and waits (``prefill_queue.await_run_result``).
+Everything downstream of getting a result — ``_finalize_prefill_result`` — is
+identical either way. See ``docs/adr/0012-*.md`` for the crash semantics
+(a dead runner fails the job cleanly; a vault-api restart resumes waiting via
+``jobs.find_active_run`` rather than re-doing the blanket startup recovery
+above, which would otherwise wrongly treat a still-running SEPARATE process
+as an orphan) and ``api/README.md``'s "Queue mode" section for the operator
+view.
 """
 
 from __future__ import annotations
@@ -54,13 +71,14 @@ from vault_api import (
     jobs,
     manifest_ingest,
     prefill,
+    prefill_queue,
     prefill_summary,
     settings_store,
     webhooks,
 )
-from vault_api.config import Settings
+from vault_api.config import PREFILL_MODE_QUEUE, Settings
 from vault_api.db import get_connection
-from vault_api.sizes import SizeCache
+from vault_api.sizes import DepotSignature, SizeCache
 from vault_api.webhooks import WebhookNotifier
 
 logger = logging.getLogger(__name__)
@@ -128,6 +146,22 @@ class PrefillWorker:
         conn = get_connection(self._settings.db_path)
         try:
             while not self._stop.is_set():
+                # WP S-1 (ADR-0012): in queue mode, a prefill job that was
+                # already handed off to a runner BEFORE this process started
+                # (i.e. a previous vault-api process died while the runner
+                # kept going — the crash-semantics case ADR-0012 §4
+                # covers) is still 'running' but invisible to
+                # ``claim_next_job`` (it only claims 'queued' rows). Checked
+                # first, every tick, ahead of claiming anything new — the
+                # project's one-job-at-a-time invariant means there is at
+                # most one such row, and it must be resumed before this
+                # worker looks for other work.
+                if self._settings.prefill_mode_queue:
+                    reattach = jobs.find_active_run(conn)
+                    if reattach is not None:
+                        self._resume_prefill(conn, reattach)
+                        continue
+
                 try:
                     job = jobs.claim_next_job(conn)
                 except sqlite3.Error:
@@ -206,21 +240,157 @@ class PrefillWorker:
             # (needs_force set by the deletion path, see deletion.py); every
             # other run is a genuinely cheap non-forced staleness check.
             use_force = jobs.get_app_needs_force(conn, appid)
-
             before = prefill.scan_depots(self._settings.cache_root)
-            result = prefill.run_prefill(
-                appid=appid,
-                steamprefill_path=self._settings.steamprefill_path,
-                timeout_seconds=self._settings.prefill_timeout_seconds,
-                should_abort=self._stop.is_set,
-                use_force=use_force,
-                # WP 3.12: read on the runner's own 0.2 s poll tick, from THIS
-                # thread's connection (the thread-confinement rule in
-                # deps.py/db.py holds — `conn` belongs to the worker thread and
-                # never leaves it).
-                stop_request=lambda: jobs.read_stop_request(conn, job_id),
-            )
 
+            if self._settings.prefill_mode_queue:
+                result_and_before = self._run_prefill_via_queue(
+                    conn, job_id, appid, use_force, before
+                )
+                if result_and_before is None:
+                    # WP S-1 / ADR-0012 §4: vault-api is shutting down
+                    # while waiting on a SEPARATE runner process that has not
+                    # been asked to stop. The job is left exactly as
+                    # 'running' with its hand-off intact — _run's reattach
+                    # path (jobs.find_active_run) resumes waiting on it, via
+                    # this exact same call, the next time this worker starts.
+                    logger.info(
+                        "vault-api is shutting down while job %s (appid %s) "
+                        "waits on its runner; leaving it 'running' so a "
+                        "future startup's worker resumes waiting on it.",
+                        job_id, appid,
+                    )
+                    return
+                result, before = result_and_before
+            else:
+                result = prefill.run_prefill(
+                    appid=appid,
+                    steamprefill_path=self._settings.steamprefill_path,
+                    timeout_seconds=self._settings.prefill_timeout_seconds,
+                    should_abort=self._stop.is_set,
+                    use_force=use_force,
+                    # WP 3.12: read on the runner's own 0.2 s poll tick, from THIS
+                    # thread's connection (the thread-confinement rule in
+                    # deps.py/db.py holds — `conn` belongs to the worker thread and
+                    # never leaves it).
+                    stop_request=lambda: jobs.read_stop_request(conn, job_id),
+                )
+
+            self._finalize_prefill_result(conn, job_id, appid, use_force, before, result)
+        except Exception:
+            # Last-resort net: the worker thread must survive any bug in the
+            # job body, otherwise the queue silently stops draining.
+            logger.exception("Prefill job %s crashed", job_id)
+            message = (
+                "[vault-api] Internal error while running this job:\n"
+                + traceback.format_exc()
+            )
+            try:
+                jobs.set_app_status(conn, appid, jobs.STATUS_ERROR)
+                webhooks.finish_job_and_notify(
+                    conn, self._webhook_notifier, job_id, jobs.STATUS_ERROR, message
+                )
+            except Exception:  # pragma: no cover - DB itself is broken
+                logger.exception("Could not even record the failure of job %s", job_id)
+
+    # -- WP S-1 (ADR-0012) --------------------------------------------------
+
+    def _run_prefill_via_queue(
+        self,
+        conn: sqlite3.Connection,
+        job_id: int,
+        appid: int,
+        use_force: bool,
+        before: dict[int, DepotSignature],
+    ) -> tuple[prefill.PrefillResult, dict[int, DepotSignature]] | None:
+        """Hand a freshly claimed prefill job off to a runner and wait.
+
+        Thin wrapper around ``jobs.handoff_run`` + ``prefill_queue.await_run_result``
+        — see their docstrings for the mechanics. ``None`` propagates the
+        "vault-api is shutting down mid-wait" signal to the caller unchanged.
+        """
+        jobs.handoff_run(conn, job_id, use_force, prefill_queue.encode_signatures(before))
+        return prefill_queue.await_run_result(
+            conn,
+            job_id,
+            lease_timeout_seconds=self._settings.runner_lease_timeout_seconds,
+            poll_seconds=self._settings.worker_poll_seconds,
+            should_abort=self._stop.is_set,
+        )
+
+    def _resume_prefill(self, conn: sqlite3.Connection, run_row: dict[str, object]) -> None:
+        """Resume waiting on a queue-mode prefill job handed off before a
+        vault-api restart (``PrefillWorker._run``'s reattach check,
+        ``jobs.find_active_run``).
+
+        Deliberately does NOT repeat any of ``_execute_prefill``'s claim-time
+        setup: ``apps.status`` is already 'running' (set before the restart
+        and never reset — nothing has touched it), and ``use_force``/
+        ``before`` are read back from the row exactly as they were recorded
+        at the ORIGINAL hand-off (``handoff_run``'s own docstring on why a
+        restarted process must not re-derive them). This function only waits
+        and finalizes — the same ``await_run_result`` call the fresh-claim
+        path uses, just skipping the ``handoff_run`` write (already done).
+        """
+        job_id = int(run_row["id"])  # type: ignore[arg-type]
+        appid = int(run_row["appid"])  # type: ignore[arg-type]
+        use_force = bool(run_row["run_use_force"])
+        before = prefill_queue.decode_signatures(
+            run_row["run_before_json"] if isinstance(run_row.get("run_before_json"), str) else None
+        )
+        logger.info(
+            "Resuming wait on job %s (appid %s): handed off to a runner "
+            "before this vault-api process started.",
+            job_id, appid,
+        )
+        try:
+            outcome = prefill_queue.await_run_result(
+                conn,
+                job_id,
+                lease_timeout_seconds=self._settings.runner_lease_timeout_seconds,
+                poll_seconds=self._settings.worker_poll_seconds,
+                should_abort=self._stop.is_set,
+            )
+            if outcome is None:
+                logger.info(
+                    "vault-api is shutting down again while job %s (appid %s) "
+                    "still waits on its runner; leaving it 'running'.",
+                    job_id, appid,
+                )
+                return
+            result, before = outcome
+            self._finalize_prefill_result(conn, job_id, appid, use_force, before, result)
+        except Exception:
+            logger.exception("Reattached prefill job %s crashed", job_id)
+            message = (
+                "[vault-api] Internal error while resuming this job after a "
+                "vault-api restart:\n" + traceback.format_exc()
+            )
+            try:
+                jobs.set_app_status(conn, appid, jobs.STATUS_ERROR)
+                webhooks.finish_job_and_notify(
+                    conn, self._webhook_notifier, job_id, jobs.STATUS_ERROR, message
+                )
+            except Exception:  # pragma: no cover - DB itself is broken
+                logger.exception("Could not even record the failure of job %s", job_id)
+
+    def _finalize_prefill_result(
+        self,
+        conn: sqlite3.Connection,
+        job_id: int,
+        appid: int,
+        use_force: bool,
+        before: dict[int, DepotSignature],
+        result: "prefill.PrefillResult",
+    ) -> None:
+        """Everything that happens once a ``PrefillResult`` exists, regardless
+        of whether THIS process ran SteamPrefill directly (``VAULT_PREFILL_MODE
+        =subprocess``) or a separate runner did (``=queue``, WP S-1 /
+        ADR-0012). Extracted verbatim from the pre-WP-S-1 body of
+        ``_execute_prefill`` — see ``docs/adr/0012-*.md`` §6 for why
+        byte-identical subprocess-mode behaviour depends on this function
+        being reached the exact same way it always was in that mode.
+        """
+        try:
             log_parts = [result.output]
 
             # WP 3.12: an operator-requested stop that was actually honored.

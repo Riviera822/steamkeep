@@ -157,7 +157,18 @@ import sqlite3
 #: conservative -- it forces every pre-existing row back to the
 #: "insufficient data" boundary until it is genuinely re-observed at least
 #: once post-upgrade, rather than inventing a history this code never saw.
-SCHEMA_VERSION = 14
+#: v15 (WP S-1, ADR-0012): added the SEVEN ``jobs.run_*`` columns -- the
+#: hand-off/lease bookkeeping between vault-api's worker (job lifecycle owner)
+#: and the separate ``prefill_runner`` process (subprocess owner). All seven
+#: are NULL for every job that never goes through queue mode (every GC job,
+#: every prefill job run in the default ``VAULT_PREFILL_MODE=subprocess``, and
+#: every job that predates this version) -- see ``vault_api/jobs.py``'s
+#: "queue-mode job handoff" section for what each column means and
+#: ``vault_api/prefill_queue.py`` for who writes/reads them.
+#: Same not-expressible-as-``CREATE TABLE IF NOT EXISTS`` situation as
+#: v4/v5/v8/v9/v14 -- an existing pre-v15 ``jobs`` table lacks all seven -- so
+#: this reuses the ``_add_missing_job_columns`` per-column-guarded ALTER step.
+SCHEMA_VERSION = 15
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -222,7 +233,55 @@ CREATE TABLE IF NOT EXISTS jobs (
     -- cleared by every terminal transition (jobs.finish_job), by park_paused
     -- once the pause has been honored, and by resume_job.
     paused_at         TEXT,
-    stop_request      TEXT
+    stop_request      TEXT,
+    -- v15 (WP S-1, ADR-0012): queue-mode hand-off between vault-api's worker
+    -- (still the ONLY writer of every column above -- job lifecycle stays
+    -- here) and the separate prefill_runner process (the only thing that ever
+    -- writes the three run_result_json/run_completed_at/run_heartbeat_at
+    -- columns below, once it owns a job). NULL for every job that never goes
+    -- through queue mode. See vault_api/jobs.py's "queue-mode job handoff"
+    -- section for the full state machine and vault_api/prefill_queue.py for
+    -- the encode/decode helpers.
+    --
+    -- run_use_force: the --force bit vault-api already decided (from
+    -- apps.needs_force) at hand-off time. Written ONCE, by handoff_run, and
+    -- never again -- a restarted vault-api process must honor exactly what it
+    -- already told the runner, not re-derive a possibly-different value from
+    -- apps.needs_force as it stands NOW.
+    -- run_before_json: a JSON-encoded {depotid: [count, bytes, mtime]} depot
+    -- signature snapshot (vault_api.sizes.DepotSignature), taken by vault-api
+    -- immediately before hand-off. Persisted (not kept in worker memory only)
+    -- for the same reattach reason as run_use_force: apply_observed_mapping's
+    -- before/after diff must use the snapshot from BEFORE this run started,
+    -- which a process that restarted mid-wait can no longer recompute
+    -- honestly (a live re-scan at reattach time would already include
+    -- whatever the runner wrote while vault-api was down).
+    -- run_claimed_by / run_claimed_at: which runner instance is executing
+    -- this job, and since when. NULL = unclaimed. Claiming is a
+    -- compare-and-swap (jobs.claim_run) so two runner instances (a second
+    -- replica, or a restarted one racing its own dangling row) can never both
+    -- claim the same job.
+    -- run_heartbeat_at: updated by the runner while SteamPrefill is in
+    -- flight (piggybacked on prefill.run_prefill's existing 0.2s poll tick).
+    -- Its staleness (jobs.run_is_stale) is the ONLY signal that a claimed job
+    -- has a dead runner behind it -- there is deliberately no lease-stealing
+    -- reclaim: once staleness is detected the JOB is failed (status leaves
+    -- 'running'), which is what makes claim_run's `run_claimed_by IS NULL`
+    -- check sufficient on its own (a terminal job can never be claimed again;
+    -- see ADR-0012 §4 for why silent reclaim-and-retry was rejected).
+    -- run_completed_at / run_result_json: non-NULL once the runner has a
+    -- result. run_result_json is `{"success", "failure_reason", "exit_code",
+    -- "output"}` -- the exact fields of prefill.PrefillResult -- so vault-api
+    -- can reconstruct one and run the SAME post-run branch logic
+    -- (worker.py's _finalize_prefill_result) regardless of which process
+    -- actually ran SteamPrefill.
+    run_use_force     INTEGER,
+    run_before_json   TEXT,
+    run_claimed_by    TEXT,
+    run_claimed_at    TEXT,
+    run_heartbeat_at  TEXT,
+    run_completed_at  TEXT,
+    run_result_json   TEXT
 );
 
 -- The job worker polls "give me the oldest queued job" on every tick and the
@@ -631,7 +690,10 @@ def init_db(db_path: str) -> None:
         # `jobs` table at ANY version from v1 to v7 up to the current column set
         # (a v7 database is missing only the two v8 columns; a v1 database is
         # missing all six).
-        if row is not None and row["version"] < 8:
+        # v15 (WP S-1, ADR-0012) reuses the same step once more -- same
+        # per-column guard, so one call also brings a v8..v14 database up to
+        # date by adding just the seven queue-mode ``run_*`` columns it lacks.
+        if row is not None and row["version"] < 15:
             _add_missing_job_columns(conn)
 
         # v5 (WP 3.4): same situation as the v4 step above -- an existing
@@ -682,16 +744,27 @@ _POST_V1_JOB_COLUMNS = (
     ("gc_execute", "INTEGER"),
     ("paused_at", "TEXT"),
     ("stop_request", "TEXT"),
+    # v15 (WP S-1, ADR-0012): queue-mode job hand-off, see the SCHEMA_VERSION
+    # docstring block and _DDL's own comment on the jobs table for what each
+    # one means.
+    ("run_use_force", "INTEGER"),
+    ("run_before_json", "TEXT"),
+    ("run_claimed_by", "TEXT"),
+    ("run_claimed_at", "TEXT"),
+    ("run_heartbeat_at", "TEXT"),
+    ("run_completed_at", "TEXT"),
+    ("run_result_json", "TEXT"),
 )
 
 
 def _add_missing_job_columns(conn: sqlite3.Connection) -> None:
-    """v1->v8 migration step: add every ``jobs`` column added after v1.
+    """v1->v15 migration step: add every ``jobs`` column added after v1.
 
     ``updated``/``up_to_date``/``summary_parse_ok`` came with v4 (WP 3.3),
     ``gc_execute`` with v7 (WP 3.8), ``paused_at``/``stop_request`` with v8
-    (WP 3.12). All six are nullable with no default, so one guarded loop covers
-    them — see ``_POST_V1_JOB_COLUMNS`` for why the loop carries types.
+    (WP 3.12), the seven ``run_*`` columns with v15 (WP S-1). All are nullable
+    with no default, so one guarded loop covers them — see
+    ``_POST_V1_JOB_COLUMNS`` for why the loop carries types.
 
     Guarded per-column via ``PRAGMA table_info`` (not just per-version) so
     calling ``init_db`` twice against the same older file — or against a file
@@ -699,7 +772,8 @@ def _add_missing_job_columns(conn: sqlite3.Connection) -> None:
     ``duplicate column name`` instead of silently doing nothing on the second
     call, matching the idempotency the rest of ``init_db`` already promises.
     That per-column guard is also what lets ONE step serve every version from
-    v1 to v7: a v7 database simply gains the two v8 columns and nothing else.
+    v1 to v14: a v14 database simply gains the seven v15 columns and nothing
+    else, while a v1 database gains all thirteen post-v1 columns.
     """
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
     for column, column_type in _POST_V1_JOB_COLUMNS:

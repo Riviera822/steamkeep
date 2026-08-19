@@ -804,6 +804,83 @@ DEFAULT_RELAY_EXPOSE_PLAYTIME = False
 DEFAULT_RELAY_EXPOSE_LAST_PLAYED = False
 
 
+# --------------------------------------------------------------------------
+# WP S-1 (ADR-0012): the runner split. vault-api's worker keeps owning job
+# lifecycle; whether it also OWNS the SteamPrefill subprocess itself
+# (``subprocess``, the byte-identical pre-WP-S-1 behaviour) or hands
+# execution off to a separate ``python -m vault_api.prefill_runner`` process
+# through the jobs table (``queue``, what S-2's compose wiring and EG-1's
+# egress lock both need) is this one switch.
+# --------------------------------------------------------------------------
+
+#: The default, and the only mode that existed before this work package —
+#: vault-api's worker calls ``prefill.run_prefill`` directly, in its own
+#: process, exactly as it always has. Required for the bare-metal/native dev
+#: setup (api/README.md), where there is no second container to run a
+#: runner in at all.
+PREFILL_MODE_SUBPROCESS = "subprocess"
+
+#: vault-api's worker hands a claimed job off via the ``jobs`` table
+#: (``vault_api/jobs.py``'s ``handoff_run``/queue-mode columns,
+#: ``vault_api/prefill_queue.py``) instead of calling ``run_prefill`` itself,
+#: then waits for a ``prefill_runner`` process (S-2 wires it into
+#: ``compose.yaml`` as its own container) to claim, execute and report back.
+PREFILL_MODE_QUEUE = "queue"
+
+SUPPORTED_PREFILL_MODES = (PREFILL_MODE_SUBPROCESS, PREFILL_MODE_QUEUE)
+
+
+def _env_prefill_mode(name: str = "VAULT_PREFILL_MODE") -> str:
+    """Read ``VAULT_PREFILL_MODE``. Blank/unset = ``subprocess`` (unchanged
+    behaviour). Same strict-enum house rule as ``VAULT_AUTO_GC``/
+    ``VAULT_MANIFEST_ORACLE`` — a typo here would silently keep vault-api
+    running SteamPrefill in-process on a host where the operator believes
+    the egress lock (EG-1) is already in effect, which is a security-relevant
+    misunderstanding, not a cosmetic one.
+    """
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return PREFILL_MODE_SUBPROCESS
+    if raw not in SUPPORTED_PREFILL_MODES:
+        raise RuntimeError(
+            f"{name}={raw!r} is not a supported prefill mode "
+            f"(known: {', '.join(SUPPORTED_PREFILL_MODES)})"
+        )
+    return raw
+
+
+#: How often ``prefill_runner`` refreshes ``jobs.run_heartbeat_at`` for the
+#: job it currently holds, piggybacked on ``prefill.run_prefill``'s existing
+#: 0.2s subprocess poll tick (throttled to this interval — seven writes a
+#: second to the shared database for one job is needless churn). Also the
+#: resolution of the "did the runner die" signal: a dead runner's last
+#: heartbeat is at most this old when it stops updating.
+DEFAULT_RUNNER_HEARTBEAT_SECONDS = 5.0
+
+#: How stale ``run_heartbeat_at`` (or, if never claimed, ``run_claimed_at`` /
+#: the job's own ``started_at``) must be before vault-api's worker treats a
+#: queue-mode job's runner as dead (``jobs.run_is_stale``). Several multiples
+#: of the heartbeat interval on purpose: a single missed heartbeat (a GC
+#: pause, a slow disk fsync under WAL) must not read as a dead process — see
+#: ADR-0012 §4 for the margin reasoning and §3 for the measured WAL
+#: contention numbers it is weighed against. Also note (round-2 review S6):
+#: this project's stored timestamps are second-precision
+#: (``jobs.TIMESTAMP_FORMAT``), so a live staleness check against one can
+#: OVER-report elapsed time by almost a full second — a value set close to
+#: that floor risks a false "presumed dead" against a genuinely alive
+#: runner, independently of the heartbeat-interval margin above.
+DEFAULT_RUNNER_LEASE_TIMEOUT_SECONDS = 30.0
+
+#: How often ``prefill_runner`` polls for a job to claim when idle.
+#: **Only consumed by the runner process** — vault-api's worker reuses
+#: ``VAULT_WORKER_POLL_SECONDS`` for its OWN wait-on-hand-off loop in queue
+#: mode (``PrefillWorker._run_prefill_via_queue``); this is a separate
+#: setting (not a shared one) because the runner is a separate
+#: process/container with its own tuning story once S-2 wires it up, even
+#: though the two defaults happen to start out equal.
+DEFAULT_RUNNER_POLL_SECONDS = 1.0
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable snapshot of the environment at startup."""
@@ -929,6 +1006,19 @@ class Settings:
     # _LAST_PLAYED above).
     relay_expose_playtime: bool = DEFAULT_RELAY_EXPOSE_PLAYTIME
     relay_expose_last_played: bool = DEFAULT_RELAY_EXPOSE_LAST_PLAYED
+    # WP S-1 (ADR-0012). 'subprocess' (default, unchanged behaviour) |
+    # 'queue' (hand off execution to a separate prefill_runner process). See
+    # the PREFILL_MODE_* constants above.
+    prefill_mode: str = PREFILL_MODE_SUBPROCESS
+    # WP S-1. Queue-mode-only tuning; harmless and unused in 'subprocess' mode.
+    runner_heartbeat_seconds: float = DEFAULT_RUNNER_HEARTBEAT_SECONDS
+    runner_lease_timeout_seconds: float = DEFAULT_RUNNER_LEASE_TIMEOUT_SECONDS
+    runner_poll_seconds: float = DEFAULT_RUNNER_POLL_SECONDS
+
+    @property
+    def prefill_mode_queue(self) -> bool:
+        """True iff execution is delegated to a separate runner process."""
+        return self.prefill_mode == PREFILL_MODE_QUEUE
 
     @property
     def webhook_enabled(self) -> bool:
@@ -998,15 +1088,34 @@ class Settings:
         return self.manifest_oracle != MANIFEST_ORACLE_OFF
 
     @staticmethod
-    def from_env() -> "Settings":
+    def from_env(*, require_api_key: bool = True) -> "Settings":
         """Build Settings from the current environment.
 
         Raises RuntimeError if VAULT_API_KEY is missing or empty — there is
         deliberately no default (plan §9: no unauthenticated endpoints beyond
         the documented /v1/health exception).
+
+        ``require_api_key=False`` (WP S-1 round-2 review, S2; ADR-0012 §2/§5
+        addendum): the ONE other caller of this method,
+        ``vault_api.prefill_runner.main``, loads the full ``Settings``
+        dataclass too — one validation path for every setting, rather than a
+        second parser class duplicating this one's grammar rules — but
+        ``prefill_runner`` is a process with broad Steam CM/CDN egress that
+        never serves HTTP and never authenticates a request, so it has no
+        legitimate use for the LAN control-plane secret every OTHER consumer
+        of this dataclass needs. Requiring it there anyway would mean EG-1's
+        egress-locked, broad-network container also has to hold the one
+        secret that gates every non-health vault-api endpoint — a posture
+        cost with no corresponding benefit, and inconsistent with this same
+        ADR rejecting an HTTP sidecar specifically for needing "a second API
+        key... to design and operate" (ADR-0012 §2). Exempting only this one
+        field, rather than writing a second config loader, keeps "one
+        validation path" for every other setting `prefill_runner` also reads
+        (``db_path``, ``steamprefill_path``, ``prefill_timeout_seconds``,
+        the three ``runner_*`` tunables) with a single line of difference.
         """
         api_key = os.environ.get("VAULT_API_KEY", "").strip()
-        if not api_key:
+        if require_api_key and not api_key:
             raise RuntimeError(
                 "VAULT_API_KEY is required and must not be empty. "
                 "Set it in the environment or in a .env file "
@@ -1194,5 +1303,18 @@ class Settings:
             ),
             relay_expose_last_played=_env_bool(
                 "VAULT_RELAY_EXPOSE_LAST_PLAYED", DEFAULT_RELAY_EXPOSE_LAST_PLAYED
+            ),
+            # WP S-1 (ADR-0012). Unset/blank = 'subprocess', byte-identical to
+            # every version of vault-api before this work package.
+            prefill_mode=_env_prefill_mode(),
+            runner_heartbeat_seconds=_env_float(
+                "VAULT_RUNNER_HEARTBEAT_SECONDS", DEFAULT_RUNNER_HEARTBEAT_SECONDS
+            ),
+            runner_lease_timeout_seconds=_env_float(
+                "VAULT_RUNNER_LEASE_TIMEOUT_SECONDS",
+                DEFAULT_RUNNER_LEASE_TIMEOUT_SECONDS,
+            ),
+            runner_poll_seconds=_env_float(
+                "VAULT_RUNNER_POLL_SECONDS", DEFAULT_RUNNER_POLL_SECONDS
             ),
         )
