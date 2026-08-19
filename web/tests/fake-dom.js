@@ -98,6 +98,15 @@ class FakeElement {
     }
     return false;
   }
+  // WP 4h.3 (header-art.test.js): components/header-art.js calls
+  // `wrap.remove()` on an image load failure, real DOM's `Element.remove()`
+  // — added here per this file's own "grows just far enough" policy.
+  remove() {
+    if (!this.parentNode) return;
+    const idx = this.parentNode.children.indexOf(this);
+    if (idx !== -1) this.parentNode.children.splice(idx, 1);
+    this.parentNode = null;
+  }
   addEventListener(type, handler) {
     if (!this._listeners.has(type)) this._listeners.set(type, new Set());
     this._listeners.get(type).add(handler);

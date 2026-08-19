@@ -4,7 +4,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { STEAM_CDN_HOST, coverArtUrl, fallbackHues, fallbackPattern } from "../js/lib/cover-art.js";
+import { STEAM_CDN_HOST, coverArtUrl, headerArtUrl, fallbackHues, fallbackPattern } from "../js/lib/cover-art.js";
 
 test("coverArtUrl uses exactly the CSP-allowed host and the library_600x900 asset path", () => {
   const url = coverArtUrl(440);
@@ -18,6 +18,32 @@ test("coverArtUrl is a real, https, single-host URL for any positive appid", () 
   assert.equal(parsed.protocol, "https:");
   assert.equal(parsed.hostname, STEAM_CDN_HOST);
   assert.equal(parsed.pathname, "/steam/apps/2010010/library_600x900.jpg");
+});
+
+// WP 4h.3 — header/hero art for the detail card.
+test("headerArtUrl uses exactly the CSP-allowed host and the header.jpg asset path", () => {
+  const url = headerArtUrl(440);
+  assert.equal(url, `https://${STEAM_CDN_HOST}/steam/apps/440/header.jpg`);
+});
+
+test("headerArtUrl is a real, https, single-host URL for any positive appid, and varies WITH the appid (mutation: a hardcoded/fixed URL dies here)", () => {
+  const urlA = headerArtUrl(440);
+  const urlB = headerArtUrl(2010010);
+  const parsedA = new URL(urlA);
+  const parsedB = new URL(urlB);
+  assert.equal(parsedA.protocol, "https:");
+  assert.equal(parsedA.hostname, STEAM_CDN_HOST);
+  assert.equal(parsedA.pathname, "/steam/apps/440/header.jpg");
+  assert.equal(parsedB.pathname, "/steam/apps/2010010/header.jpg");
+  assert.notEqual(urlA, urlB, "headerArtUrl must be a function of the appid, not a fixed/hardcoded URL");
+});
+
+test("headerArtUrl and coverArtUrl share the same CDN host but a different asset path (two distinct assets, one CSP allowance)", () => {
+  const appid = 730;
+  const header = new URL(headerArtUrl(appid));
+  const cover = new URL(coverArtUrl(appid));
+  assert.equal(header.hostname, cover.hostname);
+  assert.notEqual(header.pathname, cover.pathname);
 });
 
 test("fallbackHues is deterministic: same appid -> same pair, every time", () => {

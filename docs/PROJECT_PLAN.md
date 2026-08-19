@@ -1875,7 +1875,12 @@ surface (playtime and last-played now flow through the API response).
       Original bullet: **4h.2 (web)** — the panel itself: a right-hand column at BP-XL
       (>=1800px), a collapsible card below that width. Serves the statements
       above. Depends on 4h.1's fields and on Phase 4e's breakpoints.
-- [ ] **4h.3 (web)** — header art in the detail drawer. Nearly free: a
+- [x] **4h.3 (web)** — DONE 2026-08-19: header art in the detail card
+      (aspect-ratio as the only reservation, whole-wrapper collapse on 404
+      — verified against the real CDN both ways), 665→676 web tests, Opus
+      PASS round 1 incl. four reviewer-own mutations and a hostile-appid
+      host-escape probe (impossible by construction). D-17. PHASE 4h
+      COMPLETE. Original bullet: **4h.3 (web)** — header art in the detail drawer. Nearly free: a
       predictable `header.jpg` URL on the CDN host the CSP already allows for
       cover art, no relay endpoint, no new external call.
 - Screenshots (the `appdetails` store API) are **not** in this phase:

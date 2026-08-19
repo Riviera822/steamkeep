@@ -490,9 +490,12 @@ actually shipped:
 
 - **The playtime/last-played consuming UI does not exist yet — but a
   different personal-data field from the same relay already renders.**
-  `docs/PROJECT_PLAN.md` §7 Phase 4h's WP 4h.2/4h.3 checkboxes are still
-  unticked: the web decision-support panel that would *display*
-  playtime/last-played, and its header art, are both still open work. The
+  WP 4h.2 (the decision-support panel) and WP 4h.3 (header art) have both
+  landed (2026-08-19) — and the panel's statement module structurally
+  cannot read `rtime_last_played` and never surfaces a playtime number
+  (negative privacy pin, `web/js/lib/decision-support.js`); its
+  playtime-derived tier is unreachable in production until a web Steam
+  identity exists. The
   only UI surface that touches this relay today is the Settings "Library
   preview" lookup (`web/js/views/settings.js:462-508`), and its render
   function (`renderLookupResult`, `web/js/views/settings.js:368-391`) does
@@ -652,9 +655,11 @@ none of them Steam credentials (§3):
    read, not trusted from a comment.
 3. **Cover art.** The web UI's Content-Security-Policy allows exactly one
    external image host: `img-src 'self' data: https://cdn.akamai.
-   steamstatic.com` (`api/vault_api/webui.py:94`). A browser loading the
-   library grid fetches real Steam capsule art directly from that CDN, by
-   appid, with no vault-api relay in between — the browser's own request,
+   steamstatic.com` (`api/vault_api/webui.py:94`). A browser fetches real Steam art directly from that CDN, by
+   appid, from three surfaces: the library grid's capsule art, the detail
+   card's mini-cover (WP 4a.4), and the detail card's header art (WP 4h.3
+   — one additional request per opened detail, same host, same data
+   class), with no vault-api relay in between — the browser's own request,
    not a server-side one, and carrying no vault-api secret (the CSP's
    `connect-src 'self'` — same file, line 96 — is what the API calls
    themselves are bound by; `img-src` is a separate, wider allowance

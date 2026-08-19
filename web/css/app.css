@@ -1028,6 +1028,24 @@ body.onboarding .nav{ display:none; }
    doesn't already own the name.
    ============================================================ */
 
+/* Header/hero art (WP 4h.3) — sits above .dhead, full width of the card's
+   own content box (so it inherits the BP-L centred card's --w-sheet-l
+   width for free, no separate token needed — see docs/WORKPACKAGES.md
+   D-13). `aspect-ratio` is the ONLY reservation mechanism, on purpose: it
+   holds the box open from insertion through a successful load (nothing
+   moves — the image paints into an already-sized box), and disappears
+   completely the moment components/header-art.js removes the whole
+   wrapper on a load failure. Deliberately NOT paired with a min-height —
+   that would recreate the exact permanent empty band the 404 case must
+   avoid. 460/215 is Steam's own header.jpg pixel ratio. No transition
+   anywhere here (standing "no motion on overlays" rule, D-13) — an image
+   that finishes loading just appears, it does not fade. */
+.header-art{
+  aspect-ratio:460/215; border-radius:var(--r-m); overflow:hidden;
+  background:var(--raised); margin-bottom:12px;
+}
+.header-art img{ display:block; width:100%; height:100%; object-fit:cover; }
+
 .dhead{ display:flex; gap:13px; align-items:flex-start; margin-bottom:6px; }
 .dhead .cap{ width:78px; flex:none; }
 .dhead h2{ margin:0 0 3px; font-size:19px; letter-spacing:-.3px; line-height:1.15; text-wrap:balance; }

@@ -1343,3 +1343,20 @@ every later phase's history.
    matching `deletion.appids_with_cache_content`'s real predicate. Not
    fixed by WP 4f itself — `web/` was occupied by WP 4e.1 at review time, and
    the reviewer is closing this once 4e.1 merges.
+
+### D-17 — header art in the detail card (WP 4h.3, 2026-08-19)
+
+The frozen mockup's detail sheet body starts with `.dhead`
+(`docs/design/vault-app-mockup.html:1993-1994`) — no hero image at any
+width, and the new rule is not breakpoint-scoped, so this changes the
+phone shape the mockup does define. Plan-authorized (the 4h.3 item calls
+for header art explicitly); recorded per the D-12/D-15 precedent that
+plan-driven-but-mockup-absent visuals get a register entry. Design:
+aspect-ratio 460/215 is the only space reservation, and on error the
+whole wrapper is removed (deliberately unlike the grid's cover fallback
+— no tile underneath here). Honest shift wording, corrected in review:
+the collapse happens once per FULL RENDER, not once per sheet-open — a
+structural tick (job status change) rebuilds the card and re-runs the
+404 request/collapse for delisted titles. Known, accepted: at the
+mockup's 390px frame the banner is ~165px tall above `.dhead` — operator
+glance at phone width recommended before release (review S4).

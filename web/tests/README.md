@@ -1856,3 +1856,91 @@ after `<main>`" (app.css, index.html, and this file's own header comment)
 were corrected in the same round — DOM order and visual order are related
 but not identical claims, and the fix round is what actually makes the
 weaker, correct claim ("DOM order; CSS decides visual order") true.
+
+### WP 4h.3 — Header art in the detail card (Phase 4h, last of the phase)
+
+"Nearly free" per the plan: a wide hero image at the top of the game detail
+card, built from `lib/cover-art.js`'s existing CDN-host discipline (a new
+export, `headerArtUrl(appid)`, pointing at Steam's `header.jpg` instead of
+the grid's `library_600x900.jpg` — same host, no CSP change). New DOM-
+building module `web/js/components/header-art.js`; `game-detail-sheet.js`
+calls its one export, `buildHeaderArt(appid)`, once per full `render()`,
+appended first (above `.dhead`).
+
+Unlike every prior DOM-building component in this app (`sheet-dialog.js`,
+`clients-sheet.js`, `notifications.js`, `game-detail-sheet.js` itself —
+all "not unit-tested directly"), `header-art.js` gets ONE named exception,
+the same shape `dialog-wiring.test.js` already carves out of that general
+rule for `sheet-dialog.js`'s modal-stack wiring: the brief demanded a
+mutation-tested pin for graceful absence, so this module is small and
+side-effect-free enough (no module-level DOM/store/api touches, only lazy
+`document.createElement` calls inside `buildHeaderArt()`) to import
+directly under the existing `fake-dom.js` harness.
+
+**Absence/loading resolution, pinned exactly as designed:** `.header-art`
+(`css/app.css`) reserves its box via `aspect-ratio:460/215` (Steam's own
+header.jpg ratio) ONLY — no `height`/`min-height` anywhere on it. That box
+exists from the instant the wrapper is inserted through a successful load
+(the image paints INTO an already-sized box, so a slow load never shifts
+anything below it), and disappears completely, in one step, the moment
+`buildHeaderArt`'s `error` handler fires — critically, `wrap.remove()`,
+removing the WHOLE wrapper, not `img.remove()` alone (contrast
+`game-card.js`'s `buildCover()`, where removing only the `<img>` is correct
+because a procedural fallback tile stays underneath; this hero has no such
+tile, so removing only the image would leave the aspect-ratio band as a
+bare, styled-nothing rectangle — exactly the "reserved empty band" the
+brief forbids). Net effect stated plainly: a 404 title shows no header art
+at all, with the rest of the card's content simply one sibling higher, and
+the one visible move is whenever that error arrives (typically fast); a
+slow-loading title never moves anything, ever.
+
+- `header-art.test.js` (new, 8) — three behavioural pins against
+  `components/header-art.js` (via `fake-dom.js`): the `<img>` src is
+  `headerArtUrl(appid)`, proven to vary with the appid given (a hardcoded
+  or appid-440-only URL fails the cross-appid `notEqual`); an `error` event
+  on the `<img>` removes the entire wrapper from its parent, not just the
+  `<img>` (a same-shaped mutation that only removes the `<img>` — the
+  `game-card.js` pattern applied here by mistake — is caught by name); the
+  `<img>` carries an empty `alt` (decorative, same as the grid's cover/mini-
+  cover). One source-grep pin proves `game-detail-sheet.js` actually
+  imports and calls `buildHeaderArt(state.appid)` inside `contentEl.append(
+  ...)` (the WP 4a.1/4a.3 "documented mechanism, zero real callers" failure
+  class). Four structural CSS pins: `.header-art`'s `aspect-ratio:460/215`
+  exists; it carries neither `height` nor `min-height` (the mutation that
+  would silently reintroduce a permanent band); neither `.header-art` nor
+  `.header-art img` declares any `transition`/`animation` (standing "no
+  motion on overlays" rule, D-13 — an image that finishes loading just
+  appears); `.header-art img` is `display:block` with `object-fit:cover`.
+  All four DOM-behaviour mutations above (hardcoded URL, `img.remove()`
+  instead of `wrap.remove()`, dropped `aspect-ratio`, dropped call site) and
+  the `min-height` reintroduction were applied by hand, run, confirmed to
+  kill exactly the named test with the exact quoted assertion failure, and
+  reverted (coder's report has the transcripts).
+- `cover-art.test.js` gains three tests for the new `headerArtUrl` export:
+  the exact CSP host + `header.jpg` path (mirrors the existing
+  `coverArtUrl` pin 1:1); that it varies with the appid (same cross-appid
+  `notEqual` shape as the behavioural pin above, at the pure-function
+  level); and that `headerArtUrl`/`coverArtUrl` share the CDN host but
+  never the asset path, for the same appid.
+- `fake-dom.js`'s `FakeElement` gains one new method, `remove()` (real
+  DOM's `Element.remove()`, detaching from `parentNode.children`) — the
+  shim's own stated policy ("grows just far enough for each new consumer's
+  actual DOM-API surface", WP 4e.6) — needed because `header-art.js` is the
+  first module this harness drives whose error path removes an element via
+  `.remove()` rather than a `classList`/`hidden` toggle.
+
+**Not covered by any of the above, by design (matches every prior sibling
+component's posture):** the DOM shape `buildHeaderArt` builds around the
+`<img>` (the wrapper's class, the fact that it is a `<div>`) is exercised
+only indirectly, through the behavioural pins' own traversal of
+`wrap.children`; `game-detail-sheet.js`'s own render-scheduling decision
+(header art rebuilt on every full `render()`, never patched by
+`patchVolatile()`) is documented in that module's header comment but has
+no dedicated test of its own, the same "not unit-tested directly" posture
+every other DOM-building piece of that file already carries — a poll-tick
+re-fetch of the SAME URL is a browser-cache concern, not a correctness one,
+and is called out as such in the coder's report rather than pinned here.
+Verified live in a running instance (see the coder's report) rather than
+here: the actual visual result (a real Steam title's banner rendering
+inside the reserved box at BP-L's 680px card width, and a fabricated/
+unknown appid collapsing cleanly with no broken-image icon).

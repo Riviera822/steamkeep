@@ -25,6 +25,15 @@
  * components/game-card.js, which is DOM-only and not unit-tested the same
  * way (mirrors the existing split between status-icon.js's pure glyph
  * tables and its DOM builder).
+ *
+ * **`headerArtUrl` (WP 4h.3).** Same host, same "this module is the ONLY
+ * place that builds a URL against it" discipline, different asset:
+ * `header.jpg` is Valve's wide 460x215 landscape capsule, used as hero/
+ * header art at the top of the game detail card
+ * (components/header-art.js) rather than the portrait grid/mini-cover
+ * shape above. No CSP change needed — `STEAM_CDN_HOST` is already the
+ * exact, single host `img-src` allows (api/vault_api/webui.py), and this
+ * is a different PATH on the same host, not a new one.
  */
 
 export const STEAM_CDN_HOST = "cdn.akamai.steamstatic.com";
@@ -32,6 +41,12 @@ export const STEAM_CDN_HOST = "cdn.akamai.steamstatic.com";
 /** @param {number} appid */
 export function coverArtUrl(appid) {
   return `https://${STEAM_CDN_HOST}/steam/apps/${appid}/library_600x900.jpg`;
+}
+
+/** Wide (460x215) header/hero capsule art for the game detail card
+ * (WP 4h.3). @param {number} appid */
+export function headerArtUrl(appid) {
+  return `https://${STEAM_CDN_HOST}/steam/apps/${appid}/header.jpg`;
 }
 
 /** Tiny deterministic string hash (FNV-1a), good enough for "pick a stable

@@ -66,6 +66,15 @@
  * `lib/gc-flow.js`, `lib/gc-log-summary.js`, `lib/detail-render-plan.js`,
  * plus the already-covered `lib/multiplan.js`/`lib/game-status.js`) is pure
  * and covered headlessly in web/tests/.
+ *
+ * **Header/hero art (WP 4h.3).** `components/header-art.js`'s
+ * `buildHeaderArt(appid)` is appended once, first, in the loaded-detail
+ * success branch of `render()` only (not the loading/error/not-tracked
+ * states — nothing to show a hero for yet). That module owns the graceful-
+ * absence and no-layout-shift discipline; this file only decides WHEN to
+ * build one (every full `render()`, same treatment `buildHeader()`'s mini
+ * cover already gets — never touched by `patchVolatile()`, so a poll tick
+ * that doesn't change the structural key never re-fetches it).
  */
 
 import { store } from "../store-singleton.js";
@@ -73,6 +82,7 @@ import { api } from "../api.js";
 import { showToast } from "./toast.js";
 import { createStatusIcon, STATUS_LABEL } from "./status-icon.js";
 import { createSheetDialog } from "./sheet-dialog.js";
+import { buildHeaderArt } from "./header-art.js";
 import { onViewChange } from "../router.js";
 import { formatBytesGB, formatTimestamp } from "../lib/format.js";
 import { coverArtUrl, fallbackHues } from "../lib/cover-art.js";
@@ -853,6 +863,7 @@ function render() {
   const liveJob = findLiveJob(state.jobs, state.appid);
   const trackedJob = findTrackedJob(state.jobs, state.appid);
 
+  contentEl.append(buildHeaderArt(state.appid));
   contentEl.append(buildHeader(gameLike, liveJob));
   contentEl.append(buildFactLines(gameLike));
 
