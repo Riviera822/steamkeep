@@ -1505,3 +1505,89 @@ stated rather than hidden.
   package's only footprint is `css/app.css` (in-place hover gating, six
   cascade fixes, three focus-ring fixes, the B2 visibility fix, new hover/
   scrollbar affordances) and the one test file.
+
+### WP 4e.5 — Downloads/Settings desktop layout (Phase 4e, D-15, last of the phase)
+
+Both views "just stretched": a single, phone-width column of job cards/
+queue rows/history rows (Downloads) or form fields (Settings), pulled
+across whatever the shared `.view-root` BP-L cap happened to be —
+`--w-wall` (960-2000px, the Library grid's own ceiling), never reviewed for
+either view's own content shape. Full per-view inventory and the
+multi-column/hybrid alternatives considered and rejected for each are
+recorded as D-15, `docs/WORKPACKAGES.md`. Fix: one additive rule,
+`.view-downloads, .view-settings{ max-width:var(--w-text); margin:0 auto;
+}`, in `css/app.css`'s existing BP-L block, right after the pre-existing
+`.view-root{ max-width:var(--w-wall); }` it composes with rather than
+fights (two different elements — the child `<section>` and its parent
+`<main>` — so no cascade tie exists to resolve). `--w-wall`, not `--w-text`,
+stays on `.view-library`, unchanged, for its own auto-fill tile grid. No
+new token: `--w-text` already existed (960px base, 760px from BP-M up) and
+stays exactly that; `theme.css`'s own comment on it gained a short
+addendum documenting the new BP-L consumer, and the pre-existing BP-XL
+comment's "Settings/Downloads are --w-text-based content" claim — true in
+prose since WP 4e.2, false in the actual shipped rule until this package —
+was corrected in place rather than left stale.
+
+- `css-downloads-settings-layout.test.js` (new, +13) — same structural,
+  no-jsdom posture as `css-layout-foundation.test.js`/`css-overlay-
+  geometry.test.js`, self-contained parsing utilities per this suite's
+  per-file convention:
+  1. **The layout itself.** The BP-L block contains the
+     `.view-downloads, .view-settings` rule, referencing `var(--w-text)`
+     (never a bare px literal) plus `margin:0 auto`; `.view-library` is
+     confirmed excluded from the same selector and confirmed to keep its
+     own, independent BP-L rule untouched.
+  2. **Flatness.** `--w-text` has exactly two assignments anywhere in
+     `theme.css`+`app.css` (the `:root` base, 960px, and BP-M, 760px) — a
+     mutation-protection against a future BP-L/BP-XL redefinition silently
+     widening Downloads'/Settings' own cap without anyone touching this
+     WP's rule at all. BP-XL is asserted to touch neither `--w-text` nor
+     either view's selector.
+  3. **No cascade tie.** `.view-downloads` is referenced exactly once in
+     `app.css` (nothing else touches it, so nothing can tie with this
+     rule); `.view-settings` is referenced exactly twice — this WP's own
+     rule plus the one pre-existing, unrelated WP 4a.6
+     `h4.sec:first-of-type` descendant rule, which is checked by literal
+     text to confirm it styles `h4.sec`'s own margin, never `max-width`/
+     `margin` on the bare `.view-settings` class itself.
+  4. **Mobile/base untouched.** Six "keeps every pre-WP property value"
+     pins (same naming convention `css-overlay-geometry.test.js`
+     established) across the actual inventory: `.dl-head`/`.dl-sub`,
+     `.jobcard`/`.jobtop`, `.qrow`, `.hrow`/`.hrow > button`, `.field`/
+     `.srow`. One final pin confirms the capped-column selector text
+     itself appears nowhere outside `@media` (the pre-existing, unrelated
+     top-level `.view-settings h4.sec:first-of-type` rule is the reason
+     this check is scoped to the exact selector string, not "no mention of
+     either class name at all", which would have false-positived on it).
+
+  574 baseline → 587 green, first pass. Every pin's mutation target was
+  applied to the real files and confirmed dying by name, then reverted
+  (suite reconfirmed 587 green after each individual revert):
+  - Deleting the `.view-downloads, .view-settings{...}` block entirely →
+    **4 tests died simultaneously**: "BP-L (min-width:1024px) exists and
+    gives .view-downloads/.view-settings their own capped, centred
+    column", "`.view-library` is deliberately excluded from the
+    capped-column rule...", and both no-cascade-tie tests (with the rule
+    gone, `.view-downloads`/`.view-settings` drop to 0/1 references
+    respectively, not the expected 1/2).
+  - Changing `max-width:var(--w-text)` to a hardcoded `max-width:760px` →
+    **"BP-L (min-width:1024px) exists and gives .view-downloads/
+    .view-settings their own capped, centred column"** (the `/max-width:\s*
+    var\(--w-text\)/` assertion, specifically — the rule otherwise still
+    "exists").
+  - Adding `--w-text:900px;` inside the BP-L block's own `:root{...}` (the
+    exact drift the flatness pin exists to catch) →
+    **"--w-text has exactly two assignments anywhere (theme.css :root
+    base, BP-M) — never redeclared at BP-L or BP-XL"** (`3 !== 2` in the
+    actual failure output).
+  - Changing `.qrow`'s pre-existing `border-radius:var(--r-m)` to
+    `var(--r-s)` → **"base .qrow keeps every pre-WP property value (the
+    Queue row shape)"** — confirming this pin is a real value check, not a
+    vacuous "rule exists" one.
+
+  No production JS changed: a plain container-width cap needed no DOM
+  restructuring in either view, so `web/js/views/downloads.js`/
+  `web/js/views/settings.js` are untouched, and neither view gained a test
+  file of its own beyond the shared CSS pins above (same "DOM-building
+  views are not unit-tested directly" posture every prior Phase-4e/WP-4a
+  package in this file already documents).

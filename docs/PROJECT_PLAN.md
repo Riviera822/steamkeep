@@ -1660,9 +1660,14 @@ D-4, D-11, D-12) for what each package diverges from the mockup and why.
       round 1 FAIL (confirm dialogs -90px off-axis, found by headless-Chrome
       measurement), round 2 PASS (offset 0.0px at three widths); D-13 in
       docs/WORKPACKAGES.md
-- [ ] Downloads/Settings-specific desktop layout (both currently just
-      inherit `.view-root`'s width from WP 4e.1's foundation, unreviewed for
-      their own content shape at desktop widths)
+- [x] Downloads/Settings-specific desktop layout — WP 4e.5, 2026-08-19:
+      both views become a capped, centred 760px reading column at BP-L
+      (existing --w-text token, no new magic number); multi-column and a
+      control/help hybrid considered and rejected with measured reasons
+      (D-15 in docs/WORKPACKAGES.md — the 178-char holdnote used to render
+      as ONE line across 1931px at 2560). Opus review PASS, centring
+      measured 0.0px off the content axis at four widths. PHASE 4e
+      COMPLETE with this package.
 - [x] Pointer/keyboard interaction model pass (hover states, focus order)
       — WP 4e.4, 2026-08-19: 11 hover rules gated in place behind
       (hover:hover) and (pointer:fine), clipped focus rings fixed via

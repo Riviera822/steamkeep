@@ -969,6 +969,141 @@ entry in this register): one new divergence lands in this package.
   mutations reverted afterward; suite confirmed back to 574 green after
   each.
 
+Recorded divergence (WP 4e.5, 2026-08-19, orchestrator decision — user
+veto welcome, same as every entry in this register): one new divergence
+lands in this package, the last of Phase 4e.
+
+- **D-15 (Downloads/Settings own BP-L reading column — no mockup
+  analogue).** The frozen mockup is phone-only; it has no concept of either
+  view existing at a width where "how wide should this column be" is even a
+  question. Both views inherited `.view-root`'s BP-L width (`--w-wall`,
+  960-2000px — the Library grid's own cap, WP 4e.2/4e.6) with no content-shape
+  review of their own, which is the literal gap `docs/PROJECT_PLAN.md`'s
+  Phase 4e section named: "both currently just inherit .view-root's width...
+  unreviewed for their own content shape at desktop widths".
+
+  **Inventory, per view.** Downloads is Active/Paused job cards (`.jobcard`:
+  a header row, a right-aligned action-button row, prose `.holdnote`/
+  `.stopnote` notes), the Queue (`.qrow`: grip+name+position+remove, one line
+  each) and History (`.hrow`: icon+name+time+chevron, expanding into pre-wrap
+  `.log` text) — every one of those is a ROW or a short paragraph, never a
+  tile that benefits from more columns. Settings is a stack of `.field`s
+  (label above input above caption) plus a handful of `.srow`/hint
+  paragraphs — a form that scans top-to-bottom by design. Stretched across
+  `--w-wall`, rows just gain a wide, purposeless gap between their left and
+  right content, and the prose (`.holdnote`/`.stopnote`/`.hint`/
+  `.foot-note`) would run past a comfortable reading measure. **Citation
+  correction (Opus review, WP 4e.5): this is NOT what `--w-sheet-l`'s own
+  comment (`theme.css:222-230`, WP 4e.3) establishes** — an earlier draft
+  claimed that comment treats "45-90 characters" as this codebase's
+  ceiling; it actually records the codebase KNOWINGLY EXCEEDING the classic
+  45-75-character ideal (and even its ~90-character outer bound) at 680px,
+  calling the resulting ~102 chars/line "a real but tolerable readability
+  tax" — the opposite of a ceiling anything else must respect. The real,
+  measured numbers (Opus review): the 178-character `.holdnote` (the
+  longest single line of prose either view carries) rendered as ONE line,
+  1655px wide at a 1920px viewport / 1931px wide at 2560px, uncapped; with
+  this WP's `--w-text` cap, it wraps to 2 lines at ~89 characters each —
+  just inside, not past, that same ~90-character outer bound.
+
+  **Decision: both get the SAME capped, centred column, `--w-text`** (no new
+  token — still 760px from BP-M up, unchanged) — a "capped readable
+  measure" (one of the three options the brief itself named as legitimate),
+  not a multi-column arrangement, for reasons specific to each. Downloads'
+  four sections vary in item count independently of each other in every real
+  state (one active job and an empty queue; an idle vault with forty history
+  rows and nothing running) — a side-by-side split would routinely leave one
+  column much taller than the other with nothing to fill the gap, unlike the
+  Library grid, where every cell is the same size by construction. Settings'
+  fields are a linear form; a second column would be decoration, not
+  function, on a screen this short, and building one would contradict the
+  brief's own caution ("three columns of form fields is not automatically
+  better"). A hybrid (help text beside each field instead of below it) was
+  considered and rejected for THIS package specifically: it would need
+  `buildTextField`'s DOM restructured into a control/help split — a real JS
+  change for a cosmetic gain over the caption already shown today —
+  recorded here as a legitimate follow-up, not silently dropped.
+
+  Mechanically: `css/app.css`'s BP-L block gains one additive rule,
+  `.view-downloads, .view-settings{ max-width:var(--w-text); margin:0 auto;
+  }`, placed directly after the pre-existing `.view-root{ max-width:var(
+  --w-wall); }` it composes with (not fights — the two rules target two
+  different elements, the child `<section>` and its parent `<main>`, so
+  there is no cascade tie to resolve). `.view-library` is deliberately
+  excluded — it keeps inheriting `.view-root`'s wide cap unchanged, exactly
+  as before, for its own auto-fill tile grid. No existing rule was touched
+  to make this true; `theme.css`'s `--w-text` comment gained a short
+  addendum documenting the new BP-L consumer (still no new token, no value
+  change — pinned at exactly two assignments system-wide,
+  `css-downloads-settings-layout.test.js`), and the pre-existing BP-XL
+  comment's own "Settings/Downloads are --w-text-based content" claim —
+  true in prose since WP 4e.2, false in the actual shipped rule until this
+  package — is corrected in place to say so honestly. **That correction was
+  itself only 2/3 right (Opus review, WP 4e.5): the same sentence also
+  names the banner as `--w-text`-based, which it is not** — `.banner-wrap`
+  was deliberately moved onto `--w-wall` at BP-L in WP 4e.1's own should-fix
+  S4 (so it stays aligned with `.view-root`'s column, eight lines above
+  this WP's new rule in `app.css`), and stays there; the correction now
+  names all three cases individually rather than repeating the original
+  sentence's own three-way list as if all three were the same.
+
+  New test file `css-downloads-settings-layout.test.js` (13 tests): the
+  layout rule's existence/derivation-from-the-live-token (mutation target:
+  reverting the whole block, or hardcoding a `760px` literal in place of
+  `var(--w-text)`, each dies by name), `.view-library`'s exclusion, `--w-text`
+  pinned to exactly two assignments anywhere so a future BP-L/BP-XL
+  redefinition cannot silently widen the cap without touching this rule at
+  all (mutation-verified: sneaking `--w-text:900px` into the BP-L `:root`
+  block kills this pin by name), two no-cascade-tie pins (`.view-downloads`
+  referenced exactly once in `app.css`; `.view-settings` referenced exactly
+  twice — this WP's own rule plus the one pre-existing, unrelated
+  `h4.sec:first-of-type` descendant rule, verified NOT to touch `max-width`/
+  `margin` on the bare class), and six "keeps every pre-WP property value"
+  pins across the actual inventory (`.dl-head`/`.dl-sub`, `.jobcard`/
+  `.jobtop`, `.qrow`, `.hrow`/`.hrow > button`, `.field`/`.srow`) — mutating
+  `.qrow`'s `border-radius` from `var(--r-m)` to `var(--r-s)` dies by name,
+  confirming these are real value pins, not vacuous existence checks. All
+  mutations applied to the real files, confirmed dying by name, then
+  reverted; suite reconfirmed green after each. 574 baseline → 587 green,
+  first pass.
+
+  **Opus review: PASS, no blockers.** The one failure mode a source-text
+  pin cannot see is the actual centring AXIS — precisely the class of thing
+  that shipped wrong in WP 4e.3's round-1 blocker (a confirm dialog centred
+  on the full viewport instead of the content area, a live −90px/
+  `--rail-w`/2 mismatch) — so the "a live check is unnecessary here"
+  framing an earlier draft of this entry carried was luck-adjacent even
+  though the outcome happened to be right. Measured live instead (reviewer):
+
+  | viewport | section width | offset from the content axis |
+  |---|---|---|
+  | 1024px | 760.0px | 0.0px |
+  | 1264px | 760.0px | 0.0px |
+  | 1904px | 760.0px | 0.0px |
+  | 2544px | 760.0px | 0.0px |
+
+  — both `.view-downloads` and `.view-settings`, all four widths, exactly
+  760.0px wide and exactly 0.0px off the content axis (the main column
+  inside the rail, not the full viewport) every time; the apparent +90px
+  offset from the raw VIEWPORT centre at each width is exactly
+  `--rail-w`/2 (180px/2), the intended content-vs-viewport asymmetry this
+  package's own design relies on, not a recurrence of the 4e.3 defect. The
+  reviewer additionally checked the no-tie claim against all 46 selectors
+  in the BP-L block (not just the ones this entry names) and ran three
+  mutations beyond the coder's own four, all dying on the pins above:
+  `margin:0 auto` → `margin:0` (off-centre, hugs the left edge of
+  `.view-root`'s own wider box), dropping the `margin` declaration
+  entirely (same failure), and swapping `var(--w-text)` for `var(--w-wall)`
+  (the exact regression this whole package exists to fix). No survivor
+  anywhere; Phase 4e closes on this package.
+
+  Mobile (below BP-L) is untouched: every rule this package adds lives
+  inside the existing BP-L `@media` block (`git diff --stat` on `app.css`
+  shows only additions inside that block plus two comment-only edits
+  elsewhere — no base/BP-M rule's declarations changed). No JS changed:
+  neither view's DOM needed restructuring for a plain container-width cap,
+  so `web/js/views/downloads.js`/`web/js/views/settings.js` are untouched.
+
 ### WP 4a.1 — Static serving + app shell (api/ + web/) — **first, serial**
 - vault-api mounts `web/` (StaticFiles, SPA fallback, sane CSP/security
   headers, no-cache for index). Router auth must NOT cover static assets;

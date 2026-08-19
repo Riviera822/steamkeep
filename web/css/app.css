@@ -1130,6 +1130,79 @@ body.onboarding .nav{ display:none; }
   .banner-wrap{ grid-area:banner; max-width:var(--w-wall); }
   .view-root{ grid-area:main; max-width:var(--w-wall); }
 
+  /* ----- Downloads / Settings: capped reading column (WP 4e.5, D-15) -----
+     Closes the literal gap docs/PROJECT_PLAN.md's Phase 4e section named
+     ("Downloads/Settings-specific desktop layout: both currently just
+     inherit .view-root's width... unreviewed for their own content shape at
+     desktop widths") — and, separately, makes this file's OWN BP-XL comment
+     below finally true: it already claims Settings/Downloads are
+     "--w-text-based content" that "nothing there benefits from more width",
+     while the actual rule in force for them (`.view-root` immediately
+     above, shared by every view) put them on `--w-wall` regardless, exactly
+     like Library. That claim was aspirational, never implemented, until
+     this rule.
+
+     INVENTORY (docs/WORKPACKAGES.md's D-15 has the full per-view reasoning):
+     Downloads is Active/Paused job cards (`.jobcard`: a header row, a
+     right-aligned action-button row, prose `.holdnote`/`.stopnote` notes),
+     the Queue (`.qrow`: grip+name+position+remove, one line each) and
+     History (`.hrow`: icon+name+time+chevron, expanding into pre-wrap `.log`
+     text) — every one of those is a ROW or a short paragraph, never a tile
+     that benefits from more columns. Settings is a stack of `.field`s
+     (label above input above caption) plus a few `.srow`/hint paragraphs —
+     a form that scans top-to-bottom by design. Stretched to `--w-wall`
+     (960-2000px), rows just gain a wide, purposeless gap between their left
+     and right content, and the prose (`.holdnote`/`.stopnote`/`.hint`/
+     `.foot-note`) would run past a comfortable reading measure — NOT the
+     "45-90-character ceiling" an earlier draft of this comment claimed
+     `--w-sheet-l`'s own comment (theme.css, WP 4e.3) already established
+     for this codebase (Opus review, WP 4e.5): that comment records the
+     OPPOSITE, the codebase KNOWINGLY EXCEEDING the classic 45-75-character
+     ideal (and even its ~90-character outer bound) at 680px, calling the
+     resulting ~102 chars/line "a real but tolerable readability tax", not
+     a ceiling anything else must respect. The real numbers here, measured
+     live (Opus review): the 178-character `.holdnote` (the longest single
+     line of prose either view carries, "Paused — this does not hold the
+     worker slot...") rendered as ONE line, 1655px wide at a 1920px
+     viewport / 1931px wide at 2560px, uncapped; with this WP's `--w-text`
+     cap, it wraps to 2 lines at ~89 characters each — just inside, not
+     past, that same ~90-character outer bound. Full table in
+     `docs/WORKPACKAGES.md`'s D-15.
+
+     DECISION: both get the SAME capped, centred column, `--w-text`
+     (unchanged, still 760px from BP-M up) — a "capped readable measure",
+     not a multi-column arrangement or a hybrid, for reasons specific to
+     each (D-15): Downloads' four sections vary in item count independently
+     of each other in every real state (one active job and an empty queue;
+     an idle vault with forty history rows and nothing running) — a
+     side-by-side split would routinely leave one column much taller than
+     the other with nothing to fill the gap, unlike the Library grid, where
+     every cell is the same size by construction. Settings' fields are a
+     linear form; a second column would be decoration, not function, on a
+     screen this short, and forcing one contradicts the brief's own
+     "three columns of form fields is not automatically better" caution. A
+     hybrid (help text beside each field instead of below it) was
+     considered and rejected for THIS package specifically: it would need
+     `buildTextField`'s DOM restructured into a control/help split — a real
+     JS change for a cosmetic gain over the caption already shown today —
+     recorded as a legitimate follow-up, not silently dropped.
+
+     `.view-library` is deliberately NOT in this selector list: it needs the
+     wide `--w-wall` column for its own auto-fill tile grid (WP 4e.2/4e.6)
+     and keeps inheriting `.view-root`'s cap exactly as before, unchanged by
+     this rule. No existing rule is touched to make any of this true —
+     `.view-downloads`/`.view-settings` get their OWN, additive `max-width`/
+     `margin` pair on the SECTION element itself (a child of `.view-root`,
+     not `.view-root` itself), so it composes with `.view-root`'s own
+     centred, `--w-wall`-capped box instead of contesting it for the same
+     property on the same element: the two rules target two different
+     elements, so there is no cascade tie to resolve here, and none is
+     created by adding this. */
+  .view-downloads, .view-settings{
+    max-width:var(--w-text);
+    margin:0 auto;
+  }
+
   /* ----- Library auto-fill grid (WP 4e.2, the D-4 fix) -------------------
      "Fix the tile, multiply the columns": every ported px value INSIDE the
      card — the 2/3 `.cap` aspect-ratio, the 14.5px condensed `.name`, the
@@ -1618,7 +1691,23 @@ body.onboarding .nav{ display:none; }
    measurement note ("the topbar and reading measures do not improve past
    ~1600"): that note is true of `--w-text`-based content (the banner, the
    onboarding wizard, Settings/Downloads' text columns) — nothing there
-   benefits from more width, and nothing here changes it. It is NOT true of
+   benefits from more width, and nothing here changes it. **Correction (WP
+   4e.5): this claim was aspirational when written, and only 2/3 true even
+   now (Opus review, WP 4e.5).** The actual rule in force for
+   Settings/Downloads at the time was `.view-root`'s own `--w-wall`, same
+   as Library, not `--w-text` at all — the BP-L block's
+   `.view-downloads, .view-settings{ max-width:var(--w-text); ... }` rule
+   (added by WP 4e.5) is what makes THAT half true; --w-text itself is
+   still never redefined here, so nothing about THIS block needed to
+   change. **The banner is a THIRD case, and this sentence still misstates
+   it: `.banner-wrap` was deliberately moved onto `--w-wall`, not
+   `--w-text`, at BP-L (`.banner-wrap{ grid-area:banner; max-width:var(
+   --w-wall); }`, eight lines above this rule — the WP 4e.1 should-fix S4
+   fix, so it stays visually aligned with `.view-root`'s own column rather
+   than drifting into the 100px seam that fix closed).** So of the three
+   named here, only the onboarding wizard and Settings/Downloads are
+   genuinely `--w-text`-based at BP-L; the banner is not, and was never
+   meant to be. It is NOT true of
    the tile WALL: unlike a line of text, a grid of small tiles keeps
    getting genuinely more useful with more columns, because `auto-fill`
    simply adds another one rather than stretching existing content into an
