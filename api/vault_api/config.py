@@ -677,6 +677,69 @@ def _env_manifest_oracle_url(name: str = "VAULT_MANIFEST_ORACLE_URL") -> str:
     return raw
 
 
+#: Characters a syntactically valid hostname may contain (RFC 1123):
+#: letters, digits, ``.`` and ``-``. Shared, byte-for-byte, with the
+#: character allowlist ``deploy/proxy/validate-hostname.sh`` applies to the
+#: SAME environment variable on the proxy side — two independent renderers
+#: of one operator-supplied value should refuse the same inputs, not agree
+#: only on the happy path (WP EG-1, ADR-0011; round-2 review S2 found three
+#: real disagreements before that shared script existed — see its own
+#: header comment for what they were and how each was fixed).
+_HOSTNAME_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-"
+)
+
+
+def _env_egress_allow(name: str = "VAULT_EGRESS_ALLOW") -> frozenset[str]:
+    """Read the extra outbound-hostname allowlist (WP EG-1, ADR-0011).
+
+    Comma-separated, blank/unset = empty (the shipped default — see
+    ``deploy/compose.yaml``'s comment on this key: the egress lock ships
+    default-on with an empty allowlist, not a wide-open one). Every entry is
+    lowercased (DNS names are case-insensitive, RFC 4343) and stripped of
+    surrounding whitespace; a blank entry from a trailing comma or repeated
+    commas is silently dropped rather than treated as an error — that is a
+    typo an operator will notice immediately from a missing host, not one
+    that hides anything.
+
+    A non-blank entry containing anything other than ``_HOSTNAME_CHARS`` is a
+    hard error, not a silently-dropped or silently-passed-through one: this
+    value ends up rendered verbatim into ``deploy/proxy``'s tinyproxy filter
+    file on the OTHER container, and a value valid enough to reach here but
+    rejected there would fail *that* container's boot instead — better to
+    name the actual bad entry from the process an operator is looking at
+    (`docker compose logs vault-api` after a boot failure) than from the one
+    they are not.
+
+    Round-2 review S2: the SHAPE checks below (leading/trailing ``.``/``-``,
+    and now an empty label, ``".."``) exist for that exact reason and must
+    match ``deploy/proxy/validate-hostname.sh``'s own ``case`` arm
+    byte-for-byte, not just the character class. The empty-label case was
+    the one this function was missing: ``"a..b"`` passed here (every
+    character is individually allowed, and it neither starts nor ends with
+    ``.``/``-``) while the proxy's own script already refused it — vault-api
+    would boot "clean" on a value the OTHER container then crash-looped on.
+    """
+    raw = os.environ.get(name, "")
+    hosts: set[str] = set()
+    for entry in raw.split(","):
+        host = entry.strip().lower()
+        if not host:
+            continue
+        implausible_shape = (
+            host.startswith((".", "-")) or host.endswith((".", "-")) or ".." in host
+        )
+        if not set(host) <= _HOSTNAME_CHARS or implausible_shape:
+            raise RuntimeError(
+                f"{name} contains an entry {entry.strip()!r} that is not a "
+                "plausible hostname (letters, digits, '.', '-' only; no "
+                "leading/trailing '.' or '-'; no empty label \"..\"). Fix "
+                "deploy/.env's VAULT_EGRESS_ALLOW."
+            )
+        hosts.add(host)
+    return frozenset(hosts)
+
+
 def _is_plain_decimal(raw: str) -> bool:
     """Is ``raw`` a plain ASCII decimal literal — ``digits`` or ``digits.digits``?
 
@@ -1014,6 +1077,24 @@ class Settings:
     runner_heartbeat_seconds: float = DEFAULT_RUNNER_HEARTBEAT_SECONDS
     runner_lease_timeout_seconds: float = DEFAULT_RUNNER_LEASE_TIMEOUT_SECONDS
     runner_poll_seconds: float = DEFAULT_RUNNER_POLL_SECONDS
+    # WP EG-1 (ADR-0011): extra outbound hostnames the egress-lock proxy
+    # (`deploy/proxy`) should let vault-api reach, beyond the one host baked
+    # into that proxy's own image (the Steam Web API relay's host — see
+    # `deploy/proxy/docker-entrypoint.sh`'s comment for why that one is not
+    # gated behind this setting). Empty by default: the shipped lock is
+    # default-on with an empty allowlist, not a wide-open one. vault-api
+    # itself never makes an HTTP request gated by this value directly — it
+    # only cross-checks it, at startup, against the manifest oracle's host
+    # when that feature is enabled (`from_env`'s "oracle host missing from
+    # allowlist" check, immediately before it returns) — the actual
+    # enforcement is entirely on the proxy container's side, over a network
+    # vault-api has no visibility into. Deliberately checked in `from_env`,
+    # not `__post_init__`: this is a check on the ENVIRONMENT (the real boot
+    # path), not an invariant of `Settings` itself, and this project's own
+    # tests construct `Settings` directly, with `manifest_oracle` set and no
+    # matching allowlist, in contexts that have nothing to do with EG-1
+    # (e.g. `test_oracle.py`) — those must keep working unchanged.
+    egress_allow: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def prefill_mode_queue(self) -> bool:
@@ -1182,6 +1263,33 @@ class Settings:
             except ScheduleWindowError as exc:
                 raise RuntimeError(f"VAULT_SCHEDULE_WINDOW is invalid: {exc}") from exc
 
+        # WP EG-1 (ADR-0011). Computed here, ahead of the `Settings(...)`
+        # call below, so the two can be cross-checked BEFORE vault-api
+        # finishes booting: an operator who turns the oracle on but forgets
+        # to allowlist its host would otherwise boot cleanly and then watch
+        # every oracle query fail with a filtered-403 from the proxy
+        # container, forever, with no hint pointing back at this file. See
+        # `_env_egress_allow`'s own docstring for why a bad hostname
+        # character is a hard error here specifically (not just on the
+        # proxy's side, which also validates the identical value).
+        egress_allow = _env_egress_allow()
+        manifest_oracle = _env_manifest_oracle()
+        manifest_oracle_url = _env_manifest_oracle_url()
+        if manifest_oracle != MANIFEST_ORACLE_OFF:
+            oracle_host = (urlsplit(manifest_oracle_url).hostname or "").lower()
+            if not oracle_host or oracle_host not in egress_allow:
+                raise RuntimeError(
+                    f"VAULT_MANIFEST_ORACLE={manifest_oracle!r} is enabled, but "
+                    f"its host ({oracle_host or manifest_oracle_url!r}) is not "
+                    "listed in VAULT_EGRESS_ALLOW. Once the egress lock "
+                    "(deploy/proxy, ADR-0011) is in effect, every oracle query "
+                    "would otherwise fail with a filtered-403 from the proxy "
+                    "container, forever, with nothing pointing back at this "
+                    "as the cause. Add the host to VAULT_EGRESS_ALLOW in "
+                    "deploy/.env (see deploy/.env.example), or turn the oracle "
+                    "back off."
+                )
+
         return Settings(
             vault_api_key=api_key,
             db_path=db_path,
@@ -1279,8 +1387,8 @@ class Settings:
             # WP 3.9. Unset/blank = no oracle, no outbound third-party request
             # — the default, and the reason the URL and timeout below are
             # harmless to have a default for.
-            manifest_oracle=_env_manifest_oracle(),
-            manifest_oracle_url=_env_manifest_oracle_url(),
+            manifest_oracle=manifest_oracle,
+            manifest_oracle_url=manifest_oracle_url,
             manifest_oracle_timeout=_env_float(
                 "VAULT_MANIFEST_ORACLE_TIMEOUT", DEFAULT_MANIFEST_ORACLE_TIMEOUT
             ),
@@ -1317,4 +1425,5 @@ class Settings:
             runner_poll_seconds=_env_float(
                 "VAULT_RUNNER_POLL_SECONDS", DEFAULT_RUNNER_POLL_SECONDS
             ),
+            egress_allow=egress_allow,
         )

@@ -137,6 +137,7 @@ Copy `.env.example` to `.env` and adjust:
 | `VAULT_MANIFEST_ORACLE`         | no       | *(empty — oracle OFF)* | Third-party manifest oracle. Only `steamcmd_api` is implemented. **Enabling it makes vault-api send app ids to a service outside your LAN** — see "Manifest oracle" below before setting it. Any other value is refused at startup |
 | `VAULT_MANIFEST_ORACLE_URL`     | no       | `https://api.steamcmd.net/v1/info` | Base URL the oracle asks (`<base>/<appid>`). Point it at your own mirror to keep the queries on your network. Must be `http`/`https`; redirects away from it are never followed |
 | `VAULT_MANIFEST_ORACLE_TIMEOUT` | no       | `10`         | Socket timeout (seconds) for one oracle request; **must be > 0**. A timeout is an ordinary "no data" outcome, never an error the API surfaces |
+| `VAULT_EGRESS_ALLOW`            | no       | *(empty)*    | WP EG-1 (ADR-0011). Comma-separated bare hostnames the egress-lock proxy (`deploy/proxy`) may additionally reach on vault-api's behalf, beyond the one host baked into that proxy's image unconditionally (`api.steampowered.com`, the Steam Web API relay). **Enabling `VAULT_MANIFEST_ORACLE` with its host missing from this list refuses to boot** — see "Egress lock" below. Each entry must look like a plausible hostname (letters, digits, `.`, `-` only; no leading/trailing `.`/`-`) or vault-api refuses to boot |
 
 **All nineteen numeric settings are parsed strictly (WP 3.12).** Twelve take a
 whole number (`VAULT_PREFILL_TIMEOUT_SECONDS`, `VAULT_AGENT_REPORT_KEEP`,
@@ -949,6 +950,75 @@ goes through the same `Settings`/`.env` mechanism vault-api uses.
   has elapsed since the job started, so this is a visible `error` — not a
   silent, permanent `running` badge — even with no runner process to blame it
   on.
+
+### Egress lock (WP EG-1, ADR-0011)
+
+The runner split above is what made this possible: with SteamPrefill's own
+broad Steam CM/CDN traffic living entirely in `vault-runner`, vault-api's
+own container has nothing left that needs the wider internet by default —
+`deploy/compose.yaml` now gives it no default network route for an
+**arbitrary** outbound connection. Reaching an arbitrary WAN or other-LAN
+device now requires passing through a separate `vault-proxy` container
+(`deploy/proxy/`), reached over `HTTP_PROXY`/`HTTPS_PROXY`, which refuses
+any such destination not on an allowlist. **No code in this package
+changed for this to work**: `steam_relay.py`, `oracle.py`, and
+`webhooks.py` all build their requests through Python's standard
+`urllib`, which already honours those two environment variables on its
+own.
+
+**Two channels are measured, working, and deliberately left open (round-2
+review B1/B2; `docs/adr/0011-egress-lock.md` has the full argument, not
+repeated here):** DNS resolution from inside vault-api still reaches the
+real internet (Docker's embedded resolver answers from the HOST's own
+network namespace, not the container's — this is a working, unfiltered,
+one-label-at-a-time exfiltration path, not a theoretical one), and the
+Docker host's own reachable addresses — including anything any container
+has published on `0.0.0.0` (`vault-core:80` by default) — remain directly
+reachable, because a reply from the host needs no masquerade. Neither is
+"vault-api can reach an arbitrary destination," which the lock does make
+false; both are narrower, real exceptions this document states rather than
+hides.
+
+`VAULT_EGRESS_ALLOW` (see the Configuration table above) is the
+operator-facing half of the allowlist. `Settings.from_env` cross-checks it
+against `VAULT_MANIFEST_ORACLE` at boot: turning the oracle on without
+adding its host here is refused, loudly, naming the missing host — the
+alternative (booting clean, then failing every oracle query forever with a
+filtered-403 from the proxy container, with nothing pointing back at the
+allowlist as the cause) is exactly the "advertised but unreachable" bug
+class this project has hit before (`docs/LEARNINGS.md` "Containers"), and
+this check exists so this feature does not become its next instance. This
+check deliberately lives in `from_env`, not `Settings.__post_init__` — it
+is a check on the environment, not an invariant of the type, and several
+of this project's own tests construct `Settings` directly with the oracle
+on and no allowlist at all, unrelated to this feature.
+
+**This check is unconditional, on purpose, and fires even without a
+proxy in the picture at all (round-2 review S3).** The bare-metal/native
+dev setup (`VAULT_PREFILL_MODE=subprocess`, no `vault-proxy` container
+anywhere) still refuses to boot if `VAULT_MANIFEST_ORACLE` is on and its
+host is missing from `VAULT_EGRESS_ALLOW` — the check has no way to know
+whether a network-level lock is actually enforcing anything in a given
+deployment, and cheaply assuming "no Docker means no need to set this" is
+exactly the kind of assumption that stops being true the day someone
+copies a `.env` from a locked deployment into an unlocked one, or vice
+versa. Set `VAULT_EGRESS_ALLOW` to the oracle's host in either setup.
+
+`VAULT_WEBHOOK_URL` gets no equivalent startup check: it is DB-overridable
+at runtime (`PATCH /v1/settings`, ADR-0009), so there is no fixed boot-time
+value to check it against. If a configured webhook stops firing after
+upgrading to this version, that is the lock working — add the receiver's
+host to `VAULT_EGRESS_ALLOW`. This applies the same way whether the
+receiver is on the LAN or the internet, PROVIDED it is a genuinely
+separate device: `vault-api`'s own network has no working direct route to
+an arbitrary device once this lock is in effect, so there is no "skip the
+proxy for local traffic" case for that common shape. The one exception
+(a receiver bound to the Docker host's own address rather than a separate
+device) is named, not hidden, two paragraphs up.
+
+Full mechanism, the rejected alternatives, and a five-minute verification
+recipe: `docs/adr/0011-egress-lock.md` and `deploy/README.md`'s "Egress
+lock" section.
 
 ### Job outcome honesty (WP 3.3, ADR-0006 decision 1)
 

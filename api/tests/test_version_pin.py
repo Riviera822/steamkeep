@@ -20,8 +20,9 @@ only ``deploy/compose.yaml`` and both this module's own docstring and
 | Site | Pinned here? | Why |
 |---|---|---|
 | ``api/vault_api/__init__.py``'s ``__version__`` | n/a (the source of truth) | Everything else is compared AGAINST this |
-| ``deploy/compose.yaml`` (4x ``image:`` lines, one per service — WP S-2 added ``vault-runner``'s) | YES | in this pin's footprint, checked at startup-config time |
+| ``deploy/compose.yaml`` (5x ``image:`` lines, one per service — WP S-2 added ``vault-runner``'s, WP EG-1 added ``vault-proxy``'s) | YES | in this pin's footprint, checked at startup-config time |
 | ``api/Dockerfile``'s ``org.opencontainers.image.version`` LABEL | YES | in ``api/``, this pin's footprint; a build-time literal that cannot read a Python module |
+| ``deploy/proxy/Dockerfile``'s ``org.opencontainers.image.version`` LABEL (WP EG-1) | YES | in ``deploy/``, this pin's footprint — unlike the two **NO** rows below, this component was introduced BY this WP, so it never gets to be an acknowledged gap |
 | ``deploy/tests/verify-stack.sh``'s ``TAG=${VAULT_IMAGE_TAG:-...}`` | YES | in ``deploy/``, same conceptual value as compose's default |
 | ``deploy/.env.example``'s ``#VAULT_IMAGE_TAG=...`` example line | YES | in ``deploy/``, same conceptual value as compose's default |
 | ``core/Dockerfile``'s ``org.opencontainers.image.version`` LABEL | **NO — out of this WP's footprint** | ``core/`` belongs to vault-core, a different component this package was not scoped to touch |
@@ -73,6 +74,11 @@ COMPOSE_PATH = REPO_ROOT / "deploy" / "compose.yaml"
 API_DOCKERFILE_PATH = REPO_ROOT / "api" / "Dockerfile"
 VERIFY_STACK_PATH = REPO_ROOT / "deploy" / "tests" / "verify-stack.sh"
 ENV_EXAMPLE_PATH = REPO_ROOT / "deploy" / ".env.example"
+#: WP EG-1 (ADR-0011). `deploy/proxy/` is THIS package's own footprint (not
+#: someone else's component the way `core/`/`dns/` are), so its Dockerfile's
+#: OCI version label is pinned here from the day it is introduced, rather
+#: than joining the two acknowledged-gap rows in this module's docstring.
+PROXY_DOCKERFILE_PATH = REPO_ROOT / "deploy" / "proxy" / "Dockerfile"
 
 #: Matches `image: steamvault/<name>:${VAULT_IMAGE_TAG:-<default>}` lines
 #: exactly as they appear in deploy/compose.yaml today -- deliberately
@@ -179,6 +185,12 @@ def _dockerfile_oci_version() -> str | None:
     return match.group(1) if match else None
 
 
+def _proxy_dockerfile_oci_version() -> str | None:
+    text = PROXY_DOCKERFILE_PATH.read_text(encoding="utf-8")
+    match = _OCI_VERSION_PATTERN.search(text)
+    return match.group(1) if match else None
+
+
 def _verify_stack_tag_default() -> str | None:
     text = VERIFY_STACK_PATH.read_text(encoding="utf-8")
     match = _VERIFY_STACK_TAG_PATTERN.search(text)
@@ -208,9 +220,15 @@ def test_compose_has_the_expected_image_tag_lines() -> None:
     image name is WHY the B1 blocker existed (see this module's docstring).
     """
     found = _compose_service_image_tags()
-    assert set(found) == {"vault-core", "vault-api", "vault-runner", "vault-dns"}, (
+    assert set(found) == {
+        "vault-core",
+        "vault-api",
+        "vault-runner",
+        "vault-proxy",
+        "vault-dns",
+    }, (
         f"deploy/compose.yaml: expected exactly the vault-core/vault-api/"
-        f"vault-runner/vault-dns image lines to carry a "
+        f"vault-runner/vault-proxy/vault-dns image lines to carry a "
         f"${{VAULT_IMAGE_TAG:-...}} default, found {sorted(found)} -- the "
         "extraction regex in this test file and compose.yaml's actual "
         "layout have diverged."
@@ -320,6 +338,27 @@ def test_vault_runner_image_tag_default_matches_vault_api_version() -> None:
     )
 
 
+def test_vault_proxy_image_tag_default_matches_vault_api_version() -> None:
+    """WP EG-1 (ADR-0011). `vault-proxy` gets its OWN image (a real `build:`
+    block, `deploy/proxy/Dockerfile` — unlike `vault-runner`, it does not
+    reuse `vault-api`'s image), but it shares the exact same
+    `${VAULT_IMAGE_TAG:-...}` variable and default — this project's stack
+    ships one conceptual release number across every image it builds, not
+    one per component. Same independent-occurrence reasoning as
+    `test_vault_runner_image_tag_default_matches_vault_api_version` above:
+    there is no YAML anchor tying this line to any other, so a bump that
+    misses it must be caught here specifically.
+    """
+    proxy_default = _compose_service_image_tags().get("vault-proxy", (None, None))[1]
+    assert proxy_default == VAULT_API_VERSION, (
+        f"deploy/compose.yaml's vault-proxy service's VAULT_IMAGE_TAG "
+        f"default is {proxy_default!r}, but vault_api.__version__ is "
+        f"{VAULT_API_VERSION!r} -- one of the two changed without the "
+        "other. Bump both together (api/vault_api/__init__.py AND every "
+        "image: line in deploy/compose.yaml, including vault-proxy's)."
+    )
+
+
 def test_vault_api_version_matches_dockerfile_oci_label() -> None:
     """Review round 1 blocker B1: this site was missing entirely from the
     first version of this file. A build-time LABEL cannot read
@@ -331,6 +370,24 @@ def test_vault_api_version_matches_dockerfile_oci_label() -> None:
     assert label_value == VAULT_API_VERSION, (
         f"api/Dockerfile's org.opencontainers.image.version LABEL is "
         f"{label_value!r}, but vault_api.__version__ is "
+        f"{VAULT_API_VERSION!r} -- one of the two changed without the "
+        "other. Bump both together."
+    )
+
+
+def test_vault_proxy_dockerfile_oci_label_matches_vault_api_version() -> None:
+    """WP EG-1 (ADR-0011). `deploy/proxy/Dockerfile` is a new hand-maintained
+    "0.1.0" this WP's own footprint introduces — same reasoning as
+    `test_vault_api_version_matches_dockerfile_oci_label` above, and the same
+    class of gap this module's docstring already names for `core/Dockerfile`/
+    `dns/Dockerfile` (out of footprint for the WPs that did not own them).
+    `deploy/proxy/` IS this WP's footprint, so unlike those two, this one
+    does not get to stay an acknowledged gap.
+    """
+    label_value = _proxy_dockerfile_oci_version()
+    assert label_value == VAULT_API_VERSION, (
+        f"deploy/proxy/Dockerfile's org.opencontainers.image.version LABEL "
+        f"is {label_value!r}, but vault_api.__version__ is "
         f"{VAULT_API_VERSION!r} -- one of the two changed without the "
         "other. Bump both together."
     )

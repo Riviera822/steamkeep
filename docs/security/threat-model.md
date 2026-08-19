@@ -58,6 +58,36 @@ change: the app's OpenID identity verification still talks to Valve
 directly, but that flow carries no library data, only the identity
 assertion.
 
+**§5 gains a network-enforcement column, and §8 a new pinned image, as of
+WP EG-1 (this commit, 2026-08-19; `docs/adr/0011-egress-lock.md`).** Every
+outbound flow §5 lists was previously a *code-level* fact only ("this
+module makes an HTTPS request to this host") — as of this commit, the two
+genuinely third-party flows (the manifest oracle, items the operator opts
+into) run inside `vault-api`'s own container, which now has **no default
+network route for an arbitrary TCP/UDP connection to a WAN or LAN
+destination**
+(`deploy/compose.yaml`'s `vault-lan`/`vault-egress` networks); reaching
+such a destination requires passing through a new, separate `vault-proxy`
+container that refuses any destination not in its allowlist. §5's per-item
+notes below now state, for each flow, whether it is proxy-gated (and how),
+baked into the proxy's own default allowlist unconditionally, or
+unaffected because it never left `vault-api`'s process boundary in the
+first place. This is a *narrowing* of blast radius, not a new guarantee
+about vault-api's own code, and it is deliberately NOT stated as "vault-api
+cannot reach the internet" — two channels are measured, working, and
+explicitly left open (round-2 review B1/B2, ADR-0011 §1/§4): DNS
+*resolution* still succeeds from inside vault-api (Docker's embedded
+resolver answers from the host's own namespace, not the container's — a
+compromised process can still exfiltrate data one DNS label at a time),
+and the Docker host's own reachable addresses — including anything any
+container has published on `0.0.0.0` (`vault-core:80` in the shipped
+default) — remain directly reachable, because a reply from the host to a
+container needs no masquerade. See ADR-0011's own "What this ADR does NOT
+claim to defend against" section for both, stated as plainly as this
+document's own house style requires, alongside the other named
+out-of-scope items (a compromised `vault-proxy` image, an operator who
+edits the lock away, `vault-runner`'s deliberately broad egress).
+
 ---
 
 ## 1. The trust boundary: SteamVault assumes a trusted LAN
@@ -597,7 +627,13 @@ MISS to Steam's real CDN (§1/§2 — the point of the project, and a HIT never
 leaves the LAN at all), and SteamPrefill's own login/prefill traffic to
 Valve's servers from inside the `vault-runner` container since WP S-2 — the split that makes vault-api egress-lockable at all (§3 — the whole
 reason the project exists, and the one flow that legitimately carries a
-real Steam session). Beyond those two, `api/vault_api/oracle.py`'s own
+real Steam session). **Enforcement (WP EG-1): neither of these two core
+flows is proxy-gated, and neither needed to be** — `vault-core` has its own,
+separate, already-narrower Host-allowlist mechanism (ADR-0001 req 4), and
+`vault-runner` is deliberately excluded from the egress lock's network
+topology entirely (ADR-0011's "What this ADR does NOT claim to defend
+against" — its egress is Steam's CM/CDN fleet, not an enumerable set a
+proxy allowlist could name). Beyond those two, `api/vault_api/oracle.py`'s own
 privacy section stakes out a claim worth checking precisely because it is
 stated as exhaustive: "Every other component talks only to the LAN, to
 Steam's CDN through vault-core, or to Valve through SteamPrefill" — i.e.
@@ -633,7 +669,17 @@ none of them Steam credentials (§3):
    makes** — see item 4's historical note below and §4's own updated note
    for the full story; the app calls the exact same two routes through
    `net/VaultApiClient.kt::steamOwnedGames`/`steamPlayerSummaries`, not a
-   second, device-local path to Valve.
+   second, device-local path to Valve. **Enforcement (WP EG-1):**
+   `api.steampowered.com` is baked into `vault-proxy`'s own image
+   unconditionally (`deploy/proxy/docker-entrypoint.sh`) — NOT gated behind
+   `VAULT_EGRESS_ALLOW` the way item 2 below is, because the relay key is a
+   runtime, DB-stored setting (ADR-0009) that can be turned on with no
+   vault-api restart, so there is no boot-time moment at which a
+   `VAULT_EGRESS_ALLOW`-based check could reliably know whether this flow
+   is "in use" (ADR-0011 §3 has the full argument). The call still leaves
+   `vault-api`'s own container through `vault-proxy`, over `HTTP_PROXY`/
+   `HTTPS_PROXY` — it is proxy-gated, just permanently allowed rather than
+   conditionally.
 2. **The optional manifest oracle.** `VAULT_MANIFEST_ORACLE` is off by
    default (`api/vault_api/config.py:92-93`: "the default"); when an
    operator turns it on, `vault-api` sends the Steam **app ids** it tracks
@@ -654,7 +700,13 @@ none of them Steam credentials (§3):
    `deploy/compose.yaml:197` now forwards `VAULT_MANIFEST_ORACLE_URL` — cited
    here as a worked example of why this category of claim ("set this env
    var for privacy") must be re-verified against `compose.yaml` on every
-   read, not trusted from a comment.
+   read, not trusted from a comment. **Enforcement (WP EG-1):** proxy-gated
+   via `VAULT_EGRESS_ALLOW`, and — unlike item 1 above — genuinely
+   conditional: `vault_api/config.py`'s own startup check refuses to boot
+   if this oracle is turned on with its configured host (the default
+   `api.steamcmd.net`, or an operator's own private mirror) missing from
+   that allowlist, rather than booting clean and failing every query
+   forever with a filtered-403 and no obvious cause (ADR-0011 §3).
 3. **Cover art.** The web UI's Content-Security-Policy allows exactly one
    external image host: `img-src 'self' data: https://cdn.akamai.
    steamstatic.com` (`api/vault_api/webui.py:94`). A browser fetches real Steam art directly from that CDN, by
@@ -668,7 +720,11 @@ none of them Steam credentials (§3):
    specifically for this one host). This leaks "which app ids this browser
    is currently viewing" to that CDN the same way any hotlinked image would
    to any host, at ordinary web scale — named here for completeness, not
-   because it is a sharp risk.
+   because it is a sharp risk. **Enforcement (WP EG-1): unaffected, by
+   construction.** This is the browser's own request, made from the LAN
+   client's machine, never from inside `vault-api`'s container — the egress
+   lock restricts exactly one container's own outbound traffic, and this
+   flow never was that container's traffic to begin with.
 4. **CLOSED (WP 4h.4, this commit) — historical: the Android app's own
    direct Steam Web API calls, the same two endpoints as item 1 but from
    the DEVICE, never through vault-api.** Recorded here for the audit
@@ -705,7 +761,10 @@ none of them Steam credentials (§3):
    flow from the now-closed item 4, which is why removing item 4 did not
    remove this one: the app still has to establish who is signing in
    against Valve regardless of how (or whether) it fetches library data
-   afterward.
+   afterward. **Enforcement (WP EG-1): unaffected, by construction** — same
+   reasoning as item 3's: this call originates from the Android device
+   itself, never from inside `vault-api`'s container, so a lock scoped to
+   that one container's own network egress has nothing to do with it.
 
 Beyond the two core flows named above and the four live exceptions just
 listed (plus the one now-closed historical exception, item 4), nothing
@@ -713,7 +772,18 @@ else in this repository makes an outbound network call as shipped:
 agent reports and Android/web-to-API traffic stay LAN-internal by design
 (§1), and webhooks (`docs/PROJECT_PLAN.md` §7 Phase 3/Phase 6, out of this
 package's own footprint) are opt-in and point at a URL the operator
-supplies, not a name this document can pin.
+supplies, not a name this document can pin. **Enforcement (WP EG-1):**
+proxy-gated the same way the manifest oracle is, but with no matching
+startup check — `VAULT_WEBHOOK_URL` is DB-overridable at runtime (ADR-0009,
+`PATCH /v1/settings`), so there is no boot-time value to check it against,
+and this project's own "cheapest honest version" standard for a startup
+check stops at the one case that is actually checkable (ADR-0011 §3). A
+webhook receiver's host — LAN or WAN, no distinction — must be added to
+`VAULT_EGRESS_ALLOW` or delivery fails, silently retried and eventually
+dropped, exactly the way a receiver that is merely offline already behaves
+(`webhooks.py`'s own at-most-once, bounded-retry semantics, unchanged by
+this package). Documented plainly, in `deploy/README.md`'s own words: "if
+your webhook stops firing after this update, that is the lock working."
 
 ---
 
@@ -881,12 +951,20 @@ kept only as a trailing comment (`.github/workflows/*.yml`, e.g.
 The Android Gradle wrapper carries `distributionSha256Sum`
 (`app/gradle/wrapper/gradle-wrapper.properties:4`) — the same integrity bar
 applied consistently across four different ecosystems (Docker base images,
-GitHub Actions, Gradle) rather than in just one.
+GitHub Actions, Gradle) rather than in just one. **WP EG-1 (this commit)
+adds a fifth image, `deploy/proxy/Dockerfile`, to this same disciplined
+set**: `FROM alpine:3.23.5@sha256:fd791d74b68913cbb…` — deliberately the
+identical digest `dns/Dockerfile` already pins (ADR-0011: reusing an
+already-vetted base beats adding a second one to independently track), with
+its own exact-version package pin (`tinyproxy=1.11.3-r0`) matching the
+project's existing convention of pinning package versions alongside the
+base image digest that resolved them.
 
 **The one place this project's own pins are loose is its own output.**
-`deploy/compose.yaml:41, :133, :323` — the `vault-core`, `vault-api`, and
-`vault-dns` service definitions — all resolve `${VAULT_IMAGE_TAG:-0.1.0}`, a
-mutable tag, not a digest, for the images this project ships of *itself*.
+`deploy/compose.yaml`'s `vault-core`, `vault-api`, `vault-runner`,
+`vault-proxy`, and `vault-dns` service definitions all resolve
+`${VAULT_IMAGE_TAG:-0.1.0}`, a mutable tag, not a digest, for the images
+this project ships of *itself*.
 This is a materially different risk than the base-image pins above (those
 guard against a third party's registry serving different bytes under an old
 tag; this one is about `steamvault/vault-api:0.1.0` — or whatever tag a
@@ -930,6 +1008,16 @@ Named plainly, as out of scope, rather than implied to be covered:
   the third-party tool this project subprocess-drives. Both are outside
   this repository's code and this document's scope (see `SECURITY.md`
   "Scope").
+- **DNS-based exfiltration from `vault-api`, and direct reach to the
+  Docker host's own published ports, both survive the egress lock (WP
+  EG-1)** — measured, not assumed (round-2 review B1/B2; the full argument
+  is `docs/adr/0011-egress-lock.md`'s "What this ADR does NOT claim to
+  defend against"). Neither is a code-level gap in vault-api: DNS
+  resolution succeeds because Docker's embedded resolver answers from the
+  HOST's own network namespace, not the container's, and a reply from the
+  host to a container needs no masquerade either way — both are
+  structural properties of the network topology existing at all, not
+  omissions this package chose to leave unfixed in application code.
 
 ---
 

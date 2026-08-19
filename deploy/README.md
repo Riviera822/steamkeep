@@ -1,20 +1,21 @@
 # Deploying SteamVault (Phase 1, WP 1.9)
 
-Docker Compose deployment for the four server-side components:
+Docker Compose deployment for the five server-side components:
 
 | Service        | What it is                                        | Port  | Enabled |
 |----------------|---------------------------------------------------|-------|---------|
 | `vault-core`   | nginx `proxy_store` cache, path-faithful depot storage | 80 (HTTP) | always |
 | `vault-api`    | FastAPI + SQLite control plane                    | 8080  | always |
 | `vault-runner` | the SteamPrefill runner (WP S-2, ADR-0012) — same image as `vault-api`, runs `python -m vault_api.prefill_runner` instead | none (no HTTP) | always |
+| `vault-proxy`  | the egress-lock allowlist proxy (WP EG-1, ADR-0011) — `vault-api`'s route for an arbitrary destination beyond the LAN (two narrower channels stay open regardless, see "Egress lock" below) | none (LAN-internal only) | always |
 | `vault-dns`    | optional dnsmasq that redirects `*.steamcontent.com` | 53 (UDP+TCP) | `--profile dns` |
 
 **`vault-api` no longer runs SteamPrefill itself.** As of WP S-2, this
 compose file ships `VAULT_PREFILL_MODE=queue` (ADR-0012): vault-api hands a
 prefill job off through the database, and the separate `vault-runner`
-container claims and executes it. This is what makes it possible to lock
-vault-api's own container down to LAN-only egress later (EG-1) without also
-cutting off the one thing that genuinely needs the wider internet — see
+container claims and executes it. This is what made it possible to lock
+vault-api's own container down to LAN-only egress (WP EG-1, below) without
+also cutting off the one thing that genuinely needs the wider internet — see
 `docs/adr/0012-prefill-runner-split.md` for the full design. `vault-runner`
 has no port mapping and serves nothing: it polls the same database vault-api
 uses, runs SteamPrefill for the job it claims, and reports the result back
@@ -22,6 +23,20 @@ the same way. The bare-metal/native dev setup (`api/README.md`
 "Quickstart") is unaffected and keeps the older `subprocess` mode, where
 vault-api runs SteamPrefill in its own process — there is no second process
 to run a runner in outside a container, and nothing here changes that path.
+
+**`vault-api`'s own container has no default route for an arbitrary
+outbound connection.** As of WP EG-1 (ADR-0011), the split above is what
+this was building toward: reaching an arbitrary WAN or other-LAN-device
+destination now requires passing through a new `vault-proxy` service,
+which refuses every such destination not on an allowlist. Two narrower
+channels are not closed by this and are named plainly, not glossed over:
+DNS resolution still works from inside `vault-api` (it can leak data one
+query label at a time), and the Docker host's own reachable addresses
+(including anything published on `0.0.0.0`, `vault-core:80` by default)
+remain directly reachable. See
+[Egress lock](#egress-lock-vault-api-loses-its-default-route-out)
+below for the full mechanism, both of those channels, and a five-minute
+recipe to verify all of it yourself.
 
 Everything is LAN-only. Nothing here should ever be reachable from the
 internet — see [Security posture](#security-posture) before you expose
@@ -31,6 +46,10 @@ anything.
 deploy/
 ├── compose.yaml            # the deployment
 ├── .env.example            # committed template -> copy to .env
+├── proxy/                  # vault-proxy: the egress-lock allowlist proxy (WP EG-1)
+│   ├── Dockerfile
+│   ├── tinyproxy.conf
+│   └── docker-entrypoint.sh
 ├── examples/
 │   └── truenas-scale-dockge.md   # NAS-specific layout (dedicated ZFS cache dataset, etc.)
 ├── tests/
@@ -689,6 +708,243 @@ a floating tag.
 
 ---
 
+## Egress lock: vault-api loses its default route out
+
+WP EG-1 (ADR-0011). `vault-api`'s own container has no default route for
+an **arbitrary** outbound connection — not to Valve, not to the manifest
+oracle, not to a webhook receiver on a genuinely separate device, LAN or
+WAN. Reaching such a destination requires passing through a new
+`vault-proxy` container, which refuses any destination not on an
+allowlist. This is **on by default** in this compose file — there is no
+environment variable that turns it off (see "Removing the lock" below for
+the supported, deliberately non-trivial way to do that anyway).
+
+**Read "Two channels this does NOT close" below before treating this as
+"vault-api cannot reach the internet."** It cannot reach an arbitrary
+destination — that is the real, useful guarantee — but DNS resolution and
+the Docker host's own reachable addresses are different questions, with
+different (and open) answers.
+
+### The mechanism, in the fewest possible lines
+
+`deploy/compose.yaml`'s own top-level `networks:` block states this
+explicitly as a banner comment — read that first; this section explains it
+in prose and gives you a way to check it yourself, rather than repeating
+it:
+
+1. `vault-api` is attached to `vault-lan` (a network with Docker's outbound
+   NAT/masquerade turned OFF) and `vault-egress` (`internal: true` — no
+   route out of it exists at all, to anything). It is attached to nothing
+   else — no `default` network.
+2. `vault-egress` is shared with exactly one other container: `vault-proxy`.
+   `vault-api`'s `HTTP_PROXY`/`HTTPS_PROXY` environment variables point at
+   it by name.
+3. `vault-proxy` is also attached to `default` (an ordinary, masquerading
+   network) — its own real route to Valve, the oracle, or a webhook
+   receiver. It refuses every destination that is not in a filter file
+   rendered from `VAULT_EGRESS_ALLOW` (`deploy/proxy/docker-entrypoint.sh`)
+   plus one host baked into its image unconditionally: `api.steampowered.com`,
+   for the Steam Web API relay (see that script's own comment for why this
+   one host is not gated behind the variable).
+
+Nothing in `vault-api`'s own Python code changed to make this work — it
+never needed to. `steam_relay.py`, `oracle.py` and `webhooks.py` all use
+Python's standard `urllib`, which already honours `HTTP_PROXY`/
+`HTTPS_PROXY` on its own; the lock is enforced entirely by the network
+topology above, underneath any code that container runs.
+
+### Two channels this does NOT close
+
+Measured, not theoretical, and not proposed to be fixed here — read
+`docs/adr/0011-egress-lock.md`'s "What this ADR does NOT claim to defend
+against" for the full reasoning behind leaving both open:
+
+- **DNS resolution.** A lookup from inside `vault-api` still reaches the
+  real internet: Docker's embedded resolver answers from the HOST's own
+  network namespace, not the container's, so `vault-lan`'s disabled
+  masquerade is simply irrelevant to it. A process that controls what
+  hostname it looks up controls what data leaves inside that name (one
+  DNS label comfortably holds a 32-character Steam key). Closing this
+  would mean removing vault-api's own name resolution entirely, which is
+  not attempted here.
+- **The Docker host's own reachable addresses.** A raw connection from
+  `vault-api` straight to the Docker host's non-loopback address (bypassing
+  `HTTP_PROXY` entirely) reaches a real listener there — a reply from the
+  host to a container needs no masquerade, so the disabled-masquerade rule
+  never applies to it. In this stack, that means `vault-core:80`
+  specifically (its `0.0.0.0` bind is deliberate, see that service's own
+  section above), and anything else this same host has published the
+  ordinary way.
+
+Neither of these is "vault-api can reach an arbitrary WAN or LAN device" —
+that specific claim is what the lock actually makes false, and step 1
+below still measures exactly that. They are narrower, real exceptions
+worth knowing about before assuming the lock means more than it does.
+
+### What still needs `VAULT_EGRESS_ALLOW`
+
+Two real cases, both documented in `deploy/.env.example`:
+
+- **The manifest oracle** (`VAULT_MANIFEST_ORACLE`). Turn it on without
+  adding its host here and `vault-api` **refuses to boot**, naming the
+  missing host — this is deliberate; the alternative is a silent, permanent
+  filtered-403 on every oracle query with nothing pointing back at the
+  cause.
+- **Webhooks** (`VAULT_WEBHOOK_URL`, set via `PATCH /v1/settings`). If your
+  webhook stops firing after upgrading to this version, **that is the lock
+  working, not a bug** — add the receiver's host to `VAULT_EGRESS_ALLOW`
+  and restart `vault-api`/`vault-proxy`. This applies identically whether
+  the receiver is on your own LAN (a local ntfy/Home Assistant instance) or
+  on the internet: measured directly, `vault-api`'s own network has **no
+  working direct route to an arbitrary device** once this lock is in
+  effect — not just WAN addresses, other LAN devices too (Docker's
+  masquerade-disable is a blanket "leaving this bridge" rule with no
+  destination-based exception). There is no "skip the proxy for local
+  traffic" shortcut to configure; every outbound call to a separate device
+  goes through `vault-proxy`, or it does not go out at all. **One real
+  exception, named above, not hidden:** a receiver bound to the Docker
+  HOST's own address (rather than a separate device) is reachable directly
+  regardless of any of this — see "Two channels this does NOT close".
+
+### Verify it yourself in five minutes
+
+Trust none of the words above — check the running containers directly.
+
+**1. Inbound still works; outbound direct does not (from `vault-api` itself).**
+
+```bash
+# From vault-api's own container: a real destination, no proxy involved.
+# Expect this to HANG until it times out -- that is the pass condition.
+docker compose exec vault-api sh -c 'curl -v --max-time 8 --noproxy "*" https://1.1.1.1/'
+
+# The same request, letting the container's own HTTP_PROXY/HTTPS_PROXY
+# apply (the default -- no --noproxy flag). Expect a real response from
+# whichever allowlisted host you point this at instead; example.com is not
+# allowlisted by default, so expect "403 Filtered" for it specifically:
+docker compose exec vault-api sh -c 'curl -v --max-time 8 https://example.com/'
+```
+
+**2. Watch it with `tcpdump` on the host, not just from inside a container.**
+This is the counter-check that trusts nothing this project says about its
+own containers — a packet capture on the Docker host itself, watching for
+any packet from `vault-api`'s container IP that is NOT going to
+`vault-proxy`'s container IP:
+
+```bash
+# Find vault-api's and vault-proxy's addresses on vault-egress:
+docker inspect steamvault-vault-api-1 --format '{{.NetworkSettings.Networks.steamvault_vault-egress.IPAddress}}'
+docker inspect steamvault-vault-proxy-1 --format '{{.NetworkSettings.Networks.steamvault_vault-egress.IPAddress}}'
+
+# Capture on the host while you trigger some vault-api activity (an API
+# call, a scheduled sweep, whatever you have configured). Replace
+# <vault-api-ip> with the first command's output above. Expect to see
+# packets destined ONLY for vault-proxy's address (or nothing at all, if
+# vault-api made no outbound call during the capture window) -- never a
+# packet addressed to anything else.
+sudo tcpdump -i any -n "src host <vault-api-ip> and not dst host <vault-proxy-ip>"
+```
+
+**This capture does NOT prove DNS is also blocked — and it is not, by
+design (see "Two channels this does NOT close" above).** Docker's embedded
+resolver forwards a container's DNS queries from a process running in the
+HOST's own network namespace, not from a socket carrying vault-api's
+container address — so a DNS-based exfiltration attempt is invisible to a
+capture filtered on `src host <vault-api-ip>` specifically. Steps 3 and 4
+below check the two open channels directly, rather than leaving them as
+something this capture might misleadingly seem to rule out.
+
+**3. Confirm DNS resolution still works from inside vault-api (it does,
+and this is expected, not a bug to report).**
+
+```bash
+# A wildcard-DNS test host that encodes its own answer in the query name --
+# resolving successfully here IS the channel docs/adr/0011-egress-lock.md
+# names as open. Substitute any similar service, or your own domain, if you
+# want to see a payload of your choosing survive the round trip.
+docker compose exec vault-api sh -c \
+  'python3 -c "import socket; print(socket.gethostbyname(\"7-7-7-7.sslip.io\"))"'
+# Expect: 7.7.7.7 -- the resolution reached the real, public authoritative
+# nameserver for sslip.io, through vault-lan, with no proxy involved at all.
+```
+
+**4. Confirm the Docker host's own address is directly reachable (it is,
+and this is expected too).**
+
+```bash
+# The gateway address vault-lan assigns is the Docker host's own address on
+# that bridge -- reachable directly, HTTP_PROXY or not, because a reply
+# from the host to a container needs no masquerade.
+docker compose exec vault-api sh -c \
+  'python3 -c "
+import socket
+gw = [l.split()[2] for l in open(\"/proc/net/route\") if l.startswith(\"eth0\")][0]
+import struct
+ip = socket.inet_ntoa(struct.pack(\"<L\", int(gw, 16)))
+print(ip)
+"'
+# Then, from a SEPARATE terminal on the Docker host, confirm something is
+# actually listening there (e.g. vault-core's published port, if you know
+# the host's own LAN IP) -- or simply trust the raw-socket connect below,
+# which needs no second terminal:
+docker compose exec vault-api sh -c \
+  'python3 -c "
+import socket
+s = socket.create_connection((\"host.docker.internal\", 80), timeout=3)
+print(\"connected:\", s.recv(200))
+"' 2>&1 | head -5
+# host.docker.internal may not resolve on every Docker version/platform --
+# if it does not, substitute the gateway address the first command printed.
+```
+
+If either of steps 3 or 4 FAILS instead of succeeding, that is itself worth
+investigating (it would mean this document's own claims about these two
+channels are stale) — but succeeding is the documented, expected result,
+not a finding to report as a vulnerability.
+
+If step 2's capture ever shows a packet to anywhere other than
+`vault-proxy`'s address, the lock is not doing what
+this document claims — that is the point of running it yourself instead of
+trusting this sentence.
+
+**5. On your router, if you want a fully independent vantage point.**
+Most home routers (or a managed switch with port mirroring / a `pfSense`/
+OPNsense box) can show live connections or a traffic log per internal IP.
+Find the Docker host's LAN IP and watch its connection log while triggering
+vault-api activity the same way as step 2 — you should see outbound
+connections only to the hosts you actually allowlisted (plus
+`api.steampowered.com` if the relay is configured), never to `vault-api`'s
+own outbound attempts directly (those never leave the Docker host's
+internal bridge at all, per step 1 — the router should not see them
+either way, which is itself a confirmation: if your router logs show
+NOTHING for the container's un-proxied attempt, that is consistent with
+the packet never having a working return path, exactly as claimed).
+
+### Removing the lock
+
+Not recommended, and not a single env flag on purpose (ADR-0011 §2 has the
+full reasoning: an easy toggle becomes the path of least resistance for
+"fixing" a filtered request instead of understanding why it was filtered).
+If you genuinely need `vault-api` to have a normal, unrestricted route out
+— e.g. you already run your own network-level egress control and find this
+one redundant — write a `compose.override.yaml`
+(`deploy/examples/tuned-setup.md` has this project's house style for such
+overrides) that removes `vault-api`'s `networks:` override entirely (letting
+it fall back to Compose's implicit `default` network) and clears its
+`HTTP_PROXY`/`HTTPS_PROXY` values. `docker compose -f compose.yaml -f
+compose.override.yaml up -d` applies it.
+
+**One thing this override does NOT remove (round-2 review S3):**
+`vault_api/config.py`'s manifest-oracle startup check is unconditional —
+it fires regardless of whether the network lock is actually in effect.
+With the lock removed this way, turning `VAULT_MANIFEST_ORACLE` on
+without also setting `VAULT_EGRESS_ALLOW` still refuses to boot, even
+though there is no proxy left to filter anything. Set
+`VAULT_EGRESS_ALLOW` to the oracle's host regardless of whether you kept
+the lock — see api/README.md's "Egress lock" section for why this check
+does not (and cannot cheaply) know the difference.
+
+---
+
 ## Security posture
 
 What this deployment assumes, stated plainly so it can be checked:
@@ -713,10 +969,15 @@ What this deployment assumes, stated plainly so it can be checked:
   it fails *closed* — visibly broken rather than invisibly dangerous.
 - **No secrets in `compose.yaml`.** `VAULT_API_KEY` appears only as a required
   `${…}` reference; the real value lives in `deploy/.env`, which is gitignored.
-- All three services run with `no-new-privileges`; vault-api drops **all**
-  Linux capabilities and runs as uid 101; vault-dns keeps only the four it
-  needs to bind :53 and drop privileges. vault-core's nginx master needs root
-  to bind :80 and runs its workers as uid 101.
+- All five services run with `no-new-privileges`; vault-api, vault-runner
+  and vault-proxy each drop **all** Linux capabilities; vault-dns keeps only
+  the four it needs to bind :53 and drop privileges. vault-core's nginx
+  master needs root to bind :80 and runs its workers as uid 101. vault-proxy
+  never runs as root at any point (its listen port, 8888, is unprivileged),
+  so unlike vault-core it has no privilege-drop dance to do at all.
+- **vault-api has no default route to the internet** (WP EG-1, ADR-0011) —
+  see [Egress lock](#egress-lock-vault-api-cannot-reach-the-internet-except-through-vault-proxy)
+  above for the full mechanism and how to verify it yourself.
 
 ---
 
@@ -726,21 +987,29 @@ What this deployment assumes, stated plainly so it can be checked:
 sudo sh deploy/tests/verify-stack.sh
 ```
 
-Builds all three images and runs 109 checks against real containers: the
-config-drift contract (both directions), **the web UI baked into the
-vault-api image and served from it with no bind mount involved** (packaging
-work package), all twelve env-forwarding-audit keys (`VAULT_EVENT_LOG_PATH`,
-`VAULT_MANIFEST_ORACLE` and the ten more B1 found — see §7 Phase 5 in
-`docs/PROJECT_PLAN.md` for the full list) actually reaching vault-api's
-process environment with the correct default (not just rendering in the
-YAML), a **real Steam CDN** cache MISS → stored → HIT with byte-identical
-bodies, the LanCache heartbeat, the Host allowlist, the `?nocache=1` bypass,
-API auth and a mapping round-trip, vault-api reading the same cache volume
-vault-core just wrote, DNS A/AAAA behaviour, a **credential-free SteamPrefill
-smoke run on all three invocation paths** (it must reach the username
-prompt, never a `TypeInitializationException`), and every fail-fast guard
-(split filesystems, empty/injected resolver, unrendered template, unwritable
-cache, missing/invalid `CACHE_IP`).
+Builds every image (`vault-core`, `vault-api`, `vault-proxy`, `vault-dns` —
+`vault-runner` reuses `vault-api`'s) and runs **185 checks** against real
+containers: the config-drift contract (both directions), **the web UI baked
+into the vault-api image and served from it with no bind mount involved**
+(packaging work package), all twelve env-forwarding-audit keys
+(`VAULT_EVENT_LOG_PATH`, `VAULT_MANIFEST_ORACLE` and the ten more B1 found —
+see §7 Phase 5 in `docs/PROJECT_PLAN.md` for the full list) actually
+reaching vault-api's process environment with the correct default (not just
+rendering in the YAML), a **real Steam CDN** cache MISS → stored → HIT with
+byte-identical bodies, the LanCache heartbeat, the Host allowlist, the
+`?nocache=1` bypass, API auth and a mapping round-trip, vault-api reading
+the same cache volume vault-core just wrote, DNS A/AAAA behaviour, a
+**credential-free SteamPrefill smoke run on all three invocation paths** (it
+must reach the username prompt, never a `TypeInitializationException`), the
+runner split's own empirical evidence (WP S-2, step 6k), **the egress
+lock's own empirical evidence** (WP EG-1, steps 3k-3o and 6l — an allowlisted
+call succeeding through `vault-proxy`, a non-allowlisted one refused with a
+real `403 Filtered`, a raw direct socket bypassing the proxy reaching no
+ARBITRARY destination, DNS resolution and the Docker host's own address
+staying reachable exactly as documented (round-2 review B1/B2), and the
+mutation-bar proof that widening the allowlist actually flips the result),
+and every fail-fast guard (split filesystems, empty/injected resolver,
+unrendered template, unwritable cache, missing/invalid `CACHE_IP`).
 
 **Historical result (2026-08-17 packaging work package, three real runs
 across two review rounds):** 105/109 pass on the final run; the 4 failures
@@ -762,6 +1031,21 @@ Docker Engine 29.1.3 / Compose 2.40.3, with the event line arriving after
 ~4 s. Note the wait bound is 10 polls, each preceded by a
 `docker compose exec` round trip, so the effective window is 2-4x the 5 s
 flush and widens on exactly the slow hosts that need it.
+
+**WP EG-1 (2026-08-19), the egress lock:** 30 new checks in the original
+round (steps 3k-3o's static network/env-forwarding pins, and 6l's
+empirical proxy behaviour and mutation-bar proof), bringing the suite from
+149 to 179. **Round-2 review (same day)** added the `vault-proxy` build
+itself to section 2 (B4 — this script claimed to build it already and did
+not), the `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` process-environment guard
+(S4), and two empirical checks for the channels the lock does NOT close
+(B1: DNS resolution; B2: the Docker host's own address) — **6 more,
+185 total**. Measured, a real run: **185/185 pass**, exit 0, clean
+teardown, against Docker Engine 29.1.3 / Compose 2.40.3 — including the
+mutation-bar sequence (deny → widen-allowlist-and-recreate-vault-proxy →
+now-succeeds → restore → deny
+again → stop-vault-proxy-entirely → every outbound call fails) run against
+real containers, not simulated.
 
 It never enters credentials — reaching the login prompt is the pass condition.
 

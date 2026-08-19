@@ -589,3 +589,24 @@ These are not style preferences; each entry cost a review round to learn.
   vertical-only live pin catches one of the two states. New grid children
   get an explicit grid-area in EVERY breakpoint block that defines a
   template (WP 4h.2 blocker, browser-measured both states).
+- A Docker per-container egress lock (masquerade-disabled bridge +
+  internal net + filtering proxy) does NOT close two channels, both
+  measured live in WP EG-1 by actually exfiltrating from the locked
+  container: (1) DNS — the embedded resolver forwards from the HOST
+  namespace, so a unique label resolves against the public authoritative
+  NS regardless of the container's missing route; a 32-char secret fits in
+  one label. (2) the Docker HOST's own addresses — replies to a container
+  bridge address need no SNAT, so host-bound listeners incl. every
+  0.0.0.0-published port stay directly reachable. Only a container on an
+  internal:true net ALONE loses DNS too. State both as accepted open gaps;
+  a security doc that claims "no packet can leave" is the worse failure.
+- The reviewer of a security package must ATTEMPT the violation, not read
+  the claim: EG-1's two overstatements passed every static test and were
+  caught only by the reviewer standing the stack up and exfiltrating. The
+  mechanism was sound in both directions it targets; the FAIL was pure
+  claim-honesty, which for a doc strangers use to decide whether to run
+  this on their network is exactly the defect that matters most.
+- Docker attaches a service's networks in REVERSE of the `networks:` list
+  order, so a hardcoded `eth0` inside a multi-network container may be the
+  wrong interface (WP EG-1: picked the internal net with no gateway); find
+  the gateway-bearing interface via /proc/net/route instead.

@@ -251,7 +251,10 @@ continuously updated checklist.
   hosts-file mode
 - [`dns/README.md`](dns/README.md) — vault-dns and DNS rewrite instructions
   for AdGuard Home / Pi-hole / dnsmasq / Unbound
-- [`deploy/README.md`](deploy/README.md) — full deployment reference
+- [`deploy/README.md`](deploy/README.md) — full deployment reference,
+  including ["Egress lock"](deploy/README.md#egress-lock-vault-api-cannot-reach-the-internet-except-through-vault-proxy) —
+  vault-api's container has no default route to the internet by default
+  (WP EG-1, ADR-0011), with a five-minute recipe to verify that yourself
 - [`docs/security/threat-model.md`](docs/security/threat-model.md) — the
   trust boundary, the cache contents, where credentials actually live, the
   personal-data surface, outbound data flows, and what this project

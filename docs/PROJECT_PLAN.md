@@ -2227,11 +2227,19 @@ why 0012 precedes it in time): split first, then lock.
       the duplicate image line — re-keyed by service; a tuned-setup
       recipe asserting a mechanism the code lacks — rewritten to move the
       volume, not the variable).
-- [ ] **EG-1 (deploy, resumed)** — the egress lock as decided 2026-08-18:
-      vault-api loses its default route, allowlist proxy as shipped
-      default, VAULT_EGRESS_ALLOW, meticulous verify-in-five-minutes docs,
-      .env.example completeness pin. Topology pre-verified in sandboxes
-      during the stopped first attempt. Produces ADR-0011.
+- [x] **EG-1 (deploy, resumed)** — DONE 2026-08-19: the egress lock.
+      vault-api on vault-lan (no-masquerade) + vault-egress (internal),
+      allowlist tinyproxy as shipped default, VAULT_EGRESS_ALLOW, the
+      five-minute tcpdump/router verify recipe, completeness pins. ADR-0011.
+      Two channels the lock does NOT close are named as accepted gaps in the
+      ADR and threat-model, both measured live: DNS resolution (resolver
+      forwards from the host namespace) and the Docker host's own address
+      (replies need no masquerade). verify-stack 149->185, api 1747->1809.
+      Opus rounds 1-2 (FAIL: two security-doc absolutes overstated the lock,
+      caught by the reviewer actually exfiltrating; a CRLF gitattributes gap
+      that would crash-loop the proxy on a Windows checkout; the proxy image
+      was never built by verify-stack -> all fixed). HARDENING CHAIN
+      COMPLETE.
 
 ---
 

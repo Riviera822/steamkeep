@@ -121,6 +121,14 @@ EXPECTED_DEFAULTS_VAULT_API: dict[str, str] = {
     # NOT the true-spellings/rejects-anything-else siblings, which set the
     # env var explicitly and would not notice a default change.
     "VAULT_SETTINGS_READONLY": "false",
+    # WP EG-1 (ADR-0011). Empty by default -- the egress lock ships
+    # default-on with an empty allowlist, not a wide-open one. No
+    # DEFAULT_EGRESS_ALLOW constant exists in config.py (an empty frozenset
+    # is the dataclass's own `default_factory`, not a string constant this
+    # ${VAR:-default} shape could derive from) -- same precedent as
+    # VAULT_EVENT_LOG_PATH/VAULT_SETTINGS_READONLY above, both also literal
+    # "" for the identical reason.
+    "VAULT_EGRESS_ALLOW": "",
 }
 
 # WP S-2 (ADR-0012). The runner's own `environment:` block. Deliberately
@@ -139,6 +147,16 @@ EXPECTED_DEFAULTS_VAULT_RUNNER: dict[str, str] = {
     "VAULT_RUNNER_POLL_SECONDS": str(config.DEFAULT_RUNNER_POLL_SECONDS),
 }
 
+# WP EG-1 (ADR-0011). The proxy's own `environment:` block — a single key,
+# the same variable and default as vault-api's copy above. See
+# deploy/compose.yaml's comment on this key (on EITHER service) for why both
+# copies exist: this one is what the proxy's own entrypoint actually renders
+# into its filter file; vault-api's copy is what its own startup check
+# cross-references against VAULT_MANIFEST_ORACLE.
+EXPECTED_DEFAULTS_VAULT_PROXY: dict[str, str] = {
+    "VAULT_EGRESS_ALLOW": "",
+}
+
 #: One row per Compose service this file checks, in the sense used
 #: throughout: 'the exact set of `${VAR:-default}` keys this service's
 #: `environment:` block should forward, and what each one's default should
@@ -147,6 +165,7 @@ EXPECTED_DEFAULTS_VAULT_RUNNER: dict[str, str] = {
 SERVICE_EXPECTED_DEFAULTS: dict[str, dict[str, str]] = {
     "vault-api": EXPECTED_DEFAULTS_VAULT_API,
     "vault-runner": EXPECTED_DEFAULTS_VAULT_RUNNER,
+    "vault-proxy": EXPECTED_DEFAULTS_VAULT_PROXY,
 }
 
 
@@ -431,6 +450,31 @@ def test_new_wp_s2_vars_are_documented_in_env_example(env_var: str) -> None:
     HEARTBEAT_SECONDS=5.0` line left a passing false-positive under a bare
     `env_var in text` substring check, because a neighbouring cross-reference
     comment still named the variable — this regex is the fix for that).
+    """
+    text = ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    pattern = re.compile(rf"^#?{re.escape(env_var)}=", re.MULTILINE)
+    assert pattern.search(text), (
+        f"deploy/.env.example has no {env_var}=... or #{env_var}=... "
+        "assignment line, but deploy/compose.yaml forwards it (see "
+        "SERVICE_EXPECTED_DEFAULTS above) -- an operator has no way to "
+        "discover this variable exists from a bare mention in a neighbouring "
+        "comment alone. Restore its documentation stanza in "
+        "deploy/.env.example."
+    )
+
+
+#: New in WP EG-1 (ADR-0011). Just the one variable — VAULT_EGRESS_ALLOW is
+#: forwarded on BOTH vault-api and vault-proxy (SERVICE_EXPECTED_DEFAULTS
+#: above), but it is documented ONCE in `.env.example` (an operator sets it
+#: in one place; both services read the same value).
+NEW_WP_EG1_ENV_VARS = ("VAULT_EGRESS_ALLOW",)
+
+
+@pytest.mark.parametrize("env_var", NEW_WP_EG1_ENV_VARS)
+def test_new_wp_eg1_vars_are_documented_in_env_example(env_var: str) -> None:
+    """Same mutation target and same anchored-assignment-line reasoning as
+    `test_new_wp_s2_vars_are_documented_in_env_example` above, for WP EG-1's
+    own new variable.
     """
     text = ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
     pattern = re.compile(rf"^#?{re.escape(env_var)}=", re.MULTILINE)

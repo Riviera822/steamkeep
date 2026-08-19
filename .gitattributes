@@ -44,3 +44,17 @@ deploy/compose.yaml eol=lf
 # visibly exists. (The .ps1 in that directory runs on Windows and is left
 # alone.)
 agent/tests/sandbox/*.sh eol=lf
+
+# WP EG-1 (ADR-0011, egress lock). vault-proxy's entrypoint and the hostname-
+# validation helper it sources run INSIDE the container (same shebang
+# rationale as every *.sh entry above); tinyproxy.conf is read verbatim by
+# tinyproxy itself, so a trailing \r would land inside a directive value the
+# same way it would in nginx.conf.template above. Found the hard way in
+# round-2 review, not hypothetically: a CRLF checkout built a vault-proxy
+# image whose entrypoint crash-looped with "no such file or directory"
+# against a script that visibly existed, while vault-api kept reporting
+# healthy (its own healthcheck is a loopback call, blind to the proxy
+# container's state) and every outbound call failed. deploy/proxy/ did not
+# exist when the entries above were written, so it was never covered.
+deploy/proxy/*.sh eol=lf
+deploy/proxy/*.conf eol=lf

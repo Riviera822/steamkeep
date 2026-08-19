@@ -223,6 +223,14 @@ def test_a_blank_oracle_value_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_the_oracle_can_be_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VAULT_API_KEY", "k")
     monkeypatch.setenv("VAULT_MANIFEST_ORACLE", "  STEAMCMD_API ")
+    # WP EG-1 (ADR-0011): from_env now refuses to boot with the oracle on and
+    # its host missing from VAULT_EGRESS_ALLOW (config.py's own startup
+    # check) -- api.steamcmd.net is the default oracle host this test's own
+    # VAULT_MANIFEST_ORACLE_URL default resolves to. See
+    # test_config_egress_lock.py for that check's own dedicated tests; this
+    # one is only about oracle-selector parsing and must keep passing
+    # unrelated to it.
+    monkeypatch.setenv("VAULT_EGRESS_ALLOW", "api.steamcmd.net")
     settings = Settings.from_env()
     assert settings.manifest_oracle == MANIFEST_ORACLE_STEAMCMD_API
     assert settings.manifest_oracle_enabled is True

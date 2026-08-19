@@ -142,7 +142,7 @@ fi
 # =============================================================================
 section "2. Image builds"
 # =============================================================================
-for svc in core api dns; do
+for svc in core api proxy dns; do
     step "2.$svc  docker build $svc/"
     build_failed=0
     if [ "$svc" = "api" ]; then
@@ -153,6 +153,19 @@ for svc in core api dns; do
         # longer reach it. core and dns are UNCHANGED, still built from their
         # own directories below.
         docker build -t "steamvault/vault-api:$TAG" -f "$repo_root/api/Dockerfile" "$repo_root" \
+            > "$work/build-$svc.log" 2>&1 || build_failed=1
+    elif [ "$svc" = "proxy" ]; then
+        # WP EG-1 (ADR-0011), round-2 review B4: this WAS missing entirely --
+        # deploy/README.md claimed this script "builds every image including
+        # vault-proxy" while this loop only ever built core/api/dns, so a real
+        # Dockerfile break here (e.g. Alpine dropping the pinned tinyproxy
+        # version) was never caught here, and step 6l further down would have
+        # gone on to test whatever STALE `steamvault/vault-proxy:$TAG` image
+        # happened to already exist locally, silently. deploy/proxy/ is its
+        # own build context (not $repo_root/proxy, which does not exist --
+        # this service's Dockerfile lives under deploy/, unlike the three
+        # components above which each own a repo-root-level directory).
+        docker build -t "steamvault/vault-proxy:$TAG" "$repo_root/deploy/proxy" \
             > "$work/build-$svc.log" 2>&1 || build_failed=1
     else
         docker build -t "steamvault/vault-$svc:$TAG" "$repo_root/$svc" \
@@ -170,7 +183,7 @@ step "2.sizes  Built image sizes"
 run "docker images --filter reference='steamvault/*' --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.ID}}'"
 
 step "2.pins  Base image pins actually used (tag + digest)"
-run "grep -h '^FROM' '$repo_root/core/Dockerfile' '$repo_root/api/Dockerfile' '$repo_root/dns/Dockerfile'"
+run "grep -h '^FROM' '$repo_root/core/Dockerfile' '$repo_root/api/Dockerfile' '$repo_root/deploy/proxy/Dockerfile' '$repo_root/dns/Dockerfile'"
 
 step "2.sp  SteamPrefill binary in the vault-api image"
 say 'Checked by inspection only. This work package deliberately does NOT execute'
@@ -316,6 +329,12 @@ core_block=$(printf '%s\n' "$rendered_default" | awk '/^  vault-core:/{f=1;next}
 api_block=$(printf '%s\n' "$rendered_default" | awk '/^  vault-api:/{f=1;next} f && (/^  [A-Za-z0-9_-]+:/ || /^[A-Za-z]/){exit} f')
 # WP S-2 (ADR-0012): the runner's own block, same isolation logic.
 runner_block=$(printf '%s\n' "$rendered_default" | awk '/^  vault-runner:/{f=1;next} f && (/^  [A-Za-z0-9_-]+:/ || /^[A-Za-z]/){exit} f')
+# WP EG-1 (ADR-0011): the proxy's own block, same isolation logic.
+proxy_block=$(printf '%s\n' "$rendered_default" | awk '/^  vault-proxy:/{f=1;next} f && (/^  [A-Za-z0-9_-]+:/ || /^[A-Za-z]/){exit} f')
+# WP EG-1: the top-level `networks:` key itself (0-indent -- a DIFFERENT
+# thing from any service's own 4-indent `networks:` sub-key inside its own
+# block above; ends at the next 0-indent key, e.g. `volumes:`).
+networks_block=$(printf '%s\n' "$rendered_default" | awk '/^networks:/{f=1;next} f && /^[A-Za-z]/{exit} f')
 
 # Precondition, checked BEFORE the emptiness check below means anything:
 # `assert_eq "" "$event_log_val"` also reads as "pass" if VAULT_EVENT_LOG is
@@ -497,8 +516,75 @@ say 'sharing this host -- exactly the isolation this script promises in its own'
 say 'header comment.'
 assert_contains "$rendered_default" "container_name: $PROJECT-vault-runner" "rendered config's vault-runner container_name is project-scoped to $PROJECT"
 
+step "3k. WP EG-1 (ADR-0011): the egress-lock networks render, with the pinned subnet and masquerade disabled"
+say 'The top-level networks: block (distinct from any SERVICE'"'"'s own 4-indent'
+say 'networks: sub-key -- see this section'"'"'s own extraction comment) must'
+say 'show vault-lan with masquerade OFF and vault-egress as internal:true with'
+say 'the exact subnet deploy/proxy/tinyproxy.conf'"'"'s own Allow directive'
+say 'names (api/tests/test_eg1_egress_lock.py has the static, no-Docker-needed'
+say 'cross-file pin for that pairing; this is the Docker-rendered counterpart).'
+assert_contains "$networks_block" 'com.docker.network.bridge.enable_ip_masquerade: "false"' "rendered networks: vault-lan disables IP masquerade"
+assert_contains "$networks_block" "internal: true" "rendered networks: vault-egress is internal: true"
+assert_contains "$networks_block" "subnet: 172.30.238.0/24" "rendered networks: vault-egress pins the expected subnet"
+
+step "3l. WP EG-1: vault-api is attached to vault-lan + vault-egress ONLY -- never default"
+say 'The mutation this package'"'"'s own bar names by name: reattaching vault-api'
+say 'to a default-routed network must be caught, here, not just in'
+say 'api/tests/test_eg1_egress_lock.py (which parses the raw file, never'
+say 'through Docker -- this is the Docker-rendered cross-check of the same fact).'
+api_networks=$(printf '%s\n' "$api_block" | awk '/^    networks:/{f=1;next} f && !/^      /{exit} f' | sed -e 's/^      //' -e 's/:.*$//' | sort | tr '\n' ' ' | sed 's/ $//')
+say "    vault-api's rendered networks: $api_networks"
+assert_eq "vault-egress vault-lan" "$api_networks" "vault-api is attached to exactly {vault-egress, vault-lan} -- not default"
+
+step "3m. WP EG-1: vault-proxy exists, is dual-attached (vault-egress + default), and has no published ports"
+proxy_block_nonempty=$([ -n "$proxy_block" ] && echo yes || echo no)
+assert_eq "yes" "$proxy_block_nonempty" "vault-proxy: service block is present in the rendered config"
+proxy_networks=$(printf '%s\n' "$proxy_block" | awk '/^    networks:/{f=1;next} f && !/^      /{exit} f' | sed -e 's/^      //' -e 's/:.*$//' | sort | tr '\n' ' ' | sed 's/ $//')
+say "    vault-proxy's rendered networks: $proxy_networks"
+assert_eq "default vault-egress" "$proxy_networks" "vault-proxy is attached to exactly {default, vault-egress}"
+proxy_ports_count=$(printf '%s\n' "$proxy_block" | grep -c '^    ports:' || true)
+assert_eq "0" "${proxy_ports_count:-0}" "vault-proxy publishes no ports at all"
+
+step "3n. WP EG-1: vault-api's HTTP_PROXY/HTTPS_PROXY/NO_PROXY and VAULT_EGRESS_ALLOW render correctly"
+say 'Unlike every ${VAR:-default} key elsewhere in this script'"'"'s section 3,'
+say 'HTTP_PROXY/HTTPS_PROXY/NO_PROXY are deliberate LITERALS, not operator-'
+say 'configurable -- checked as exact values, not defaults-that-could-be-'
+say 'overridden.'
+for pair in \
+    "HTTP_PROXY:http://vault-proxy:8888" \
+    "HTTPS_PROXY:http://vault-proxy:8888" \
+    "NO_PROXY:127.0.0.1,localhost"
+do
+    key=${pair%%:*}
+    expected=${pair#*:}
+    count=$(printf '%s\n' "$api_block" | grep -c "^      ${key}:" || true)
+    assert_eq "1" "${count:-0}" "vault-api: $key key is present exactly once in the rendered block (precondition)"
+    val=$(printf '%s\n' "$api_block" | grep "^      ${key}:" | head -1 | sed -e "s/^[[:space:]]*${key}:[[:space:]]*//" -e 's/"//g')
+    assert_eq "$expected" "$val" "vault-api: $key renders as the expected literal"
+done
+egress_allow_key_count=$(printf '%s\n' "$api_block" | grep -c 'VAULT_EGRESS_ALLOW:')
+proxy_egress_allow_key_count=$(printf '%s\n' "$proxy_block" | grep -c 'VAULT_EGRESS_ALLOW:')
+assert_eq "1" "$egress_allow_key_count" "vault-api: VAULT_EGRESS_ALLOW key is present exactly once in the rendered block (precondition)"
+assert_eq "1" "$proxy_egress_allow_key_count" "vault-proxy: VAULT_EGRESS_ALLOW key is present exactly once in the rendered block (precondition)"
+egress_allow_val=$(printf '%s\n' "$api_block" | grep 'VAULT_EGRESS_ALLOW:' | head -1 | sed -e 's/^[[:space:]]*VAULT_EGRESS_ALLOW:[[:space:]]*//' -e 's/"//g')
+proxy_egress_allow_val=$(printf '%s\n' "$proxy_block" | grep 'VAULT_EGRESS_ALLOW:' | head -1 | sed -e 's/^[[:space:]]*VAULT_EGRESS_ALLOW:[[:space:]]*//' -e 's/"//g')
+assert_eq "" "$egress_allow_val" "vault-api: VAULT_EGRESS_ALLOW defaults empty (the test .env above sets none)"
+assert_eq "" "$proxy_egress_allow_val" "vault-proxy: VAULT_EGRESS_ALLOW defaults empty"
+
+step "3o. WP EG-1: vault-core, vault-runner and vault-dns are UNCHANGED -- still on the plain default network"
+say 'ADR-0011 states this explicitly as out of scope: vault-runner stays broad'
+say '(its egress is Steam'"'"'s CM/CDN fleet, not enumerable) and vault-core keeps'
+say 'its own, separate, already-narrower Host allowlist (ADR-0001 req 4).'
+dns_block=$(printf '%s\n' "$rendered_default" | awk '/^  vault-dns:/{f=1;next} f && (/^  [A-Za-z0-9_-]+:/ || /^[A-Za-z]/){exit} f')
+for pair in "vault-core:$core_block" "vault-runner:$runner_block" "vault-dns:$dns_block"; do
+    svc_name=${pair%%:*}
+    svc_block=${pair#*:}
+    nets=$(printf '%s\n' "$svc_block" | awk '/^    networks:/{f=1;next} f && !/^      /{exit} f' | sed -e 's/^      //' -e 's/:.*$//' | tr -d ' ')
+    assert_eq "default" "$nets" "$svc_name is attached to exactly {default} -- unaffected by the egress lock"
+done
+
 # =============================================================================
-section "4. Stack up (vault-core + vault-api + vault-runner)"
+section "4. Stack up (vault-core + vault-api + vault-proxy + vault-runner)"
 # =============================================================================
 run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' up -d"
 
@@ -986,6 +1072,270 @@ say '--- stop_grace_period actually renders on the container, not only in compos
 runner_stop_timeout=$(docker inspect --format '{{.Config.StopTimeout}}' "$runner_cid")
 say "    StopTimeout: ${runner_stop_timeout}s"
 assert_eq "20" "$runner_stop_timeout" "vault-runner's container has the 20s stop_grace_period applied (ADR-0012 §4 nitpick: teardown budget margin)"
+
+step "6l. Egress lock (WP EG-1, ADR-0011): the empirical checks"
+say 'Everything above proves the STATIC shape (section 3) or vault-runner'"'"'s'
+say 'own split (6k). This step is the live behavioural evidence for the lock'
+say 'itself: vault-proxy comes up healthy, an allowlisted request through it'
+say 'succeeds, a non-allowlisted one is REFUSED BY THE PROXY (403 Filtered,'
+say 'not a silent drop), a raw direct socket bypassing the proxy entirely'
+say 'cannot reach an ARBITRARY address (the measurement behind the'
+say 'NO_PROXY/LAN-webhook design decision, ADR-0011 §4 -- DNS resolution and'
+say 'the Docker host'"'"'s own reachable addresses are a DIFFERENT, deliberately'
+say 'open question, not tested here -- see docs/adr/0011-egress-lock.md'"'"'s'
+say '"What this ADR does NOT claim to defend against"), and -- the mutation'
+say 'bar this package was written against -- widening the allowlist and'
+say 're-running the EXACT SAME denied-host probe flips the result, proving'
+say 'the proxy checks in section 3 are not asserting a foregone conclusion.'
+say ''
+say 'The test .env from section 3 sets no VAULT_EGRESS_ALLOW at all (empty,'
+say 'the shipped default) and no VAULT_MANIFEST_ORACLE either -- so every'
+say 'check below that succeeds through the proxy without any allowlist entry'
+say 'is exercising the ONE baked-in host, api.steampowered.com (the Steam Web'
+say 'API relay), not an operator-configured one.'
+
+say ''
+say '--- vault-proxy healthcheck ---'
+i=0
+proxy_h=starting
+while [ "$i" -lt 15 ]; do
+    proxy_h=$(docker inspect --format '{{.State.Health.Status}}' "$(dc ps -q vault-proxy)" 2>/dev/null || echo starting)
+    [ "$proxy_h" = "healthy" ] && break
+    i=$((i + 1))
+    sleep 2
+done
+say "    vault-proxy health: $proxy_h"
+assert_eq "healthy" "$proxy_h" "vault-proxy container healthcheck"
+
+say ''
+say '--- env forwarding (round-2 review S4): HTTP_PROXY/HTTPS_PROXY/NO_PROXY actually reach the RUNNING vault-api process ---'
+say 'Same printenv-exit-code pattern as step 6i above (present-even-if-empty'
+say 'is exit 0; absent is exit 1) -- section 3n already proved these three'
+say 'render into `docker compose config` output; this is the stronger claim'
+say "that the value genuinely lands in the RUNNING container's environment,"
+say 'not merely in the rendered YAML.'
+run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' exec -T vault-api sh -c 'printenv HTTP_PROXY; echo \"exit=\$?\"; printenv HTTPS_PROXY; echo \"exit=\$?\"; printenv NO_PROXY; echo \"exit=\$?\"'"
+http_proxy_val=$(dc exec -T vault-api sh -c 'printenv HTTP_PROXY' | tr -d '\r')
+https_proxy_val=$(dc exec -T vault-api sh -c 'printenv HTTPS_PROXY' | tr -d '\r')
+no_proxy_val=$(dc exec -T vault-api sh -c 'printenv NO_PROXY' | tr -d '\r')
+assert_eq "http://vault-proxy:8888" "$http_proxy_val" "HTTP_PROXY reaches the running vault-api process with the expected literal value"
+assert_eq "http://vault-proxy:8888" "$https_proxy_val" "HTTPS_PROXY reaches the running vault-api process with the expected literal value"
+assert_eq "127.0.0.1,localhost" "$no_proxy_val" "NO_PROXY reaches the running vault-api process with the expected literal value (loopback only)"
+
+say ''
+say '--- the baked-in host is reachable through the proxy with an EMPTY VAULT_EGRESS_ALLOW ---'
+baked_probe=$(dc exec -T vault-api python3 <<'PYEOF'
+import urllib.request
+try:
+    r = urllib.request.urlopen(
+        "https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/", timeout=8
+    )
+    print("OK", r.status)
+except Exception as exc:  # noqa: BLE001 - this IS the diagnostic
+    print("FAIL", repr(exc))
+PYEOF
+)
+say "    $baked_probe"
+assert_contains "$baked_probe" "OK 200" "vault-api reaches api.steampowered.com through vault-proxy, no VAULT_EGRESS_ALLOW entry needed (the baked-in relay host)"
+
+say ''
+say '--- a NON-allowlisted host is refused BY THE PROXY (403 Filtered) -- the destination allowlist, actually enforced ---'
+denied_probe=$(dc exec -T vault-api python3 <<'PYEOF'
+import urllib.request
+try:
+    urllib.request.urlopen("http://example.com/", timeout=8)
+    print("UNEXPECTED SUCCESS")
+except OSError as exc:
+    print("DENIED", repr(exc))
+PYEOF
+)
+say "    $denied_probe"
+assert_contains "$denied_probe" "DENIED" "a non-allowlisted host is refused, not silently allowed through"
+assert_contains "$denied_probe" "403" "...specifically with a real 403 Filtered from tinyproxy itself, not a generic connection failure"
+
+say ''
+say '--- a raw direct socket, bypassing HTTP_PROXY entirely, reaches NO ARBITRARY DESTINATION -- the LAN-webhook design question, measured live ---'
+say 'This is what settled ADR-0011 S4: vault-lan has no working direct route'
+say 'to an ARBITRARY destination once masquerade is disabled, so there is no'
+say '"skip the proxy for local traffic" case for a genuinely separate device'
+say '-- a LAN target would fail exactly the same way a WAN one does here.'
+say 'This does NOT test DNS resolution or the Docker host'"'"'s own address --'
+say 'those are DIFFERENT, deliberately open channels, checked separately'
+say 'right below rather than left untested and implicitly assumed closed.'
+direct_probe=$(dc exec -T vault-api python3 <<'PYEOF'
+import socket
+import time
+
+start = time.time()
+try:
+    socket.create_connection(("1.1.1.1", 443), timeout=6)
+    print("UNEXPECTED: connected")
+except OSError as exc:
+    print("BLOCKED after %.1fs: %r" % (time.time() - start, exc))
+PYEOF
+)
+say "    $direct_probe"
+assert_contains "$direct_probe" "BLOCKED" "a raw direct socket from vault-api (no HTTP_PROXY involved at all) cannot reach an arbitrary real address"
+
+say ''
+say '--- round-2 review B1: DNS resolution from vault-api still reaches the real internet (expected, not a bug) ---'
+say 'A wildcard-DNS host that encodes its own answer in the query name --'
+say 'resolving it successfully is the exfiltration channel ADR-0011 names as'
+say 'open and NOT closed by this lock (Docker'"'"'s embedded resolver answers'
+say 'from the HOST'"'"'s own network namespace, not the container'"'"'s, so'
+say 'vault-lan'"'"'s disabled masquerade is irrelevant to it).'
+dns_probe=$(dc exec -T vault-api python3 <<'PYEOF'
+import socket
+try:
+    ip = socket.gethostbyname("7-7-7-7.sslip.io")
+    print("RESOLVED", ip)
+except OSError as exc:
+    print("FAILED", repr(exc))
+PYEOF
+)
+say "    $dns_probe"
+assert_contains "$dns_probe" "RESOLVED 7.7.7.7" "DNS resolution from inside vault-api reaches the real internet (the documented, open channel -- not a regression if this passes)"
+
+say ''
+say '--- round-2 review B2: the Docker host'"'"'s own address is directly reachable, bypassing HTTP_PROXY (expected, not a bug) ---'
+say 'A reply from the host to a container needs no masquerade, so this is'
+say 'unaffected by vault-lan'"'"'s disabled masquerade rule -- unlike the'
+say 'arbitrary-destination case above. This script'"'"'s OWN test .env binds'
+say 'every published port to 127.0.0.1 specifically (this file'"'"'s own header'
+say 'comment: kept off the LAN on purpose), which is not the address a'
+say 'container sees when it reaches for "the host" via its gateway -- so'
+say 'this starts a throwaway listener bound to every interface on the HOST'
+say '(not 127.0.0.1-scoped) to test the actual claim honestly, rather than'
+say 'reusing a port this run deliberately narrowed. vault-core'"'"'s own'
+say '0.0.0.0-by-default published port (deploy/compose.yaml'"'"'s own comment'
+say 'on it) is the real, shipped instance of the same fact -- this listener'
+say 'stands in for it only because THIS test run'"'"'s own isolation deliberately'
+say 'rebound that one port to loopback.'
+b2_port=18089
+( python3 -m http.server "$b2_port" --bind 0.0.0.0 >/dev/null 2>&1 & echo $! > "$work/b2-listener.pid" )
+sleep 1
+# Round-2 investigation, measured directly (not assumed): vault-api's
+# `eth0` is NOT reliably `vault-lan` -- Docker attached vault-egress as
+# eth0 and vault-lan as eth1 in the run this was found in, the REVERSE of
+# their order in compose.yaml's own `networks:` list under vault-api. A
+# first version of this check hardcoded "eth0" and got vault-egress's own
+# subnet line instead (no gateway field at all, `internal: true` -- Docker
+# does not even program a default route for it), which decoded to
+# "0.0.0.0" and produced a same-host-but-wrong-target
+# `ConnectionRefusedError`, not the timeout a genuinely blocked route would
+# give -- a false negative for this exact check, not a sign the underlying
+# B2 claim was wrong. Finding the interface with an ACTUAL gateway-bearing
+# default route (Destination all-zero AND Gateway non-zero) is robust
+# against that reordering, because vault-egress (`internal: true`) never
+# gets one, regardless of which `ethN` name Docker assigns it.
+host_reach_probe=$(dc exec -T vault-api python3 <<PYEOF
+import socket
+import struct
+
+gw_ip = None
+with open("/proc/net/route") as f:
+    for line in f.read().splitlines()[1:]:
+        fields = line.split()
+        if fields[1] == "00000000" and fields[2] != "00000000":
+            gw_ip = socket.inet_ntoa(struct.pack("<L", int(fields[2], 16)))
+            break
+try:
+    if gw_ip is None:
+        raise OSError("no gateway-bearing default route found in /proc/net/route")
+    s = socket.create_connection((gw_ip, $b2_port), timeout=6)
+    print("REACHED", gw_ip, "via gateway")
+    s.close()
+except OSError as exc:
+    print("FAILED", repr(exc))
+PYEOF
+)
+kill "$(cat "$work/b2-listener.pid")" >/dev/null 2>&1 || true
+say "    $host_reach_probe"
+assert_contains "$host_reach_probe" "REACHED" "the Docker host's own address is directly reachable from vault-api without HTTP_PROXY (the documented, open channel)"
+
+say ''
+say '--- mutation bar: widening VAULT_EGRESS_ALLOW actually changes what gets through ---'
+say 'Recreates vault-proxy with example.com ADDED to the allowlist, then'
+say 're-runs the EXACT SAME probe that was just denied above. If it still'
+say 'failed, the "DENIED" result above would not have been driven by the'
+say 'allowlist'"'"'s actual content -- this is what proves it was.'
+widened_env="$work/widened.env"
+cp "$env_file" "$widened_env"
+echo "VAULT_EGRESS_ALLOW=example.com" >> "$widened_env"
+run "docker compose --env-file '$widened_env' -f '$compose_file' -p '$PROJECT' up -d --force-recreate vault-proxy"
+i=0
+proxy_h2=starting
+while [ "$i" -lt 15 ]; do
+    proxy_h2=$(docker inspect --format '{{.State.Health.Status}}' "$(dc ps -q vault-proxy)" 2>/dev/null || echo starting)
+    [ "$proxy_h2" = "healthy" ] && break
+    i=$((i + 1))
+    sleep 2
+done
+widened_probe=$(dc exec -T vault-api python3 <<'PYEOF'
+import urllib.request
+try:
+    r = urllib.request.urlopen("http://example.com/", timeout=8)
+    print("OK", r.status)
+except OSError as exc:
+    print("STILL DENIED", repr(exc))
+PYEOF
+)
+say "    $widened_probe"
+assert_contains "$widened_probe" "OK" "the SAME host, previously denied, now succeeds once its host is in VAULT_EGRESS_ALLOW -- the allowlist is real, not decorative"
+
+say ''
+say '--- restoring the narrow allowlist (leaves the stack in the state every later step expects) ---'
+run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' up -d --force-recreate vault-proxy"
+i=0
+proxy_h3=starting
+while [ "$i" -lt 15 ]; do
+    proxy_h3=$(docker inspect --format '{{.State.Health.Status}}' "$(dc ps -q vault-proxy)" 2>/dev/null || echo starting)
+    [ "$proxy_h3" = "healthy" ] && break
+    i=$((i + 1))
+    sleep 2
+done
+assert_eq "healthy" "$proxy_h3" "vault-proxy is healthy again after being restored to the narrow (empty) allowlist"
+restored_probe=$(dc exec -T vault-api python3 <<'PYEOF'
+import urllib.request
+try:
+    urllib.request.urlopen("http://example.com/", timeout=8)
+    print("UNEXPECTED SUCCESS")
+except OSError as exc:
+    print("DENIED", repr(exc))
+PYEOF
+)
+say "    $restored_probe"
+assert_contains "$restored_probe" "DENIED" "example.com is denied again after restoring the original (empty) allowlist"
+
+say ''
+say '--- mutation bar: dropping vault-proxy entirely breaks every outbound call, immediately ---'
+say 'The static case (the service block missing from compose.yaml) is'
+say 'api/tests/test_eg1_egress_lock.py::test_vault_proxy_service_exists'"'"'s'
+say 'job, run in CI with no Docker at all. This is the LIVE counterpart: with'
+say 'the CONTAINER stopped (compose.yaml itself untouched), HTTP_PROXY still'
+say 'names it by DNS, and that name now resolves to nothing.'
+run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' stop vault-proxy"
+dropped_probe=$(dc exec -T vault-api python3 <<'PYEOF'
+import urllib.request
+try:
+    urllib.request.urlopen("https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/", timeout=8)
+    print("UNEXPECTED SUCCESS")
+except OSError as exc:
+    print("FAILS", repr(exc))
+PYEOF
+)
+say "    $dropped_probe"
+assert_contains "$dropped_probe" "FAILS" "with vault-proxy stopped, even the baked-in-host call fails immediately -- there is no fallback path"
+run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' start vault-proxy"
+i=0
+proxy_h4=starting
+while [ "$i" -lt 15 ]; do
+    proxy_h4=$(docker inspect --format '{{.State.Health.Status}}' "$(dc ps -q vault-proxy)" 2>/dev/null || echo starting)
+    [ "$proxy_h4" = "healthy" ] && break
+    i=$((i + 1))
+    sleep 2
+done
+assert_eq "healthy" "$proxy_h4" "vault-proxy is healthy again after being restarted"
 
 # =============================================================================
 section "7. vault-dns (--profile dns)"

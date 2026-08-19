@@ -29,6 +29,90 @@ x-vault-logging: &vault-logging
     max-size: "${VAULT_LOG_MAX_SIZE:-10m}"
     max-file: "${VAULT_LOG_MAX_FILE:-5}"
 
+# ==============================================================================
+# THE EGRESS LOCK (WP EG-1, ADR-0011). READ THIS BEFORE ANYTHING ELSE BELOW.
+#
+# vault-api's own container has NO default route for an ARBITRARY outbound
+# TCP/UDP connection. Every line that makes that true (and that carves out
+# the one path it still has) is named explicitly here -- this comment IS the
+# audit surface, not a summary of it, so checking these claims means reading
+# these exact lines, not trusting this paragraph. Two things this does NOT
+# close are named at the end, deliberately, not omitted: read those too.
+#
+#   1. `networks:` below defines `vault-lan` (a bridge network with Docker's
+#      outbound NAT/masquerade rule turned OFF for it) and `vault-egress`
+#      (`internal: true` -- Docker refuses to route it anywhere outside
+#      itself at all, not even with masquerade on).
+#   2. vault-api's own `networks:` list (in its service block below) attaches
+#      it to EXACTLY those two networks -- no `default`, no third network.
+#      `vault-lan` still carries its published port (inbound keeps working;
+#      Docker's port-publish DNAT is independent of the masquerade rule
+#      `vault-lan` disables -- measured, deploy/README.md's "verify in five
+#      minutes" section), and a direct OUTBOUND connection to an ARBITRARY
+#      WAN or other-LAN-device address times out (masquerade is a blanket
+#      "leaving this bridge" rule with no destination-based exception -- see
+#      deploy/README.md for the measurement and why this answers the "what
+#      about a LAN-destined webhook" question the same way for both).
+#   3. `vault-egress` is shared with exactly one other container:
+#      `vault-proxy`, below. vault-api's `HTTP_PROXY`/`HTTPS_PROXY` env lines
+#      point at it BY NAME -- the only route this container has to anything
+#      beyond the LAN runs through those two lines, into that one container.
+#   4. `vault-proxy` is dual-attached: `vault-egress` (to talk to vault-api)
+#      and `default` (a normal, masquerading network -- its real route to
+#      Valve, the manifest oracle, or a webhook receiver, LAN or WAN). It
+#      refuses every destination not in its rendered filter file
+#      (`deploy/proxy/docker-entrypoint.sh`, built from `VAULT_EGRESS_ALLOW`
+#      plus one baked-in host) -- a CONNECT or GET to anything else gets a
+#      real `403 Filtered` from the proxy itself, not a silent drop.
+#
+# TWO CHANNELS SURVIVE THIS LOCK, MEASURED AND ACCEPTED, NOT OVERSIGHTS
+# (docs/adr/0011-egress-lock.md has the full argument for both):
+#   - DNS resolution from inside vault-api still reaches the real internet
+#     (Docker's embedded resolver answers from the HOST's own network
+#     namespace, not the container's -- vault-lan's masquerade-disable is
+#     irrelevant to it). A compromised process can exfiltrate data one DNS
+#     label at a time this way. No code change closes this without also
+#     removing vault-api's own name resolution.
+#   - The Docker host's own non-loopback address(es), and anything any
+#     container has published on 0.0.0.0 (vault-core:80 in this file),
+#     remain directly reachable, bypassing HTTP_PROXY entirely -- a reply
+#     from the host to a container needs no masquerade either way.
+#
+# What this does NOT lock down, by design (ADR-0011 has the full argument):
+# `vault-runner` (broad Steam CM/CDN egress is the entire reason the S-track
+# split it out of vault-api in the first place) and `vault-core` (its own,
+# separate, already-narrower Host-allowlist mechanism, ADR-0001 req 4) are
+# UNCHANGED by this block -- neither gets a `networks:` line here, so both
+# keep the plain, fully-routed `default` network they always had.
+# ==============================================================================
+
+networks:
+  # No masquerade: outbound packets sourced from a container on this network
+  # get NO NAT as they leave the bridge, so they carry an address nothing
+  # outside Docker can route a reply to -- a real connection attempt just
+  # times out (measured, WP EG-1: a direct socket to a public IP from a
+  # container on a network configured exactly like this one). Inbound stays
+  # unaffected: Docker's published-port DNAT is a completely separate
+  # iptables rule from the masquerade one this switch disables.
+  vault-lan:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+  # internal: true is Docker's own, stronger guarantee: no route out of this
+  # network exists AT ALL, to anything, regardless of masquerade -- verified
+  # directly (WP EG-1): even DNS resolution of an outside name fails from a
+  # container attached only here, not merely the eventual TCP connect. A
+  # fixed subnet (not Compose's auto-picked one) is pinned deliberately, so
+  # `deploy/proxy/tinyproxy.conf`'s own `Allow` directive (who may USE the
+  # proxy -- a different allowlist from the destination one) can name an
+  # exact, auditable CIDR instead of a guessed RFC1918 range.
+  vault-egress:
+    internal: true
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.30.238.0/24
+
 services:
 
   # ===========================================================================
@@ -270,6 +354,64 @@ services:
       # ever removed. Off (read-write) by default, matching config.py's own
       # default.
       VAULT_SETTINGS_READONLY: ${VAULT_SETTINGS_READONLY:-false}
+      # --- WP EG-1 (ADR-0011): the egress lock. See the big banner comment
+      # above the top-level `networks:` block for the full mechanism; these
+      # four lines are that mechanism's vault-api-side half. ---
+      #
+      # vault-api's own outbound-HTTP code (steam_relay.py, oracle.py,
+      # webhooks.py) makes ZERO code changes for this: all three build their
+      # urllib opener from `urllib.request.build_opener(SomeRedirectHandler)`
+      # or call `urllib.request.urlopen` directly, neither of which
+      # overrides the DEFAULT `ProxyHandler` build_opener always adds --
+      # that handler reads exactly these two variables (verified, WP EG-1).
+      HTTP_PROXY: http://vault-proxy:8888
+      HTTPS_PROXY: http://vault-proxy:8888
+      # ONLY loopback -- not operator-configurable, and NOT a place to list
+      # LAN webhook receivers "to skip the proxy for local traffic": measured
+      # (WP EG-1) that vault-api's own network (`vault-lan`, no masquerade)
+      # has no working direct route to an ARBITRARY WAN or other-LAN-device
+      # address once attached the way this file attaches it, because Docker's
+      # masquerade rule is a blanket "leaving this bridge" rule with no
+      # destination-based exception. TWO narrow, named exceptions remain and
+      # are documented as accepted open channels (ADR-0011 "does not defend
+      # against", .env.example, deploy/README.md "Two channels this does NOT
+      # close"): the DOCKER HOST's own address (replies need no masquerade,
+      # so host-bound listeners incl. published ports stay reachable) and DNS
+      # resolution (Docker's resolver forwards from the host namespace).
+      # Neither is a reason to list a webhook host here: adding a LAN host to
+      # NO_PROXY would not make it reachable directly, it would only stop it
+      # being reachable through the proxy too -- see deploy/README.md
+      # "verify in five minutes" for the measurement and the full argument,
+      # and its own note on what this means for the webhook feature
+      # specifically ("if your webhook stops firing after this update, that
+      # is the lock working" -- add its host to VAULT_EGRESS_ALLOW instead).
+      #
+      # 127.0.0.1/localhost ARE excluded, and this is not the same class of
+      # exception as a LAN host would be: a request to 127.0.0.1 can only
+      # ever reach a listener inside THIS SAME container's own network
+      # namespace, never anything vault-egress/vault-lan would otherwise
+      # block -- excluding it costs nothing security-wise. It is also not
+      # optional in practice: measured directly (WP EG-1) -- api/Dockerfile's
+      # own HEALTHCHECK (`urlopen('http://127.0.0.1:8080/v1/health')`) is
+      # itself a plain urllib call from inside vault-api, and with NO_PROXY
+      # empty it was ALSO routed through HTTP_PROXY -- tinyproxy correctly
+      # filtered "127.0.0.1" as an un-allowlisted host (403 Filtered), which
+      # made the container FAIL ITS OWN HEALTHCHECK forever
+      # ("FailingStreak" climbing, `docker inspect`'s Health.Log showing the
+      # 403 verbatim) -- not a hypothetical, this is what a first, naive
+      # `NO_PROXY: ""` actually did the first time this was run end to end
+      # against a real container.
+      NO_PROXY: "127.0.0.1,localhost"
+      # The proxy's own allowlist of extra hosts, forwarded here too (not
+      # only to vault-proxy below) so vault_api/config.py's own startup
+      # check can cross-reference it against VAULT_MANIFEST_ORACLE: turning
+      # the oracle on with its host missing from this list refuses to boot,
+      # rather than booting clean and then failing every oracle query with a
+      # filtered-403 forever. Empty by default -- the lock ships default-on
+      # with an empty allowlist, not a wide-open one (the two documented,
+      # real cases needing an entry are the manifest oracle's host, and any
+      # webhook receiver -- deploy/.env.example has the full explanation).
+      VAULT_EGRESS_ALLOW: ${VAULT_EGRESS_ALLOW:-}
       # VAULT_DB_PATH, VAULT_CACHE_ROOT, VAULT_STEAMPREFILL_PATH and
       # VAULT_WEB_DIR are baked into the image (they describe the image's own
       # layout, not a deployment choice) -- see api/Dockerfile. VAULT_NAME,
@@ -366,6 +508,17 @@ services:
       # (that binary now runs in vault-runner, but the same fact applies
       # there -- see this same volume on that service below).
       - vault-steamprefill-home:/opt/steamprefill/home
+    networks:
+      # WP EG-1 (ADR-0011). See the banner comment above the top-level
+      # `networks:` block for the full mechanism -- in short, `default` is
+      # DELIBERATELY ABSENT from this list: vault-api never talks to
+      # vault-core, vault-runner or vault-dns over the network at all (every
+      # cross-container fact it needs comes from a shared VOLUME --
+      # vault-core's event log, the sqlite jobs table -- never a socket), so
+      # dropping `default` costs it nothing and is exactly what makes the
+      # lock real rather than cosmetic.
+      - vault-lan
+      - vault-egress
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -579,6 +732,54 @@ services:
     # than by a probe with nothing meaningful to ask over HTTP.
     healthcheck:
       disable: true
+    logging: *vault-logging
+
+  # ===========================================================================
+  # vault-proxy -- the egress-lock allowlist proxy (WP EG-1, ADR-0011). See
+  # the big banner comment above the top-level `networks:` block for the
+  # full mechanism this service is one half of; deploy/proxy/Dockerfile,
+  # tinyproxy.conf and docker-entrypoint.sh have the implementation detail.
+  # Started unconditionally, like every other service here (no profile, no
+  # lock-toggle env -- the operator's decision, ADR-0011: default-on, not an
+  # opt-in profile).
+  # ===========================================================================
+  vault-proxy:
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile
+    image: steamvault/vault-proxy:${VAULT_IMAGE_TAG:-0.1.0}
+    restart: unless-stopped
+    environment:
+      # The ONLY operator-facing knob this service has. Rendered into a
+      # tinyproxy filter file at container start (docker-entrypoint.sh) --
+      # see that script's own comment for the one host baked in ahead of
+      # this value, and deploy/.env.example for the two real cases that
+      # need an entry here (the manifest oracle's host, webhook receivers).
+      # Same variable, same value, as vault-api's copy above -- vault-api
+      # cross-checks it against VAULT_MANIFEST_ORACLE at its own boot
+      # (vault_api/config.py), which is a reason for that copy to exist,
+      # not a reason this one could be dropped: this is the copy that
+      # actually enforces anything.
+      VAULT_EGRESS_ALLOW: ${VAULT_EGRESS_ALLOW:-}
+    networks:
+      # vault-egress: talks to vault-api (the only other container ever on
+      # this network -- `internal: true`, see the top-level banner comment).
+      # default: its own real route out, for the destinations its filter
+      # file actually allows -- an ordinary, masquerading bridge network,
+      # unaffected by anything vault-lan/vault-egress restrict.
+      - vault-egress
+      - default
+    # No `ports:` -- this process is reached only from vault-api, over
+    # vault-egress, and never needs to be reachable from the LAN or the
+    # host at all.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      # Never runs as root at any point (Dockerfile's `USER tinyproxy`, no
+      # privilege-drop dance the way vault-core's nginx has -- tinyproxy's
+      # listen port, 8888, is unprivileged) -- there is no capability this
+      # process ever legitimately holds.
+      - ALL
     logging: *vault-logging
 
   # ===========================================================================
