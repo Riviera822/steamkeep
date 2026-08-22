@@ -10,13 +10,20 @@ is: games actually installed on the gaming machines"). The target set was the
 agent reports and nothing else through Phase 3 — no popularity heuristic, no
 size budget, no manual include/exclude list. Installed *is* the prefill set.
 
-Phase 4d adds exactly one more source, opt-in and off by default: every app
-with cache content on disk, regardless of whether anything currently reports
-it installed (``VAULT_SWEEP_INCLUDE_CACHED`` / ``sweep_include_cached``,
-``compute_targets``'s ``include_cached`` parameter). See that function's
-docstring and api/README.md's "Sweep target set" section for the rationale,
-the cost model, and the auto-GC coupling this couples with
-(``cached_sweep_gc_risk``).
+Phase 4d adds exactly one more source: every app with cache content on disk,
+regardless of whether anything currently reports it installed
+(``VAULT_SWEEP_INCLUDE_CACHED`` / ``Settings.sweep_include_cached``,
+``compute_targets``'s ``include_cached`` parameter). Off by default through
+WP 4d; **on by default since WP SWEEP-1 / ADR-0014 (2026-08-22, operator
+decision)**, paired with auto-GC also defaulting to ``execute`` in the same
+change — see ``docs/adr/0014-sweep-cached-and-auto-gc-default-on.md``.
+``compute_targets``'s own ``include_cached`` keyword parameter still
+defaults to ``False`` (unchanged by ADR-0014, see its docstring below) —
+that is a separate, defensive default for direct/test callers that bypass
+``Settings`` entirely, not the value the shipped scheduler actually runs
+with. See that function's docstring and api/README.md's "Sweep target set"
+section for the rationale, the cost model, and the auto-GC coupling this
+couples with (``cached_sweep_gc_risk``).
 
 Why enqueuing everything is already the rate limiting
 -----------------------------------------------------
@@ -98,6 +105,7 @@ transition is the advisory ``next_eligible_at`` in ``GET /v1/schedule`` (see
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -313,8 +321,9 @@ class ExcludedClient:
 
 @dataclass(frozen=True)
 class TargetSet:
-    """The union of every fresh client's latest installed list, plus
-    (WP 4d, opt-in) every app with cache content on disk."""
+    """The union of every fresh client's latest installed list, plus (WP 4d;
+    on by default since WP SWEEP-1 / ADR-0014, 2026-08-22) every app with
+    cache content on disk."""
 
     appids: list[int]
     included_clients: list[str]
@@ -453,9 +462,19 @@ def compute_targets(
     source file.
 
     Through Phase 3, intersected with nothing else: plan A8 made the
-    installed list the whole criterion. ``include_cached`` (WP 4d,
-    ``Settings.sweep_include_cached``, default ``False``) is the one
-    exception, and it is deliberately ADDITIVE rather than a replacement:
+    installed list the whole criterion. ``include_cached`` — this keyword
+    parameter, which defaults to ``False`` here and is UNCHANGED by
+    ADR-0014 (a deliberate, separate, defensive default for direct/test
+    callers that bypass ``Settings`` entirely) — is the one exception, and
+    it is deliberately ADDITIVE rather than a replacement. The production
+    caller (``maybe_sweep`` below) always passes
+    ``include_cached=settings.sweep_include_cached`` explicitly, and THAT
+    field's own default is ``True`` since WP SWEEP-1 / ADR-0014
+    (2026-08-22) — see ``config.DEFAULT_SWEEP_INCLUDE_CACHED``. Do not
+    conflate the two: this keyword staying ``False`` is what keeps
+    "everything above this line is unchanged when the mode is off" testable
+    at all (see the BYTE-IDENTICAL note two bullets below), not a claim
+    about what the shipped scheduler actually runs with.
 
     * it is computed **independently** of the client-freshness logic above —
       a cached app is swept even if the client that installed it is
@@ -712,6 +731,115 @@ def next_eligible_at(
     return to_utc_iso(next_open(window, candidate_local))
 
 
+def format_utc_offset(moment: datetime) -> str:
+    """``UTC+02:00`` for ``moment``'s own UTC offset.
+
+    The one shared implementation — ``routers/schedule.py``'s
+    ``GET /v1/schedule`` (``server_timezone``) and
+    ``describe_resolved_schedule`` below (the startup log line, WP SWEEP-1
+    follow-up) both call this rather than each formatting an offset their
+    own way, which is exactly the "two call sites computing the same domain
+    predicate WILL diverge" shape docs/LEARNINGS.md already names.
+    """
+    offset = moment.utcoffset()
+    if offset is None:  # pragma: no cover - every caller here passes an aware moment
+        return "UTC"
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    total_minutes = abs(total_minutes)
+    return f"UTC{sign}{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+
+
+def describe_resolved_schedule(settings: Settings, now: datetime) -> str:
+    """One human-readable line naming the resolved window, timezone, and next
+    opening — logged once at scheduler startup (WP SWEEP-1 follow-up,
+    ADR-0014 §"Shipping an enabled nightly schedule").
+
+    **Why this exists at all.** ``VAULT_SCHEDULE_WINDOW`` is interpreted on
+    the container's own local wall clock, and a container's "local" time is
+    exactly whatever ``TZ`` resolves to — ``UTC`` if unset, which this
+    project ships as the honest, zone-agnostic default (deploy/compose.yaml's
+    own comment on ``TZ`` has the full argument against guessing a populated
+    zone). An operator who ships the default window without also setting
+    ``TZ`` gets a window that opens at a UTC hour, not their own local hour,
+    and nothing before this function made that fact visible anywhere except
+    by reading source. This line is the fix: it names the resolved zone and
+    offset, and the next opening in BOTH local and UTC time, so a mismatch is
+    something an operator NOTICES in the log rather than a silent surprise at
+    3 AM UTC.
+
+    **The requested TZ is named alongside the resolved one (review round 2,
+    blocker R2-B2a, measured in the real image).** A typo'd IANA name is the
+    single most likely operator error with a brand-new variable, and glibc
+    does NOT fail loudly on one: ``TZ=Europe/Berlinn`` (one extra letter)
+    falls back to a POSIX-style parse that silently resolves to a
+    plausible-LOOKING but wrong zone — measured directly, it resolves to a
+    zone named ``Europe`` at ``UTC+00:00``, not an error, not "Berlinn", and
+    not the intended Berlin offset either. Printing only the resolved side
+    (as an earlier version of this function did) would have shown
+    "resolved against Europe (UTC+00:00)" — plausible enough to not raise an
+    eyebrow. Printing the REQUESTED value (``os.environ.get("TZ")``)
+    alongside it is deliberately the fix that needs no timezone-database
+    lookup of its own: the mismatch between what was typed and what it
+    resolved to tells the truth on its own, and it is what makes this
+    monkeypatch-testable (see ``test_scheduler.py``) without needing a
+    container with a broken zone actually running.
+
+    Pure (no I/O beyond the one ``os.environ.get`` read, no clock of its
+    own, no thread) so it is unit-testable without starting the scheduler
+    thread — ``_tick`` below is the only production caller (moved there
+    from ``start()``, review round 2 blocker R2-B2b — see
+    ``PrefillScheduler._logged_resolved_schedule``'s own comment for why).
+    Deliberately uses ``schedule_window.next_open`` directly against ``now``
+    rather than ``next_eligible_at`` above: this is a boot-time sanity
+    display, not a promise, and does not need (or want) the
+    interval-since-last-sweep gate ``next_eligible_at`` layers on top — at
+    boot there usually is no meaningful "last sweep" yet, and this line's
+    only job is "does today's window/timezone make sense", not "when
+    exactly will the next sweep fire".
+    """
+    window = settings.schedule_window
+    offset_str = format_utc_offset(now)
+    zone_name = now.tzname() or "an unnamed zone"
+    requested_tz = os.environ.get("TZ")
+    tz_clause = (
+        f"TZ={requested_tz!r} resolved to {zone_name} ({offset_str})"
+        if requested_tz is not None
+        else f"TZ unset, resolved to {zone_name} ({offset_str})"
+    )
+    if window is None:
+        return (
+            f"scheduler: no VAULT_SCHEDULE_WINDOW configured -- the "
+            f"scheduler is DISABLED, no automatic sweep will run as of this "
+            f"tick's resolved settings. {tz_clause}. Auto-GC still applies "
+            f"immediately to manual and miss-triggered prefills regardless "
+            f"of this setting -- see api/README.md 'Auto-GC'."
+        )
+    next_local = next_open(window, now)
+    next_utc = next_local.astimezone(timezone.utc)
+    # N2 (should-fix, review round 2): `next_open` returns `now` UNCHANGED
+    # when the window is already open (its own docstring) -- worded plainly
+    # as "next opening <now>" that would technically be correct (the window
+    # IS open, right now counts as an opening) but reads oddly on a boot
+    # that happens to land inside the window. Special-cased rather than left
+    # to be misread as a bug in the log.
+    opening_clause = (
+        f"the window is OPEN right now ({next_local.isoformat()} local = "
+        f"{next_utc.isoformat()} UTC)"
+        if window.contains(now)
+        else (
+            f"next opening {next_local.isoformat()} local = "
+            f"{next_utc.isoformat()} UTC"
+        )
+    )
+    return (
+        f"scheduler: window {window.normalized} in effect as of this "
+        f"tick's resolved settings -- {tz_clause} -- {opening_clause}. If "
+        f"the requested/resolved TZ above don't match what you expect, "
+        f"check for a typo (see deploy/.env.example)."
+    )
+
+
 # --------------------------------------------------------------------------
 # WP 4d — the auto-GC coupling, stated honestly
 # --------------------------------------------------------------------------
@@ -845,6 +973,22 @@ class PrefillScheduler:
         #: ``_tick``, i.e. only ever touched by this one thread, same as
         #: every other plain attribute on this class.
         self._warned_cached_sweep_gc_risk = False
+        #: WP SWEEP-1 follow-up (review round 2, blocker R2-B2b, measured
+        #: both directions): this used to be logged once, synchronously,
+        #: inside ``start()`` — against ``self._settings``, the boot-time
+        #: snapshot. That is wrong whenever a DB override (ADR-0009,
+        #: ``PATCH /v1/settings``) changes ``schedule_window`` relative to
+        #: what booted: measured with a DB-stored window and no env window,
+        #: the old line said "the scheduler is DISABLED, no automatic sweep
+        #: will run" while an unattended nightly sweep with executing GC was
+        #: in fact about to run on the very next tick — precisely backwards
+        #: for the one line this project offers as the reason unattended
+        #: deletion is acceptable (ADR-0014). Logged from ``_tick`` instead
+        #: (below), against ``effective`` (the SAME db>env>default
+        #: resolution every sweep decision already uses), on the first tick
+        #: only — mutated only from ``_tick``, same as
+        #: ``_warned_cached_sweep_gc_risk`` above.
+        self._logged_resolved_schedule = False
 
     # -- accessors ---------------------------------------------------------
 
@@ -897,6 +1041,16 @@ class PrefillScheduler:
     def start(self) -> None:
         if self._thread is not None:  # pragma: no cover - guarded by lifespan
             raise RuntimeError("scheduler already started")
+        # WP SWEEP-1 follow-up (ADR-0014 §"Shipping an enabled nightly
+        # schedule"): the resolved-schedule line used to be logged HERE,
+        # synchronously, against ``self._settings`` (the boot snapshot).
+        # Moved to ``_tick``'s first call instead (review round 2, blocker
+        # R2-B2b) — see ``self._logged_resolved_schedule``'s own comment in
+        # ``__init__`` for the measured failure mode that motivated the
+        # move. The first tick fires immediately once the thread starts
+        # (see the "tick immediately, then wait" comment in ``_run`` below),
+        # so this is not a behaviour change in WHEN the line appears, only
+        # in WHICH settings it is computed against.
         # daemon=True for the same reason as the worker: a hard shutdown must
         # never be able to wedge the interpreter.
         self._thread = threading.Thread(
@@ -977,6 +1131,23 @@ class PrefillScheduler:
                 "applied) for one cycle."
             )
             effective = self._settings
+
+        # WP SWEEP-1 follow-up (review round 2, blocker R2-B2b): the
+        # resolved-schedule line, logged against ``effective`` (DB-resolved,
+        # not the boot snapshot) on the FIRST tick only — see
+        # ``self._logged_resolved_schedule``'s own comment in ``__init__``
+        # for why this moved here from ``start()``. Its own try, same
+        # "never raises" contract as every other block in this method.
+        if not self._logged_resolved_schedule:
+            try:
+                logger.info("%s", describe_resolved_schedule(effective, now))
+            except Exception:
+                logger.exception(
+                    "Could not log the resolved-schedule line this tick; "
+                    "not fatal, retried next tick."
+                )
+            else:
+                self._logged_resolved_schedule = True
 
         # WP 4d: a config-risk warning, not a sweep — evaluated every tick
         # (cheap, no I/O) regardless of whether a sweep is actually due this

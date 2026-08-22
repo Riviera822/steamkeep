@@ -140,10 +140,11 @@ DEFAULT_SCHEDULE_CLIENT_STALE_DAYS = 7
 #: WP 3.12. ``VAULT_AUTO_GC`` — should a successful prefill that actually
 #: updated something queue a garbage-collection job for that app?
 #:
-#: ``off`` (the default) keeps GC entirely operator-driven, which is the safe
-#: shape for a feature that can delete files. ``dry-run`` queues a reporting-only
-#: GC job, so an operator can watch what automatic collection *would* reclaim
-#: before trusting it. ``execute`` queues a deleting one.
+#: ``off`` keeps GC entirely operator-driven, which was the safe shape WP 3.12
+#: shipped for a feature that can delete files. ``dry-run`` queues a
+#: reporting-only GC job, so an operator can watch what automatic collection
+#: *would* reclaim before trusting it. ``execute`` (**the default since
+#: WP SWEEP-1 / ADR-0014**) queues a deleting one.
 #:
 #: Deliberately a three-value string rather than a boolean: the dry-run rung is
 #: the whole point of an opt-in ladder for a destructive feature, and a boolean
@@ -154,31 +155,66 @@ AUTO_GC_DRY_RUN = "dry-run"
 AUTO_GC_EXECUTE = "execute"
 AUTO_GC_MODES = (AUTO_GC_OFF, AUTO_GC_DRY_RUN, AUTO_GC_EXECUTE)
 
-DEFAULT_AUTO_GC = AUTO_GC_OFF
+#: WP SWEEP-1 / ADR-0014 (operator decision, 2026-08-22): was ``AUTO_GC_OFF``
+#: through WP 3.12. Flipped to ``AUTO_GC_EXECUTE`` **together with**
+#: ``DEFAULT_SWEEP_INCLUDE_CACHED`` below, as one change, not two — see that
+#: constant's own comment for why splitting them is exactly the
+#: half-configuration ``scheduler.cached_sweep_gc_risk`` exists to warn about.
+#: The cost this used to protect against is real and unchanged: ``execute``
+#: deletes files, on every app whose prefill just updated something, with no
+#: further confirmation. It is accepted as the default now because pairing it
+#: with the cached-apps sweep (below) is the only way that sweep mode does not
+#: grow a vault's disk usage without bound — see docs/adr/0014-sweep-cached-
+#: and-auto-gc-default-on.md for the full argument, the upgrade impact on an
+#: existing install, and the exact two lines that restore the pre-ADR-0014
+#: behaviour (``VAULT_AUTO_GC=off`` and/or ``VAULT_SWEEP_INCLUDE_CACHED=false``
+#: in the environment, or the equivalent ``PATCH /v1/settings`` call — both
+#: keys stay ordinary, individually overridable settings, ADR-0009).
+DEFAULT_AUTO_GC = AUTO_GC_EXECUTE
 
 #: WP 4d (plan §7 Phase 4d, "Sweep target set — installed PLUS cached").
 #: ``VAULT_SWEEP_INCLUDE_CACHED`` — should ``scheduler.compute_targets`` widen
 #: its target set to every app with SOME cache content on disk, not only the
 #: union of installed apps from fresh agent reports?
 #:
-#: **Off by default, deliberately.** The installed-based set (plan A8) is
-#: "what somebody asked to have on their machine"; the cached set is "what is
-#: already sitting on this vault's disk" — a much larger, operator-unbounded
-#: set that spends bandwidth (checking) and, on real updates, disk (fresh
-#: chunks) on games nobody currently asked for. That must be an explicit
-#: operator opt-in, not a byte-for-byte-free upgrade to the existing sweep.
+#: **On by default since WP SWEEP-1 (ADR-0014, operator decision,
+#: 2026-08-22) — was off by default through WP 4d.** The cost that made WP 4d
+#: ship this off is real and has not gone away, and is worth stating exactly
+#: as it was then: the installed-based set (plan A8) is "what somebody asked
+#: to have on their machine"; the cached set is "what is already sitting on
+#: this vault's disk" — a much larger, operator-unbounded set that spends
+#: bandwidth (checking) and, on real updates, disk (fresh chunks) on games
+#: nobody currently asked for. WP 4d's own words were that turning this on
+#: "must be an explicit operator opt-in, not a byte-for-byte-free upgrade to
+#: the existing sweep" — that sentence was correct advice for a sweep mode
+#: shipped *without* a paired collector, which is exactly what changed.
 #:
-#: **Why turning it on is still cheap** (the reasoning that makes it worth
-#: having at all): a non-forced SteamPrefill run against an already-current
-#: app is a ~3 s no-op that transfers zero bytes (ADR-0006 decision 1, the
-#: same fact Phase 4c's manual-check feature rests on) — real traffic only
-#: happens for apps that actually have an update. See
+#: **Why the operator chose to accept that cost as the shipped default
+#: anyway, and why doing so is defensible rather than reckless:** this key
+#: does not move alone — ``DEFAULT_AUTO_GC`` above flips to
+#: ``AUTO_GC_EXECUTE`` in the same change, so every fresh chunk this mode's
+#: extra bandwidth spends on a game update has its superseded predecessor
+#: actually reclaimed, not merely reported on. Turning the sweep on without
+#: also turning on real collection is precisely the "keeps itself current
+#: straight into a full disk" condition ``scheduler.cached_sweep_gc_risk``
+#: names — pairing the two defaults is what keeps that condition from being
+#: the out-of-the-box experience. See docs/adr/0014-sweep-cached-and-auto-gc-
+#: default-on.md for the full pairing argument, the presented-twice cost
+#: this decision knowingly accepts, the upgrade impact on an existing
+#: install, and the opt-out (env or ``PATCH /v1/settings``, ADR-0009 — this
+#: key remains fully overridable both ways).
+#:
+#: **Why turning it on is still cheap** (the reasoning that made it worth
+#: having at all, unchanged since WP 4d): a non-forced SteamPrefill run
+#: against an already-current app is a ~3 s no-op that transfers zero bytes
+#: (ADR-0006 decision 1, the same fact Phase 4c's manual-check feature rests
+#: on) — real traffic only happens for apps that actually have an update. See
 #: ``scheduler.cached_appids``/``compute_targets`` for the mechanics and
 #: api/README.md's "Sweep target set" section for the full cost model and the
 #: auto-GC coupling (every kept-current game leaves its superseded chunks as
 #: fresh orphans — ``scheduler.cached_sweep_gc_risk`` names that condition and
 #: ``GET /v1/schedule`` surfaces it).
-DEFAULT_SWEEP_INCLUDE_CACHED = False
+DEFAULT_SWEEP_INCLUDE_CACHED = True
 
 
 # --------------------------------------------------------------------------
@@ -847,10 +883,19 @@ def parse_strict_float(raw: str) -> float:
 #: rtime_last_played -- as something a shared-household vault must not
 #: surface without an explicit opt-in: "playtime makes the UI judgemental
 #: ... off by default or dismissible at any time, no nagging, and no number
-#: that gets held up to somebody else." That is the same house style
-#: DEFAULT_SWEEP_INCLUDE_CACHED and the WP 3.11 event sweep already follow
-#: for every privacy/cost-sensitive switch in this file: ship off, let an
-#: operator who wants it read the README and turn it on. "The
+#: that gets held up to somebody else." That is the house style the WP 3.11
+#: event sweep already follows for every cost-sensitive switch that has no
+#: OTHER party's data at stake: ship off, let an operator who wants it read
+#: the README and turn it on. **`DEFAULT_SWEEP_INCLUDE_CACHED` above is no
+#: longer a same-direction example of that house style (WP SWEEP-1,
+#: ADR-0014) -- it now ships ON by default.** That is not a contradiction:
+#: the two settings differ in KIND, not just in value. Disk/bandwidth spent
+#: refreshing a cached game is a cost the OPERATOR who runs this vault pays
+#: and can see (disk usage, a log line); a moment of someone else's playtime
+#: surfaced without their knowledge is a cost a DIFFERENT person pays, who
+#: may never know it happened -- the failure-mode asymmetry the section
+#: banner above this constant explains at length is what keeps this one
+#: default at "off" while the sweep/auto-GC pair moved to "on". "The
 #: decision-support panel needs it" (docs/PROJECT_PLAN.md Phase 4h) is
 #: explicitly NOT treated as a sufficient reason to default this on --
 #: WP 4h.0's own brief asks for a stronger argument than that, and the
@@ -998,8 +1043,9 @@ class Settings:
     auto_gc: str = DEFAULT_AUTO_GC
     # WP 4d (plan §7 Phase 4d). Additive sweep target-set mode: every app with
     # SOME cache content on disk joins the installed-based union
-    # `scheduler.compute_targets` already sweeps. OFF by default — see
-    # DEFAULT_SWEEP_INCLUDE_CACHED above for the cost model and api/README.md
+    # `scheduler.compute_targets` already sweeps. ON by default since
+    # WP SWEEP-1 (ADR-0014) — see DEFAULT_SWEEP_INCLUDE_CACHED above for the
+    # cost model, the pairing with `auto_gc` below, and api/README.md
     # "Sweep target set" for the full write-up, including the auto-GC
     # coupling this setting deliberately does not hide.
     sweep_include_cached: bool = DEFAULT_SWEEP_INCLUDE_CACHED
@@ -1331,8 +1377,9 @@ class Settings:
                 "VAULT_SCHEDULE_CLIENT_STALE_DAYS", DEFAULT_SCHEDULE_CLIENT_STALE_DAYS
             ),
             auto_gc=_env_auto_gc(),
-            # WP 4d. Blank/unset = off, the safe default (see
-            # DEFAULT_SWEEP_INCLUDE_CACHED above for why).
+            # WP 4d / WP SWEEP-1 (ADR-0014). Blank/unset = on (see
+            # DEFAULT_SWEEP_INCLUDE_CACHED above for why the default flipped,
+            # and for how an operator opts back out).
             sweep_include_cached=_env_bool(
                 "VAULT_SWEEP_INCLUDE_CACHED", DEFAULT_SWEEP_INCLUDE_CACHED
             ),

@@ -39,14 +39,15 @@ router = APIRouter(dependencies=[Depends(require_api_key)], tags=["schedule"])
 
 
 def _format_offset(moment: datetime) -> str:
-    """``UTC+02:00`` for the server's current local offset."""
-    offset = moment.utcoffset()
-    if offset is None:  # pragma: no cover - the scheduler clock is always aware
-        return "UTC"
-    total_minutes = int(offset.total_seconds() // 60)
-    sign = "+" if total_minutes >= 0 else "-"
-    total_minutes = abs(total_minutes)
-    return f"UTC{sign}{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+    """``UTC+02:00`` for the server's current local offset.
+
+    WP SWEEP-1 follow-up: delegates to ``scheduler.format_utc_offset`` now
+    that a second caller (the scheduler's startup log line,
+    ``describe_resolved_schedule``) needs the identical computation — one
+    implementation, not two that could quietly diverge (docs/LEARNINGS.md
+    "two call sites computing the same domain predicate WILL diverge").
+    """
+    return scheduler_module.format_utc_offset(moment)
 
 
 class ScheduleOut(BaseModel):
@@ -81,7 +82,12 @@ class ScheduleOut(BaseModel):
     #: WP 4d. Effective value of ``sweep_include_cached``/
     #: ``VAULT_SWEEP_INCLUDE_CACHED`` — true iff the NEXT sweep will also
     #: target every app that holds content of its own on disk, not only the
-    #: installed union. Off by default; see api/README.md "Sweep target set".
+    #: installed union. On by default since WP SWEEP-1 / ADR-0014
+    #: (2026-08-22) — was off through WP 4d; see api/README.md "Sweep target
+    #: set". Meaningless unless a sweep actually runs at all, i.e. unless
+    #: ``enabled`` above is true (``VAULT_SCHEDULE_WINDOW`` configured) — this
+    #: field reports the value the flag WOULD apply with, not a promise a
+    #: sweep is happening.
     sweep_include_cached: bool
     #: WP 4d. True iff ``sweep_include_cached`` is on while ``VAULT_AUTO_GC``
     #: is anything OTHER than ``execute`` — the exact condition

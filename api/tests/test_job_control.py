@@ -1052,9 +1052,18 @@ def test_auto_gc_queues_a_gc_job_after_an_updating_prefill(
     assert queued[0]["gc_execute"] == expected_execute
 
 
-def test_auto_gc_off_is_the_default_and_queues_nothing(
+def test_auto_gc_off_queues_nothing_when_explicitly_configured(
     tmp_path: Path, bindir: Path, cache_root: Path
 ) -> None:
+    """Renamed (WP SWEEP-1, ADR-0014): this test's own former name claimed
+    ``off`` "is the default", which stopped being true when
+    ``DEFAULT_AUTO_GC`` flipped to ``AUTO_GC_EXECUTE`` (see
+    ``test_config.py::test_auto_gc_defaults_to_execute`` for that pin). The
+    behavioural claim this test actually exercises is unchanged and still
+    correct either way: ``run_one_prefill`` below passes ``auto_gc="off"``
+    EXPLICITLY, so nothing about this assertion ever depended on what the
+    default happens to be.
+    """
     settings, job = run_one_prefill(tmp_path, bindir, cache_root, auto_gc="off")
 
     assert job["status"] == "done"
@@ -1064,9 +1073,17 @@ def test_auto_gc_off_is_the_default_and_queues_nothing(
         assert gc_jobs_for(conn, 440) == []
     finally:
         conn.close()
+    # A SEPARATE pin from the one above: `Settings(...)` here deliberately
+    # omits `auto_gc=`, so this exercises the dataclass FIELD's own literal
+    # default (`auto_gc: str = DEFAULT_AUTO_GC`) -- a different code path
+    # from `Settings.from_env()`'s env-fallback pathway that
+    # `test_config.py::test_auto_gc_defaults_to_execute` pins. Two call
+    # sites deriving the same default are exactly the kind of pair that can
+    # quietly diverge (docs/LEARNINGS.md "Containers") -- keeping both pinned
+    # is deliberate, not redundant.
     assert Settings(
         vault_api_key="k", db_path="x", cache_root="y", log_level="INFO"
-    ).auto_gc == "off"
+    ).auto_gc == "execute"
 
 
 def test_auto_gc_does_not_fire_on_a_failed_run(

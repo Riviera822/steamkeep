@@ -29,6 +29,7 @@ from tests import stub_prefill
 from tests.conftest import TEST_API_KEY
 from vault_api import jobs as jobs_queue
 from vault_api import scheduler as scheduler_module
+from vault_api import settings_store
 from vault_api.config import Settings
 from vault_api.db import get_connection, init_db
 from vault_api.main import create_app
@@ -42,7 +43,9 @@ from vault_api.scheduler import (
     cached_sweep_gc_risk,
     claim_sweep,
     compute_targets,
+    describe_resolved_schedule,
     finish_sweep,
+    format_utc_offset,
     interval_elapsed,
     maybe_sweep,
     next_eligible_at,
@@ -335,7 +338,8 @@ def test_no_clients_means_no_targets(conn: sqlite3.Connection) -> None:
 
 
 # ==========================================================================
-# WP 4d — sweep target-set mode: installed PLUS cached (opt-in)
+# WP 4d — sweep target-set mode: installed PLUS cached (off by default
+# through WP 4d; on by default since WP SWEEP-1 / ADR-0014, 2026-08-22)
 # ==========================================================================
 
 
@@ -590,10 +594,41 @@ def test_maybe_sweep_enqueues_cached_apps_when_the_setting_is_on(
 def test_maybe_sweep_ignores_cache_content_when_the_setting_is_off(
     conn: sqlite3.Connection, tmp_path: Path
 ) -> None:
-    """Mutation pin on the wiring (not just compute_targets' own default):
-    make_settings' Settings never sets sweep_include_cached, so this relies
-    on Settings' OWN dataclass default -- flip DEFAULT_SWEEP_INCLUDE_CACHED
-    to True and this test dies too."""
+    """Explicit opt-out still behaves correctly (WP SWEEP-1, ADR-0014
+    changed which value is the DEFAULT, not what either value DOES): with
+    ``sweep_include_cached`` explicitly forced to ``False``, cache content
+    must still be invisible to the sweep. This used to rely on
+    ``make_settings``' ``Settings`` never setting the field at all (i.e. on
+    ``Settings``' own dataclass default happening to be ``False``) -- that
+    wiring-level mutation pin now lives on the ON side instead, see
+    ``test_maybe_sweep_includes_cache_content_by_default`` below, since the
+    dataclass default flipped to ``True``.
+    """
+    cache_root = tmp_path / "cache"
+    write_cached_depot(cache_root, 441)
+    upsert_mapping(conn, depotid=441, appid=440, name="TF2")
+    settings = replace(make_settings(tmp_path, cache_root=cache_root), sweep_include_cached=False)
+
+    result = maybe_sweep(conn, settings, local(10))
+
+    assert result.swept is True
+    assert result.targets == ()
+    assert jobs_queue.list_jobs(conn, 10) == []
+
+
+def test_maybe_sweep_includes_cache_content_by_default(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """Mutation pin on the wiring (WP SWEEP-1, ADR-0014; not just
+    ``compute_targets``' own keyword default, which stays ``False`` on
+    purpose for direct/test callers per ``scheduler.py``'s own docstring):
+    ``make_settings``' ``Settings`` never sets ``sweep_include_cached``, so
+    this relies on ``Settings``' OWN dataclass default -- flip
+    ``DEFAULT_SWEEP_INCLUDE_CACHED`` back to ``False`` and this test dies.
+    This is the mirror image of
+    ``test_maybe_sweep_ignores_cache_content_when_the_setting_is_off``
+    above, which used to be the wiring pin before the default flipped.
+    """
     cache_root = tmp_path / "cache"
     write_cached_depot(cache_root, 441)
     upsert_mapping(conn, depotid=441, appid=440, name="TF2")
@@ -602,8 +637,8 @@ def test_maybe_sweep_ignores_cache_content_when_the_setting_is_off(
     result = maybe_sweep(conn, settings, local(10))
 
     assert result.swept is True
-    assert result.targets == ()
-    assert jobs_queue.list_jobs(conn, 10) == []
+    assert result.targets == (440,)
+    assert result.cached_only_appids == (440,)
 
 
 def test_maybe_sweep_logs_the_cached_mode_even_when_it_adds_nothing(
@@ -657,6 +692,195 @@ def test_compute_targets_requires_a_real_cache_root_when_the_mode_is_on(
     # there is no usable default left to fall back on.
     with pytest.raises(ValueError, match="cache_root"):
         compute_targets(conn, local(10), stale_after_days=7, include_cached=True)
+
+
+# ==========================================================================
+# WP SWEEP-1 follow-up (ADR-0014 §"Shipping an enabled nightly schedule",
+# S3 review finding): the resolved-timezone startup log line.
+# ==========================================================================
+
+
+def test_format_utc_offset_positive_and_negative():
+    assert format_utc_offset(local(10)) == "UTC+02:00"  # local()'s fixed TZ
+    assert format_utc_offset(datetime(2026, 8, 6, 10, tzinfo=timezone.utc)) == "UTC+00:00"
+    west = timezone(timedelta(hours=-5, minutes=-30))
+    assert format_utc_offset(datetime(2026, 8, 6, 10, tzinfo=west)) == "UTC-05:30"
+
+
+def test_format_utc_offset_is_the_one_shared_implementation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Structural pin (docs/LEARNINGS.md "Testing discipline": byte-identity
+    today does not protect tomorrow) for the de-duplication claim in this
+    function's own docstring: monkeypatch it to a sentinel and assert BOTH
+    known callers -- `describe_resolved_schedule` below and
+    `routers.schedule._format_offset` -- return exactly that sentinel,
+    never a superset/subset or their own independently-computed answer. A
+    future edit that reintroduces a second, separately-maintained offset
+    formatter in either caller would pass every other test in this file
+    (both would still produce a CORRECT-looking string) and only this test
+    would notice the divergence.
+    """
+    import vault_api.routers.schedule as schedule_router
+
+    sentinel = "UTC+99:99-SENTINEL"
+    monkeypatch.setattr(scheduler_module, "format_utc_offset", lambda moment: sentinel)
+    monkeypatch.delenv("TZ", raising=False)
+
+    settings = Settings(
+        vault_api_key=TEST_API_KEY, db_path=":memory:", cache_root="./cache", log_level="INFO"
+    )
+    assert sentinel in describe_resolved_schedule(settings, local(10))
+    assert schedule_router._format_offset(local(10)) == sentinel
+
+
+def test_describe_resolved_schedule_reports_disabled_when_no_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TZ", raising=False)
+    settings = Settings(
+        vault_api_key=TEST_API_KEY, db_path=":memory:", cache_root="./cache", log_level="INFO"
+    )
+    line = describe_resolved_schedule(settings, local(10))
+    assert "DISABLED" in line
+    assert "no automatic sweep" in line
+    assert "UTC+02:00" in line
+    assert "Auto-GC still applies" in line
+    assert "TZ unset, resolved to" in line
+
+
+def test_describe_resolved_schedule_names_window_offset_and_both_next_openings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact mechanism ADR-0014's schedule-window section promises: an
+    operator who set nothing sees the window expressed against their
+    resolved offset, plus the next opening in BOTH local and UTC time, so a
+    TZ mismatch (this fixture uses a deliberately non-UTC +02:00 clock,
+    mirroring `local()`'s own fixed offset used throughout this file) is
+    visible in one log line rather than requiring the reader to do the math.
+    """
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    settings = Settings(
+        vault_api_key=TEST_API_KEY,
+        db_path=":memory:",
+        cache_root="./cache",
+        log_level="INFO",
+        schedule_window=parse_window("03:00-07:00"),
+    )
+    now = local(1)  # 01:00 local, before the window -> opens later TODAY
+    line = describe_resolved_schedule(settings, now)
+    assert "03:00-07:00" in line
+    assert "UTC+02:00" in line
+    assert "2026-08-06T03:00:00+02:00" in line  # next opening, LOCAL
+    assert "2026-08-06T01:00:00+00:00" in line  # the SAME instant, UTC
+    assert "TZ='Europe/Berlin' resolved to" in line
+    assert "check for a typo" in line
+
+
+def test_describe_resolved_schedule_names_a_typod_tz_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 2, blocker R2-B2a, measured in the real built image:
+    `TZ=Europe/Berlinn` (one extra letter) does NOT fail loudly -- glibc
+    falls back to a POSIX-style parse and silently resolves to a zone named
+    `Europe` at `UTC+00:00`, a plausible-looking wrong answer, not an error.
+    Printing only the resolved side would show "resolved against Europe
+    (UTC+00:00)" and nothing would look wrong. This test fixes the clock's
+    OWN tzinfo to the measured wrong answer (UTC+00:00, tzname "Europe") so
+    the assertion does not depend on this dev machine's own zoneinfo
+    database recognising the typo the same way glibc does -- what matters
+    is that the REQUESTED value ('Europe/Berlinn') and the RESOLVED one
+    ('Europe') both appear side by side, so the mismatch is visible without
+    needing a timezone-database lookup of its own.
+    """
+    monkeypatch.setenv("TZ", "Europe/Berlinn")
+    typo_zone = timezone(timedelta(0), name="Europe")  # the measured glibc fallback
+    settings = Settings(
+        vault_api_key=TEST_API_KEY, db_path=":memory:", cache_root="./cache", log_level="INFO"
+    )
+    now = datetime(2026, 8, 6, 10, tzinfo=typo_zone)
+    line = describe_resolved_schedule(settings, now)
+    assert "TZ='Europe/Berlinn' resolved to Europe (UTC+00:00)" in line
+
+
+def test_describe_resolved_schedule_says_open_right_now_inside_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N2 (should-fix, review round 2): `next_open` returns `now` UNCHANGED
+    when already inside the window, which read oddly worded as "next
+    opening <now>" (technically true, but not what "next" suggests). A boot
+    landing inside the window must say the window is open, not something
+    that reads like a stuck clock.
+    """
+    monkeypatch.delenv("TZ", raising=False)
+    settings = Settings(
+        vault_api_key=TEST_API_KEY,
+        db_path=":memory:",
+        cache_root="./cache",
+        log_level="INFO",
+        schedule_window=parse_window("03:00-07:00"),
+    )
+    now = local(5)  # 05:00 local -- INSIDE 03:00-07:00
+    line = describe_resolved_schedule(settings, now)
+    assert "OPEN right now" in line
+    assert "next opening" not in line
+
+
+def test_prefill_scheduler_start_logs_the_resolved_schedule_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Integration-level pin for the wiring, not just the pure function
+    above: a real `PrefillScheduler` must emit the line, even with no window
+    configured (S3: "the scheduler is disabled" must be a visible fact too,
+    not silence indistinguishable from "still booting").
+
+    Review round 2, blocker R2-B2b: the line moved from `start()` (logged
+    synchronously against the boot snapshot) to the first `_tick()` call
+    (logged against `effective_settings`, asynchronously, on the scheduler's
+    own thread) -- so this test now calls `stop()` (which joins the thread)
+    BEFORE inspecting `caplog`, which is what guarantees the first tick has
+    actually run by the time the assertion checks it, rather than racing a
+    background thread.
+    """
+    settings = make_settings(tmp_path, window=None)
+    init_db(settings.db_path)
+    scheduler = PrefillScheduler(settings, clock=lambda: local(10))
+    with caplog.at_level("INFO", logger=scheduler_module.__name__):
+        scheduler.start()
+        scheduler.stop()
+        matches = [r for r in caplog.records if "no VAULT_SCHEDULE_WINDOW" in r.getMessage()]
+        assert len(matches) == 1
+
+
+def test_prefill_scheduler_logs_a_db_override_window_not_disabled(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review round 2, blocker R2-B2b, the SERIOUS direction measured: with
+    no env window but a DB-stored override setting one (ADR-0009, exactly
+    what `PATCH /v1/settings` produces), the OLD (`start()`-based) line said
+    "the scheduler is DISABLED, no automatic sweep will run" while an
+    unattended nightly sweep with executing GC was in fact about to run on
+    the very next tick -- backwards, for the one line ADR-0014 offers as
+    the reason unattended deletion is acceptable. Logging against
+    `effective_settings` (DB-resolved) on the first tick, as fixed, must
+    name the DB-stored window, not report DISABLED.
+    """
+    settings = make_settings(tmp_path, window=None)
+    init_db(settings.db_path)
+    conn = get_connection(settings.db_path)
+    try:
+        settings_store.set_override(conn, "schedule_window", "03:00-07:00")
+    finally:
+        conn.close()
+
+    scheduler = PrefillScheduler(settings, clock=lambda: local(1))
+    with caplog.at_level("INFO", logger=scheduler_module.__name__):
+        scheduler.start()
+        scheduler.stop()
+        messages = [r.getMessage() for r in caplog.records if "scheduler:" in r.getMessage()]
+
+    assert any("03:00-07:00" in m for m in messages), messages
+    assert not any("DISABLED" in m for m in messages), messages
 
 
 # ==========================================================================
@@ -1004,7 +1228,12 @@ def test_schedule_endpoint_reports_config_and_last_sweep(tmp_path: Path) -> None
         "last_sweep_targets": 2,
         "last_sweep_enqueued": 2,
         "next_eligible_at": utc_iso(13),
-        "sweep_include_cached": False,
+        # WP SWEEP-1 (ADR-0014): `make_settings` does not set
+        # `sweep_include_cached`/`auto_gc` explicitly, so this reports
+        # `Settings`' own dataclass defaults -- `True` /
+        # `auto_gc_executes` respectively since the flip, hence
+        # `sweep_cached_gc_risk` (on AND NOT executing) stays `False`.
+        "sweep_include_cached": True,
         "sweep_cached_gc_risk": False,
     }
 

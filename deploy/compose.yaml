@@ -221,6 +221,36 @@ services:
       # without it, and vault-api itself refuses to boot without it.
       VAULT_API_KEY: ${VAULT_API_KEY:?set VAULT_API_KEY in deploy/.env (see .env.example)}
       VAULT_LOG_LEVEL: ${VAULT_LOG_LEVEL:-INFO}
+      # WP SWEEP-1 follow-up (ADR-0014 §"Shipping an enabled nightly
+      # schedule"): the scheduler's window (below) is interpreted on the
+      # CONTAINER's own local wall clock (vault_api/scheduler.py's
+      # `local_now()`), and a container's local time IS its `TZ` -- with none
+      # set, that is UTC. Deliberately `UTC`, not a guessed populated zone
+      # (e.g. `Europe/Berlin`): this is a public project shipped to operators
+      # in every timezone, and a non-UTC guess would be silently wrong for
+      # most of them. `UTC` is the one value that is honestly correct for
+      # everyone by construction (the offset is always +00:00), at the cost
+      # of the shipped 03:00-07:00 window (below) not actually landing at
+      # 3 AM local for an operator who never sets this. vault-api logs the
+      # resolved offset/zone and the next window opening in both local and
+      # UTC time once at startup specifically so a wrong TZ is visible, not
+      # silent -- see PrefillScheduler.start()'s own log line and
+      # deploy/.env.example's TZ entry for the filled-in example. Measured in
+      # the built image (python:3.13.14-slim-trixie ships tzdata): unset ->
+      # `date` prints UTC; `TZ=Europe/Berlin` -> correct, DST-aware local
+      # time. Also forwarded to vault-runner below, for log-timestamp
+      # consistency only (it has no scheduling logic of its own).
+      #
+      # DELIBERATELY KEPT AS THE COLON FORM (review round 2, R2-B1's
+      # decision point, considered and NOT changed): unlike
+      # VAULT_SCHEDULE_WINDOW below, an explicitly blank TZ and this
+      # variable's own default (UTC) are not two different states -- POSIX
+      # `tzset()` treats an empty TZ as UTC too, so `${TZ:-UTC}` substituting
+      # the literal string for a blank value changes nothing observable:
+      # both paths land on UTC. There is no "blank means something else"
+      # claim to protect here the way there was for the window, so the
+      # simpler, more common `:-` form stays.
+      TZ: ${TZ:-UTC}
       VAULT_PREFILL_TIMEOUT_SECONDS: ${VAULT_PREFILL_TIMEOUT_SECONDS:-14400}
       VAULT_WORKER_POLL_SECONDS: ${VAULT_WORKER_POLL_SECONDS:-1.0}
       # WP S-2 (ADR-0012): the api-side half of the runner split's mode
@@ -258,12 +288,65 @@ services:
       VAULT_RUNNER_LEASE_TIMEOUT_SECONDS: ${VAULT_RUNNER_LEASE_TIMEOUT_SECONDS:-30.0}
       VAULT_SIZE_CACHE_TTL: ${VAULT_SIZE_CACHE_TTL:-60.0}
       VAULT_AGENT_REPORT_KEEP: ${VAULT_AGENT_REPORT_KEEP:-20}
+      # WP SWEEP-1 follow-up (ADR-0014 §"Shipping an enabled nightly
+      # schedule", operator decision after the S3 review finding: the
+      # cached-sweep/auto-GC pairing above needs the scheduler actually
+      # RUNNING to mean anything, and no version of this file had ever
+      # forwarded a window before). `03:00-07:00` is a SUGGESTED default, not
+      # a claim about any particular operator's actual quiet hours -- it is
+      # in the container's `TZ` above (UTC unless you set it), so read this
+      # together with that variable. An existing deployment that already set
+      # its own VAULT_SCHEDULE_WINDOW (env or `PATCH /v1/settings`) is
+      # UNCHANGED by this line -- the substitution below only resolves for
+      # an UNSET variable.
+      #
+      # DELIBERATELY THE NO-COLON FORM (review round 2, blocker R2-B1,
+      # measured): `${VAR:-default}` (a colon) substitutes the default for
+      # BOTH unset AND an explicitly blank value -- measured directly, a
+      # `.env` containing `VAULT_SCHEDULE_WINDOW=` still rendered
+      # `03:00-07:00` under that form, which made "set it blank to disable"
+      # a documented lie: no `.env` expression of "disabled" existed at all.
+      # `${VAR-default}` (no colon) only substitutes for UNSET; an
+      # explicitly blank value passes through as `""`, which
+      # `config.Settings.from_env` already treats as "scheduler disabled" --
+      # the config-parsing side of this was always correct, only the
+      # Compose-substitution side was wrong. Blank an explicitly-set
+      # VAULT_SCHEDULE_WINDOW= to restore the pre-2026-08-22 disabled
+      # scheduler. Also still DB-overridable at runtime via
+      # `PATCH /v1/settings` (ADR-0009, applies "next_sweep") exactly as
+      # before -- this line only changes what an operator who touches
+      # neither gets.
+      VAULT_SCHEDULE_WINDOW: ${VAULT_SCHEDULE_WINDOW-03:00-07:00}
       # Manifest-based GC (WP 3.8b/3.12, api/README.md "The recently-stored
       # grace window" / "Auto-GC"). Defaults match vault-api's own built-in
-      # defaults byte-for-byte, so a deployment that never touches either
-      # variable in .env sees identical behaviour to today.
+      # defaults byte-for-byte -- WP SWEEP-1 (ADR-0014, operator decision
+      # 2026-08-22) flipped VAULT_AUTO_GC's OWN default from `off` to
+      # `execute`, paired with VAULT_SWEEP_INCLUDE_CACHED below also flipping
+      # to `true`, so this line's default changed WITH it, not independently
+      # of it -- see docs/adr/0014-sweep-cached-and-auto-gc-default-on.md for
+      # the pairing argument and the real upgrade-behaviour-change this is on
+      # an existing deployment that never set either variable. Set either
+      # line back to its pre-ADR-0014 value (`off` / `false`) to restore the
+      # old behaviour.
       VAULT_GC_GRACE_DAYS: ${VAULT_GC_GRACE_DAYS:-14}
-      VAULT_AUTO_GC: ${VAULT_AUTO_GC:-off}
+      VAULT_AUTO_GC: ${VAULT_AUTO_GC:-execute}
+      # WP SWEEP-1 (ADR-0014). Through WP P1 (`da79aca`) this key was
+      # DELIBERATELY not forwarded here at all: it is DB-overridable at
+      # runtime via `PATCH /v1/settings` (ADR-0009), which was considered the
+      # one supported path to change it while its default was the safe `off`
+      # value. That reasoning inverted the moment the default became `true`
+      # (this ADR): an operator running the documented, supported
+      # `VAULT_SETTINGS_READONLY=1` headless/GitOps mode has `PATCH` refused
+      # with `403` and, without this line, no way to reach
+      # VAULT_SWEEP_INCLUDE_CACHED at all -- a real deployment shape that
+      # would have had no way to turn the now-default-on cached sweep back
+      # off. Forwarded here for exactly that reason, pinned by
+      # tests/test_p1_compose_env_defaults.py the same way every other
+      # forwarded key already is; PATCH /v1/settings remains the OTHER
+      # supported way to change it once the stack is up (unaffected by this
+      # line -- ADR-0009's db > env > default precedence still applies, this
+      # is only the ENV half of that chain).
+      VAULT_SWEEP_INCLUDE_CACHED: ${VAULT_SWEEP_INCLUDE_CACHED:-true}
       # How many archived manifest .bin files prune_archive keeps PER DEPOT
       # (WP 3.2, api/README.md "Manifest archive"). Default matches
       # config.py's own built-in default byte-for-byte.
@@ -415,15 +498,20 @@ services:
       # VAULT_DB_PATH, VAULT_CACHE_ROOT, VAULT_STEAMPREFILL_PATH and
       # VAULT_WEB_DIR are baked into the image (they describe the image's own
       # layout, not a deployment choice) -- see api/Dockerfile. VAULT_NAME,
-      # VAULT_SCHEDULE_WINDOW, VAULT_SCHEDULE_INTERVAL_MINUTES,
-      # VAULT_SCHEDULE_CLIENT_STALE_DAYS, VAULT_WEBHOOK_URL and
-      # VAULT_WEBHOOK_EVENTS are deliberately NOT forwarded here, for a
-      # different reason than VAULT_SETTINGS_READONLY above: they are
-      # DB-overridable at runtime via PATCH /v1/settings (ADR-0009) once the
-      # stack is up, which is the supported way to set them -- see
-      # api/README.md "Settings" and the web UI / app settings screens. That
-      # reasoning does not transfer to VAULT_SETTINGS_READONLY, which is why
-      # it is forwarded separately above instead of grouped with these.
+      # VAULT_SCHEDULE_INTERVAL_MINUTES, VAULT_SCHEDULE_CLIENT_STALE_DAYS,
+      # VAULT_WEBHOOK_URL and VAULT_WEBHOOK_EVENTS are deliberately NOT
+      # forwarded here, for a different reason than VAULT_SETTINGS_READONLY
+      # above: they are DB-overridable at runtime via PATCH /v1/settings
+      # (ADR-0009) once the stack is up, which is the supported way to set
+      # them -- see api/README.md "Settings" and the web UI / app settings
+      # screens. That reasoning does not transfer to VAULT_SETTINGS_READONLY,
+      # which is why it is forwarded separately above instead of grouped with
+      # these. VAULT_SCHEDULE_WINDOW used to be grouped with this list too
+      # (through the WP SWEEP-1 default flip above) -- it moved to its own
+      # forwarding line near VAULT_GC_GRACE_DAYS/VAULT_AUTO_GC once shipping
+      # a default window became necessary to make THAT pairing's sweep half
+      # actually run out of the box (ADR-0014 §"Shipping an enabled nightly
+      # schedule"); PATCH /v1/settings remains equally supported for it.
       # VAULT_MANIFEST_ARCHIVE_DIR and VAULT_STEAMPREFILL_CACHE_DIR are
       # genuine path overrides tied to volume layout, not general-purpose
       # tuning knobs -- left env-only and documented via the
@@ -589,6 +677,18 @@ services:
         condition: service_healthy
     environment:
       VAULT_LOG_LEVEL: ${VAULT_LOG_LEVEL:-INFO}
+      # WP SWEEP-1 follow-up. NOT because this container has any scheduling
+      # logic of its own -- it does not; the window is evaluated entirely on
+      # vault-api's side (ADR-0012 §1: prefill_runner.py never reads
+      # VAULT_SCHEDULE_WINDOW or anything scheduler-shaped). Forwarded here
+      # purely so this container's own log timestamps agree with vault-api's
+      # when an operator is reading both side by side (e.g. correlating a
+      # scheduled sweep's enqueue on vault-api with the SteamPrefill run it
+      # produced here) -- same value, same default, for the same reason
+      # VAULT_PREFILL_MODE/VAULT_PREFILL_TIMEOUT_SECONDS above are kept in
+      # sync across both services even though only one side's code branches
+      # on them.
+      TZ: ${TZ:-UTC}
       # See the long comment on this same key over on vault-api above --
       # this is the identical variable, required on BOTH services. Settings
       # here does not need require_api_key, but it does go through the same

@@ -739,8 +739,14 @@ class PrefillWorker:
 
         Three conditions, all required, and each one is a decision:
 
-        1. ``VAULT_AUTO_GC`` is ``dry-run`` or ``execute`` (default ``off`` —
-           a feature that can delete files does not switch itself on).
+        1. ``VAULT_AUTO_GC`` is ``dry-run`` or ``execute`` (``off`` through
+           WP 3.12 — "a feature that can delete files does not switch itself
+           on" — but ``execute`` since WP SWEEP-1 / ADR-0014, 2026-08-22,
+           paired with ``sweep_include_cached`` defaulting on in the same
+           change; see ``docs/adr/0014-sweep-cached-and-auto-gc-default-on.md``).
+           This applies regardless of whether the scheduler's own window is
+           configured — the trigger here is any successful, updating prefill
+           (manual, miss-triggered, or scheduled), not the sweep itself.
         2. This job reached the **successful** branch. A failed, aborted,
            unowned, cancelled or paused run tells us nothing about what is now
            orphaned, and collecting off the back of one would be acting on a

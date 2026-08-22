@@ -311,12 +311,13 @@ assert_contains "$noKey" "VAULT_API_KEY" "compose refuses to render without VAUL
 # produced). FIXED in WP 4g with a bounded wait-for-line loop -- see the
 # comment above step 5i in section 5 below for the mechanism and why a flat
 # `sleep` would not have been an honest fix.
-step "3e. Phase-3 knobs (VAULT_EVENT_LOG / VAULT_GC_GRACE_DAYS / VAULT_AUTO_GC): feature-off defaults pass through unchanged"
-say 'The test .env above (section 3) sets none of the three -- deploy/README.md'
+step "3e. Phase-3 knobs (VAULT_EVENT_LOG / VAULT_GC_GRACE_DAYS / VAULT_AUTO_GC) plus VAULT_SWEEP_INCLUDE_CACHED (WP SWEEP-1): defaults pass through unchanged"
+say 'The test .env above (section 3) sets none of these -- deploy/README.md'
 say '"Phase-3 knobs" -- so the rendered config must show vault-core with an empty'
 say 'event-log path and vault-api with the same defaults api/README.md documents'
-say '(grace window 14 days, auto-GC off). Quoting style varies across Compose'
-say 'versions, so values are compared with surrounding quotes stripped.'
+say '(grace window 14 days, auto-GC execute, sweep_include_cached true -- WP SWEEP-1'
+say '/ ADR-0014 flipped the latter two together, 2026-08-22). Quoting style varies'
+say 'across Compose versions, so values are compared with surrounding quotes stripped.'
 run "docker compose --env-file '$env_file' -f '$compose_file' -p '$PROJECT' --profile dns config"
 rendered_default=$(dc --profile dns config 2>/dev/null)
 # Extract just one service's block: from its "  <name>:" key line up to (but
@@ -353,7 +354,63 @@ grace_val=$(printf '%s\n' "$api_block" | grep 'VAULT_GC_GRACE_DAYS:' | head -1 |
 autogc_val=$(printf '%s\n' "$api_block" | grep 'VAULT_AUTO_GC:' | head -1 | sed -e 's/^[[:space:]]*VAULT_AUTO_GC:[[:space:]]*//' -e 's/"//g')
 assert_eq "" "$event_log_val"    "vault-core: VAULT_EVENT_LOG renders empty (feature off) by default"
 assert_eq "14" "$grace_val"      "vault-api: VAULT_GC_GRACE_DAYS default (14) passes through"
-assert_eq "off" "$autogc_val"    "vault-api: VAULT_AUTO_GC default (off) passes through"
+# WP SWEEP-1 (ADR-0014, operator decision 2026-08-22): VAULT_AUTO_GC's own
+# default flipped from "off" to "execute", PAIRED with
+# VAULT_SWEEP_INCLUDE_CACHED below also flipping to "true" -- see that ADR
+# for the pairing argument and docs/PROJECT_PLAN.md/README.md for the
+# upgrade-behaviour-change this represents on an existing deployment.
+assert_eq "execute" "$autogc_val" "vault-api: VAULT_AUTO_GC default (execute, WP SWEEP-1) passes through"
+
+# WP SWEEP-1 (ADR-0014). Newly forwarded here as of this package -- see
+# deploy/compose.yaml's own comment on this key for why (the
+# VAULT_SETTINGS_READONLY trap this closes: without this line, a
+# `VAULT_SETTINGS_READONLY=1` deployment would have had no way to turn the
+# now-default-on cached sweep back off at all). Same precondition-then-value
+# pattern as VAULT_EVENT_LOG_PATH below: presence is checked BEFORE the value,
+# or a deleted passthrough line would read as an unnoticed pass.
+sweep_include_cached_key_count=$(printf '%s\n' "$api_block" | grep -c 'VAULT_SWEEP_INCLUDE_CACHED:')
+assert_eq "1" "$sweep_include_cached_key_count" "vault-api: VAULT_SWEEP_INCLUDE_CACHED key is present exactly once in the rendered block (precondition; WP SWEEP-1 forwarding)"
+sweep_include_cached_val=$(printf '%s\n' "$api_block" | grep 'VAULT_SWEEP_INCLUDE_CACHED:' | head -1 | sed -e 's/^[[:space:]]*VAULT_SWEEP_INCLUDE_CACHED:[[:space:]]*//' -e 's/"//g')
+assert_eq "true" "$sweep_include_cached_val" "vault-api: VAULT_SWEEP_INCLUDE_CACHED default (true, WP SWEEP-1) passes through"
+
+# WP SWEEP-1 follow-up (ADR-0014 "Shipping an enabled nightly schedule", S3
+# review finding + operator decision): VAULT_SCHEDULE_WINDOW and TZ are what
+# make the sweep half of the pairing above actually run out of the box --
+# without a window, VAULT_SWEEP_INCLUDE_CACHED=true has no sweep to apply
+# itself to. Same precondition-then-value pattern as the keys above.
+schedule_window_key_count=$(printf '%s\n' "$api_block" | grep -c 'VAULT_SCHEDULE_WINDOW:')
+assert_eq "1" "$schedule_window_key_count" "vault-api: VAULT_SCHEDULE_WINDOW key is present exactly once in the rendered block (precondition; WP SWEEP-1 follow-up forwarding)"
+schedule_window_val=$(printf '%s\n' "$api_block" | grep 'VAULT_SCHEDULE_WINDOW:' | head -1 | sed -e 's/^[[:space:]]*VAULT_SCHEDULE_WINDOW:[[:space:]]*//' -e 's/"//g')
+assert_eq "03:00-07:00" "$schedule_window_val" "vault-api: VAULT_SCHEDULE_WINDOW default (03:00-07:00, WP SWEEP-1 follow-up) passes through"
+
+tz_key_count=$(printf '%s\n' "$api_block" | grep -c '^[[:space:]]*TZ:')
+assert_eq "1" "$tz_key_count" "vault-api: TZ key is present exactly once in the rendered block (precondition; WP SWEEP-1 follow-up forwarding)"
+tz_val=$(printf '%s\n' "$api_block" | grep '^[[:space:]]*TZ:' | head -1 | sed -e 's/^[[:space:]]*TZ:[[:space:]]*//' -e 's/"//g')
+assert_eq "UTC" "$tz_val" "vault-api: TZ default (UTC, WP SWEEP-1 follow-up) passes through -- deliberately NOT a guessed populated zone, see deploy/compose.yaml's own comment on this key"
+
+step "3e-bis. An EXPLICITLY BLANK VAULT_SCHEDULE_WINDOW really disables the scheduler (review round 2, blocker R2-B1)"
+say 'Measured directly during review round 2: with the colon form'
+say '(${VAULT_SCHEDULE_WINDOW:-03:00-07:00}), a .env line reading'
+say 'VAULT_SCHEDULE_WINDOW= (present, explicitly blank) still rendered the'
+say 'default window -- there was no way to express "disabled" in .env at all,'
+say 'while four shipped places claimed there was. Fixed by switching to the'
+say 'no-colon form (${VAULT_SCHEDULE_WINDOW-03:00-07:00}), which only'
+say 'substitutes for an UNSET variable. This step is the live proof: a second'
+say '.env, identical to section 3'"'"'s except one explicit blank line, must'
+say 'render an EMPTY value here, not the default -- the static pin in'
+say 'api/tests/test_p1_compose_env_defaults.py (test_schedule_window_uses_the_'
+say 'no_colon_substitution_form) checks the SYNTAX; this checks the actual'
+say 'Compose substitution BEHAVIOUR it is supposed to produce.'
+blank_window_env_file="$work/verify-blank-window.env"
+cp "$env_file" "$blank_window_env_file"
+printf 'VAULT_SCHEDULE_WINDOW=\n' >> "$blank_window_env_file"
+run "docker compose --env-file '$blank_window_env_file' -f '$compose_file' -p '$PROJECT' --profile dns config"
+rendered_blank_window=$(docker compose --env-file "$blank_window_env_file" -f "$compose_file" -p "$PROJECT" --profile dns config 2>/dev/null)
+api_block_blank_window=$(printf '%s\n' "$rendered_blank_window" | awk '/^  vault-api:/{f=1;next} f && (/^  [A-Za-z0-9_-]+:/ || /^[A-Za-z]/){exit} f')
+blank_window_key_count=$(printf '%s\n' "$api_block_blank_window" | grep -c 'VAULT_SCHEDULE_WINDOW:')
+assert_eq "1" "$blank_window_key_count" "vault-api: VAULT_SCHEDULE_WINDOW key is present exactly once in the rendered block against the blank-window .env (precondition)"
+blank_window_val=$(printf '%s\n' "$api_block_blank_window" | grep 'VAULT_SCHEDULE_WINDOW:' | head -1 | sed -e 's/^[[:space:]]*VAULT_SCHEDULE_WINDOW:[[:space:]]*//' -e 's/"//g')
+assert_eq "" "$blank_window_val" "vault-api: an explicitly blank VAULT_SCHEDULE_WINDOW= renders EMPTY, not the 03:00-07:00 default -- the scheduler-disable path documented in deploy/README.md and deploy/.env.example actually works"
 
 # Packaging WP regression guard (docs/PROJECT_PLAN.md §7 Phase 5): these two
 # keys existed in config.py well before they were ever forwarded in

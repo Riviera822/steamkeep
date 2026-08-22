@@ -583,11 +583,58 @@ Four Phase-3 settings, documented in full in `.env.example`:
 | `VAULT_EVENT_LOG`       | no       | `/vault/logs/event.log` (**on** by default as of the 2026-08-17 packaging WP) | vault-core: path to the machine-readable cache-event log (WP 3.10, ADR-0008) — its WRITE side |
 | `VAULT_EVENT_LOG_PATH`  | no       | `/vault/logs/event.log` (**on** by default, same WP) | vault-api: the SAME path — its READ side. WP 3.11's sweeper tails it to drive miss-triggered prefill completion, per-client hit stats and bypass detection (requirement A12). Must equal `VAULT_EVENT_LOG` above |
 | `VAULT_GC_GRACE_DAYS`   | no       | `14`         | vault-api: days a freshly stored chunk is protected from garbage collection purely by its own store time (protects beta-branch/demo content GC cannot otherwise see); `0` disables the window. See `api/README.md` "The recently-stored grace window" |
-| `VAULT_AUTO_GC`         | no       | `off`        | vault-api: `off` \| `dry-run` \| `execute` — automatically queue a GC job after a prefill that actually updated something. See `api/README.md` "Auto-GC" |
+| `VAULT_AUTO_GC`         | no       | `execute` (**since WP SWEEP-1, 2026-08-22 — was `off` through WP 3.12**) | vault-api: `off` \| `dry-run` \| `execute` — automatically queue a GC job after a prefill that actually updated something. See `api/README.md` "Auto-GC" |
 
 A fifth, `VAULT_MANIFEST_ORACLE` (WP 3.9), stays off by default and is
 **not** in this table on purpose — see `.env.example`'s privacy note before
 touching it: enabling it sends outbound queries to a third party.
+
+**A sixth, newly forwarded here by WP SWEEP-1: `VAULT_SWEEP_INCLUDE_CACHED`
+(WP 4d) now also passes through, defaulting to `true`, paired with
+`VAULT_AUTO_GC`'s own default above flipping to `execute` in the same
+change (operator decision, 2026-08-22 — see
+`docs/adr/0014-sweep-cached-and-auto-gc-default-on.md`).** It is a Phase 4d
+setting, not Phase 3, and it stays DB-overridable at runtime via `PATCH
+/v1/settings` exactly as before (ADR-0009) — this is only a NEW env
+fallback path, added specifically so a `VAULT_SETTINGS_READONLY=1`
+deployment (which refuses every `PATCH`) has a way to turn the now-default-on
+cached sweep back off at all. `api/README.md`'s "Sweep target set" section
+has the full cost model and the auto-GC coupling. To keep the exact
+pre-2026-08-22 behavior, set all three (see the seventh/eighth note just
+below for why the window line is required too — without it the scheduler
+still runs a plain installed-only sweep every night, which is not what
+"pre-2026-08-22" means):
+```
+VAULT_SWEEP_INCLUDE_CACHED=false
+VAULT_AUTO_GC=off
+VAULT_SCHEDULE_WINDOW=
+```
+
+**A seventh and eighth, also newly forwarded here as a WP SWEEP-1 follow-up
+(review round S3 finding, operator decision): `VAULT_SCHEDULE_WINDOW`
+(default `03:00-07:00`) and `TZ` (default `UTC`).** Without a window, the
+scheduler thread never sweeps at all — the sixth note's pairing above
+needs the scheduler actually RUNNING to mean anything, and no version of
+this file forwarded a window before this. `03:00-07:00` is a suggested
+quiet-hours default, not a claim about any specific operator's actual
+schedule, and it is measured against `TZ` — `UTC` unless you also set that,
+deliberately not a guessed populated zone (see `deploy/compose.yaml`'s own
+comment on the `TZ` key for the full argument against guessing). A wrong
+or absent `TZ` is made visible, not silent: vault-api logs one line on its
+first tick naming the requested `TZ` value, the resolved zone/offset, and
+the next window opening in both local and UTC time (`api/README.md`
+"Timezone"). **The blank-disables-it path needs the exact right Compose
+syntax to actually work, and review round 2 caught a real bug here**: the
+no-colon substitution form (`${VAULT_SCHEDULE_WINDOW-03:00-07:00}`, no
+colon before the dash) is required for `VAULT_SCHEDULE_WINDOW=` (present,
+blank) to actually disable the scheduler — the more common colon form
+(`${VAR:-default}`) substitutes the default for a blank value too, which
+would have silently kept the scheduler running for anyone following the
+recipe above. `deploy/compose.yaml` uses the no-colon form for exactly this
+reason; `TZ` deliberately keeps the colon form (blank and `UTC` are the
+same thing for that one variable, so the distinction does not matter
+there). Still DB-overridable at runtime via `PATCH /v1/settings`
+(`schedule_window`, ADR-0009) exactly as before.
 
 **The cache-event log is now the feed for a real feature, and needs no extra
 volume.** `VAULT_EVENT_LOG` writes into `/vault/logs/`, which lives on the
@@ -988,7 +1035,7 @@ sudo sh deploy/tests/verify-stack.sh
 ```
 
 Builds every image (`vault-core`, `vault-api`, `vault-proxy`, `vault-dns` —
-`vault-runner` reuses `vault-api`'s) and runs **185 checks** against real
+`vault-runner` reuses `vault-api`'s) and runs **193 checks** against real
 containers: the config-drift contract (both directions), **the web UI baked
 into the vault-api image and served from it with no bind mount involved**
 (packaging work package), all twelve env-forwarding-audit keys
@@ -1046,6 +1093,26 @@ mutation-bar sequence (deny → widen-allowlist-and-recreate-vault-proxy →
 now-succeeds → restore → deny
 again → stop-vault-proxy-entirely → every outbound call fails) run against
 real containers, not simulated.
+
+**WP SWEEP-1 (2026-08-22):** 2 more checks — `VAULT_SWEEP_INCLUDE_CACHED`
+newly joins `VAULT_AUTO_GC` in step 3e's env-forwarding block (ADR-0014, the
+operator decision that flipped both keys' defaults together; see
+`docs/adr/0014-sweep-cached-and-auto-gc-default-on.md`) — bringing the suite
+from 185 to **187 total**. Measured, a real run: **187/187 pass**, exit 0,
+clean teardown, against Docker Engine 29.1.3 / Compose 2.40.3.
+
+**WP SWEEP-1 follow-up (2026-08-22, same day, review round 2 fix round):**
+6 more checks — 4 in step 3e (`VAULT_SCHEDULE_WINDOW` and `TZ` join the
+env-forwarding block, presence + value, same precondition-then-value
+pattern as every other forwarded key), plus 2 in a new step 3e-bis that
+renders config against a SECOND `.env` with an explicit blank
+`VAULT_SCHEDULE_WINDOW=` and asserts it renders empty rather than the
+`03:00-07:00` default — the live proof for review round 2's blocker R2-B1
+(a colon-form substitution had silently defeated that exact recipe; fixed
+by switching to the no-colon form, see the seventh/eighth `.env.example`
+note above) — bringing the suite from 187 to **193 total**. Measured
+twice, both real runs: **193/193 pass**, exit 0, clean teardown, against
+Docker Engine 29.1.3 / Compose 2.40.3.
 
 It never enters credentials — reaching the login prompt is the pass condition.
 

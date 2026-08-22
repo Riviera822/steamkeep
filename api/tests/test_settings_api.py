@@ -93,8 +93,15 @@ def test_get_reports_defaults_on_a_fresh_install(client: TestClient) -> None:
         "env_only": False,
     }
 
+    # WP SWEEP-1 (ADR-0014): the `client` fixture's `Settings` sets neither
+    # `auto_gc` nor `sweep_include_cached` explicitly, so this reports their
+    # own dataclass defaults -- `execute` / `True` since the operator-decided
+    # flip, paired together on purpose (see `docs/adr/0014-sweep-cached-and-
+    # auto-gc-default-on.md`). Previously `off` -- flip either
+    # `DEFAULT_AUTO_GC`/`DEFAULT_SWEEP_INCLUDE_CACHED` back and this test
+    # dies.
     auto_gc = find(body, "auto_gc")
-    assert auto_gc["effective"] == "off"
+    assert auto_gc["effective"] == "execute"
     assert auto_gc["source"] == "default"
     assert auto_gc["applies"] == "immediately"
 
@@ -102,13 +109,13 @@ def test_get_reports_defaults_on_a_fresh_install(client: TestClient) -> None:
     assert window["effective"] is None
     assert window["applies"] == "next_sweep"
 
-    # WP 4d.
+    # WP 4d / WP SWEEP-1.
     sweep_include_cached = find(body, "sweep_include_cached")
     assert sweep_include_cached == {
         "key": "sweep_include_cached",
-        "effective": False,
+        "effective": True,
         "source": "default",
-        "fallback": False,
+        "fallback": True,
         "applies": "next_sweep",
         "env_only": False,
     }
@@ -184,11 +191,16 @@ def test_patch_rejects_server_version_like_any_unknown_key(
 
 
 def test_precedence_default_when_nothing_is_set(client: TestClient) -> None:
+    """WP SWEEP-1 (ADR-0014): the built-in default `auto_gc` resolves to
+    (with no env override and no DB override) is `execute`, not `off`, since
+    the operator-decided flip -- see
+    `test_config.py::test_auto_gc_defaults_to_execute` for the constant-level
+    pin this test's expectation follows."""
     body = client.get("/v1/settings", headers=AUTH).json()
     row = find(body, "auto_gc")
     assert row["source"] == "default"
-    assert row["effective"] == "off"
-    assert row["fallback"] == "off"
+    assert row["effective"] == "execute"
+    assert row["fallback"] == "execute"
 
 
 def test_precedence_env_wins_over_default(tmp_path: Path) -> None:
@@ -250,42 +262,63 @@ def test_precedence_env_wins_over_default_for_sweep_include_cached(
     a boolean-typed override needs its own test since ``_source_without_override``
     compares TYPED values and ``True != False`` must resolve the same way
     ``"dry-run" != "off"`` already does.
+
+    WP SWEEP-1 (ADR-0014) flipped ``DEFAULT_SWEEP_INCLUDE_CACHED`` to
+    ``True``, which flips which explicit value actually differs from it: a
+    base ``Settings`` built with ``sweep_include_cached=True`` (this test's
+    value before ADR-0014) would now equal the default and be reported as
+    ``"default"``, not ``"env"`` -- exactly the false-negative
+    ``_source_without_override``'s own docstring warns "an operator who
+    explicitly sets an env var to the SAME value the default already has"
+    produces. Using ``False`` here is what actually exercises "env differs
+    from the built-in default" now.
     """
     settings = Settings(
         vault_api_key=TEST_API_KEY,
         db_path=str(tmp_path / "vault.db"),
         cache_root=str(tmp_path / "cache"),
         log_level="INFO",
-        sweep_include_cached=True,
+        sweep_include_cached=False,
     )
     with TestClient(create_app(settings)) as client:
         body = client.get("/v1/settings", headers=AUTH).json()
 
     row = find(body, "sweep_include_cached")
-    assert row["effective"] is True
+    assert row["effective"] is False
     assert row["source"] == "env"
-    assert row["fallback"] is True
+    assert row["fallback"] is False
 
 
 def test_precedence_db_wins_over_env_for_sweep_include_cached(tmp_path: Path) -> None:
+    """Not in the failing set after WP SWEEP-1 (ADR-0014 flipped
+    ``DEFAULT_SWEEP_INCLUDE_CACHED`` to ``True``), but the base value this
+    test used (``True``) now EQUALS the hardcoded default -- the exact
+    numbers still passed, but the "reverts to the env value, not the
+    hardcoded default" claim in the old comment stopped being demonstrated,
+    since post-ADR-0014 the two values are identical and the assertion could
+    no longer tell them apart. Flipped the base to ``False`` (which now
+    genuinely differs from the default) so ``fallback`` again proves
+    "the env value" as distinct from "the built-in default", same fix as
+    ``test_precedence_env_wins_over_default_for_sweep_include_cached`` above.
+    """
     settings = Settings(
         vault_api_key=TEST_API_KEY,
         db_path=str(tmp_path / "vault.db"),
         cache_root=str(tmp_path / "cache"),
         log_level="INFO",
-        sweep_include_cached=True,
+        sweep_include_cached=False,
     )
     with TestClient(create_app(settings)) as client:
         patch_response = client.patch(
-            "/v1/settings", json={"sweep_include_cached": "false"}, headers=AUTH
+            "/v1/settings", json={"sweep_include_cached": "true"}, headers=AUTH
         )
         assert patch_response.status_code == 200
         body = client.get("/v1/settings", headers=AUTH).json()
 
     row = find(body, "sweep_include_cached")
-    assert row["effective"] is False
+    assert row["effective"] is True
     assert row["source"] == "db"
-    assert row["fallback"] is True  # clearing reverts to the env value, not False
+    assert row["fallback"] is False  # clearing reverts to the env value, not True
 
 
 # ==========================================================================
@@ -426,16 +459,26 @@ def test_patch_sweep_include_cached_accepts_every_bool_spelling(
 def test_patch_null_clears_the_sweep_include_cached_override(
     client: TestClient,
 ) -> None:
+    """WP SWEEP-1 (ADR-0014) flipped the built-in default to ``True``. Using
+    ``"false"`` for the override (not the pre-ADR-0014 ``"true"``) is
+    deliberate, not arbitrary: if the override value equalled the new
+    default, a PATCH that failed to actually clear anything (a no-op bug in
+    the DELETE-the-row path) would still report the same ``effective``
+    value before and after and this test would not notice. Setting an
+    override that DIFFERS from the default, then asserting the transition
+    back to the default on clear, is what makes "clearing did something"
+    observable.
+    """
     set_response = client.patch(
-        "/v1/settings", json={"sweep_include_cached": "true"}, headers=AUTH
+        "/v1/settings", json={"sweep_include_cached": "false"}, headers=AUTH
     )
-    assert find(set_response.json(), "sweep_include_cached")["effective"] is True
+    assert find(set_response.json(), "sweep_include_cached")["effective"] is False
 
     clear_response = client.patch(
         "/v1/settings", json={"sweep_include_cached": None}, headers=AUTH
     )
     row = find(clear_response.json(), "sweep_include_cached")
-    assert row["effective"] is False
+    assert row["effective"] is True
     assert row["source"] == "default"
 
     conn = get_connection(client.app.state.settings.db_path)
@@ -872,7 +915,9 @@ def test_effective_settings_ignores_a_corrupt_stored_override(tmp_path: Path) ->
     finally:
         conn.close()
 
-    assert effective.auto_gc == "off"  # fell back to the built-in default
+    # WP SWEEP-1 (ADR-0014): the built-in default `auto_gc` falls back to
+    # is `execute`, not `off`, since the operator-decided flip.
+    assert effective.auto_gc == "execute"  # fell back to the built-in default
 
 
 def test_scheduler_tick_picks_up_an_interval_override_next_sweep(
@@ -923,9 +968,17 @@ def test_scheduler_tick_picks_up_a_sweep_include_cached_override_next_sweep(
     tmp_path: Path,
 ) -> None:
     """WP 4d's own version of the test above: a cached-but-uninstalled app is
-    invisible to the first sweep (mode off, the default) and picked up by the
-    very next sweep once a ``PATCH`` turns the mode on -- ``next_sweep``, not
-    ``restart-required``.
+    invisible to the first sweep and picked up by the very next sweep once a
+    ``PATCH`` turns the mode on -- ``next_sweep``, not ``restart-required``.
+
+    WP SWEEP-1 (ADR-0014) flipped the mode's own default to ``True``, so
+    ``base`` here explicitly overrides it to ``False`` (mirroring
+    ``test_precedence_env_wins_over_default_for_sweep_include_cached``'s own
+    fix for the same reason) -- this test's point is the ``next_sweep``
+    transition an override produces, not which value happens to be the
+    built-in default, and starting from ``base.sweep_include_cached is True``
+    (the new default) would have made the "first sweep, mode off" half of
+    the transition impossible to set up at all.
     """
     from datetime import timedelta, timezone
 
@@ -948,12 +1001,13 @@ def test_scheduler_tick_picks_up_a_sweep_include_cached_override_next_sweep(
             log_level="INFO",
             schedule_window=parse_window("00:00-24:00"),
             schedule_interval_minutes=1,
+            sweep_include_cached=False,
         )
         now = scheduler_module.local_now().astimezone(timezone.utc)
 
         first = scheduler_module.maybe_sweep(conn, base, now)
         assert first.swept is True
-        assert first.targets == ()  # mode off (default): cache content ignored
+        assert first.targets == ()  # mode explicitly off: cache content ignored
 
         settings_store.set_override(conn, "sweep_include_cached", "true")
         effective = settings_store.effective_settings(conn, base)

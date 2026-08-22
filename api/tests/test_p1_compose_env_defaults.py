@@ -56,6 +56,14 @@ COMPOSE_PATH = Path(__file__).resolve().parents[2] / "deploy" / "compose.yaml"
 # config.py's own default rather than a copy of it.
 EXPECTED_DEFAULTS_VAULT_API: dict[str, str] = {
     "VAULT_LOG_LEVEL": "INFO",  # config.py: from_env()'s os.environ.get fallback (Settings.log_level has no dataclass default, and a from_env fallback is not introspectable — literal is defensible here)
+    # WP SWEEP-1 follow-up (ADR-0014 §"Shipping an enabled nightly
+    # schedule"). NOT a vault_api/config.py setting at all — a bare OS/libc
+    # env var Python's stdlib (datetime.astimezone(), zoneinfo) reads
+    # directly, so there is no config.DEFAULT_* to derive this from, same
+    # class of literal as VAULT_LOG_LEVEL above. UTC is deliberately the
+    # honest, zone-agnostic default (deploy/compose.yaml's own comment on
+    # this key has the full argument against guessing a populated zone).
+    "TZ": "UTC",
     "VAULT_PREFILL_TIMEOUT_SECONDS": str(config.DEFAULT_PREFILL_TIMEOUT_SECONDS),
     "VAULT_WORKER_POLL_SECONDS": str(config.DEFAULT_WORKER_POLL_SECONDS),
     # WP S-2 (ADR-0012). Deliberately the literal "queue", NOT
@@ -75,8 +83,27 @@ EXPECTED_DEFAULTS_VAULT_API: dict[str, str] = {
     "VAULT_SIZE_CACHE_TTL": str(config.DEFAULT_SIZE_CACHE_TTL_SECONDS),
     "VAULT_AGENT_REPORT_KEEP": str(config.DEFAULT_AGENT_REPORT_KEEP),
     "VAULT_MANIFEST_KEEP": str(config.DEFAULT_MANIFEST_KEEP),
+    # WP SWEEP-1 follow-up (ADR-0014 §"Shipping an enabled nightly
+    # schedule", S3 review finding). Deliberately the literal "03:00-07:00",
+    # NOT config.py's own bare-metal default (disabled/no window,
+    # `Settings.schedule_window is None`) — same "compose ships a different
+    # value than the native default" shape as VAULT_PREFILL_MODE above: the
+    # cached-sweep/auto-GC pairing just above only does anything once a
+    # sweep actually runs, and no compose default had ever forwarded a
+    # window before. See
+    # test_config_py_own_schedule_window_default_is_still_disabled below for
+    # the pin on the OTHER half of that divergence.
+    "VAULT_SCHEDULE_WINDOW": "03:00-07:00",
     "VAULT_GC_GRACE_DAYS": str(config.DEFAULT_GC_GRACE_DAYS),
     "VAULT_AUTO_GC": str(config.DEFAULT_AUTO_GC),
+    # WP SWEEP-1 (ADR-0014). Newly forwarded here as of this package -- see
+    # deploy/compose.yaml's own comment on this key for why (the
+    # VAULT_SETTINGS_READONLY trap this closes) and
+    # docs/adr/0014-sweep-cached-and-auto-gc-default-on.md for the pairing
+    # argument with VAULT_AUTO_GC directly above. Still ALSO DB-overridable
+    # at runtime via PATCH /v1/settings (ADR-0009) -- this line adds an env
+    # path, it does not remove that one.
+    "VAULT_SWEEP_INCLUDE_CACHED": "true" if config.DEFAULT_SWEEP_INCLUDE_CACHED else "false",
     "VAULT_EVENT_LOG_PATH": "",  # config.py: Settings.event_log_path dataclass default "", feature-off sentinel
     "VAULT_EVENT_SWEEP_INTERVAL_MINUTES": str(config.DEFAULT_EVENT_SWEEP_INTERVAL_MINUTES),
     "VAULT_MISS_TRIGGER_COOLDOWN_MINUTES": str(config.DEFAULT_MISS_TRIGGER_COOLDOWN_MINUTES),
@@ -88,11 +115,12 @@ EXPECTED_DEFAULTS_VAULT_API: dict[str, str] = {
     "VAULT_MANIFEST_ORACLE_URL": config.DEFAULT_MANIFEST_ORACLE_URL,
     "VAULT_MANIFEST_ORACLE_TIMEOUT": str(config.DEFAULT_MANIFEST_ORACLE_TIMEOUT),
     "VAULT_WEBHOOK_TIMEOUT_SECONDS": str(config.DEFAULT_WEBHOOK_TIMEOUT_SECONDS),
-    # WP 4h.0 (ADR-0010): env-only privacy gate, forwarded directly (unlike
-    # VAULT_SWEEP_INCLUDE_CACHED, which is deliberately absent from this dict
-    # because compose never forwards it -- it is DB-overridable at runtime
-    # via PATCH /v1/settings instead, ADR-0009) -- see deploy/compose.yaml's
-    # own comment for why that one is the exception.
+    # WP 4h.0 (ADR-0010): env-only privacy gate, forwarded directly, like
+    # VAULT_SWEEP_INCLUDE_CACHED/VAULT_AUTO_GC above -- but UNLIKE those two,
+    # deliberately has no PATCH /v1/settings override at all (a privacy
+    # opt-out must not be backed by a store, the vault-db volume, that can be
+    # lost independently of the environment meant to govern it -- see
+    # docs/adr/0010-relay-privacy-gate-env-only.md).
     "VAULT_RELAY_EXPOSE_PLAYTIME": "true" if config.DEFAULT_RELAY_EXPOSE_PLAYTIME else "false",
     "VAULT_RELAY_EXPOSE_LAST_PLAYED": (
         "true" if config.DEFAULT_RELAY_EXPOSE_LAST_PLAYED else "false"
@@ -100,9 +128,9 @@ EXPECTED_DEFAULTS_VAULT_API: dict[str, str] = {
     # Fable-audit follow-up (security lock that fails open if omitted):
     # VAULT_SETTINGS_READONLY is env-only BY DEFINITION (ADR-0009 decision 3
     # -- a lock on the settings-write API cannot be unlockable through that
-    # same API), so unlike VAULT_SWEEP_INCLUDE_CACHED above it has NO
-    # DB-overridable alternative path at all and forwarding it here is the
-    # only way an operator following api/README.md's "the operator
+    # same API), so unlike VAULT_SWEEP_INCLUDE_CACHED/VAULT_AUTO_GC above it
+    # has NO DB-overridable alternative path at all and forwarding it here is
+    # the only way an operator following api/README.md's "the operator
     # hard-lock" can ever reach it. No DEFAULT_SETTINGS_READONLY constant
     # exists in config.py (Settings.from_env inlines the literal `False`
     # default for `_env_bool("VAULT_SETTINGS_READONLY", False)`) -- the
@@ -132,15 +160,21 @@ EXPECTED_DEFAULTS_VAULT_API: dict[str, str] = {
 }
 
 # WP S-2 (ADR-0012). The runner's own `environment:` block. Deliberately
-# narrow: only the four variables `vault_api/prefill_runner.py` (or the
-# `Settings.from_env` loader it shares with vault-api) actually reads —
-# every job-lifecycle setting (scheduler, auto-GC, webhooks, the Steam relay
-# gate, the settings hard-lock, ...) lives only in EXPECTED_DEFAULTS_VAULT_API
-# above, because prefill_runner.py imports nothing from worker.py and never
-# reads any of them (ADR-0012 §1). See deploy/compose.yaml's comment block on
-# the vault-runner service for the per-key evidence of which side reads what.
+# narrow: only the variables `vault_api/prefill_runner.py` (or the
+# `Settings.from_env` loader it shares with vault-api) actually reads, PLUS
+# `TZ` (WP SWEEP-1 follow-up) — every job-lifecycle setting (scheduler,
+# auto-GC, webhooks, the Steam relay gate, the settings hard-lock, ...)
+# lives only in EXPECTED_DEFAULTS_VAULT_API above, because prefill_runner.py
+# imports nothing from worker.py and never reads any of them (ADR-0012 §1).
+# `TZ` is the one deliberate exception to "only what this process reads" —
+# it is forwarded here purely for log-timestamp consistency with vault-api
+# (deploy/compose.yaml's own comment on this key explains why), not because
+# prefill_runner.py has any scheduling logic. See deploy/compose.yaml's
+# comment block on the vault-runner service for the per-key evidence of
+# which side reads what.
 EXPECTED_DEFAULTS_VAULT_RUNNER: dict[str, str] = {
     "VAULT_LOG_LEVEL": "INFO",  # same literal/reasoning as vault-api's copy above
+    "TZ": "UTC",  # log-timestamp consistency only, see the block comment above
     "VAULT_PREFILL_MODE": "queue",  # same deliberate-divergence literal as vault-api's copy above
     "VAULT_PREFILL_TIMEOUT_SECONDS": str(config.DEFAULT_PREFILL_TIMEOUT_SECONDS),
     "VAULT_RUNNER_HEARTBEAT_SECONDS": str(config.DEFAULT_RUNNER_HEARTBEAT_SECONDS),
@@ -262,16 +296,25 @@ def _extract_service_volumes_block(compose_text: str, service_name: str) -> str:
 
 
 def _parsed_env_defaults(block_text: str) -> dict[str, str]:
-    """Parse every `KEY: ${VAR:-default}` line in ``block_text`` into a
-    ``{KEY: default}`` dict. Deliberately narrow: only matches the exact
-    `${VAR:-default}` passthrough shape every default-carrying line in this
-    file already uses (see the neighbouring comments in compose.yaml for why
-    that is the house style) -- a line using `:?` (required, no default,
-    e.g. VAULT_API_KEY) does not match and is correctly absent from the
-    result, not misread as an empty default.
+    """Parse every `KEY: ${VAR:-default}` OR `KEY: ${VAR-default}` line in
+    ``block_text`` into a ``{KEY: default}`` dict.
+
+    The colon is now OPTIONAL in the pattern (review round 2, blocker
+    R2-B1): `VAULT_SCHEDULE_WINDOW` deliberately uses the no-colon form
+    (`${VAULT_SCHEDULE_WINDOW-03:00-07:00}`) precisely BECAUSE it differs
+    from the colon form -- `${VAR:-default}` substitutes the default for
+    BOTH unset and an explicitly blank value, which made "set it blank to
+    disable" undocumentable-as-true for that key (measured: a blank
+    `VAULT_SCHEDULE_WINDOW=` still rendered the default under the colon
+    form). `${VAR-default}` only substitutes when unset, leaving an
+    explicit blank as `""`. Both forms remain matched here, still
+    deliberately narrow: a line using `:?` (required, no default, e.g.
+    VAULT_API_KEY) does not match either alternative (the character after
+    the optional colon must be `-`, never `?`) and is correctly absent from
+    the result, not misread as an empty default.
     """
     found: dict[str, str] = {}
-    pattern = re.compile(r"^\s{6}([A-Z0-9_]+):\s*\$\{[A-Z0-9_]+:-([^}]*)\}\s*$")
+    pattern = re.compile(r"^\s{6}([A-Z0-9_]+):\s*\$\{[A-Z0-9_]+:?-([^}]*)\}\s*$")
     for line in block_text.splitlines():
         m = pattern.match(line)
         if m:
@@ -405,6 +448,30 @@ def test_config_py_own_prefill_mode_default_is_still_subprocess() -> None:
     assert settings.prefill_mode == config.PREFILL_MODE_SUBPROCESS
 
 
+def test_config_py_own_schedule_window_default_is_still_disabled() -> None:
+    """Pins the OTHER half of the VAULT_SCHEDULE_WINDOW divergence above
+    (WP SWEEP-1 follow-up, ADR-0014 §"Shipping an enabled nightly schedule"),
+    same shape as `test_config_py_own_prefill_mode_default_is_still_subprocess`
+    just above.
+
+    `deploy/compose.yaml` ships `VAULT_SCHEDULE_WINDOW=03:00-07:00`
+    (deliberately, see `EXPECTED_DEFAULTS_VAULT_API`'s own comment on this
+    key) — but that is only a safe divergence to hand-type as a literal here
+    for as long as `config.py`'s OWN built-in default (what applies when the
+    variable is unset entirely — the bare-metal/native dev path) stays
+    "disabled, no window". If that constant ever changes, the
+    "03:00-07:00" literal above stops documenting a deliberate choice and
+    starts hiding a real default change; this test is what would actually
+    notice, since the dict above does not derive its value FROM config.py
+    (by design).
+    """
+    settings = config.Settings(
+        vault_api_key="test-key", db_path=":memory:", cache_root="./cache", log_level="INFO"
+    )
+    assert settings.schedule_window is None
+    assert settings.scheduler_enabled is False
+
+
 # WP S-2's own completeness discipline: every NEW `VAULT_*` variable this
 # package's compose wiring introduces must have an operator-facing stanza in
 # `deploy/.env.example`, not just a `${VAR:-default}` passthrough line in
@@ -485,6 +552,79 @@ def test_new_wp_eg1_vars_are_documented_in_env_example(env_var: str) -> None:
         "discover this variable exists from a bare mention in a neighbouring "
         "comment alone. Restore its documentation stanza in "
         "deploy/.env.example."
+    )
+
+
+#: New in WP SWEEP-1 (ADR-0014, operator decision 2026-08-22). Just the one
+#: variable — VAULT_AUTO_GC's own `.env.example` stanza pre-dates this
+#: package (WP 3.12) and only its DEFAULT VALUE changed, which the mutation
+#: pin on `EXPECTED_DEFAULTS_VAULT_API["VAULT_AUTO_GC"]` above already
+#: covers; VAULT_SWEEP_INCLUDE_CACHED is the one variable that is NEWLY
+#: forwarded by `deploy/compose.yaml` in this package (it existed in
+#: `config.py` since WP 4d, but WP P1 deliberately never forwarded it — see
+#: that key's own comment in `deploy/compose.yaml` for why this package
+#: reverses that). Extended in the same package's fix round (S3 review
+#: finding, operator decision) with the two variables that make the
+#: cached-sweep/auto-GC pairing above actually run out of the box:
+#: VAULT_SCHEDULE_WINDOW (newly forwarded, `deploy/compose.yaml` never had a
+#: line for it before) and TZ (never forwarded by this file at all, for
+#: anything, before this package — see `deploy/compose.yaml`'s own comment
+#: on the key for why UTC and not a guessed zone).
+NEW_WP_SWEEP1_ENV_VARS = ("VAULT_SWEEP_INCLUDE_CACHED", "VAULT_SCHEDULE_WINDOW", "TZ")
+
+
+@pytest.mark.parametrize("env_var", NEW_WP_SWEEP1_ENV_VARS)
+def test_new_wp_sweep1_vars_are_documented_in_env_example(env_var: str) -> None:
+    """Same mutation target and same anchored-assignment-line reasoning as
+    `test_new_wp_s2_vars_are_documented_in_env_example` above, for WP SWEEP-1's
+    own newly-forwarded variable.
+    """
+    text = ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    pattern = re.compile(rf"^#?{re.escape(env_var)}=", re.MULTILINE)
+    assert pattern.search(text), (
+        f"deploy/.env.example has no {env_var}=... or #{env_var}=... "
+        "assignment line, but deploy/compose.yaml forwards it (see "
+        "SERVICE_EXPECTED_DEFAULTS above) -- an operator has no way to "
+        "discover this variable exists from a bare mention in a neighbouring "
+        "comment alone. Restore its documentation stanza in "
+        "deploy/.env.example."
+    )
+
+
+def test_schedule_window_uses_the_no_colon_substitution_form(compose_text: str) -> None:
+    """Structural pin for review round 2's blocker R2-B1, measured directly
+    against a real `docker compose config` render (see
+    `deploy/tests/verify-stack.sh` step 3e for the live half of this pin,
+    which needs Docker and cannot run here): `${VAR:-default}` (WITH a
+    colon) substitutes the default for BOTH an unset variable AND an
+    explicitly blank one, which is what made "set VAULT_SCHEDULE_WINDOW=
+    blank to disable the scheduler" a documented claim that was measurably
+    false -- `deploy/README.md`, `deploy/.env.example`'s UPGRADE NOTE, and
+    an earlier draft of `docs/adr/0014-sweep-cached-and-auto-gc-default-on.md`
+    all told an operator to do exactly that.
+
+    This test does not merely check that SOME default exists for this key
+    (`test_compose_default_matches_config_default` above already does) --
+    it asserts the exact SUBSTITUTION SYNTAX, because the colon is the
+    entire bug: a future edit that "cleans up" this line back to the
+    colon form would pass every other check in this file (the rendered
+    default is identical either way when the variable is simply unset) and
+    silently reopen the exact trap this test exists to catch.
+    """
+    api_block = _extract_service_environment_block(compose_text, "vault-api")
+    assert "VAULT_SCHEDULE_WINDOW: ${VAULT_SCHEDULE_WINDOW-03:00-07:00}" in api_block, (
+        "deploy/compose.yaml's vault-api service no longer uses the no-colon "
+        "substitution form for VAULT_SCHEDULE_WINDOW -- if it now reads "
+        "${VAULT_SCHEDULE_WINDOW:-03:00-07:00} (WITH a colon), an explicitly "
+        "blank VAULT_SCHEDULE_WINDOW= in .env silently renders the default "
+        "window instead of disabling the scheduler (review round 2, "
+        "blocker R2-B1, measured). Restore the no-colon form."
+    )
+    assert "VAULT_SCHEDULE_WINDOW: ${VAULT_SCHEDULE_WINDOW:-" not in api_block, (
+        "deploy/compose.yaml's vault-api service forwards VAULT_SCHEDULE_WINDOW "
+        "with BOTH a colon-form and a no-colon-form substitution somehow -- "
+        "this should be structurally impossible (one line, one key) but if "
+        "it happens the colon form wins the trap this test exists to catch."
     )
 
 

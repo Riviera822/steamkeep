@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from vault_api import config
 from vault_api.config import Settings
 
 
@@ -515,21 +516,94 @@ def test_every_env_example_value_still_parses(monkeypatch: pytest.MonkeyPatch) -
     assert len(seen) >= 8, "the .env.example parsing above found suspiciously little"
 
 
+#: WP SWEEP-1 review round 1 (Opus, blocker B1): `deploy/compose.yaml` has
+#: had a `config.DEFAULT_*`-derived value pin since WP P1
+#: (`test_p1_compose_env_defaults.py::EXPECTED_DEFAULTS_VAULT_API`) — this
+#: file (`api/.env.example`, the bare-metal/native path `api/README.md`
+#: tells operators to copy) never got the same treatment, only the
+#: "parses without error" check above. That ASYMMETRY is what let this
+#: file's `VAULT_SWEEP_INCLUDE_CACHED=off` / `VAULT_AUTO_GC=off` assignments
+#: keep asserting the pre-ADR-0014 values, unnoticed, after `config.py`'s own
+#: defaults flipped. Deliberately narrow to the two keys that actual drift
+#: just hit, not a retrofit of every pre-existing line in this file — same
+#: incremental-scope precedent `EXPECTED_DEFAULTS_VAULT_API` itself set
+#: (grown one work package at a time, never audited wholesale in one pass).
+ENV_EXAMPLE_DEFAULT_PINS: dict[str, str] = {
+    "VAULT_SWEEP_INCLUDE_CACHED": "true" if config.DEFAULT_SWEEP_INCLUDE_CACHED else "false",
+    "VAULT_AUTO_GC": str(config.DEFAULT_AUTO_GC),
+}
+
+
+@pytest.mark.parametrize("env_var", sorted(ENV_EXAMPLE_DEFAULT_PINS))
+def test_env_example_value_matches_config_default(env_var: str) -> None:
+    """The VALUE half of the pin `test_every_env_example_value_still_parses`
+    above does not provide: that test only proves every line PARSES, not
+    that the shipped value is still the one `config.py` actually defaults
+    to. Read from the real file (not a hand-copied literal) so a future
+    edit to either side that lets them drift is what actually fails here,
+    the same "derive, don't hand-copy" discipline
+    `test_p1_compose_env_defaults.py` already applies to
+    `deploy/compose.yaml`.
+    """
+    import os
+
+    env_example = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env.example"
+    )
+    with open(env_example, encoding="utf-8") as handle:
+        lines = [
+            line.strip()
+            for line in handle
+            if line.strip() and not line.strip().startswith("#") and "=" in line
+        ]
+    documented: dict[str, str] = {}
+    for line in lines:
+        name, _, value = line.partition("=")
+        documented[name] = value
+
+    assert env_var in documented, (
+        f"api/.env.example no longer has an assignment line for {env_var}, "
+        "but ENV_EXAMPLE_DEFAULT_PINS above expects one."
+    )
+    expected = ENV_EXAMPLE_DEFAULT_PINS[env_var]
+    assert documented[env_var] == expected, (
+        f"api/.env.example's {env_var}={documented[env_var]!r} no longer "
+        f"matches config.py's own default ({expected!r}) -- one of the two "
+        "changed without the other. This is the exact asymmetry that let "
+        "WP SWEEP-1's default flip go undetected here the first time "
+        "(review round 1, blocker B1)."
+    )
+
+
 # ==========================================================================
 # WP 3.12: VAULT_AUTO_GC
 # ==========================================================================
 
 
-def test_auto_gc_defaults_to_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A feature that can delete files does not switch itself on."""
+def test_auto_gc_defaults_to_execute(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mutation pin (WP SWEEP-1, ADR-0014): flip ``DEFAULT_AUTO_GC`` back to
+    ``AUTO_GC_OFF`` and this test dies. Supersedes this test's own former
+    name and assertion (``test_auto_gc_defaults_to_off`` -- "a feature that
+    can delete files does not switch itself on"), which was true through
+    WP 3.12 and is not the shipped default any more: the operator decided
+    ``execute`` ships by default, PAIRED with
+    ``DEFAULT_SWEEP_INCLUDE_CACHED`` also defaulting on (see
+    ``test_sweep_include_cached_defaults_to_true`` below and
+    ``docs/adr/0014-sweep-cached-and-auto-gc-default-on.md``) so that mode's
+    superseded chunks are actually reclaimed rather than left to accumulate
+    forever. An operator who wants the pre-ADR-0014 "GC only runs when I ask
+    for it" behaviour back sets ``VAULT_AUTO_GC=off`` explicitly (env or
+    ``PATCH /v1/settings``) -- that path is unchanged and still fully
+    supported, see ``test_auto_gc_accepts_the_three_modes`` below.
+    """
     monkeypatch.setenv("VAULT_API_KEY", "some-key")
     monkeypatch.delenv("VAULT_AUTO_GC", raising=False)
 
     settings = Settings.from_env()
 
-    assert settings.auto_gc == "off"
-    assert settings.auto_gc_enabled is False
-    assert settings.auto_gc_executes is False
+    assert settings.auto_gc == "execute"
+    assert settings.auto_gc_enabled is True
+    assert settings.auto_gc_executes is True
 
 
 @pytest.mark.parametrize(
@@ -967,17 +1041,26 @@ def test_settings_readonly_rejects_anything_else(
 # ==========================================================================
 
 
-def test_sweep_include_cached_defaults_to_off(
+def test_sweep_include_cached_defaults_to_true(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mutation pin: flip ``DEFAULT_SWEEP_INCLUDE_CACHED`` to ``True`` and
-    this test dies -- a feature that spends bandwidth/disk on games nobody
-    asked for must be an explicit opt-in (plan §7 Phase 4d), never the
-    out-of-the-box behaviour of a fresh install."""
+    """Mutation pin (WP SWEEP-1, ADR-0014): flip ``DEFAULT_SWEEP_INCLUDE_CACHED``
+    back to ``False`` and this test dies. Supersedes this test's own former
+    name and assertion (``test_sweep_include_cached_defaults_to_off``): the
+    "must be an explicit opt-in" reasoning (plan §7 Phase 4d) was correct
+    for a sweep mode shipped without a paired collector, which is exactly
+    what changed -- the operator decided this ships on by default, PAIRED
+    with ``DEFAULT_AUTO_GC`` also defaulting to ``execute`` (see
+    ``test_auto_gc_defaults_to_execute`` above and
+    ``docs/adr/0014-sweep-cached-and-auto-gc-default-on.md``) so the extra
+    bandwidth/disk this mode spends has its superseded chunks actually
+    reclaimed rather than left to grow forever. An operator who wants the
+    pre-ADR-0014 behaviour back sets ``VAULT_SWEEP_INCLUDE_CACHED=false``
+    explicitly (env or ``PATCH /v1/settings``)."""
     monkeypatch.setenv("VAULT_API_KEY", "some-key")
     monkeypatch.delenv("VAULT_SWEEP_INCLUDE_CACHED", raising=False)
 
-    assert Settings.from_env().sweep_include_cached is False
+    assert Settings.from_env().sweep_include_cached is True
 
 
 @pytest.mark.parametrize("truthy", ["1", "true", "True", "YES", "on", " on "])
@@ -990,14 +1073,42 @@ def test_sweep_include_cached_accepts_true_spellings(
     assert Settings.from_env().sweep_include_cached is True
 
 
-@pytest.mark.parametrize("falsy", ["0", "false", "False", "NO", "off", ""])
+@pytest.mark.parametrize("falsy", ["0", "false", "False", "NO", "off"])
 def test_sweep_include_cached_accepts_false_spellings(
     monkeypatch: pytest.MonkeyPatch, falsy: str
 ) -> None:
+    """``""`` was DROPPED from this parametrize list (WP SWEEP-1, ADR-0014):
+    a blank value is not a "false spelling" at all, it is ``_env_bool``'s
+    "unset, use the default" sentinel (``config.py``'s own docstring on that
+    function). Through WP 4d this test passed for ``""`` for the WRONG
+    reason -- the old default happened to BE ``False``, so "blank" and
+    "false" were indistinguishable by outcome. Now that the default is
+    ``True``, that coincidence is gone; see
+    ``test_sweep_include_cached_blank_env_value_resolves_to_the_true_default``
+    below for blank's own, now-distinct, explicit pin."""
     monkeypatch.setenv("VAULT_API_KEY", "some-key")
     monkeypatch.setenv("VAULT_SWEEP_INCLUDE_CACHED", falsy)
 
     assert Settings.from_env().sweep_include_cached is False
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_sweep_include_cached_blank_env_value_resolves_to_the_true_default(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    """A PRESENT-but-blank value (e.g. a compose ``${VAULT_SWEEP_INCLUDE_
+    CACHED}`` passthrough with nothing set in ``.env``) hits the exact same
+    "blank means default" branch in ``_env_bool`` as the variable being
+    entirely absent (``test_sweep_include_cached_defaults_to_true`` above).
+    Before ADR-0014 this was unobservable as its own case because it was
+    folded into ``test_sweep_include_cached_accepts_false_spellings``'s
+    parametrize list and produced the same answer either way; now that the
+    default is ``True`` the two paths (blank vs. an explicit false spelling)
+    produce DIFFERENT answers, so this needs its own pin."""
+    monkeypatch.setenv("VAULT_API_KEY", "some-key")
+    monkeypatch.setenv("VAULT_SWEEP_INCLUDE_CACHED", blank)
+
+    assert Settings.from_env().sweep_include_cached is True
 
 
 @pytest.mark.parametrize("bad", ["yeah", "1.0", "enabled", "2"])

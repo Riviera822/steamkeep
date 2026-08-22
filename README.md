@@ -23,12 +23,12 @@ bypass-detection banner, and the used/free footer.*
   checks whatever the vault-agent on your gaming PCs last reported as
   installed, without forcing a full re-download — so by the time you sit
   down, an update that already shipped is often already sitting in the
-  cache instead of about to start. (That needs at least one vault-agent
-  reporting in: a guests-only vault with no agent installed anywhere has
-  nothing for the schedule to check by default — the opt-in "keep the cache
-  current" mode in the FAQ below covers that case too, by watching
-  everything already cached instead of only what's installed somewhere.)
-  Either way, the two hours you have go into the game, not the progress bar.
+  cache instead of about to start. And this no longer needs a single
+  vault-agent reporting in: the scheduler also keeps every game already
+  sitting in the cache current by default (the "keep the cache current"
+  mode in the FAQ below), so a guests-only vault with no agent installed
+  anywhere still has something for the schedule to check. Either way, the
+  two hours you have go into the game, not the progress bar.
 - **Wanting a game while you're away from home.** Start the download from
   work or on holiday, and find it ready when you get back. That's what the
   Android app is for — not a dashboard bolted onto the cache, but a remote
@@ -40,9 +40,15 @@ bypass-detection banner, and the used/free footer.*
   internet at once when the party starts.
 - **Cached games going stale silently.** The same scheduled check as above
   keeps refreshing what it already knows about, without you standing over
-  it — and the opt-in "keep the cache current" mode widens that to every
-  game already cached, installed or not, for whichever ones you'd rather
-  keep current regardless of what's on which PC right now.
+  it — and, by default, that widens to every game already cached, installed
+  or not, so nothing sitting in the vault goes stale just because no PC
+  currently reports it installed. (Paired, by default, with actually
+  reclaiming the disk space that keeping things current frees up along the
+  way — see "The terabyte black box" below and
+  [ADR-0014](docs/adr/0014-sweep-cached-and-auto-gc-default-on.md) for why
+  the two go together. An operator with a small disk or a headless
+  deployment can turn either or both back off — `.env` or one `PATCH
+  /v1/settings` call, see that ADR.)
 - **The terabyte black box.** See which game takes how much space, and
   delete one game — not all or nothing. This is the core design goal (see
   "Why not just use LanCache?" below for why general-purpose caches can't do
@@ -378,20 +384,28 @@ The primary check is a scheduled SteamPrefill run *without* `--force`
 ([ADR-0006](docs/adr/0006-staleness-via-nonforced-prefill.md)):
 SteamPrefill's own up-to-date bookkeeping makes this a ~3-second,
 zero-download no-op for an app that's already current, and a real (but
-minimal — only the changed chunks) fetch when it isn't; a "keep the cache
-current" mode can widen the sweep to include cached-but-not-installed games
-too. Between sweeps, an optional, opt-in third-party manifest oracle
-(`VAULT_MANIFEST_ORACLE`, off by default) already ships as a backend
-feature that can answer "is this stale right now" without waiting for the
-next sweep — but neither frontend renders its answer as a badge yet, so
-today that's a capability you can query over the API, not something you'll
-see on screen. Garbage collection (**GC**: clearing out the chunks a game
-update leaves behind that no cached version of the game needs any more)
-reclaims that orphaned space via `POST /v1/cache/{appid}/gc`, diffing
-cached chunks against the current manifest rather than guessing by file
-age. It is **dry-run by default at every layer**; deleting anything
+minimal — only the changed chunks) fetch when it isn't; by default, that
+sweep widens to include cached-but-not-installed games too — a game with
+nobody currently reporting it installed still gets kept current
+([ADR-0014](docs/adr/0014-sweep-cached-and-auto-gc-default-on.md), an
+operator can opt back out). Between sweeps, an optional, opt-in third-party
+manifest oracle (`VAULT_MANIFEST_ORACLE`, off by default) already ships as
+a backend feature that can answer "is this stale right now" without
+waiting for the next sweep — but neither frontend renders its answer as a
+badge yet, so today that's a capability you can query over the API, not
+something you'll see on screen. Garbage collection (**GC**: clearing out
+the chunks a game update leaves behind that no cached version of the game
+needs any more) reclaims that orphaned space via
+`POST /v1/cache/{appid}/gc`, diffing cached chunks against the current
+manifest rather than guessing by file age. Manual calls to that endpoint
+are **dry-run by default at every layer**; deleting anything through it
 requires the explicit opt-in `{"execute": true}`
-([ADR-0007](docs/adr/0007-manifest-diff-gc.md)).
+([ADR-0007](docs/adr/0007-manifest-diff-gc.md)). The *automatic* GC that
+runs after a scheduled prefill actually updates something is a separate
+setting (`VAULT_AUTO_GC`) that now defaults to `execute` — paired with the
+cached-sweep default above so keeping the cache current doesn't quietly
+grow it forever; see ADR-0014 for that pairing and how to turn it back to
+`dry-run`/`off`.
 
 **Is my Steam account safe?**
 SteamHangar's own components never see your Steam password. The one-time
@@ -438,10 +452,12 @@ otherwise:
   none have run yet against a real device or emulator, including the
   release-signing path.
 - **A settings switch for "keep the cache current."** The backend half —
-  the opt-in sweep mode named throughout this README — already ships; the
-  same gap the manifest oracle has above: no toggle for it exists in either
-  frontend yet, so turning it on today means `PATCH /v1/settings` (from a
-  `curl`, or the API directly), not clicking anything.
+  the sweep mode named throughout this README, on by default since
+  [ADR-0014](docs/adr/0014-sweep-cached-and-auto-gc-default-on.md) — already
+  ships; the same gap the manifest oracle has above: no toggle for it exists
+  in either frontend yet, so turning it back *off* today means `PATCH
+  /v1/settings` (from a `curl`, or the API directly) or an `.env` edit, not
+  clicking anything.
 - **The web UI's own still-open validation list:** real screen-reader
   testing, how cover art actually renders on a phone browser, and
   performance at a much larger library size than has been tested so far —
@@ -466,8 +482,9 @@ otherwise:
 - [`docs/adr/`](docs/adr/) — architecture decision records: feasibility,
   Linux/SteamOS agent scope, depot mapping, credentials, agent language,
   staleness, garbage collection, the cache-event feed, persisted settings,
-  the relay privacy gate, the egress lock, the prefill-runner split, and the
-  product rename to SteamHangar
+  the relay privacy gate, the egress lock, the prefill-runner split, the
+  product rename to SteamHangar, and the cached-sweep/auto-GC default-on
+  decision
 - [`core/README.md`](core/README.md) — vault-core (nginx cache) internals
 - [`api/README.md`](api/README.md) — vault-api endpoints, schema, and
   configuration

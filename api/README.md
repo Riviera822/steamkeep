@@ -122,7 +122,7 @@ Copy `.env.example` to `.env` and adjust:
 | `VAULT_SCHEDULE_WINDOW`         | no       | *(empty — scheduler OFF)* | Daytime window the scheduler sweeps in, `HH:MM-HH:MM` **server-local** time (e.g. `09:00-17:00`, `22:00-06:00`). Unset/blank = disabled. See "Scheduler" |
 | `VAULT_SCHEDULE_INTERVAL_MINUTES` | no     | `180`        | Minimum spacing between two sweeps (plan §7's "every 3 h"); **must be > 0** |
 | `VAULT_SCHEDULE_CLIENT_STALE_DAYS` | no    | `7`          | A client whose newest agent report is older than this drops out of the sweep's target set; **must be > 0** |
-| `VAULT_AUTO_GC`                 | no       | `off`        | `off` \| `dry-run` \| `execute` — queue a GC job after a prefill that actually **updated** something (WP 3.12). See "Job control → Auto-GC" |
+| `VAULT_AUTO_GC`                 | no       | `execute` (**was `off` through WP 3.12; flipped by WP SWEEP-1 / ADR-0014, 2026-08-22**) | `off` \| `dry-run` \| `execute` — queue a GC job after a prefill that actually **updated** something (WP 3.12). See "Job control → Auto-GC" |
 | `VAULT_EVENT_LOG_PATH`          | no       | *(empty — sweep OFF)* | Path to vault-core's structured cache-event log (WP 3.10). Unset/blank = the whole cache-event feature is off. See "Cache-event sweep" |
 | `VAULT_EVENT_SWEEP_INTERVAL_MINUTES` | no  | `5`          | Minutes between sweeps of that log; **must be > 0**. Deliberately independent of `VAULT_SCHEDULE_WINDOW` |
 | `VAULT_MISS_TRIGGER_COOLDOWN_MINUTES` | no | `60`         | Per-app cooldown for miss-triggered prefill; **`0` turns the trigger OFF** (statistics keep running); **must be >= 0** |
@@ -1511,15 +1511,21 @@ honours.
 
 ### Auto-GC (`VAULT_AUTO_GC`)
 
-`off` (default) | `dry-run` | `execute`. After a **successful** prefill whose
-parsed summary reports `updated > 0`, vault-api queues a GC job for that app in
-the configured mode.
+`off` | `dry-run` | `execute` (**default since WP SWEEP-1 / ADR-0014,
+2026-08-22 — was `off` through WP 3.12**). After a **successful** prefill
+whose parsed summary reports `updated > 0`, vault-api queues a GC job for
+that app in the configured mode.
 
 Three conditions, all required, each a decision:
 
-1. The setting is not `off`. A feature that can delete files does not switch
-   itself on, and the `dry-run` rung exists so an operator can watch what
-   automatic collection *would* reclaim before trusting it.
+1. The setting is not `off`. WP 3.12's own reasoning for shipping `off` — "a
+   feature that can delete files does not switch itself on" — is still why
+   `off`/`dry-run` exist as real, supported choices; it stopped being the
+   *default* the moment this setting was paired with the cached-apps sweep
+   mode defaulting on too (see "Sweep target set" below and
+   `docs/adr/0014-sweep-cached-and-auto-gc-default-on.md`). The `dry-run`
+   rung still exists so an operator who wants that can watch what automatic
+   collection *would* reclaim before trusting it.
 2. The prefill reached the **successful** branch. A failed, aborted, unowned,
    cancelled or paused run tells you nothing about what is now orphaned.
 3. The summary **parsed** and `updated > 0`. Orphans are what a game *update*
@@ -1551,7 +1557,9 @@ every one it refreshes can leave its superseded chunks as fresh orphans.
 only reports what could be reclaimed and reclaims nothing, so it does NOT
 close this loop either (B2, user decision "nothing is being reclaimed") — the
 two settings are designed to be turned on together, with `execute` being the
-half that matters for this specific coupling. Turning the sweep mode on
+half that matters for this specific coupling. Since WP SWEEP-1 / ADR-0014
+(2026-08-22) both actually ship on together by default, for exactly this
+reason. Turning the sweep mode on
 while `VAULT_AUTO_GC` is anything other than `execute` is not refused (the
 operator may have a reason: manual `POST /v1/cache/{appid}/gc` runs, say),
 but it is never silent: `scheduler.cached_sweep_gc_risk` names the condition,
@@ -2700,10 +2708,27 @@ Plan A7 ("prefill updates automatically during the day") and plan §7 Phase 3's
 > take the union of the app ids every gaming machine most recently reported as
 > installed and enqueue a normal prefill job for each one.
 
-**Off by default.** With `VAULT_SCHEDULE_WINDOW` unset, no thread is started
-and nothing is ever enqueued on vault-api's own initiative. A fresh install
-must not start Steam logins and downloads because nobody has read the docs
-yet; opt in by setting a window.
+**`config.py`'s own built-in default is disabled** — with `VAULT_SCHEDULE_WINDOW`
+unset (the bare-metal/native dev path's own default, `Settings.from_env`),
+no sweep is ever enqueued on vault-api's own initiative. That was the
+*whole* story through WP SWEEP-1's own first draft: "a fresh install must
+not start Steam logins and downloads because nobody has read the docs yet."
+
+**The shipped Compose stack is no longer disabled by default.**
+`deploy/compose.yaml` forwards `VAULT_SCHEDULE_WINDOW` with its own default
+of `03:00-07:00` (WP SWEEP-1 follow-up, operator decision, ADR-0014
+§"Shipping an enabled nightly schedule") — the argument above was correct
+for a sweep mode that could only widen an installed-only sweep; it stopped
+being the whole story once `sweep_include_cached`/`auto_gc` (below and
+"Sweep target set") needed the scheduler actually running for their own
+defaults to mean anything. See that ADR for the pairing argument, and
+"Timezone" just below for what the window is actually measured against —
+`03:00-07:00` opens at 3 AM **UTC** unless `TZ` is also set, which for most
+operators is not 3 AM where they live. Opt out entirely with
+`VAULT_SCHEDULE_WINDOW=` (blank, not unset — see the compose-substitution
+note in `deploy/compose.yaml`'s own comment on this key for why blank and
+unset are deliberately NOT the same thing for this one variable), or via
+`PATCH /v1/settings`.
 
 ### Window semantics
 
@@ -2735,6 +2760,29 @@ reports (`last_sweep_at`, `next_eligible_at`) is UTC in the project's standard
 `YYYY-MM-DDTHH:MM:SSZ` form, like every other timestamp in this database.
 `GET /v1/schedule` reports the server's current offset as `server_timezone`
 (e.g. `UTC+02:00`) so you can tell the two apart at a glance.
+
+**`deploy/compose.yaml` forwards `TZ`, defaulting to `UTC` (WP SWEEP-1
+follow-up).** Deliberately UTC and not a guessed populated zone — this
+project ships to operators in every timezone, and a non-UTC guess would be
+silently wrong for most of them; see that file's own comment on the `TZ`
+key for the full argument. The real cost: the shipped `03:00-07:00` window
+above does not land at 3 AM *local* for an operator who never sets this.
+
+**A wrong or absent `TZ` is made visible, not silent.** The scheduler logs
+one line on its first tick after every start naming the *requested* `TZ`
+value (`os.environ.get("TZ")`) alongside the *resolved* zone abbreviation
+and UTC offset, plus the next window opening in both local and UTC time —
+`vault_api/scheduler.py`'s `describe_resolved_schedule`. This exists
+specifically because a typo'd IANA zone name does not fail loudly: measured
+in the shipped image, `TZ=Europe/Berlinn` (one extra letter) silently falls
+back to a POSIX-style parse that resolves to a plausible-looking but wrong
+zone (`Europe`, `UTC+00:00`) rather than raising an error — printing only
+the resolved side would never have shown that anything was wrong. The line
+is logged against `effective_settings` (the same `db > env > default`
+resolution every sweep decision already uses, ADR-0009), not the boot
+snapshot, specifically so a `PATCH /v1/settings`-stored window is reported
+correctly instead of the line claiming the scheduler is disabled while an
+unattended sweep is in fact about to run.
 
 DST needs no handling: the tick loop re-reads the clock and re-evaluates the
 window every minute, so a transition just shifts when the window opens and
@@ -2776,14 +2824,17 @@ reported in the log (with the client id and the reason):
   makes the staleness question unanswerable. Excluded rather than assumed
   fresh: never prefill on the strength of a value that could not be read.
 
-### Sweep target set — installed PLUS cached (WP 4d, opt-in)
+### Sweep target set — installed PLUS cached (WP 4d; default-on since WP SWEEP-1)
 
 Plan §7 Phase 4d. Through Phase 3, the section above was the *whole*
 criterion: "intersected with nothing else". WP 4d adds exactly one more
 source, and it is additive by construction — everything above this line is
-completely unchanged when the new setting is off (the default), which is
-pinned by a test asserting `compute_targets` returns a BYTE-IDENTICAL result
-with the mode off, cache content or not.
+completely unchanged when the setting is off, which is pinned by a test
+asserting `compute_targets` returns a BYTE-IDENTICAL result with the mode
+off, cache content or not. **This mode is ON by default since WP SWEEP-1
+(ADR-0014, operator decision 2026-08-22) — it shipped OFF by default through
+WP 4d**; see "Off by default through WP 4d — now on by default, paired with
+auto-GC" below for the full argument for the flip.
 
 **What it does.** `VAULT_SWEEP_INCLUDE_CACHED` / `sweep_include_cached`
 (overridable via `PATCH /v1/settings`, ADR-0009) widens the target set to
@@ -2861,8 +2912,9 @@ the matching field on `SweepResult`) names exactly which apps were added
 included client — purely for the sweep's log line and for tests; the apps
 themselves are already in `appids`, counted once.
 
-**Cost model, stated plainly (why opt-in is safe to turn on, not just safe to
-leave off):** a non-forced SteamPrefill run against an already-current app is
+**Cost model, stated plainly (why this mode is cheap enough to be the
+default now, not just safe to turn on for an operator who opts in):** a
+non-forced SteamPrefill run against an already-current app is
 a ~3 s no-op that transfers zero bytes (ADR-0006 decision 1 — the same fact
 Phase 4c's manual-check feature rests on). Real bandwidth is spent only on
 apps that actually have an update. The filesystem side of the cost is one
@@ -2958,14 +3010,29 @@ plainly rather than leaving to be discovered (reviewer should-fix S5, WP 4d):
    own; nothing is corrupted and no lock is held across the join), but it
    will read as a fault in the log if this isn't said up front.
 
-**Off by default, and it must stay an explicit choice** (ADR-0009 decision 5
-does not apply here — this key IS overridable, but its *default* is the
-safety mechanism): the mode spends bandwidth and, on real updates, disk on
-games nobody currently asked to have refreshed. Pinned three ways: a test
+**Off by default through WP 4d — now on by default, paired with auto-GC
+(WP SWEEP-1, ADR-0014, operator decision 2026-08-22).** The cost that made
+WP 4d ship this off is real and unchanged: the mode spends bandwidth and, on
+real updates, disk on games nobody currently asked to have refreshed. That
+cost was presented to the operator twice before this change, explicitly, and
+the operator chose the new default anyway — see
+`docs/adr/0014-sweep-cached-and-auto-gc-default-on.md` for the full argument,
+including why pairing this with `VAULT_AUTO_GC` defaulting to `execute` in
+the SAME change is what makes accepting the cost defensible rather than
+reckless (shipping this on alone would be exactly the "keeps itself current
+straight into a full disk" condition `cached_sweep_gc_risk` below exists to
+warn about). An operator who wants the pre-2026-08-22 behavior back sets
+`VAULT_SWEEP_INCLUDE_CACHED=false` (env or `PATCH /v1/settings`).
+
+The ON/OFF split itself is unchanged and still pinned three ways: a test
 that omits the `include_cached` keyword entirely and asserts nothing cached
-leaks in; a second test that never sets `sweep_include_cached` on `Settings`
-and asserts the same through the full `maybe_sweep` call; and
-`config.DEFAULT_SWEEP_INCLUDE_CACHED` itself, mutation-killed by both.
+leaks in (`compute_targets`'s own keyword default stays `False` on purpose,
+for direct/test callers — see `scheduler.py`'s module docstring); a second
+test that explicitly sets `sweep_include_cached=False` on `Settings` and
+asserts the same through the full `maybe_sweep` call; a THIRD test that
+relies on `Settings`' own dataclass default (now `True`) and asserts cache
+content IS picked up; and `config.DEFAULT_SWEEP_INCLUDE_CACHED` itself,
+mutation-killed by all three.
 
 **The auto-GC coupling, stated honestly — this mode does not collect
 garbage, it only refreshes it.** Every kept-current game this mode refreshes
@@ -3117,8 +3184,8 @@ exists for). It shares nothing with the worker but the database file; WAL plus
   "last_sweep_targets": 12,       // null while a sweep is in flight
   "last_sweep_enqueued": 3,       // NEW jobs only (dedupe hits not counted)
   "next_eligible_at": "2026-08-06T11:00:00Z", // estimate; interval then window
-  "sweep_include_cached": false,  // WP 4d — effective value, additive field
-  "sweep_cached_gc_risk": false   // WP 4d — cached mode on AND auto_gc != 'execute'
+  "sweep_include_cached": true,   // WP 4d — effective value, additive field. Default `true` since WP SWEEP-1 (ADR-0014)
+  "sweep_cached_gc_risk": false   // WP 4d — cached mode on AND auto_gc != 'execute'. `false` here because auto_gc also defaults to 'execute' (paired, ADR-0014)
 }
 ```
 
@@ -3143,9 +3210,13 @@ interval and staleness bound, so an operator can see what enabling the window
 - No garbage collection (`3.6`/`3.7`) and no third-party manifest oracle
   (`3.8`, ADR-0006 decision 4).
 - No config-write API, no per-app schedule overrides, no "sweep now" endpoint.
-- No `deploy/` changes — the new `VAULT_SCHEDULE_*` variables are documented
-  in `api/.env.example`; wiring them (and a `TZ`) into the Compose file is a
-  follow-up on top of WP 1.9.
+- ~~No `deploy/` changes — the new `VAULT_SCHEDULE_*` variables are
+  documented in `api/.env.example`; wiring them (and a `TZ`) into the
+  Compose file is a follow-up on top of WP 1.9.~~ **Done.**
+  `VAULT_SCHEDULE_WINDOW` (default `03:00-07:00`) and `TZ` (default `UTC`)
+  are forwarded by `deploy/compose.yaml` and documented in
+  `deploy/.env.example` as of WP SWEEP-1's follow-up round (ADR-0014
+  §"Shipping an enabled nightly schedule", operator decision 2026-08-22).
 
 ## Cache-event sweep (WP 3.11, ADR-0008)
 
@@ -4517,12 +4588,17 @@ aggregate hour count while still refusing to ever surface the date.
 itself — not only `rtime_last_played` — as something a shared-household
 vault must not surface without an explicit opt-in ("off by default or
 dismissible at any time, no nagging, and no number that gets held up to
-somebody else"). That is the same house style `VAULT_SWEEP_INCLUDE_CACHED`
-and the WP 3.11 event sweep already follow for every privacy/cost-sensitive
-switch in this project: ship off, let an operator who wants the data read
-this section and turn it on. "The decision-support panel needs it" is
-explicitly not treated as a sufficient reason to default either of these
-on — the privacy stance above is.
+somebody else"). That is the same house style the WP 3.11 event sweep
+already follows for every cost-sensitive switch with no OTHER person's data
+at stake: ship off, let an operator who wants it read this section and turn
+it on. **`VAULT_SWEEP_INCLUDE_CACHED` is no longer a same-direction example
+of that house style (WP SWEEP-1, ADR-0014, 2026-08-22) — it now ships ON by
+default,** which is not a contradiction: disk/bandwidth an OPERATOR spends
+and can see is a different kind of cost than a DIFFERENT person's playtime
+surfaced without their knowledge, and only the latter is what this privacy
+stance is about. "The decision-support panel needs it" is explicitly not
+treated as a sufficient reason to default either of these two playtime
+switches on — the privacy stance above is.
 
 ```bash
 VAULT_RELAY_EXPOSE_PLAYTIME=true       # off by default

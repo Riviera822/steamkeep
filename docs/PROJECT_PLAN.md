@@ -994,12 +994,39 @@ all. A settings screen that can toggle anything therefore needs a new layer.
 - [ ] Phase 4a's settings screen builds on this rather than displaying
       read-only values with "set this env var" hints
 
-**Sweep target set — installed PLUS cached (opt-in).** Today the nightly
-sweep targets only the union of *installed* lists from fresh agent reports
-(`scheduler.compute_targets`: "Intersected with nothing else", plan A8). A
+**Sweep target set — installed PLUS cached (default-on since WP SWEEP-1,
+2026-08-22 — opt-in as originally shipped by WP 4d below).** Today the
+nightly sweep targets the union of *installed* lists from fresh agent
+reports (`scheduler.compute_targets`: "Intersected with nothing else", plan
+A8) PLUS, by default, every app that already holds cache content on disk. A
 game that sits in the cache but is currently installed nowhere — or whose
-PC has been quiet longer than `VAULT_SCHEDULE_CLIENT_STALE_DAYS` — is never
-refreshed and silently rots.
+PC has been quiet longer than `VAULT_SCHEDULE_CLIENT_STALE_DAYS` — used to
+never be refreshed and silently rot; it now is, out of the box.
+
+**Update (WP SWEEP-1, operator decision 2026-08-22):** the checklist and
+evidence log directly below are WP 4d's own historical record and are left
+as they were written — they describe an opt-in, off-by-default feature,
+which is what WP 4d actually shipped and what was true until this date. It
+no longer describes the shipped default. The operator asked for "keep the
+cache current" to be the out-of-the-box behavior rather than something an
+installer has to discover, was shown the cost this section itself names
+(bandwidth/disk on games nobody asked for, a real behaviour change on
+upgrade) twice, and chose the new default anyway.
+`DEFAULT_SWEEP_INCLUDE_CACHED` flipped to `True` PAIRED with
+`DEFAULT_AUTO_GC` flipping to `execute` in the same change — shipping the
+cached-apps sweep on without
+also shipping real garbage collection on would be exactly the "keeps itself
+current straight into a full disk" condition `scheduler.cached_sweep_gc_risk`
+(named two bullets below) exists to warn about, not a smaller, safer step.
+See `docs/adr/0014-sweep-cached-and-auto-gc-default-on.md` for the full
+argument, the upgrade impact, and the two-line opt-out
+(`VAULT_SWEEP_INCLUDE_CACHED=false` / `VAULT_AUTO_GC=off`, env or `PATCH
+/v1/settings` — both keys remain fully overridable either way, ADR-0009).
+Making that pairing actually run out of the box needed a scheduler window,
+so the same package also ships `VAULT_SCHEDULE_WINDOW=03:00-07:00` /
+`TZ=UTC` as the default Compose configuration (WP SWEEP-1 follow-up,
+2026-08-22) — see that ADR's "Shipping an enabled nightly schedule" section
+for the full argument.
 
 - [x] New target-set mode adding every cached app to the sweep. Cheap by
       construction: ~3 s and zero bytes per app that is already current
@@ -2349,9 +2376,12 @@ Phases 1–3 plus 4a shipped. Rewritten 2026-08-17 to reflect the real state.
    clients/bypass detail surface); see §7 Phase 4b's evidence notes.
 4. [ ] **Phase 4c / 4d** frontend halves: the manual "check & update" trigger
    in both UIs (web done WP 4c-web, Android done WP 4c-app — both frontend
-   triggers now shipped), and the opt-in "keep the cache current" sweep mode
-   (its auto-GC prerequisite is shipped — see §7 Phase 3; the sweep mode's
-   own frontend surface in both UIs is still open).
+   triggers now shipped), and the now-default-on "keep the cache current"
+   sweep mode (WP SWEEP-1, 2026-08-22, flipped it — and its auto-GC pair —
+   from opt-in to the shipped default, docs/adr/0014-sweep-cached-and-auto-
+   gc-default-on.md; its auto-GC prerequisite is shipped — see §7 Phase 3;
+   the sweep mode's own frontend surface in both UIs — now an OPT-OUT
+   control, not an opt-in one — is still open).
 5. [x] **WP 5.3 docs half** — `SECURITY.md` + `docs/security/threat-model.md`,
    done 2026-08-18 (see §7 Phase 5). Round-2 review ran and FAILED (two
    blockers plus should-fixes, mostly citation drift from WP 4h.0 landing
