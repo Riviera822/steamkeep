@@ -1,4 +1,4 @@
-# SteamVault -- Docker Compose deployment (Phase 1, WP 1.9).
+# SteamHangar -- Docker Compose deployment (Phase 1, WP 1.9).
 #
 #   cd deploy
 #   cp .env.example .env      # then set VAULT_API_KEY
@@ -13,7 +13,7 @@
 # Full walkthrough, including the one-time interactive SteamPrefill login and the
 # port-80 / dedicated-IP story: deploy/README.md.
 
-name: steamvault
+name: steamhangar
 
 # --- Log rotation ------------------------------------------------------------
 # Applied to every service below. This is what closes core/README.md's open "log
@@ -122,7 +122,7 @@ services:
     build:
       context: ../core
       dockerfile: Dockerfile
-    image: steamvault/vault-core:${VAULT_IMAGE_TAG:-0.1.0}
+    image: steamhangar/vault-core:${VAULT_IMAGE_TAG:-0.1.0}
     restart: unless-stopped
     environment:
       # Upstream DNS resolver nginx uses to resolve Steam CDN hostnames at
@@ -150,7 +150,7 @@ services:
       # another port simply never gets used (docs/PROJECT_PLAN.md §10).
       #
       # If something else on this host already owns port 80, do NOT move
-      # SteamVault to another port -- give it its own address instead (§10):
+      # SteamHangar to another port -- give it its own address instead (§10):
       #   * an IP alias on the existing NIC:
       #       ip addr add 192.168.1.50/24 dev eth0
       #       VAULT_CORE_BIND=192.168.1.50   in .env
@@ -214,7 +214,7 @@ services:
       # build context, unaffected by this.
       context: ..
       dockerfile: api/Dockerfile
-    image: steamvault/vault-api:${VAULT_IMAGE_TAG:-0.1.0}
+    image: steamhangar/vault-api:${VAULT_IMAGE_TAG:-0.1.0}
     restart: unless-stopped
     environment:
       # Required. No default anywhere in the stack: Compose refuses to start
@@ -546,7 +546,7 @@ services:
   # vault_api/prefill_runner.py's own module docstring.
   # ===========================================================================
   vault-runner:
-    image: steamvault/vault-api:${VAULT_IMAGE_TAG:-0.1.0}
+    image: steamhangar/vault-api:${VAULT_IMAGE_TAG:-0.1.0}
     command: ["python", "-m", "vault_api.prefill_runner"]
     restart: unless-stopped
     # A stable, project-scoped name for the one documented interactive step
@@ -554,12 +554,12 @@ services:
     # `docker exec` into it for the one-time SteamPrefill login,
     # ADR-0012 §5). Deliberately NOT a bare "vault-runner" literal:
     # ${COMPOSE_PROJECT_NAME} is how Compose exposes the ALREADY-RESOLVED
-    # project name (the `name: steamvault` key at the top of this file, or
+    # project name (the `name: steamhangar` key at the top of this file, or
     # whatever `-p`/COMPOSE_PROJECT_NAME overrides it to) back into this
     # file's own variable interpolation -- confirmed empirically with
     # `docker compose config` both with no override (renders
-    # "steamvault-vault-runner") and with `-p steamvault-verify` (renders
-    # "steamvault-verify-vault-runner"). A literal container_name would
+    # "steamhangar-vault-runner") and with `-p steamhangar-verify` (renders
+    # "steamhangar-verify-vault-runner"). A literal container_name would
     # collide across two Compose projects on the same host, which is exactly
     # the isolation deploy/tests/verify-stack.sh's own header comment
     # promises ("uses its own Compose project name ... so it can never touch
@@ -568,7 +568,7 @@ services:
     # on its own for every service that (like the other three in this file)
     # has no explicit container_name, so a real deployment and a verify run
     # on the same host would otherwise fight over one literal name.
-    container_name: ${COMPOSE_PROJECT_NAME:-steamvault}-vault-runner
+    container_name: ${COMPOSE_PROJECT_NAME:-steamhangar}-vault-runner
     # Empirically found running this package (not a hypothetical): on a
     # genuinely FRESH `vault-db` volume, vault-api's schema creation
     # (vault_api/db.py's init_db, called from create_app() BEFORE uvicorn
@@ -747,7 +747,7 @@ services:
     build:
       context: ./proxy
       dockerfile: Dockerfile
-    image: steamvault/vault-proxy:${VAULT_IMAGE_TAG:-0.1.0}
+    image: steamhangar/vault-proxy:${VAULT_IMAGE_TAG:-0.1.0}
     restart: unless-stopped
     environment:
       # The ONLY operator-facing knob this service has. Rendered into a
@@ -794,7 +794,7 @@ services:
     build:
       context: ../dns
       dockerfile: Dockerfile
-    image: steamvault/vault-dns:${VAULT_IMAGE_TAG:-0.1.0}
+    image: steamhangar/vault-dns:${VAULT_IMAGE_TAG:-0.1.0}
     restart: unless-stopped
     environment:
       # REQUIRED when this profile is enabled: the LAN IPv4 address of the host

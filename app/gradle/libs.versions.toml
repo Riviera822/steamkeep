@@ -1,4 +1,4 @@
-## SteamVault Android app — version catalog (WP 4b.1).
+## SteamHangar Android app — version catalog (WP 4b.1).
 ##
 ## Repo rule (docs/LEARNINGS.md / CLAUDE.md): pinned versions only, no
 ## dynamic ranges ("latest.release", "+") anywhere in the build. Every

@@ -1,4 +1,4 @@
-# SteamVault vault-proxy -- the egress-lock allowlist proxy (WP EG-1, ADR-0011).
+# SteamHangar vault-proxy -- the egress-lock allowlist proxy (WP EG-1, ADR-0011).
 #
 # This is the ONE way vault-api reaches anything beyond the LAN once the lock
 # is in effect (deploy/compose.yaml's `vault-lan` network drops vault-api's
@@ -23,9 +23,9 @@
 #   '{{index .RepoDigests 0}}'` (dns/Dockerfile's own record of this pin).
 FROM alpine:3.23.5@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 
-LABEL org.opencontainers.image.title="SteamVault vault-proxy" \
+LABEL org.opencontainers.image.title="SteamHangar vault-proxy" \
       org.opencontainers.image.description="Allowlist-only forward proxy: the sole egress path for the egress-locked vault-api container" \
-      org.opencontainers.image.source="https://github.com/steamvault/steamvault" \
+      org.opencontainers.image.source="https://github.com/Riviera822/steamhangar" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="0.1.0"
 

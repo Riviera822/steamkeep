@@ -1,6 +1,6 @@
-# Deploying SteamVault on TrueNAS SCALE with Dockge
+# Deploying SteamHangar on TrueNAS SCALE with Dockge
 
-A community layout for running SteamVault on TrueNAS SCALE 25.x, managed
+A community layout for running SteamHangar on TrueNAS SCALE 25.x, managed
 through [Dockge](https://github.com/louislam/dockge) instead of the SCALE
 Apps UI. This is one way to do it, not the only way -- adapt paths and pool
 names to your own system. Every address below is an
@@ -36,18 +36,18 @@ running your own DNS as a SCALE app).
 ## 2. Stack layout under Dockge
 
 Dockge discovers stacks as subdirectories of the directory you pointed it at
-during its own setup (commonly `/mnt/<pool>/dockge/stacks/`). Give SteamVault
+during its own setup (commonly `/mnt/<pool>/dockge/stacks/`). Give SteamHangar
 its own subdirectory there and put `deploy/compose.yaml` (and your `.env`)
 inside it -- Dockge treats any directory containing a `compose.yaml`/
 `docker-compose.yaml` as a stack it can start, stop, and show logs for:
 
 ```
-/mnt/<pool>/dockge/stacks/steamvault/
+/mnt/<pool>/dockge/stacks/steamhangar/
 ├── compose.yaml     # copy (or symlink) of deploy/compose.yaml from a checkout
 └── .env             # copied from deploy/.env.example, then edited -- see below
 ```
 
-Either check out the SteamVault repo directly under that path and use
+Either check out the SteamHangar repo directly under that path and use
 `deploy/` as the stack directory (simplest -- Dockge just needs *some*
 directory with a compose file and an `.env` next to it, subdirectories of the
 repo are fine), or copy just `deploy/compose.yaml` and `deploy/.env.example`
@@ -59,7 +59,7 @@ it lives only in the stack directory.
 
 ## 3. Why an HDD pool is fine for this cache
 
-The instinct is "cache = fast disk, so SSD pool." For SteamVault specifically,
+The instinct is "cache = fast disk, so SSD pool." For SteamHangar specifically,
 that instinct costs you SSD space for no measurable benefit, because the
 bottleneck for this cache is never the disk:
 
@@ -98,7 +98,7 @@ requires touching `compose.yaml` itself.
 # Run on the TrueNAS SCALE host shell (or via Storage > Datasets > Add
 # Dataset in the UI, then set the same properties there).
 zfs create -o recordsize=1M -o atime=off -o compression=off \
-    <pool>/steamvault-cache
+    <pool>/steamhangar-cache
 ```
 
 Why each property, specifically for this workload:
@@ -121,7 +121,7 @@ Why each property, specifically for this workload:
   parsed real Steam manifests and diffed `cb_compressed` (the manifest's
   declared *compressed* chunk length) against the actual on-disk chunk file
   size across ~12,000 real cached chunks, with **zero size mismatches**.
-  That means the bytes SteamVault stores under `cache/depot/.../chunk/<id>`
+  That means the bytes SteamHangar stores under `cache/depot/.../chunk/<id>`
   are already Valve's own compressed chunk payload -- there is no
   uncompressed data downstream of Valve's own pipeline for ZFS to
   additionally compress. Turning ZFS compression on for this dataset spends
@@ -136,8 +136,8 @@ Optional, if you want a hard ceiling or a guaranteed floor on this dataset
 is the only ceiling that exists at all):
 
 ```bash
-zfs set quota=500G <pool>/steamvault-cache        # hard ceiling
-zfs set reservation=50G <pool>/steamvault-cache   # guaranteed floor (optional)
+zfs set quota=500G <pool>/steamhangar-cache        # hard ceiling
+zfs set reservation=50G <pool>/steamhangar-cache   # guaranteed floor (optional)
 ```
 
 ### 4.2 Ownership
@@ -147,7 +147,7 @@ ownership of the *mount point* is a plain POSIX chown, same as any bind mount
 (`deploy/README.md` "Using a bind mount for the cache"):
 
 ```bash
-chown -R 101:101 /mnt/<pool>/steamvault-cache
+chown -R 101:101 /mnt/<pool>/steamhangar-cache
 ```
 
 uid/gid 101 is not a placeholder -- it's the exact numeric identity of the
@@ -163,7 +163,7 @@ In the stack's `.env` (`deploy/.env.example` documents this variable in
 full):
 
 ```bash
-VAULT_CACHE_PATH=/mnt/<pool>/steamvault-cache
+VAULT_CACHE_PATH=/mnt/<pool>/steamhangar-cache
 ```
 
 That's the entire knob -- one line, no `compose.yaml` edit. Leaving
@@ -188,7 +188,7 @@ by default. Its path lands inside this same dataset either way:
 `core/Dockerfile` pre-creates `logs/` alongside `cache/` and `tmp/` under the
 one `/vault` mount, and `VAULT_CACHE_PATH` redirects all three together, not
 just `cache/`. Worth knowing before you set a tight `zfs set quota=...` on
-`<pool>/steamvault-cache` (§4.1) -- the event log competes for the same
+`<pool>/steamhangar-cache` (§4.1) -- the event log competes for the same
 quota as the depot cache itself. It is a much smaller scale (one TSV line
 per request, not per-chunk bytes) but genuinely unbounded over time, and
 `deploy/README.md`/`.env.example` are explicit that vault-api can read the
@@ -209,7 +209,7 @@ traffic is plain HTTP and the Steam client only ever asks for port 80
 (`deploy/README.md` "Port 80 and the dedicated-IP question"; do not "solve"
 this by moving `VAULT_CORE_PORT`, that just makes a cache nothing uses).
 
-Give SteamVault its own IP address on the NIC instead, via the SCALE UI:
+Give SteamHangar its own IP address on the NIC instead, via the SCALE UI:
 
 1. **Network > Interfaces > (your NIC) > Edit > Aliases > Add** -- add an
    alias IP in your LAN's range, e.g. `192.168.1.50/24`, distinct from the
@@ -278,7 +278,7 @@ After `docker compose up -d` (or Dockge's Start), the same checks
 
 ```bash
 curl http://192.168.1.50/health                     # vault-core -> ok
-curl -I http://192.168.1.50/lancache-heartbeat       # X-LanCache-Processed-By: steamvault
+curl -I http://192.168.1.50/lancache-heartbeat       # X-LanCache-Processed-By: steamhangar
 curl http://<truenas-host>:8080/v1/health            # vault-api -> {"status":"ok"}
 ```
 
@@ -288,11 +288,11 @@ fallback named volume (i.e. that `VAULT_CACHE_PATH` took effect):
 ```bash
 docker compose exec vault-core sh -c 'stat -c "%n %d" /vault /vault/cache /vault/tmp'
 # then, on the TrueNAS host:
-zfs list <pool>/steamvault-cache
+zfs list <pool>/steamhangar-cache
 ```
 
-After a client's first download, `zfs list -o space <pool>/steamvault-cache`
-should show `USED` growing, and `ls /mnt/<pool>/steamvault-cache/cache/depot`
+After a client's first download, `zfs list -o space <pool>/steamhangar-cache`
+should show `USED` growing, and `ls /mnt/<pool>/steamhangar-cache/cache/depot`
 should show real depot-ID directories -- not an empty dataset with all the
 bytes landing somewhere else.
 
@@ -326,7 +326,7 @@ app-managed container/VM on the same box, not necessarily what the host's
 Docker daemon resolves through) -- so DNS often doesn't save you here
 either. If none of the four candidates succeeds, prefill jobs silently
 download straight from Valve -- the job still finishes green, and
-`zfs list -o space <pool>/steamvault-cache` never grows.
+`zfs list -o space <pool>/steamhangar-cache` never grows.
 
 Check it with the heartbeat probe, not a DNS lookup -- a DNS lookup only
 tells you about candidate 1, and candidates 2-4 never touch DNS at all.
@@ -337,7 +337,7 @@ use `python3`, which is:
 docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://<your §5 alias IP>/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
 ```
 
-A line printing `200 steamvault` is success. A traceback ending in
+A line printing `200 steamhangar` is success. A traceback ending in
 `ConnectionRefusedError`/`URLError` means it's missing --
 `deploy/README.md`'s fix recipe applies unchanged here: pin
 `lancache.steamcontent.com` to your §5 alias IP via `extra_hosts` on
@@ -355,8 +355,8 @@ may not control what the Docker daemon's own resolver is doing.
 | Symptom | Likely cause |
 |---|---|
 | `vault-core` exits at boot: `... is not writable by the nginx worker user` | `chown -R 101:101` on the dataset's mount point was skipped or ran before the dataset existed. |
-| `vault-core` exits at boot: `... DIFFERENT filesystems` | Something (a snapshot mount, an unrelated bind mount) is layered inside `/mnt/<pool>/steamvault-cache` on a different device than the dataset root. `VAULT_CACHE_PATH` must point at one filesystem boundary, not a directory with something else mounted inside it. |
+| `vault-core` exits at boot: `... DIFFERENT filesystems` | Something (a snapshot mount, an unrelated bind mount) is layered inside `/mnt/<pool>/steamhangar-cache` on a different device than the dataset root. `VAULT_CACHE_PATH` must point at one filesystem boundary, not a directory with something else mounted inside it. |
 | `docker compose up` starts but nothing ever gets cached, and there's no ownership error | Check `VAULT_CACHE_PATH` was actually picked up (Dockge/`docker compose config | grep -A3 /vault`) -- a value without a leading `/` is parsed as a *named volume reference*, not a bind path, and Compose refuses with `refers to undefined volume ...: invalid compose project` if it doesn't match `vault-cache` exactly. |
 | Every request is a cache MISS at internet speed, cache empty | DNS redirection isn't reaching the client, or the AAAA/RA bypass (§6) is open. `dig A` and `dig AAAA` against your resolver from an actual client, not just the NAS. |
 | Port 80 already answers something else (a Traefik/NPM welcome page) | You bound `vault-core` to the host's primary address instead of the alias from §5 -- double-check `VAULT_CORE_BIND` in `.env` against `ip addr show` on the TrueNAS host. |
-| Prefill jobs finish `done` but `zfs list -o space <pool>/steamvault-cache` never grows | SteamPrefill inside the container isn't finding the cache via any of its four detection candidates (§7.1 above -- this is the expected risk of the §5 dedicated-alias layout specifically). Check with `docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://<your §5 alias IP>/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"` (`curl` is not in the `vault-api` image), looking for `200 steamvault`, and fix with the `extra_hosts` override in `deploy/README.md`. |
+| Prefill jobs finish `done` but `zfs list -o space <pool>/steamhangar-cache` never grows | SteamPrefill inside the container isn't finding the cache via any of its four detection candidates (§7.1 above -- this is the expected risk of the §5 dedicated-alias layout specifically). Check with `docker compose exec vault-api python3 -c "import urllib.request as u; r=u.urlopen('http://<your §5 alias IP>/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"` (`curl` is not in the `vault-api` image), looking for `200 steamhangar`, and fix with the `extra_hosts` override in `deploy/README.md`. |

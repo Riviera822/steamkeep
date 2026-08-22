@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Riviera822/steamvault/agent/hostsfile"
+	"github.com/Riviera822/steamhangar/agent/hostsfile"
 )
 
 const testCacheIP = "192.168.1.50"

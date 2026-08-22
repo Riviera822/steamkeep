@@ -495,7 +495,7 @@ const AUTO_GC_MODES = Object.freeze(["off", "dry-run", "execute"]);
 // on purpose, so a fresh demo session shows a realistic mix of "default"
 // and "env" sourced rows, not everything defaulted.
 const SETTINGS_BASE = {
-  vault_name: { default: "", env: "steamvault-demo" },
+  vault_name: { default: "", env: "steamhangar-demo" },
   schedule_window: { default: null, env: "22:00-06:00" },
   schedule_interval_minutes: { default: 180, env: 180 },
   schedule_client_stale_days: { default: 7, env: 7 },

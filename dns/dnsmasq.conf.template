@@ -1,4 +1,4 @@
-# SteamVault vault-dns -- production dnsmasq config TEMPLATE (Phase 1, WP 1.8).
+# SteamHangar vault-dns -- production dnsmasq config TEMPLATE (Phase 1, WP 1.8).
 #
 # This is a TEMPLATE, not a ready-to-use config: every ${VAR} placeholder
 # below is substituted by `envsubst` when the vault-dns container starts.

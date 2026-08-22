@@ -52,7 +52,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Riviera822/steamvault/agent/report"
+	"github.com/Riviera822/steamhangar/agent/report"
 )
 
 // Defaults for New. All are overridable via Option.

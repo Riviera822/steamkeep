@@ -31,7 +31,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/Riviera822/steamvault/agent/report"
+	"github.com/Riviera822/steamhangar/agent/report"
 )
 
 // Default report interval for --loop mode (plan §3: "periodically, e.g.

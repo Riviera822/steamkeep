@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Riviera822/steamvault/agent/acf"
+	"github.com/Riviera822/steamhangar/agent/acf"
 )
 
 func installedApp(appid, name string, stateFlags int) acf.InstalledApp {

@@ -95,7 +95,7 @@ via the GC keep set — filesystem paths:
   documented exception contract crashes the caller), and the number of
   depots/branches/rows is capped.
 
-## Privacy — this is the one thing in SteamVault that leaves the LAN
+## Privacy — this is the one thing in SteamHangar that leaves the LAN
 
 Every other component talks only to the LAN, to Steam's CDN through
 vault-core, or to Valve through SteamPrefill. **With the oracle enabled,
@@ -192,7 +192,7 @@ MAX_WARNINGS = 10
 DEFAULT_FETCH_TIMEOUT_SECONDS = 10.0
 
 #: Sent so the operators of a free public service can see who is calling.
-USER_AGENT = "SteamVault-vault-api/0.1 (+https://github.com/, self-hosted)"
+USER_AGENT = "SteamHangar-vault-api/0.1 (+https://github.com/, self-hosted)"
 
 #: ``AppStaleness.verdict`` / ``DepotStaleness.verdict`` values.
 VERDICT_CURRENT = "current"

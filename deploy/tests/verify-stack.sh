@@ -1,5 +1,5 @@
 #!/bin/sh
-# SteamVault WP 1.9 -- container verification suite.
+# SteamHangar WP 1.9 -- container verification suite.
 #
 # Proves that the three images and deploy/compose.yaml actually deliver what the
 # Phase-0 PoC and WP 1.1-1.8 established, INSIDE Linux containers: the cache
@@ -12,7 +12,7 @@
 #     sudo sh deploy/tests/verify-stack.sh
 #
 # It is self-contained and side-effect-free by design:
-#   * uses its own Compose project name (steamvault-verify), so it can never
+#   * uses its own Compose project name (steamhangar-verify), so it can never
 #     touch a real deployment's containers or volumes
 #   * publishes every port on 127.0.0.1 and on non-default port numbers, so it
 #     cannot collide with a host nginx on :80 or a host resolver on :53
@@ -32,7 +32,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 compose_file="$repo_root/deploy/compose.yaml"
 
-PROJECT=steamvault-verify
+PROJECT=steamhangar-verify
 TAG=${VAULT_IMAGE_TAG:-0.1.0}
 
 # Non-default, loopback-only host ports (see header).
@@ -101,7 +101,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-printf '# SteamVault WP 1.9 -- container verification transcript\n\n'
+printf '# SteamHangar WP 1.9 -- container verification transcript\n\n'
 say "date:            $(date -u '+%Y-%m-%dT%H:%M:%SZ') (UTC)"
 say "host:            $(uname -srm)"
 say "distro:          $(. /etc/os-release 2>/dev/null; printf '%s' "${PRETTY_NAME:-unknown}")"
@@ -152,7 +152,7 @@ for svc in core api proxy dns; do
         # SIBLING of api/, not a child of it -- an api/-only context can no
         # longer reach it. core and dns are UNCHANGED, still built from their
         # own directories below.
-        docker build -t "steamvault/vault-api:$TAG" -f "$repo_root/api/Dockerfile" "$repo_root" \
+        docker build -t "steamhangar/vault-api:$TAG" -f "$repo_root/api/Dockerfile" "$repo_root" \
             > "$work/build-$svc.log" 2>&1 || build_failed=1
     elif [ "$svc" = "proxy" ]; then
         # WP EG-1 (ADR-0011), round-2 review B4: this WAS missing entirely --
@@ -160,15 +160,15 @@ for svc in core api proxy dns; do
         # vault-proxy" while this loop only ever built core/api/dns, so a real
         # Dockerfile break here (e.g. Alpine dropping the pinned tinyproxy
         # version) was never caught here, and step 6l further down would have
-        # gone on to test whatever STALE `steamvault/vault-proxy:$TAG` image
+        # gone on to test whatever STALE `steamhangar/vault-proxy:$TAG` image
         # happened to already exist locally, silently. deploy/proxy/ is its
         # own build context (not $repo_root/proxy, which does not exist --
         # this service's Dockerfile lives under deploy/, unlike the three
         # components above which each own a repo-root-level directory).
-        docker build -t "steamvault/vault-proxy:$TAG" "$repo_root/deploy/proxy" \
+        docker build -t "steamhangar/vault-proxy:$TAG" "$repo_root/deploy/proxy" \
             > "$work/build-$svc.log" 2>&1 || build_failed=1
     else
-        docker build -t "steamvault/vault-$svc:$TAG" "$repo_root/$svc" \
+        docker build -t "steamhangar/vault-$svc:$TAG" "$repo_root/$svc" \
             > "$work/build-$svc.log" 2>&1 || build_failed=1
     fi
     if [ "$build_failed" -eq 0 ]; then
@@ -180,7 +180,7 @@ for svc in core api proxy dns; do
 done
 
 step "2.sizes  Built image sizes"
-run "docker images --filter reference='steamvault/*' --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.ID}}'"
+run "docker images --filter reference='steamhangar/*' --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.ID}}'"
 
 step "2.pins  Base image pins actually used (tag + digest)"
 run "grep -h '^FROM' '$repo_root/core/Dockerfile' '$repo_root/api/Dockerfile' '$repo_root/deploy/proxy/Dockerfile' '$repo_root/dns/Dockerfile'"
@@ -189,8 +189,8 @@ step "2.sp  SteamPrefill binary in the vault-api image"
 say 'Checked by inspection only. This work package deliberately does NOT execute'
 say 'SteamPrefill in a container: it has no Steam session, and creating one is the'
 say "operator's one-time interactive step (deploy/README.md 'First run')."
-run "docker run --rm --entrypoint sh steamvault/vault-api:$TAG -c 'ls -l /opt/steamprefill/SteamPrefill; sha256sum /opt/steamprefill/SteamPrefill; head -c 4 /opt/steamprefill/SteamPrefill | od -c | head -1'"
-sp_deps=$(docker run --rm --entrypoint sh "steamvault/vault-api:$TAG" -c 'ldd /opt/steamprefill/SteamPrefill 2>&1' )
+run "docker run --rm --entrypoint sh steamhangar/vault-api:$TAG -c 'ls -l /opt/steamprefill/SteamPrefill; sha256sum /opt/steamprefill/SteamPrefill; head -c 4 /opt/steamprefill/SteamPrefill | od -c | head -1'"
+sp_deps=$(docker run --rm --entrypoint sh "steamhangar/vault-api:$TAG" -c 'ldd /opt/steamprefill/SteamPrefill 2>&1' )
 say ''
 say 'Dynamic libraries the binary needs, resolved inside the image (no "not found"):'
 printf '%s\n' "$sp_deps" | sed 's/^/    /'
@@ -202,22 +202,22 @@ say 'documented gap since WP 4a.1) into the image itself -- api/Dockerfile now'
 say 'COPYs web/ in at /app/web and sets VAULT_WEB_DIR=/app/web explicitly.'
 say 'Checked here at the IMAGE layer (docker run, no compose stack needed yet),'
 say 'so a broken COPY path is caught even before section 6 exercises it over HTTP.'
-web_ls=$(docker run --rm --entrypoint sh "steamvault/vault-api:$TAG" -c 'ls -la /app/web /app/web/css /app/web/js 2>&1')
+web_ls=$(docker run --rm --entrypoint sh "steamhangar/vault-api:$TAG" -c 'ls -la /app/web /app/web/css /app/web/js 2>&1')
 printf '%s\n' "$web_ls" | sed 's/^/    /'
 assert_contains "$web_ls" "index.html" "/app/web/index.html exists in the image"
 assert_contains "$web_ls" "app.css" "/app/web/css/app.css (an app-shell asset) exists in the image"
 assert_contains "$web_ls" "app.js" "/app/web/js/app.js (an app-shell asset) exists in the image"
-webdir_env=$(docker run --rm --entrypoint sh "steamvault/vault-api:$TAG" -c 'printf %s "$VAULT_WEB_DIR"')
+webdir_env=$(docker run --rm --entrypoint sh "steamhangar/vault-api:$TAG" -c 'printf %s "$VAULT_WEB_DIR"')
 assert_eq "/app/web" "$webdir_env" "VAULT_WEB_DIR is baked into the image and points at the actual COPY target"
 
 step "2.home  HOME for uid 101 exists, is owned by it, and both definitions agree"
 say 'Regression guard for the WP 1.9 review blocker: with HOME unwritable,'
 say "SteamPrefill's AppConfig static constructor throws before parsing any"
 say 'argument, so the documented login and every prefill job die identically.'
-run "docker run --rm --entrypoint sh steamvault/vault-api:$TAG -c 'getent passwd 101; echo \"ENV HOME=\$HOME\"; stat -c \"%n %u:%g %a\" \$HOME'"
-home_passwd=$(docker run --rm --entrypoint sh "steamvault/vault-api:$TAG" -c 'getent passwd 101 | cut -d: -f6')
-home_env=$(docker run --rm --entrypoint sh "steamvault/vault-api:$TAG" -c 'printf %s "$HOME"')
-home_own=$(docker run --rm --entrypoint sh "steamvault/vault-api:$TAG" -c 'stat -c "%u:%g" /opt/steamprefill/home')
+run "docker run --rm --entrypoint sh steamhangar/vault-api:$TAG -c 'getent passwd 101; echo \"ENV HOME=\$HOME\"; stat -c \"%n %u:%g %a\" \$HOME'"
+home_passwd=$(docker run --rm --entrypoint sh "steamhangar/vault-api:$TAG" -c 'getent passwd 101 | cut -d: -f6')
+home_env=$(docker run --rm --entrypoint sh "steamhangar/vault-api:$TAG" -c 'printf %s "$HOME"')
+home_own=$(docker run --rm --entrypoint sh "steamhangar/vault-api:$TAG" -c 'stat -c "%u:%g" /opt/steamprefill/home')
 assert_eq "/opt/steamprefill/home" "$home_passwd" "passwd entry for uid 101 has a real home"
 assert_eq "$home_passwd" "$home_env"             "ENV HOME agrees with the passwd entry"
 assert_eq "101:101" "$home_own"                  "HOME is owned by the container user"
@@ -234,7 +234,7 @@ say 'NO CREDENTIALS ARE ENTERED HERE, EVER. Logging in is the operator step.'
 # Steam<esc>[0m account is required"), so raw substring matching is unreliable.
 strip_ansi() { sed -e 's/\x1B\[[0-9;]*[A-Za-z]//g'; }
 sp_smoke=$(docker run --rm --entrypoint /opt/steamprefill/SteamPrefill \
-             "steamvault/vault-api:$TAG" select-apps < /dev/null 2>&1 | strip_ansi | head -12)
+             "steamhangar/vault-api:$TAG" select-apps < /dev/null 2>&1 | strip_ansi | head -12)
 printf '%s\n' "$sp_smoke" | sed 's/^/    /'
 assert_not_contains "$sp_smoke" "TypeInitializationException" "no TypeInitializationException (the blocker signature)"
 assert_not_contains "$sp_smoke" "UnauthorizedAccessException" "no UnauthorizedAccessException reaching for HOME"
@@ -290,15 +290,17 @@ assert_contains "$noKey" "VAULT_API_KEY" "compose refuses to render without VAUL
 # logic replayed against synthetic fixtures). The packaging work package
 # (build-context move to the repo root, the twelve env-forwarding additions
 # across this step and the B1 audit block below it, and 2.web/6h/6i/6j in
-# the sections that follow -- 109 checks total, up from WP D1's 73) was
-# written the same way, then actually run THREE times against a real
-# Docker host across two review rounds (WSL2, Engine 29.1.3/Compose
+# the sections that follow -- 109 checks total AT THAT TIME, up from WP
+# D1's 73) was written the same way, then actually run THREE times against
+# a real Docker host across two review rounds (WSL2, Engine 29.1.3/Compose
 # 2.40.3): 105/109 passed on the final run. Every packaging-WP check passed
-# on every run. The 4 failures were ALL in step 5i below, and were a genuine
-# PRE-EXISTING bug unrelated to this package: nginx's cache-event
-# `access_log` uses `buffer=64k flush=5s` (core/nginx/nginx.conf), and step
-# 5i's grep ran immediately after the triggering request with no wait for
-# that flush -- an isolated repro (fresh `docker run` of vault-core alone,
+# on every run. (The suite has grown since with later work packages -- WP
+# RN-1's run of this script counted 185 checks total; deploy/README.md
+# carries that measured figure.) The 4 failures were ALL in step 5i below,
+# and were a genuine PRE-EXISTING bug unrelated to this package: nginx's
+# cache-event `access_log` uses `buffer=64k flush=5s` (core/nginx/nginx.conf),
+# and step 5i's grep ran immediately after the triggering request with no
+# wait for that flush -- an isolated repro (fresh `docker run` of vault-core alone,
 # one real MISS, checking the file at increasing delays) showed the correct
 # 9-field line reliably once you wait past 5 s, and reliably empty before
 # that. Reproducible on every run so far, but NOT deterministic in the
@@ -667,7 +669,7 @@ hb=$(curl -s -D - -o /dev/null --max-time 10 "$CORE_URL/lancache-heartbeat")
 # instead of starting its own -- which makes `grep -c '^PASS'` under-count the
 # results by one against the summary. (Found reviewing the first recorded run.)
 printf '%s\n' "$hb" | sed 's/^/    /'
-assert_contains "$hb" "X-LanCache-Processed-By: steamvault" "heartbeat carries X-LanCache-Processed-By"
+assert_contains "$hb" "X-LanCache-Processed-By: steamhangar" "heartbeat carries X-LanCache-Processed-By"
 
 step "5c. Temp paths are not web-reachable (WP 1.1 S3 fix)"
 tmp_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$CORE_URL/tmp/proxy/anything")
@@ -948,7 +950,7 @@ webroot_code=$(curl -s -o "$work/webroot.html" -w '%{http_code}' --max-time 10 "
 say "    GET / -> http $webroot_code"
 assert_eq "200" "$webroot_code" "GET / returns 200"
 webroot_body=$(cat "$work/webroot.html")
-assert_contains "$webroot_body" "<title>SteamVault</title>" "GET / body is the real app shell (title tag), not a generic 404 page"
+assert_contains "$webroot_body" "<title>SteamHangar</title>" "GET / body is the real app shell (title tag), not a generic 404 page"
 assert_contains "$webroot_body" 'id="app"' "GET / body contains the app shell's root element"
 
 step "6i. Env-forwarding regression guard: VAULT_EVENT_LOG_PATH, VAULT_MANIFEST_ORACLE and VAULT_SETTINGS_READONLY actually reach vault-api's process environment"
@@ -1343,14 +1345,14 @@ section "7. vault-dns (--profile dns)"
 step "7a. Fail-fast: no CACHE_IP"
 say 'dns/README.md makes CACHE_IP required with no default; the entrypoint must'
 say 'refuse to start rather than emit address=/steamcontent.com/ with no address.'
-nocacheip=$(docker run --rm "steamvault/vault-dns:$TAG" 2>&1; echo "exit=$?")
+nocacheip=$(docker run --rm "steamhangar/vault-dns:$TAG" 2>&1; echo "exit=$?")
 printf '%s\n' "$nocacheip" | sed 's/^/    /'
 assert_contains "$nocacheip" "FATAL" "vault-dns refuses to start without CACHE_IP"
 assert_not_contains "$nocacheip" "exit=0" "...and exits non-zero"
 
 step "7b. Fail-fast: CACHE_IP that is not a plain IPv4 address"
 badip=$(docker run --rm -e 'CACHE_IP=1.2.3.4
-log-queries' "steamvault/vault-dns:$TAG" 2>&1; echo "exit=$?")
+log-queries' "steamhangar/vault-dns:$TAG" 2>&1; echo "exit=$?")
 printf '%s\n' "$badip" | sed 's/^/    /'
 assert_contains "$badip" "FATAL" "a CACHE_IP carrying an injected config line is refused"
 
@@ -1402,23 +1404,23 @@ step "8a. cache/ and tmp/ split across two filesystems"
 say 'Simulated with a tmpfs over /vault/tmp (a different st_dev), which is exactly'
 say 'what a second volume mount would look like to the preflight.'
 docker volume create "$PROJECT-scratch" >/dev/null
-split=$(docker run --rm -v "$PROJECT-scratch:/vault" --tmpfs /vault/tmp "steamvault/vault-core:$TAG" 2>&1; echo "exit=$?")
+split=$(docker run --rm -v "$PROJECT-scratch:/vault" --tmpfs /vault/tmp "steamhangar/vault-core:$TAG" 2>&1; echo "exit=$?")
 printf '%s\n' "$split" | grep -E 'FATAL|st_dev|exit=' | sed 's/^/    /'
 assert_contains "$split" "DIFFERENT" "a split cache//tmp mount is refused at boot"
 assert_not_contains "$split" "exit=0" "...and exits non-zero"
 
 step "8b. An empty VAULT_RESOLVER"
-emptyres=$(docker run --rm -v "$PROJECT-scratch:/vault" -e VAULT_RESOLVER= "steamvault/vault-core:$TAG" 2>&1; echo "exit=$?")
+emptyres=$(docker run --rm -v "$PROJECT-scratch:/vault" -e VAULT_RESOLVER= "steamhangar/vault-core:$TAG" 2>&1; echo "exit=$?")
 printf '%s\n' "$emptyres" | grep -E 'FATAL|exit=' | sed 's/^/    /'
 assert_contains "$emptyres" "VAULT_RESOLVER is empty" "an empty resolver is refused"
 
 step "8c. A VAULT_RESOLVER carrying an nginx-config injection"
-inj=$(docker run --rm -v "$PROJECT-scratch:/vault" -e 'VAULT_RESOLVER=1.1.1.1; return 200 "pwned";' "steamvault/vault-core:$TAG" 2>&1; echo "exit=$?")
+inj=$(docker run --rm -v "$PROJECT-scratch:/vault" -e 'VAULT_RESOLVER=1.1.1.1; return 200 "pwned";' "steamhangar/vault-core:$TAG" 2>&1; echo "exit=$?")
 printf '%s\n' "$inj" | grep -E 'FATAL|exit=' | sed 's/^/    /'
 assert_contains "$inj" "refusing" "a resolver value with config-injection characters is refused"
 
 step "8d. A misconfigured envsubst filter leaves a placeholder unrendered"
-unrendered=$(docker run --rm -v "$PROJECT-scratch:/vault" -e 'NGINX_ENVSUBST_FILTER=^NOTHING_' "steamvault/vault-core:$TAG" 2>&1; echo "exit=$?")
+unrendered=$(docker run --rm -v "$PROJECT-scratch:/vault" -e 'NGINX_ENVSUBST_FILTER=^NOTHING_' "steamhangar/vault-core:$TAG" 2>&1; echo "exit=$?")
 printf '%s\n' "$unrendered" | grep -E 'FATAL|unsubstituted|exit=' | sed 's/^/    /'
 assert_contains "$unrendered" "unsubstituted" "an unrendered \${VAULT_...} placeholder is caught before nginx starts"
 
@@ -1427,7 +1429,7 @@ mkdir -p "$work/rootonly/cache/depot" "$work/rootonly/tmp"
 chmod 0755 "$work/rootonly" "$work/rootonly/cache" "$work/rootonly/tmp"
 chown -R 0:0 "$work/rootonly" 2>/dev/null
 chmod 0555 "$work/rootonly/cache" "$work/rootonly/tmp"
-ro=$(docker run --rm -v "$work/rootonly:/vault" "steamvault/vault-core:$TAG" 2>&1; echo "exit=$?")
+ro=$(docker run --rm -v "$work/rootonly:/vault" "steamhangar/vault-core:$TAG" 2>&1; echo "exit=$?")
 printf '%s\n' "$ro" | grep -E 'FATAL|chown|exit=' | sed 's/^/    /'
 assert_contains "$ro" "not writable" "a cache directory the nginx worker cannot write is refused"
 

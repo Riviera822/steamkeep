@@ -24,7 +24,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/Riviera822/steamvault/agent/acf"
+	"github.com/Riviera822/steamhangar/agent/acf"
 )
 
 // MaxClientIDLength mirrors vault_api.agent_reports.MAX_CLIENT_ID_LENGTH.

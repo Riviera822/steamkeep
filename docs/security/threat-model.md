@@ -1,4 +1,4 @@
-# SteamVault — Threat Model
+# SteamHangar — Threat Model
 
 **Verified against commit `234f16c`, 2026-08-18**, with §4 re-verified
 against the code as of **WP 4h.0** (not yet its own commit at the time of
@@ -28,7 +28,7 @@ growing (source code, other docs) are given as line numbers/ranges, each
 verified at the stated commit; re-open them if reading this well after
 that date.
 
-This document describes the security posture of SteamVault *as shipped*, not
+This document describes the security posture of SteamHangar *as shipped*, not
 as designed or aspired to. Every claim about behaviour below is followed by
 the file and line (or section-plus-quote anchor) it was read from. Where a
 protection does not exist, that is stated plainly rather than left implicit.
@@ -90,7 +90,7 @@ edits the lock away, `vault-runner`'s deliberately broad egress).
 
 ---
 
-## 1. The trust boundary: SteamVault assumes a trusted LAN
+## 1. The trust boundary: SteamHangar assumes a trusted LAN
 
 This is the single load-bearing assumption of the whole design, stated
 directly in the deployment docs: **`vault-core` (the cache) has no
@@ -159,7 +159,7 @@ Nothing in the code stops it. `vault-core`'s default bind is `0.0.0.0`
 0.0.0.0 is deliberate and correct HERE and only here… It has no
 authentication, by design"). Port-forwarding that address from a home
 router to the internet is a configuration action entirely outside
-SteamVault's control — there is no code-level guard (no IP allowlist, no
+SteamHangar's control — there is no code-level guard (no IP allowlist, no
 "refuse non-private source addresses") that would detect or block it. The
 only thing standing between "LAN-only by design" and "an open,
 unauthenticated Steam-CDN-scoped HTTP relay on the internet" is the
@@ -240,7 +240,7 @@ cached it or when.
 
 ### What the cache is *not*: not a licence bypass
 
-SteamVault stores exactly the bytes Steam's own CDN serves to a licensed,
+SteamHangar stores exactly the bytes Steam's own CDN serves to a licensed,
 authenticated Steam client for the same request — the cache does not
 decrypt, re-encrypt, strip protections from, or otherwise transform the
 content (there is no code path in this repository that does any such
@@ -254,14 +254,14 @@ outside a cache entirely. Whether that content is independently usable
 without Steam's own login/licence checks depends on Steam's own DRM/content
 architecture, which is outside this repository and not something this
 threat model verifies one way or the other — it is asserted here only that
-SteamVault adds no bypass mechanism of its own.
+SteamHangar adds no bypass mechanism of its own.
 
 ---
 
 ## 3. Credentials — ADR-0004's claim, checked against the code
 
 ADR-0004 (`docs/adr/0004-steam-credentials-never-touch-steamvault.md`)
-states that Steam credentials never touch SteamVault code. This was checked
+states that Steam credentials never touch SteamHangar code. This was checked
 directly, not taken on faith:
 
 - **`vault_api/auth.py` and every router module** were read in full; none
@@ -297,7 +297,7 @@ session.**" Concretely: whoever has read access to that Docker volume's
 files on the host (root on the Docker host, or anyone who can `docker
 cp`/mount it) can act as that logged-in Steam session. This is the single
 point where a real, **full-account** Steam credential-equivalent lives at
-rest in a SteamVault deployment — not inside the SQLite database. That
+rest in a SteamHangar deployment — not inside the SQLite database. That
 qualifier matters: §3's own next subsection describes a second, narrower
 secret (the Steam Web API relay key) that *is* stored in the SQLite
 database, in plain text — a real credential, but a revocable, read-scoped
@@ -654,7 +654,7 @@ none of them Steam credentials (§3):
    `steam_relay.py`'s own module docstring, "## Privacy" section, says the
    same thing in the same words and names this exact document by name as
    the place that should say it: "this is one of the few things in
-   SteamVault that leaves the LAN — and here it leaves it carrying the
+   SteamHangar that leaves the LAN — and here it leaves it carrying the
    operator's own Steam Web API key and the SteamID64 being looked up…
    see api/README.md's 'Steam Web API relay' section for the full note
    WP 5.3's threat model is expected to read"
@@ -684,7 +684,7 @@ none of them Steam credentials (§3):
    default (`api/vault_api/config.py:92-93`: "the default"); when an
    operator turns it on, `vault-api` sends the Steam **app ids** it tracks
    to a third party over HTTPS — default `api.steamcmd.net`
-   (`api/vault_api/oracle.py:98-107`: "this is the one thing in SteamVault
+   (`api/vault_api/oracle.py:98-107`: "this is the one thing in SteamHangar
    that leaves the LAN… carrying the Steam app id it is asking about — i.e.
    which games this vault tracks, and roughly when. No API key, no client
    id, no user identity and no Steam credentials are ever sent"). Worth
@@ -857,7 +857,7 @@ custom `X-Api-Key` header to `vault-api` cross-origin without a CORS
 preflight response the server never provides, which is an incidental,
 browser-enforced mitigation against a malicious third-party web page
 silently calling the authenticated API on a LAN user's behalf; this is
-standard browser same-origin behaviour, not a SteamVault-specific control,
+standard browser same-origin behaviour, not a SteamHangar-specific control,
 and is not a substitute for anything above.
 
 **The key travels in cleartext by default.** `vault-api` serves plain HTTP
@@ -951,7 +951,15 @@ kept only as a trailing comment (`.github/workflows/*.yml`, e.g.
 The Android Gradle wrapper carries `distributionSha256Sum`
 (`app/gradle/wrapper/gradle-wrapper.properties:4`) — the same integrity bar
 applied consistently across four different ecosystems (Docker base images,
-GitHub Actions, Gradle) rather than in just one. **WP EG-1 (this commit)
+GitHub Actions, Gradle) rather than in just one. **One honest gap in that
+bar, found in WP CI-2's review:** the Android continuous-integration job
+restores a Gradle download cache, and on a cache hit the restored wrapper
+distribution carries its own `.ok` marker, so `distributionSha256Sum` is
+not re-verified; restored dependency artifacts are not re-verified either
+(there is no `gradle/verification-metadata.xml`). Both are bounded — writing
+that cache requires push access to a branch of this repository, which a fork
+pull request does not have — but the checksum is cited above as a live
+integrity bar, and continuous integration now has a path that skips it. **WP EG-1 (this commit)
 adds a fifth image, `deploy/proxy/Dockerfile`, to this same disciplined
 set**: `FROM alpine:3.23.5@sha256:fd791d74b68913cbb…` — deliberately the
 identical digest `dns/Dockerfile` already pins (ADR-0011: reusing an
@@ -967,7 +975,7 @@ base image digest that resolved them.
 this project ships of *itself*.
 This is a materially different risk than the base-image pins above (those
 guard against a third party's registry serving different bytes under an old
-tag; this one is about `steamvault/vault-api:0.1.0` — or whatever tag a
+tag; this one is about `steamhangar/vault-api:0.1.0` — or whatever tag a
 future release publishes — potentially resolving to different bytes over
 time on whatever registry ends up hosting it, once WP 5.5 publishes one).
 No registry is published yet (`SECURITY.md` "Supported versions"), so this
@@ -976,7 +984,7 @@ today.
 
 ---
 
-## 9. What SteamVault deliberately does not defend against
+## 9. What SteamHangar deliberately does not defend against
 
 Named plainly, as out of scope, rather than implied to be covered:
 
@@ -1031,7 +1039,7 @@ In the interest of the review discipline this package was asked to follow:
   actually checked. Whether Steam's own CDN content is itself
   ciphertext requiring a licensed client's depot key, or merely
   access-controlled at the URL/session level, is a fact about Valve's
-  infrastructure, not about SteamVault, and was deliberately *not*
+  infrastructure, not about SteamHangar, and was deliberately *not*
   asserted as a verified fact in §2 for that reason.
 - **The Android OpenID login flow's current security properties** (state
   binding, replay residuals) were not re-verified for this document —
@@ -1055,5 +1063,5 @@ In the interest of the review discipline this package was asked to follow:
   SteamPrefill *persists* afterward is "not raw credentials"
   (`poc/steamprefill/PROTOCOL.md:176`). Whether the live handshake ever
   exposes the password in-process before that point is a fact about
-  Valve's protocol, not about SteamVault, and this document does not claim
+  Valve's protocol, not about SteamHangar, and this document does not claim
   to have checked it.

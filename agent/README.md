@@ -1,6 +1,6 @@
 # vault-agent
 
-The PC listener for SteamVault. Deliberately dumb by design (see
+The PC listener for SteamHangar. Deliberately dumb by design (see
 `docs/PROJECT_PLAN.md` section 3): read the local Steam library, report
 what's installed, no control logic on the device. All prefill/scheduling
 decisions live in vault-api.
@@ -40,7 +40,7 @@ never copied).
 
 ```
 agent/go/
-├── go.mod                    # module github.com/Riviera822/steamvault/agent
+├── go.mod                    # module github.com/Riviera822/steamhangar/agent
 ├── acf/
 │   ├── acf.go                 # KeyValues (ordered map), ParseError, getCI
 │   ├── tokenizer.go            # rune-based tokenizer
@@ -120,7 +120,7 @@ verification story.
 environment; Go 1.26 in WSL):**
 
 ```bash
-wsl bash -c "cd /mnt/c/claude-dev/SteamVault/agent/go && go build ./... && go vet ./... && gofmt -l . && go test ./..."
+wsl bash -c "cd /mnt/c/path/to/your/checkout/agent/go && go build ./... && go vet ./... && gofmt -l . && go test ./..."
 ```
 
 **Cross-compile matrix** (static binaries, no CGO, matching the three
@@ -467,9 +467,9 @@ only way this code writes anything is you typing `hosts apply`.
 ### What it writes — exactly one block, exactly one line
 
 ```
-# BEGIN steamvault-agent (managed block - do not edit inside)
+# BEGIN steamhangar-agent (managed block - do not edit inside)
 192.168.1.50 lancache.steamcontent.com
-# END steamvault-agent
+# END steamhangar-agent
 ```
 
 That's the whole change. `lancache.steamcontent.com` is **not** a
@@ -502,7 +502,7 @@ assumed from the platform.
 | Not running elevated | Fails with exit 1, changes nothing, and prints the exact command to re-run in an elevated shell |
 
 **Before every mutation** the pre-change bytes are written to
-`<hosts file>.steamvault.bak`. If that backup cannot be written, the
+`<hosts file>.steamhangar.bak`. If that backup cannot be written, the
 mutation does not happen at all.
 
 `--cache-ip` must be a plain IPv4 address (`netip.ParseAddr` + `Is4`, so
@@ -534,7 +534,7 @@ the file always had. It is a single byte, and it makes the file more
 POSIX-correct, not less. Every other round trip is hash-identical, which the
 test suite and both sandboxes assert.
 
-The `.steamvault.bak` file is left in place on purpose — it is your undo
+The `.steamhangar.bak` file is left in place on purpose — it is your undo
 copy. Delete it yourself when you're satisfied. **It is a single slot, not a
 history:** every mutation overwrites it with the state from immediately
 before that mutation, so after `apply` → `remove` it holds the *applied*
@@ -577,10 +577,10 @@ window can leave the file empty or half-written — which would break name
 resolution for the whole machine until it is repaired. That is exactly why it
 is the fallback and not the default, and why the backup is written first and
 is mandatory. **Recovery is a single copy:** put
-`<hosts file>.steamvault.bak` back over the hosts file (from an elevated
-shell, e.g. `copy C:\Windows\System32\drivers\etc\hosts.steamvault.bak
+`<hosts file>.steamhangar.bak` back over the hosts file (from an elevated
+shell, e.g. `copy C:\Windows\System32\drivers\etc\hosts.steamhangar.bak
 C:\Windows\System32\drivers\etc\hosts` or
-`sudo cp /etc/hosts.steamvault.bak /etc/hosts`). Which path was used is
+`sudo cp /etc/hosts.steamhangar.bak /etc/hosts`). Which path was used is
 printed on every mutation as `write: rename` or `write: in-place`. If a write
 does fail after the fallback already truncated the file, the error says so
 explicitly ("may be partially written or empty right now") rather than
@@ -697,7 +697,7 @@ caught incidentally.
 `/etc/hosts` that a real resolver reads:
 
 ```bash
-wsl -u root bash /mnt/c/claude-dev/SteamVault/agent/tests/sandbox/run-hosts-sandbox.sh
+wsl -u root bash /mnt/c/path/to/your/checkout/agent/tests/sandbox/run-hosts-sandbox.sh
 ```
 
 It cross-builds the linux/amd64 binary, then in a throwaway
@@ -765,7 +765,7 @@ want to confirm the real thing end to end, this is the whole procedure:
    ```
    Then `vault-agent hosts status` should report `absent`, and
    `Resolve-DnsName lancache.steamcontent.com` should stop returning your
-   cache IP. Restart Steam again. Delete the `.steamvault.bak` file if you
+   cache IP. Restart Steam again. Delete the `.steamhangar.bak` file if you
    don't want the undo copy.
 
 ### Exit codes
@@ -1394,7 +1394,7 @@ agent\packaging\windows\tests\test-install-uninstall.ps1 -AgentExe <path to vaul
 ```
 
 Runs entirely under a throwaway `TaskName`
-(`SteamVault-WP26-Harness-Test`) and `ConfigDir` (under `%TEMP%`) so it
+(`SteamHangar-WP26-Harness-Test`) and `ConfigDir` (under `%TEMP%`) so it
 cannot collide with, or be mistaken for, a real install; cleans up on
 every exit path (including failure) via a `finally` block, and resets any
 ACL it touched before deleting (`icacls ... /reset`) so cleanup itself can

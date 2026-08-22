@@ -2,9 +2,9 @@
 // system hosts file (WP 2.3, plan §3 "optional hosts-file mode" and §10
 // deployment mode 3):
 //
-//	# BEGIN steamvault-agent (managed block - do not edit inside)
+//	# BEGIN steamhangar-agent (managed block - do not edit inside)
 //	192.168.1.50 lancache.steamcontent.com
-//	# END steamvault-agent
+//	# END steamhangar-agent
 //
 // The hostname is not ours to choose: `lancache.steamcontent.com` is
 // hardcoded by Valve in the Steam client and lives on Valve's own
@@ -24,7 +24,7 @@
 //     OFFSETS (never "split into lines, modify, join") so the bytes before
 //     and after the block are carried over verbatim — line endings,
 //     trailing whitespace, exotic encodings in unrelated lines and all.
-//   - Every mutation writes <path>.steamvault.bak FIRST, containing the
+//   - Every mutation writes <path>.steamhangar.bak FIRST, containing the
 //     exact pre-mutation bytes. If the backup cannot be written, no
 //     mutation happens at all (fail closed).
 //   - A hosts file whose markers do not form exactly one well-formed
@@ -70,16 +70,44 @@ const Hostname = "lancache.steamcontent.com"
 // vault-agent becoming invisible (which would make Apply append a SECOND
 // block — the exact failure this package exists to prevent).
 const (
-	BeginMarker = "# BEGIN steamvault-agent (managed block - do not edit inside)"
-	EndMarker   = "# END steamvault-agent"
+	BeginMarker = "# BEGIN steamhangar-agent (managed block - do not edit inside)"
+	EndMarker   = "# END steamhangar-agent"
 
-	beginPrefix = "# BEGIN steamvault-agent"
-	endPrefix   = "# END steamvault-agent"
+	beginPrefix = "# BEGIN steamhangar-agent"
+	endPrefix   = "# END steamhangar-agent"
 )
+
+// legacyBeginPrefixes/legacyEndPrefixes are prefixes an OLDER vault-agent
+// build may have written to a user's hosts file before the SteamVault ->
+// SteamHangar product rename (WP RN-1). Detection must keep matching them,
+// or a block an older agent wrote becomes invisible to a newer one: Apply
+// would append a SECOND block above/below it (two markers "present" at
+// once), and Remove would leave the old one orphaned in the user's system
+// hosts file forever, since it could never be identified as ours again.
+// steamvault-agent is the real, shipped legacy name; steamkeep-agent and
+// steamsilo-agent are defensive only — both were considered as the new
+// product name for a few hours the same day as the rename and dropped
+// before either was ever committed to the default branch, but recognizing
+// them costs nothing and closes the door on a hosts file from that window.
+// Because isMarker matches a PREFIX (not the full line), Apply's rewrite
+// (renderBlock, using the CURRENT BeginMarker/EndMarker) heals any of these
+// on the very next apply — detection plus unconditional rewrite is the
+// whole healing mechanism, there is no separate migration step.
+var legacyBeginPrefixes = []string{
+	"# BEGIN steamvault-agent",
+	"# BEGIN steamkeep-agent",
+	"# BEGIN steamsilo-agent",
+}
+
+var legacyEndPrefixes = []string{
+	"# END steamvault-agent",
+	"# END steamkeep-agent",
+	"# END steamsilo-agent",
+}
 
 // BackupSuffix is appended to the hosts file path to form the backup
 // written before every mutation.
-const BackupSuffix = ".steamvault.bak"
+const BackupSuffix = ".steamhangar.bak"
 
 // State is the coarse answer to "what does the hosts file look like right
 // now" that Verify reports.
@@ -176,7 +204,7 @@ type CorruptError struct {
 
 func (e *CorruptError) Error() string {
 	return fmt.Sprintf(
-		"%s: the steamvault-agent markers are damaged (%s).\n"+
+		"%s: the steamhangar-agent markers are damaged (%s).\n"+
 			"Refusing to modify the file: the managed block cannot be identified,\n"+
 			"so any edit would be a guess. Fix it by hand — delete every line from\n"+
 			"the %q line through the %q line — then re-run this command.",
@@ -195,7 +223,7 @@ type ConflictError struct {
 
 func (e *ConflictError) Error() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s already contains an entry for %s outside the steamvault-agent block:\n", e.Path, Hostname)
+	fmt.Fprintf(&b, "%s already contains an entry for %s outside the steamhangar-agent block:\n", e.Path, Hostname)
 	for _, c := range e.Conflicts {
 		fmt.Fprintf(&b, "  line %d: %s\n", c.Line, c.Text)
 	}
@@ -308,6 +336,18 @@ func isMarker(text, prefix string) bool {
 	return t == prefix || strings.HasPrefix(t, prefix+" ")
 }
 
+// isMarkerAny reports whether text matches any of the given prefixes, under
+// the same rule as isMarker (exact prefix, or prefix plus a trailing
+// human-readable parenthetical).
+func isMarkerAny(text string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if isMarker(text, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // hostsEntry is one parsed hosts-file entry: an address plus the
 // hostnames it answers for.
 type hostsEntry struct {
@@ -384,9 +424,9 @@ func parseBytes(raw []byte, path, expectedAddress string, goos string) *parsed {
 	var begins, ends []int
 	for i, l := range lines {
 		switch {
-		case isMarker(l.text, beginPrefix):
+		case isMarker(l.text, beginPrefix) || isMarkerAny(l.text, legacyBeginPrefixes):
 			begins = append(begins, i)
-		case isMarker(l.text, endPrefix):
+		case isMarker(l.text, endPrefix) || isMarkerAny(l.text, legacyEndPrefixes):
 			ends = append(ends, i)
 		}
 	}

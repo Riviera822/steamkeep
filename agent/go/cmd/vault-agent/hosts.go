@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Riviera822/steamvault/agent/hostsfile"
+	"github.com/Riviera822/steamhangar/agent/hostsfile"
 )
 
 // resolverTimeout bounds the `hosts status` resolution check. Short on

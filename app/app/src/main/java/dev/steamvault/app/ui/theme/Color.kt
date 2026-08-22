@@ -3,7 +3,7 @@ package dev.steamvault.app.ui.theme
 import androidx.compose.ui.graphics.Color
 
 /**
- * SteamVault dark theme tokens (WP 4b.1).
+ * SteamHangar dark theme tokens (WP 4b.1).
  *
  * Ported byte-for-byte from `web/css/theme.css` (the already-reviewed WP
  * 4a.1 port of `docs/design/vault-app-mockup.html`'s `:root` palette).

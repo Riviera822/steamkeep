@@ -1,10 +1,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>SteamVault — App Mockup</title>
+<title>SteamHangar — App Mockup</title>
 
 <style>
 /* ============================================================
-   SteamVault vault-app — interactive design mockup
+   SteamHangar vault-app — interactive design mockup
    Dark, committed single-theme app surface (user decision).
    Only the desk backdrop around the phone follows the viewer theme.
    ============================================================ */
@@ -1188,7 +1188,7 @@ button.notif:hover .ngo{ color:var(--accent); }
             </span>
             <button class="btn ghost sm">Sign out</button>
           </div>
-          <p class="hint">Sign-in opens Valve's own login page. SteamVault never sees your password, and your library is read on this phone — never through the cache server. (ADR-0004)</p>
+          <p class="hint">Sign-in opens Valve's own login page. SteamHangar never sees your password, and your library is read on this phone — never through the cache server. (ADR-0004)</p>
 
           <h4 class="sec">Library layout</h4>
           <button class="opt" data-layout="grid2" aria-checked="true" role="radio">
@@ -1238,7 +1238,7 @@ button.notif:hover .ngo{ color:var(--accent); }
           </div>
 
           <h4 class="sec">About</h4>
-          <p class="hint">SteamVault is a community project and is not affiliated with Valve Corporation. "Steam" is a trademark of Valve Corporation.</p>
+          <p class="hint">SteamHangar is a community project and is not affiliated with Valve Corporation. "Steam" is a trademark of Valve Corporation.</p>
         </div>
       </section>
 
@@ -1323,7 +1323,7 @@ button.notif:hover .ngo{ color:var(--accent); }
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 2.6 20.5 6v6.1c0 5-3.6 8.3-8.5 9.3-4.9-1-8.5-4.3-8.5-9.3V6L12 2.6Z"/><circle cx="12" cy="11.4" r="2.6"/><path d="M12 14v3.2"/></svg>
           </div>
           <div style="flex:1">
-            <div class="wordmark">SteamVault</div>
+            <div class="wordmark">SteamHangar</div>
             <div class="stepnum" id="stepnum">Step 1 of 3 · Connect</div>
           </div>
           <button class="btn ghost sm" id="onb-skip">Skip</button>
@@ -1335,7 +1335,7 @@ button.notif:hover .ngo{ color:var(--accent); }
           <!-- ---- step 1: server connection ---- -->
           <section class="ostep on" data-step="1">
             <h2>Connect to your vault</h2>
-            <p class="lede">SteamVault runs on your own machine. Tell the app how to reach it.</p>
+            <p class="lede">SteamHangar runs on your own machine. Tell the app how to reach it.</p>
 
             <p class="steplbl">Connection profile</p>
             <button class="opt" data-onb="vpn" aria-checked="true" role="radio">
@@ -1382,7 +1382,7 @@ button.notif:hover .ngo{ color:var(--accent); }
           <!-- ---- step 2: steam identity ---- -->
           <section class="ostep" data-step="2">
             <h2>Signing in with Steam lets the app show your library</h2>
-            <p class="lede">Without it SteamVault still manages the cache — the grid just lists app ids instead of covers and names.</p>
+            <p class="lede">Without it SteamHangar still manages the cache — the grid just lists app ids instead of covers and names.</p>
 
             <h4 class="sec">What gets fetched</h4>
             <ul class="bullets">
@@ -1394,7 +1394,7 @@ button.notif:hover .ngo{ color:var(--accent); }
             <p class="foot-note">All of it is public profile data, and <b style="color:var(--text)">this phone</b> fetches it straight from Valve. It never travels through your cache server.</p>
 
             <div class="disclaim">
-              SteamVault is a community project and is not affiliated with Valve Corporation.
+              SteamHangar is a community project and is not affiliated with Valve Corporation.
               "Steam" is a trademark of Valve Corporation.
             </div>
 
@@ -1417,7 +1417,7 @@ button.notif:hover .ngo{ color:var(--accent); }
               The button sends you to <b>https://steamcommunity.com</b> — check the address bar before
               you type anything. If you are already signed in to Steam in that browser, all you do
               there is press <b>Sign In</b>; there is nothing else to fill in.
-              SteamVault never receives your username or password. Valve hands back only your
+              SteamHangar never receives your username or password. Valve hands back only your
               SteamID64, and there is no code path in this app or on the server that accepts Steam
               credentials at all (ADR-0004).
             </p>
@@ -1455,7 +1455,7 @@ button.notif:hover .ngo{ color:var(--accent); }
           <div class="ph">
             <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
             <p class="phtitle">Valve's sign-in page loads here</p>
-            <p class="phtext">In the real app this is Valve's own OpenID page, opened in a browser tab. SteamVault cannot read it — it only receives your SteamID64 when Valve redirects back.</p>
+            <p class="phtext">In the real app this is Valve's own OpenID page, opened in a browser tab. SteamHangar cannot read it — it only receives your SteamID64 when Valve redirects back.</p>
             <p class="phwarn">MOCKUP · this is a placeholder, not Valve's page. Nothing here asks for or accepts a password.</p>
           </div>
           <button class="btn primary wide" id="valve-ok">Simulate a successful sign-in</button>

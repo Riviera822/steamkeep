@@ -47,10 +47,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Riviera822/steamvault/agent/acf"
-	"github.com/Riviera822/steamvault/agent/agentconfig"
-	"github.com/Riviera822/steamvault/agent/client"
-	"github.com/Riviera822/steamvault/agent/report"
+	"github.com/Riviera822/steamhangar/agent/acf"
+	"github.com/Riviera822/steamhangar/agent/agentconfig"
+	"github.com/Riviera822/steamhangar/agent/client"
+	"github.com/Riviera822/steamhangar/agent/report"
 )
 
 func main() {

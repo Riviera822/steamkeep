@@ -535,7 +535,7 @@ function buildAboutSection() {
     el(
       "p",
       "hint",
-      "SteamVault is a community project and is not affiliated with Valve Corporation. “Steam” is a trademark of Valve Corporation.",
+      "SteamHangar is a community project and is not affiliated with Valve Corporation. “Steam” is a trademark of Valve Corporation.",
     ),
   );
   return wrap;

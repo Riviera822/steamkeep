@@ -1,6 +1,6 @@
-# SteamVault Android app (`app/`)
+# SteamHangar Android app (`app/`)
 
-Kotlin/Compose Android client for SteamVault (Phase 4b, `docs/PROJECT_PLAN.md`
+Kotlin/Compose Android client for SteamHangar (Phase 4b, `docs/PROJECT_PLAN.md`
 / `docs/WORKPACKAGES.md`). This directory is a fully self-contained Gradle
 project — its own `settings.gradle.kts`, wrapper, and version catalog — and
 does not depend on anything elsewhere in the monorepo at build time. It talks
@@ -746,7 +746,7 @@ vault entirely" (untouched by signing out of Steam).
    `SteamIdentityRepository.completeLogin`.
 3. `SteamOpenIdCallback.parse` extracts the full `openid.*` parameter map
    (shape checks only — this proves nothing about authenticity, since any
-   app can send SteamVault an `Intent` naming this scheme).
+   app can send SteamHangar an `Intent` naming this scheme).
 4. `SteamOpenIdCallback.signedCoversClaimedId` checks that
    `openid.signed` actually lists `claimed_id` — the OpenID 2.0
    requirement that is easy to skip if a caller stops at a bare
@@ -764,7 +764,7 @@ vault entirely" (untouched by signing out of Steam).
 ### `return_to`/intent-filter design (WP brief: "pick a scheme, document it")
 
 **Chose a custom `steamvault://` scheme, not an `https://` return_to.**
-SteamVault has no hosted web presence — `vault-api` lives on the user's
+SteamHangar has no hosted web presence — `vault-api` lives on the user's
 LAN/VPN, never a public domain by default — so there is no HTTPS endpoint
 this app could register as a redirect target. A custom-scheme deep link is
 the standard native-app OpenID/OAuth pattern for exactly this situation.
@@ -818,7 +818,7 @@ Concretely: a malicious app already installed on the same device could
 capture a **genuine**, Valve-signed OpenID assertion for the ATTACKER's own
 Steam account (e.g. by triggering its own sign-in against this app's exact
 `return_to` scheme+host+path, since nothing was per-attempt-unique) and
-replay it into SteamVault's intent-filter — `check_authentication` would
+replay it into SteamHangar's intent-filter — `check_authentication` would
 legitimately return `is_valid:true` (it IS a genuine, unmodified Valve
 assertion, just not the one THIS app's button press initiated), and the app
 would flip its displayed identity to the attacker's account.
@@ -2005,9 +2005,9 @@ same app by any device that installed an earlier signed build):**
 
 ```bash
 keytool -genkeypair -v \
-  -keystore /absolute/path/to/steamvault-release.jks \
+  -keystore /absolute/path/to/steamhangar-release.jks \
   -keyalg RSA -keysize 2048 -validity 10000 \
-  -alias steamvault
+  -alias steamhangar
 ```
 
 `keytool` (bundled with any JDK — this project's own pinned JDK 17 works)

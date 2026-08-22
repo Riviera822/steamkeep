@@ -1,4 +1,4 @@
-"""vault-api — the FastAPI backend for SteamVault (depot mapping, prefill orchestration, cache control)."""
+"""vault-api — the FastAPI backend for SteamHangar (depot mapping, prefill orchestration, cache control)."""
 
 #: The ONE source of truth, IN CODE, for "what code is running" (WP 4e.7).
 #: Hand-maintained — there are no release tags yet (plan §7 Phase 5, WP 5.5

@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-SteamVault has no tagged releases yet (see `docs/PROJECT_PLAN.md` §7 Phase 5 —
+SteamHangar has no tagged releases yet (see `docs/PROJECT_PLAN.md` §7 Phase 5 —
 publishing to a registry with version tags is still gated on the user's
 go-ahead (docs/PROJECT_PLAN.md §11, WP 5.5). Until the first tagged release,
 security reports are accepted against the current state of the `main`

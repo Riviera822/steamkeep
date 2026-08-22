@@ -1,4 +1,4 @@
-# SteamVault vault-api -- FastAPI + SQLite brain, and the SteamPrefill host
+# SteamHangar vault-api -- FastAPI + SQLite brain, and the SteamPrefill host
 # (Phase 1, WP 1.9).
 #
 # Build from the REPO ROOT, not api/ (packaging work package,
@@ -9,7 +9,7 @@
 # `dockerfile: api/Dockerfile` accordingly; every COPY source path below is
 # repo-root-relative as a result. vault-core and vault-dns are UNCHANGED --
 # they keep their own directories as build context.
-#     docker build -t steamvault/vault-api:<version> -f api/Dockerfile .
+#     docker build -t steamhangar/vault-api:<version> -f api/Dockerfile .
 # (<version> is a free-text tag for your own build -- see the
 # org.opencontainers.image.version LABEL below for the pinned-and-tested
 # constant, api/vault_api/__init__.py's __version__, WP 4e.7.)
@@ -83,9 +83,9 @@ FROM python:3.13.14-slim-trixie@sha256:bf503bb2243c5aad0aa951544dd60d165f9926464
 # all three together (see that test file's module docstring for the full
 # enumeration of every site a release bump must touch, including the ones
 # outside this pin's reach).
-LABEL org.opencontainers.image.title="SteamVault vault-api" \
+LABEL org.opencontainers.image.title="SteamHangar vault-api" \
       org.opencontainers.image.description="FastAPI + SQLite control plane: prefill orchestration, per-game size and deletion" \
-      org.opencontainers.image.source="https://github.com/steamvault/steamvault" \
+      org.opencontainers.image.source="https://github.com/Riviera822/steamhangar" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="0.1.0"
 

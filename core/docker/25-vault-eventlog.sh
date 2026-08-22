@@ -1,5 +1,5 @@
 #!/bin/sh
-# SteamVault vault-core container hook -- optional cache-event log toggle
+# SteamHangar vault-core container hook -- optional cache-event log toggle
 # (WP 3.10, ADR-0008).
 #
 # Runs from the official nginx image's /docker-entrypoint.d/ hook directory,

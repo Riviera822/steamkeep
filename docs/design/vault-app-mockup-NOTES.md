@@ -169,7 +169,7 @@ your library"), what happens without it, an explicit list of what gets fetched
 a prominent full-width **Sign in through Steam** button, and finally a
 "How can I verify this is legitimate?" paragraph telling the user to check the address
 bar for `https://steamcommunity.com`, that an already-signed-in browser only needs one
-click, and that SteamVault never receives a username or password (ADR-0004). The
+click, and that SteamHangar never receives a username or password (ADR-0004). The
 information architecture is borrowed; none of the visual design is — our palette, our
 type, our layout, and a neutral external-link glyph rather than any Steam iconography.
 
@@ -293,7 +293,7 @@ stacking a second job for the same app — and a paused job still occupies that 
 
 **ADR-0004 is visible, not just respected.** Sign-in opens a mocked browser tab that
 is deliberately *not* a Valve look-alike: a dashed placeholder that says the real page
-loads there, states that SteamVault only ever receives the SteamID64, and is labelled
+loads there, states that SteamHangar only ever receives the SteamID64, and is labelled
 MOCKUP. There is no password field anywhere in the prototype — a realistic fake login
 screen would be an impersonation risk, and the honest placeholder communicates the
 trust story better anyway.

@@ -1,5 +1,5 @@
 #!/bin/sh
-# SteamVault vault-proxy container entrypoint (WP EG-1, ADR-0011).
+# SteamHangar vault-proxy container entrypoint (WP EG-1, ADR-0011).
 #
 # Renders /etc/tinyproxy/filter -- the destination allowlist tinyproxy.conf's
 # `Filter` + `FilterDefaultDeny Yes` enforce -- from VAULT_EGRESS_ALLOW plus
@@ -88,7 +88,7 @@ to_pattern() {
     echo "# the LAN. See deploy/README.md \"verify in five minutes\" for how"
     echo "# to check that claim against the running container yourself."
     echo ""
-    echo "# --- baked in: SteamVault's own Steam Web API relay (see this"
+    echo "# --- baked in: SteamHangar's own Steam Web API relay (see this"
     echo "# script's own comment on BAKED_HOSTS above for why this one host"
     echo "# is not gated behind VAULT_EGRESS_ALLOW like the ones below) ---"
     for h in $BAKED_HOSTS; do

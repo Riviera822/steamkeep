@@ -1,5 +1,5 @@
 #!/bin/sh
-# SteamVault vault-core container preflight (Phase 1, WP 1.9).
+# SteamHangar vault-core container preflight (Phase 1, WP 1.9).
 #
 # Runs from the official nginx image's /docker-entrypoint.d/ hook directory,
 # AFTER 20-envsubst-on-templates.sh has rendered
@@ -84,8 +84,8 @@ esac
 log "upstream resolver (ADR-0001 req 4): $RESOLVER"
 
 # --- 3. cache/ and tmp/ must be on ONE filesystem ---------------------------
-[ -d "$CACHE_DIR" ] || die "$CACHE_DIR is missing. Mount the SteamVault cache volume at $PREFIX."
-[ -d "$TMP_DIR" ]   || die "$TMP_DIR is missing. Mount the SteamVault cache volume at $PREFIX
+[ -d "$CACHE_DIR" ] || die "$CACHE_DIR is missing. Mount the SteamHangar cache volume at $PREFIX."
+[ -d "$TMP_DIR" ]   || die "$TMP_DIR is missing. Mount the SteamHangar cache volume at $PREFIX
   (it must contain both cache/ and tmp/)."
 
 cache_dev=$(stat -c %d "$CACHE_DIR")

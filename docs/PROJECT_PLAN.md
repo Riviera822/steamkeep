@@ -1,11 +1,11 @@
-# SteamVault — Project Plan
+# SteamHangar — Project Plan
 
 A Steam game cache with true per-game management — self-hosted, Docker-first.
 
 Status: IMPLEMENTATION — Phases 0–3, 4a, and 4b (4b.1–4b.10) complete;
 pre-release (see §11 Next Steps) · License: Apache-2.0
 
-> SteamVault is a community project and is not affiliated with Valve Corporation.
+> SteamHangar is a community project and is not affiliated with Valve Corporation.
 > "Steam" is a trademark of Valve Corporation.
 
 ---
@@ -19,7 +19,7 @@ from the cache impossible**. Community tools like lancache-manager reconstruct
 the game-to-file mapping after the fact by parsing access logs — clever, but
 error-prone and maintenance-heavy.
 
-SteamVault inverts the approach: the **depot ID is already part of the Steam
+SteamHangar inverts the approach: the **depot ID is already part of the Steam
 CDN URL** (`/depot/<depotid>/chunk/<hash>`). By storing the cache path-faithfully
 (nginx `proxy_store` instead of `proxy_cache`), the game mapping becomes part of
 the directory structure from the start. Deleting a game = deleting its depot
@@ -206,12 +206,12 @@ be unreclaimable forever once every co-owner has been deleted.
 
 ---
 
-## 5. Known LanCache Pain Points SteamVault Addresses
+## 5. Known LanCache Pain Points SteamHangar Addresses
 
 Documented community issues (GitHub issues, Steam forums, LanCache docs) that a
 Steam-only, prefill-first design can solve better:
 
-| Pain point | How SteamVault addresses it |
+| Pain point | How SteamHangar addresses it |
 |---|---|
 | **No per-game visibility or deletion** — cache is opaque hashed storage | Core design: path-faithful depot storage, per-game size, per-game delete |
 | **Slow cache-miss downloads** — nginx slice mechanics + CDN back-off behave poorly with the Steam client; users resort to multi-IP workarounds | **Prefill-first philosophy, hybrid miss path (Phase 0 decision, ADR-0001):** misses are stored synchronously (`proxy_store`, no slice mechanics — measured overhead within noise) AND trigger an async prefill job that completes the affected app. Prefill remains the primary fill mechanism |
@@ -1745,7 +1745,7 @@ D-4, D-11, D-12) for what each package diverges from the mockup and why.
 
 The desktop portering (Phase 4e) frees width that today carries nothing. The
 question "what do we put there" was answered deliberately: **decision support
-about the cache, not taste.** SteamVault knows things Steam does not — what is
+about the cache, not taste.** SteamHangar knows things Steam does not — what is
 on the disk, how much of it sits in SHARED depots, when a game was last
 confirmed current, what is installed on which machine, and from
 `depot_manifests`, how often a game actually changes. Crossed with playtime
@@ -1904,7 +1904,7 @@ surface (playtime and last-played now flow through the API response).
       grant; AGPL deliberately rejected as it deters contributors and
       companies in the early phase)
       *(WP 5.4: root `LICENSE`, canonical text, copyright line "Copyright
-      2026 SteamVault contributors")*
+      2026 SteamHangar contributors")*
 - [x] **Packaging: ship the web UI in the vault-api image + close the
       env-forwarding gaps** (gap recorded 2026-08-17, closed same day, WP
       P1, two Opus review rounds: FAIL → fix → FAIL → fix → re-verified).
@@ -2038,6 +2038,17 @@ surface (playtime and last-played now flow through the API response).
       wait-for-line loop instead of an immediate read, so this 105/109
       result is historical — see `verify-stack.sh`'s step-5i comment and
       `deploy/README.md`.
+- [x] **Product rename SteamVault → SteamHangar** (WP RN-1, 2026-08-19):
+      the working title collided with piracy tools and an established
+      achievement tracker. Three tiers — product word and image namespace
+      renamed; Kotlin package `dev.steamvault.app`, the `steamvault://`
+      scheme, internal `vault-*`/`VAULT_` names, and every dated historical
+      record deliberately NOT renamed. Two persisted-state identifiers
+      (Android prefs file, web localStorage keys) left on the old name so no
+      existing install silently loses its saved connection — a migration is
+      a separate package. See docs/adr/0013-product-rename-steamvault-to-
+      steamhangar.md for the full change list, the wire-visible items, and
+      the open follow-ups.
 - [ ] CI: GitHub Actions — lint, tests, multi-arch image build (amd64/arm64),
       publish to ghcr.io with pinned version tags
       *(WP 5.1 done 2026-08-09 — the test/lint half: api pytest (Linux),
@@ -2246,7 +2257,7 @@ why 0012 precedes it in time): split first, then lock.
 ## 8. Repository Structure (Monorepo)
 
 ```
-steamvault/
+steamhangar/
 ├── core/            # nginx config, Dockerfile
 ├── dns/             # optional dnsmasq container (Compose profile)
 ├── api/             # FastAPI, SQLite schema, scheduler
@@ -2350,6 +2361,6 @@ Phases 1–3 plus 4a shipped. Rewritten 2026-08-17 to reflect the real state.
 6. [ ] **WP 5.3 review half, still open** — pre-release security review
    (Fable mandatory), after an api/core code freeze that has not happened
    yet.
-7. [ ] **User-gated:** WP 5.5 (GitHub org + `ghcr.io/steamvault/*` publish)
+7. [ ] **User-gated:** WP 5.5 (GitHub org + `ghcr.io/steamhangar/*` publish)
    and WP 5.6 (announcement, only after the user's own end-to-end test with
    the Android app). Phase 6 integrations are deliberately post-release.

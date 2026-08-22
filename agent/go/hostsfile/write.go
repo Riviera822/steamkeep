@@ -56,7 +56,7 @@ const defaultFileMode fs.FileMode = 0o644
 // Corruption of that kind fails CLOSED on the next run rather than
 // compounding: a damaged block trips the markers-corrupt check and every
 // subsequent Apply/Remove refuses to touch the file until a human fixes it.
-// And it is recoverable — <path>.steamvault.bak holds the pre-mutation
+// And it is recoverable — <path>.steamhangar.bak holds the pre-mutation
 // bytes.
 func mutate(path string, oldRaw, newRaw []byte) (backupPath, method string, err error) {
 	mode := defaultFileMode
@@ -182,7 +182,7 @@ func writeFile(path string, data []byte, mode fs.FileMode) (method string, trunc
 // always cleaned up on failure, so a failed apply never litters the hosts
 // directory with .tmp files.
 func tryAtomicReplace(dir, path string, data []byte, mode fs.FileMode) error {
-	tmp, err := os.CreateTemp(dir, ".steamvault-hosts-*.tmp")
+	tmp, err := os.CreateTemp(dir, ".steamhangar-hosts-*.tmp")
 	if err != nil {
 		return fmt.Errorf("could not create a temp file in %s: %w", dir, err)
 	}

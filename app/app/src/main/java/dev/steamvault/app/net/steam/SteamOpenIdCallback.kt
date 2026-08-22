@@ -15,7 +15,7 @@ import java.net.URLDecoder
  * this object the raw `Intent.dataString`, a plain `String`.
  *
  * **What this file does NOT prove on its own: the callback params could
- * still be entirely attacker-forged.** Any app can send SteamVault an
+ * still be entirely attacker-forged.** Any app can send SteamHangar an
  * Android `Intent` naming this custom scheme with arbitrary query
  * parameters -- [parse] only checks SHAPE (required fields present, `mode`
  * says `id_res`). The actual trust decision is [SteamOpenIdClient

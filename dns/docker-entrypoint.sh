@@ -1,5 +1,5 @@
 #!/bin/sh
-# SteamVault vault-dns container entrypoint (Phase 1, WP 1.9).
+# SteamHangar vault-dns container entrypoint (Phase 1, WP 1.9).
 #
 # Implements the placeholder contract dns/README.md defines for
 # dns/dnsmasq.conf.template ("Placeholder contract"):
@@ -68,7 +68,7 @@ validate_ipv4() {
 
 # --- required: CACHE_IP ------------------------------------------------------
 validate_ipv4 "CACHE_IP" "${CACHE_IP:-}" \
-"CACHE_IP must be the LAN IPv4 address of your SteamVault cache server
+"CACHE_IP must be the LAN IPv4 address of your SteamHangar cache server
   (the host running vault-core), e.g. CACHE_IP=192.168.1.50. It is the address
   every *.steamcontent.com A query gets answered with, so there is deliberately
   no default -- every deployment's is different. Set it in deploy/.env."

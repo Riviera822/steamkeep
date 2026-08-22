@@ -1,5 +1,5 @@
 #!/bin/sh
-# SteamVault vault-proxy -- shared VAULT_EGRESS_ALLOW hostname validation
+# SteamHangar vault-proxy -- shared VAULT_EGRESS_ALLOW hostname validation
 # (WP EG-1, ADR-0011, round-2 review S2/N4).
 #
 # Defines ONE function, `normalize_egress_hostname`, with NO side effects

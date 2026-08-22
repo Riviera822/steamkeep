@@ -1,5 +1,5 @@
 #!/bin/sh
-# SteamVault WP 1.9 -- drift check between the native and container nginx configs.
+# SteamHangar WP 1.9 -- drift check between the native and container nginx configs.
 #
 #   core/nginx/nginx.conf              (WP 1.1, reviewed, test-covered by
 #                                       core/tests/test-core.ps1 against the real

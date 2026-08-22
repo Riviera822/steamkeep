@@ -1,7 +1,7 @@
-# SteamVault vault-core -- the path-faithful Steam depot cache (Phase 1, WP 1.9).
+# SteamHangar vault-core -- the path-faithful Steam depot cache (Phase 1, WP 1.9).
 #
 # Build from the repo's core/ directory:
-#     docker build -t steamvault/vault-core:0.1.0 core/
+#     docker build -t steamhangar/vault-core:0.1.0 core/
 # or, normally, via deploy/compose.yaml.
 #
 # --- Base image pin ----------------------------------------------------------
@@ -19,9 +19,9 @@
 # less to keep patched. Bump both the tag and the digest together.
 FROM nginx:1.29.8-alpine3.23@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
 
-LABEL org.opencontainers.image.title="SteamVault vault-core" \
+LABEL org.opencontainers.image.title="SteamHangar vault-core" \
       org.opencontainers.image.description="nginx proxy_store cache with path-faithful Steam depot storage" \
-      org.opencontainers.image.source="https://github.com/steamvault/steamvault" \
+      org.opencontainers.image.source="https://github.com/Riviera822/steamhangar" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="0.1.0"
 

@@ -8,7 +8,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
  * intent-filter").
  *
  * **Choice: a custom `steamvault://` scheme, not an `https://` return_to.**
- * SteamVault has no hosted web presence of its own (it is a self-hosted
+ * SteamHangar has no hosted web presence of its own (it is a self-hosted
  * homelab tool -- `vault-api` is reachable only over the user's LAN/VPN,
  * never a public domain by default), so there is no HTTPS endpoint this app
  * could register as a redirect target even if it wanted one. A custom

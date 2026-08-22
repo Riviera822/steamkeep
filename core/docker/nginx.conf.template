@@ -1,4 +1,4 @@
-# SteamVault vault-core — CONTAINER nginx config TEMPLATE (Phase 1, WP 1.9).
+# SteamHangar vault-core — CONTAINER nginx config TEMPLATE (Phase 1, WP 1.9).
 #
 # ############################################################################
 # # THIS FILE IS A NEAR-VERBATIM COPY OF core/nginx/nginx.conf.              #
@@ -219,7 +219,7 @@ http {
     # ("acceptable") by ADR req 3.
     map $arg_nocache $vault_try_target {
         default  $uri;
-        "1"      "/__steamvault_force_miss__$uri";
+        "1"      "/__steamhangar_force_miss__$uri";
     }
 
     # "-" for upstream_status on locally-served cache hits (no upstream was
@@ -590,7 +590,7 @@ http {
         # GETs this before trusting an IP as a real cache and requires the
         # X-LanCache-Processed-By response header to be present.
         location = /lancache-heartbeat {
-            add_header X-LanCache-Processed-By "steamvault";
+            add_header X-LanCache-Processed-By "steamhangar";
             return 200;
         }
     }

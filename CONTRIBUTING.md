@@ -1,6 +1,6 @@
-# Contributing to SteamVault
+# Contributing to SteamHangar
 
-SteamVault is a self-hosted Steam game cache with true per-game management —
+SteamHangar is a self-hosted Steam game cache with true per-game management —
 see [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) for the full vision,
 architecture, and phase plan, and [`docs/adr/`](docs/adr) for the binding
 architecture decisions (ADRs) that plan builds on. **Read the plan before your
@@ -30,7 +30,7 @@ contradicts one will be asked to start with that discussion instead.
 ## Repository layout
 
 ```
-steamvault/
+steamhangar/
 ├── core/            # nginx config, Dockerfile (the cache itself)
 ├── dns/             # optional dnsmasq container (Compose profile)
 ├── api/             # FastAPI, SQLite schema, scheduler
@@ -129,7 +129,7 @@ as normal issues — see the bug report template.
 
 ## License
 
-SteamVault is licensed under [Apache-2.0](LICENSE). By submitting a
+SteamHangar is licensed under [Apache-2.0](LICENSE). By submitting a
 contribution, you agree it is licensed under the same terms
 (inbound = outbound) — there is no separate Contributor License Agreement
 (CLA) to sign.

@@ -282,7 +282,7 @@ function Start-CoreNginxResident {
 }
 
 # ==============================================================================
-Write-Host "== SteamVault WP 1.7 -- MVP end-to-end test ==" -ForegroundColor Cyan
+Write-Host "== SteamHangar WP 1.7 -- MVP end-to-end test ==" -ForegroundColor Cyan
 Write-Host "AppId=$AppId  BaseUrl=$BaseUrl  JobTimeoutSeconds=$JobTimeoutSeconds"
 
 # --- prerequisite check (fail fast, before touching anything) ----------------
@@ -322,8 +322,8 @@ try {
 
     try {
         $hb = Invoke-WebRequest -Uri "http://127.0.0.1/lancache-heartbeat" -UseBasicParsing -TimeoutSec 10
-        if ($hb.StatusCode -eq 200 -and $hb.Headers['X-LanCache-Processed-By'] -eq "steamvault") {
-            Pass "/lancache-heartbeat: 200 + X-LanCache-Processed-By: steamvault"
+        if ($hb.StatusCode -eq 200 -and $hb.Headers['X-LanCache-Processed-By'] -eq "steamhangar") {
+            Pass "/lancache-heartbeat: 200 + X-LanCache-Processed-By: steamhangar"
         }
         else {
             Fail "/lancache-heartbeat unexpected: HTTP $($hb.StatusCode), header='$($hb.Headers['X-LanCache-Processed-By'])'"

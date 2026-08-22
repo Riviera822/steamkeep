@@ -12,7 +12,7 @@ dataset tuned for ~1 MiB Steam chunks — set one variable in `deploy/.env`:
 
 ```bash
 # deploy/.env
-VAULT_CACHE_PATH=/srv/steamvault-cache
+VAULT_CACHE_PATH=/srv/steamhangar-cache
 ```
 
 `deploy/compose.yaml` already resolves both services' `/vault` mount from
@@ -25,8 +25,8 @@ user (uid/gid 101 — not a placeholder, see
 [`deploy/README.md`](../README.md#using-a-dedicated-cache-mount)):
 
 ```bash
-sudo mkdir -p /srv/steamvault-cache/cache/depot /srv/steamvault-cache/tmp
-sudo chown -R 101:101 /srv/steamvault-cache
+sudo mkdir -p /srv/steamhangar-cache/cache/depot /srv/steamhangar-cache/tmp
+sudo chown -R 101:101 /srv/steamhangar-cache
 ```
 
 If you're on TrueNAS SCALE with ZFS specifically,
@@ -130,7 +130,7 @@ services:
     environment:
       VAULT_MANIFEST_ARCHIVE_DIR: "/data/manifests"  # default: sibling of VAULT_DB_PATH
     volumes:
-      - /srv/steamvault-manifest-cache:/opt/steamprefill/home
+      - /srv/steamhangar-manifest-cache:/opt/steamprefill/home
   vault-runner:
     volumes:
       # Same host path as vault-api's above -- both services must still
@@ -139,7 +139,7 @@ services:
       # about VAULT_STEAMPREFILL_CACHE_DIR needs to change: it stays unset,
       # its default computation is still $HOME-relative, and $HOME is still
       # /opt/steamprefill/home regardless of what physically backs it.
-      - /srv/steamvault-manifest-cache:/opt/steamprefill/home
+      - /srv/steamhangar-manifest-cache:/opt/steamprefill/home
 ```
 
 Create and `chown -R 101:101` the host directory first, same as the

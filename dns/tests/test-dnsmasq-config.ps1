@@ -122,7 +122,7 @@ function Get-Port53ListenerCount {
 }
 
 # ==============================================================================
-Write-Host "== SteamVault vault-dns (WP 1.8) template validation suite ==" -ForegroundColor Cyan
+Write-Host "== SteamHangar vault-dns (WP 1.8) template validation suite ==" -ForegroundColor Cyan
 Write-Host "Template: $TemplatePath"
 Write-Host "Test values: CACHE_IP=$CacheIp UPSTREAM_DNS_1=$Upstream1 UPSTREAM_DNS_2=$Upstream2"
 

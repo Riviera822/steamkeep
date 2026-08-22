@@ -1,4 +1,4 @@
-# SteamVault Android app (app/) — WP 4b.1.
+# SteamHangar Android app (app/) — WP 4b.1.
 # Scoped to this directory; does not affect the rest of the monorepo.
 
 # Local SDK path — machine-specific, NEVER committed (repo rule: secrets/
@@ -29,7 +29,7 @@ captures/
 # accident). Review fix (S3): *.jks/*.keystore alone missed every OTHER
 # keystore format keytool can produce — `keytool -genkeypair` defaults to
 # PKCS12 as of modern JDKs (no `-storetype` needed to get one), so an
-# operator naming their store e.g. `steamvault.p12` next to the project
+# operator naming their store e.g. `steamhangar.p12` next to the project
 # would otherwise be trackable. This is the one finding class that is
 # unrecoverable after a push (the private key itself, not just a
 # password), so the extensions below are covered even though nothing here

@@ -5,7 +5,7 @@
 # container actually runs (see core/README.md "The Docker image").
 #
 # Explicitly OUT of scope here (per the WP 5.1 brief): no `docker build` of
-# any SteamVault image (that would start crossing into image-publishing
+# any SteamHangar image (that would start crossing into image-publishing
 # territory, WP 5.5's job, and it is unnecessary anyway -- rendering the
 # template needs only the stock upstream image plus core/docker/*.sh, none
 # of which requires a build step). This script only ever `docker pull`s a
@@ -164,10 +164,10 @@ render_and_test() {
             # that stock config would ALSO show directive_count=0, matching
             # EXPECTED_DIRECTIVES and passing this check for entirely the
             # wrong reason. Guard against validating the wrong file: only
-            # the SteamVault template declares the vault_event log format,
+            # the SteamHangar template declares the vault_event log format,
             # so its absence means rendering never happened.
             grep -q "log_format vault_event" "$conf" || {
-                echo "FATAL: $conf is not the SteamVault config -- the template was never rendered"
+                echo "FATAL: $conf is not the SteamHangar config -- the template was never rendered"
                 exit 1
             }
 

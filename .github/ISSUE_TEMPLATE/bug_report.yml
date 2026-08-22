@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in SteamVault isn't working as documented.
+description: Something in SteamHangar isn't working as documented.
 title: "[bug]: "
 labels: ["bug"]
 body:
@@ -14,7 +14,7 @@ body:
     id: component
     attributes:
       label: Component
-      description: Which part of SteamVault is affected?
+      description: Which part of SteamHangar is affected?
       options:
         - core (vault-core / nginx cache)
         - api (vault-api / FastAPI backend)

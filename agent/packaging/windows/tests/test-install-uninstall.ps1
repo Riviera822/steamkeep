@@ -57,7 +57,7 @@ $installScript = Join-Path $packagingDir "install-task.ps1"
 $uninstallScript = Join-Path $packagingDir "uninstall-task.ps1"
 $runnerScript = Join-Path $packagingDir "run-vault-agent.ps1"
 
-$TaskName = "SteamVault-WP26-Harness-Test"
+$TaskName = "SteamHangar-WP26-Harness-Test"
 $ConfigDir = Join-Path $env:TEMP "vault-agent-wp26-harness"
 $ApiKeyValue = "test-secret-api-key-do-not-leak-12345"
 $ApiKeyFilePath = Join-Path $env:TEMP "vault-agent-wp26-harness-apikey.txt"

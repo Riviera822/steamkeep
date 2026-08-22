@@ -71,7 +71,7 @@ def test_index_served_unauthenticated(client: TestClient) -> None:
     response = client.get("/")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
-    assert "SteamVault" in response.text
+    assert "SteamHangar" in response.text
 
 
 def test_index_has_no_cache_header(client: TestClient) -> None:
@@ -114,7 +114,7 @@ def test_spa_view_routes_serve_index(client: TestClient, view: str) -> None:
     response = client.get(f"/{view}")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
-    assert "SteamVault" in response.text
+    assert "SteamHangar" in response.text
 
 
 def test_clients_is_not_a_registered_view(client: TestClient) -> None:

@@ -1,6 +1,6 @@
 # vault-api
 
-FastAPI + SQLite backend for SteamVault. Plain `sqlite3` with small helper
+FastAPI + SQLite backend for SteamHangar. Plain `sqlite3` with small helper
 functions — no ORM. WP 1.2 shipped the project skeleton (config, DB schema,
 auth dependency, `GET /v1/health`); WP 1.3 added depot→app mapping storage and
 the games endpoints; WP 1.4 added **prefill orchestration** — a job queue, the
@@ -133,7 +133,7 @@ Copy `.env.example` to `.env` and adjust:
 | `VAULT_WEBHOOK_URL`             | no       | *(empty — webhooks OFF)* | Generic JSON webhook target (WP 3.13). Unset/blank = the whole feature is off. See "Webhooks" |
 | `VAULT_WEBHOOK_EVENTS`          | no       | *(all five)* | Comma list of events to send: `job.done`, `job.error`, `job.cancelled`, `client.bypass_suspected`, `client.bypass_resolved`. Unknown names or empty entries fail at startup |
 | `VAULT_WEBHOOK_TIMEOUT_SECONDS` | no       | `5`          | Per-attempt HTTP timeout for one delivery try; **must be > 0** |
-| `VAULT_NAME`                    | no       | *(empty)*    | Optional label carried as `"vault_name"` in every webhook payload — omitted entirely when unset. Purely cosmetic, for an operator running more than one SteamVault instance |
+| `VAULT_NAME`                    | no       | *(empty)*    | Optional label carried as `"vault_name"` in every webhook payload — omitted entirely when unset. Purely cosmetic, for an operator running more than one SteamHangar instance |
 | `VAULT_MANIFEST_ORACLE`         | no       | *(empty — oracle OFF)* | Third-party manifest oracle. Only `steamcmd_api` is implemented. **Enabling it makes vault-api send app ids to a service outside your LAN** — see "Manifest oracle" below before setting it. Any other value is refused at startup |
 | `VAULT_MANIFEST_ORACLE_URL`     | no       | `https://api.steamcmd.net/v1/info` | Base URL the oracle asks (`<base>/<appid>`). Point it at your own mirror to keep the queries on your network. Must be `http`/`https`; redirects away from it are never followed |
 | `VAULT_MANIFEST_ORACLE_TIMEOUT` | no       | `10`         | Socket timeout (seconds) for one oracle request; **must be > 0**. A timeout is an ordinary "no data" outcome, never an error the API surfaces |
@@ -3472,7 +3472,7 @@ Every event is the same shape; only `payload` varies:
 job's own `finished_at`, which is already in the row `GET /v1/jobs/{id}`
 returns). `vault_name` is `VAULT_NAME` and is **omitted entirely** — not sent
 as `""` — when that variable is unset; it exists purely so an operator
-running more than one SteamVault instance behind the same receiver can tell
+running more than one SteamHangar instance behind the same receiver can tell
 notifications apart.
 
 ### The five events
@@ -4106,7 +4106,7 @@ tempting:
 
 ## Manifest oracle (WP 3.9, ADR-0006 decision 4 + ADR-0007 decision B)
 
-**Off by default, and the only part of SteamVault that talks to anything
+**Off by default, and the only part of SteamHangar that talks to anything
 outside your LAN.** Read the privacy note below before enabling it.
 
 ### What it is for
@@ -4276,7 +4276,7 @@ project).
 
 ## Steam Web API relay (WP 4a.6r; ADR-0004 addendum, user decision A+C)
 
-**Off until a key is configured, and one of the few things in SteamVault that
+**Off until a key is configured, and one of the few things in SteamHangar that
 talks to anything outside your LAN.** Read the privacy note below before
 setting a key.
 

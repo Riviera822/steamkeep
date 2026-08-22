@@ -149,7 +149,7 @@ function buildStep1() {
     el(
       "p",
       "lede",
-      "SteamVault is already serving this page from your vault — the API key below is what lets THIS BROWSER talk to it.",
+      "SteamHangar is already serving this page from your vault — the API key below is what lets THIS BROWSER talk to it.",
     ),
   );
 
@@ -305,7 +305,7 @@ function buildStep2() {
     el(
       "p",
       "lede",
-      "Without this, SteamVault still manages the cache — the library grid just lists app ids instead of covers and names.",
+      "Without this, SteamHangar still manages the cache — the library grid just lists app ids instead of covers and names.",
     ),
   );
 
@@ -327,7 +327,7 @@ function buildStep2() {
   const disclaim = el(
     "div",
     "disclaim",
-    "This is read via a small opt-in relay on THIS server (never proxied through Valve credentials — ADR-0004 addendum): with a key configured, library queries leave your LAN toward Valve's servers. SteamVault is a community project and is not affiliated with Valve Corporation.",
+    "This is read via a small opt-in relay on THIS server (never proxied through Valve credentials — ADR-0004 addendum): with a key configured, library queries leave your LAN toward Valve's servers. SteamHangar is a community project and is not affiliated with Valve Corporation.",
   );
   section.append(disclaim);
 
@@ -513,7 +513,7 @@ function buildOverlay() {
   mark.appendChild(staticIcon(MARK_SVG));
   const titleWrap = el("div");
   titleWrap.style.flex = "1";
-  const wordmark = el("div", "wordmark", "SteamVault");
+  const wordmark = el("div", "wordmark", "SteamHangar");
   const stepnum = el("div", "stepnum", "");
   titleWrap.append(wordmark, stepnum);
   const skipBtn = el("button", "btn ghost sm", "Skip");

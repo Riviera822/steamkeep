@@ -1,4 +1,4 @@
-# Deploying SteamVault (Phase 1, WP 1.9)
+# Deploying SteamHangar (Phase 1, WP 1.9)
 
 Docker Compose deployment for the five server-side components:
 
@@ -105,7 +105,7 @@ Check it:
 
 ```bash
 curl http://<server>/health                     # -> ok            (vault-core)
-curl -I http://<server>/lancache-heartbeat      # -> X-LanCache-Processed-By: steamvault
+curl -I http://<server>/lancache-heartbeat      # -> X-LanCache-Processed-By: steamhangar
 curl http://<server>:8080/v1/health             # -> {"status":"ok"}
 curl -H "X-Api-Key: $VAULT_API_KEY" http://<server>:8080/v1/games
 ```
@@ -162,11 +162,11 @@ actually running for this Compose project, so the command above works
 regardless of project name. If you need the container's literal name for
 some other tool (`docker exec` without going through Compose, log
 aggregation, ...), `deploy/compose.yaml` gives it a stable one:
-`<project>-vault-runner` — `steamvault-vault-runner` for a default
-deployment (the `name: steamvault` at the top of `compose.yaml`):
+`<project>-vault-runner` — `steamhangar-vault-runner` for a default
+deployment (the `name: steamhangar` at the top of `compose.yaml`):
 
 ```bash
-docker exec -it steamvault-vault-runner \
+docker exec -it steamhangar-vault-runner \
     /opt/steamprefill/SteamPrefill select-apps
 ```
 
@@ -245,7 +245,7 @@ an RFC1918-or-loopback IPv4 address:
 For **each** candidate that resolves to a private/loopback IPv4, it sends
 `GET http://<ip>/lancache-heartbeat` and accepts the candidate only if the
 response carries `X-LanCache-Processed-By` — vault-core answers this at
-`core/nginx/nginx.conf`'s `/lancache-heartbeat` location with `steamvault`.
+`core/nginx/nginx.conf`'s `/lancache-heartbeat` location with `steamhangar`.
 It stops at the first candidate that passes. If none does, SteamPrefill
 quietly downloads straight from Valve instead: **the job still finishes and
 reports success, and the cache stays empty.** No error, no red job status —
@@ -280,8 +280,8 @@ when it ran SteamPrefill itself — this is a real re-run against
 literal `172.17.0.1` from inside the real `vault-runner` container:
 
 ```
-$ docker exec steamvault-vault-runner python3 -c "import urllib.request as u; r=u.urlopen('http://172.17.0.1/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
-200 steamvault
+$ docker exec steamhangar-vault-runner python3 -c "import urllib.request as u; r=u.urlopen('http://172.17.0.1/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
+200 steamhangar
 ```
 
 So in the layout `docker compose up` gives you out of the box, **there is
@@ -301,7 +301,7 @@ time, on a stack with `VAULT_CORE_BIND` set to a dedicated (in this
 re-check, loopback) address instead of `0.0.0.0`:
 
 ```
-$ docker exec steamvault-vault-runner python3 -c "import urllib.request as u; r=u.urlopen('http://172.17.0.1/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
+$ docker exec steamhangar-vault-runner python3 -c "import urllib.request as u; r=u.urlopen('http://172.17.0.1/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
 [...]
 urllib.error.URLError: <urlopen error [Errno 111] Connection refused>
 ```
@@ -339,10 +339,10 @@ docker compose exec vault-runner python3 -c "import urllib.request as u; r=u.url
 docker compose exec vault-runner python3 -c "import urllib.request as u; r=u.urlopen('http://<VAULT_CORE_BIND value>/lancache-heartbeat',timeout=5); print(r.status, r.headers.get('X-LanCache-Processed-By'))"
 ```
 
-A line printing `200 steamvault` means that candidate works. A traceback
+A line printing `200 steamhangar` means that candidate works. A traceback
 ending in `ConnectionRefusedError`/`URLError` means it doesn't — check the
 next candidate down the list. If you're on the default `0.0.0.0` bind and
-the first command already prints `200 steamvault`, you are done — skip the
+the first command already prints `200 steamhangar`, you are done — skip the
 fix below. (If you'd rather probe from vault-core's own shell instead,
 vault-core's Alpine/nginx image does have `curl` — but that checks
 vault-core's OWN reachability of an address, a related but different
@@ -450,7 +450,7 @@ nothing uses. `VAULT_CORE_PORT` exists for testing, not as a way out of a port
 clash.
 
 If something else on this host already owns port 80 (another reverse proxy, a
-web UI), give SteamVault **its own address** instead
+web UI), give SteamHangar **its own address** instead
 (`docs/PROJECT_PLAN.md` §10):
 
 ```bash
@@ -481,10 +481,10 @@ see ["Using a dedicated cache mount"](#using-a-dedicated-cache-mount) above):
 
 ```bash
 # back up the two small ones
-docker run --rm -v steamvault_vault-db:/data:ro \
-                -v steamvault_vault-steamprefill:/cfg:ro \
+docker run --rm -v steamhangar_vault-db:/data:ro \
+                -v steamhangar_vault-steamprefill:/cfg:ro \
                 -v "$PWD:/backup" alpine:3.23.5 \
-                tar czf /backup/steamvault-state-$(date +%F).tar.gz /data /cfg
+                tar czf /backup/steamhangar-state-$(date +%F).tar.gz /data /cfg
 ```
 
 ### Why SteamPrefill gets a HOME volume
@@ -535,7 +535,7 @@ so leaving the variable unset is byte-for-byte what this line always was.
 
 ```bash
 # deploy/.env
-VAULT_CACHE_PATH=/srv/steamvault-cache
+VAULT_CACHE_PATH=/srv/steamhangar-cache
 ```
 
 Prepare the directory **before the first start** -- a bind mount, unlike a
@@ -546,8 +546,8 @@ step is not silent: vault-core's preflight will refuse to start with
 `/vault/cache is missing`.
 
 ```bash
-sudo mkdir -p /srv/steamvault-cache/cache/depot /srv/steamvault-cache/tmp
-sudo chown -R 101:101 /srv/steamvault-cache
+sudo mkdir -p /srv/steamhangar-cache/cache/depot /srv/steamhangar-cache/tmp
+sudo chown -R 101:101 /srv/steamhangar-cache
 ```
 
 **uid/gid 101 is required, not a suggestion.** It is the numeric identity of
@@ -832,8 +832,8 @@ any packet from `vault-api`'s container IP that is NOT going to
 
 ```bash
 # Find vault-api's and vault-proxy's addresses on vault-egress:
-docker inspect steamvault-vault-api-1 --format '{{.NetworkSettings.Networks.steamvault_vault-egress.IPAddress}}'
-docker inspect steamvault-vault-proxy-1 --format '{{.NetworkSettings.Networks.steamvault_vault-egress.IPAddress}}'
+docker inspect steamhangar-vault-api-1 --format '{{.NetworkSettings.Networks.steamhangar_vault-egress.IPAddress}}'
+docker inspect steamhangar-vault-proxy-1 --format '{{.NetworkSettings.Networks.steamhangar_vault-egress.IPAddress}}'
 
 # Capture on the host while you trigger some vault-api activity (an API
 # call, a scheduled sweep, whatever you have configured). Replace

@@ -1,9 +1,9 @@
 # Minimal LAN setup
 
-The smallest working SteamVault deployment: `vault-core` + `vault-api` only,
+The smallest working SteamHangar deployment: `vault-core` + `vault-api` only,
 using a local DNS server you already run to redirect Steam's CDN traffic —
 no `vault-dns` container, no dedicated cache disk, no scheduler tuning. If
-this is your first SteamVault install, start here; the other examples in
+this is your first SteamHangar install, start here; the other examples in
 this directory are variations on top of this one.
 
 Read [`deploy/README.md`](../README.md) first — this page only shows the
@@ -73,7 +73,7 @@ this step.
 
 - **Dedicated cache disk/dataset** (`VAULT_CACHE_PATH`) — the cache lives in
   the default Docker-managed named volume, which is fine for trying
-  SteamVault out or a small install. See
+  SteamHangar out or a small install. See
   [`tuned-setup.md`](tuned-setup.md) once you outgrow it, or
   [`truenas-scale-dockge.md`](truenas-scale-dockge.md) for a ZFS-specific
   recipe.

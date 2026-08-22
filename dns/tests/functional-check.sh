@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SteamVault vault-dns -- WSL2-side helper for test-dnsmasq-config.ps1 (WP 1.8).
+# SteamHangar vault-dns -- WSL2-side helper for test-dnsmasq-config.ps1 (WP 1.8).
 #
 # Starts a THROWAWAY dnsmasq instance (foreground, --no-daemon) against the
 # rendered config passed as $1, queries it for A and AAAA records against
@@ -36,9 +36,9 @@ set -uo pipefail
 
 CONF="${1:?usage: functional-check.sh <rendered-conf-path> [port] [name1] [name2]}"
 TEST_PORT="${2:-5533}"
-QUERY_NAME_WILDCARD="${3:-anything-random-steamvault-test.steamcontent.com}"
+QUERY_NAME_WILDCARD="${3:-anything-random-steamhangar-test.steamcontent.com}"
 QUERY_NAME_REALNAME="${4:-cache2-ams1.steamcontent.com}"
-LOG=/tmp/steamvault-func-check.log
+LOG=/tmp/steamhangar-func-check.log
 
 rm -f "$LOG"
 

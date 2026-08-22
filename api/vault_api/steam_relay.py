@@ -92,7 +92,7 @@ to a fixed wall-clock window regardless of configuration changes.
 ## Privacy
 
 Exactly like the manifest oracle (``vault_api/oracle.py``'s own privacy
-section), this is one of the few things in SteamVault that leaves the LAN —
+section), this is one of the few things in SteamHangar that leaves the LAN —
 and here it leaves it carrying the operator's own Steam Web API key and the
 SteamID64 being looked up. **With the relay configured, library queries
 originate from the SERVER** (they leave the LAN toward Valve), not from the
@@ -204,7 +204,7 @@ DEFAULT_CACHE_TTL_SECONDS = 300.0  # 5 minutes
 #: many steamids cannot grow this dict without bound.
 MAX_CACHE_ENTRIES = 256
 
-USER_AGENT = "SteamVault-vault-api/0.1 (+https://github.com/, self-hosted relay)"
+USER_AGENT = "SteamHangar-vault-api/0.1 (+https://github.com/, self-hosted relay)"
 
 
 class SteamRelayError(Exception):

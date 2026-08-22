@@ -306,7 +306,7 @@ function Wait-EventNewLines([int]$SinceCount, [int]$MinNewLines = 1, [int]$Timeo
 }
 
 # ==============================================================================
-Write-Host "== SteamVault vault-core (WP 1.1) test suite ==" -ForegroundColor Cyan
+Write-Host "== SteamHangar vault-core (WP 1.1) test suite ==" -ForegroundColor Cyan
 Write-Host "Target object: depot $DepotId chunk $ChunkHash"
 
 try {
@@ -328,11 +328,11 @@ try {
         if ($hb.StatusCode -ne 200) {
             Fail "/lancache-heartbeat returned HTTP $($hb.StatusCode), expected 200"
         }
-        elseif ($hb.Headers['X-LanCache-Processed-By'] -ne "steamvault") {
-            Fail "/lancache-heartbeat X-LanCache-Processed-By was '$($hb.Headers['X-LanCache-Processed-By'])', expected 'steamvault'"
+        elseif ($hb.Headers['X-LanCache-Processed-By'] -ne "steamhangar") {
+            Fail "/lancache-heartbeat X-LanCache-Processed-By was '$($hb.Headers['X-LanCache-Processed-By'])', expected 'steamhangar'"
         }
         else {
-            Pass "/lancache-heartbeat: 200 + X-LanCache-Processed-By: steamvault"
+            Pass "/lancache-heartbeat: 200 + X-LanCache-Processed-By: steamhangar"
         }
     }
     catch { Fail "/lancache-heartbeat request failed: $_" }

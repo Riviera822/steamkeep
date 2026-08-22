@@ -1,4 +1,4 @@
-# SteamVault — Working Agreement
+# SteamHangar — Working Agreement
 
 Canonical source for scope, architecture, phases, and definition of done:
 `docs/PROJECT_PLAN.md`. Read it before doing anything else.

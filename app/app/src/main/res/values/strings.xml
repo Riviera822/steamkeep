@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <string name="app_name">SteamVault</string>
+    <string name="app_name">SteamHangar</string>
 
     <!-- Debug status-icon gallery screen (WP 4b.1's visible artifact).
          Navigation/real views arrive in later WPs (4b.4/4b.5/4b.6). -->
@@ -265,7 +265,7 @@
     <!-- Notifications section (WP 4b.8) — see SettingsScreen.kt's
          NotificationsSection kdoc for why this is a single always-shown
          button rather than a live granted/denied indicator. -->
-    <string name="settings_notifications_desc">SteamVault checks for finished downloads, updates and cache-bypass warnings in the background, roughly every 15 minutes. Enable notifications so it can tell you.</string>
+    <string name="settings_notifications_desc">SteamHangar checks for finished downloads, updates and cache-bypass warnings in the background, roughly every 15 minutes. Enable notifications so it can tell you.</string>
     <string name="settings_notifications_enable_button">Enable notifications</string>
 
     <!-- Notification channels (NotificationChannels.kt) — one per event

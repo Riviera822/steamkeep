@@ -1,11 +1,11 @@
-# SteamVault vault-dns -- optional bundled DNS redirector (Phase 1, WP 1.9).
+# SteamHangar vault-dns -- optional bundled DNS redirector (Phase 1, WP 1.9).
 #
 # Only needed by deployments that do NOT already run a local DNS server
 # (docs/PROJECT_PLAN.md §10 mode 2). Enabled behind a Compose profile:
 #     docker compose --profile dns up -d
 #
 # Build from the repo's dns/ directory:
-#     docker build -t steamvault/vault-dns:0.1.0 dns/
+#     docker build -t steamhangar/vault-dns:0.1.0 dns/
 #
 # *** EXPOSURE WARNING -- READ deploy/README.md BEFORE PUBLISHING PORT 53 ***
 # This is a forwarding resolver with no source-address ACL (dnsmasq has no such
@@ -24,9 +24,9 @@
 #   '{{index .RepoDigests 0}}'`.
 FROM alpine:3.23.5@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 
-LABEL org.opencontainers.image.title="SteamVault vault-dns" \
+LABEL org.opencontainers.image.title="SteamHangar vault-dns" \
       org.opencontainers.image.description="Optional dnsmasq that points *.steamcontent.com at vault-core and closes the AAAA bypass" \
-      org.opencontainers.image.source="https://github.com/steamvault/steamvault" \
+      org.opencontainers.image.source="https://github.com/Riviera822/steamhangar" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="0.1.0"
 

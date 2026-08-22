@@ -44,9 +44,9 @@ side of which comparison drifted.
 **Review round 2, WP S-2 blocker B1.** ``deploy/compose.yaml`` gained a
 FOURTH ``image:`` line (``vault-runner``, ADR-0012's runner split) that
 deliberately reuses the exact same image name as ``vault-api``
-(``steamvault/vault-api`` — same codebase, same tag, different ``command:``,
+(``steamhangar/vault-api`` — same codebase, same tag, different ``command:``,
 no separate build). The pre-fix version of this file's extraction keyed its
-result dict by IMAGE NAME (the value inside ``steamvault/<name>:...``), not
+result dict by IMAGE NAME (the value inside ``steamhangar/<name>:...``), not
 by which COMPOSE SERVICE the line lives under — so with two lines both
 naming the image ``vault-api``, a plain ``{image_name: default}`` dict
 comprehension let vault-runner's occurrence silently overwrite vault-api's
@@ -80,7 +80,7 @@ ENV_EXAMPLE_PATH = REPO_ROOT / "deploy" / ".env.example"
 #: than joining the two acknowledged-gap rows in this module's docstring.
 PROXY_DOCKERFILE_PATH = REPO_ROOT / "deploy" / "proxy" / "Dockerfile"
 
-#: Matches `image: steamvault/<name>:${VAULT_IMAGE_TAG:-<default>}` lines
+#: Matches `image: steamhangar/<name>:${VAULT_IMAGE_TAG:-<default>}` lines
 #: exactly as they appear in deploy/compose.yaml today -- deliberately
 #: narrow, like test_p1_compose_env_defaults.py's `_parsed_env_defaults`
 #: regex, so a line that does not match this exact `${VAR:-default}` shape
@@ -88,9 +88,9 @@ PROXY_DOCKERFILE_PATH = REPO_ROOT / "deploy" / "proxy" / "Dockerfile"
 #: block text at a time (see `_service_blocks`/`_compose_service_image_tags`
 #: below) -- never to the whole file at once, which is the B1 fix: the
 #: captured group here is the IMAGE NAME, which is NOT unique per service
-#: since WP S-2 (vault-runner intentionally reuses `steamvault/vault-api`).
+#: since WP S-2 (vault-runner intentionally reuses `steamhangar/vault-api`).
 _IMAGE_TAG_PATTERN = re.compile(
-    r"^\s*image:\s*steamvault/([a-z-]+):\$\{VAULT_IMAGE_TAG:-([^}]+)\}\s*$",
+    r"^\s*image:\s*steamhangar/([a-z-]+):\$\{VAULT_IMAGE_TAG:-([^}]+)\}\s*$",
     re.MULTILINE,
 )
 
@@ -146,7 +146,7 @@ def _service_blocks(text: str) -> dict[str, str]:
 
 def _compose_service_image_tags() -> dict[str, tuple[str, str]]:
     """{service_name: (image_name, default_tag)} — one entry per COMPOSE
-    SERVICE with an `image: steamvault/<name>:${VAULT_IMAGE_TAG:-<default>}`
+    SERVICE with an `image: steamhangar/<name>:${VAULT_IMAGE_TAG:-<default>}`
     line, keyed by the SERVICE the line lives under (never by the image name
     in its value — see the B1 fix note in this module's docstring for why
     that distinction is the whole point: vault-runner intentionally reuses

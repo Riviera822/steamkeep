@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "steamvault-app"
+rootProject.name = "steamhangar-app"
 include(":app")

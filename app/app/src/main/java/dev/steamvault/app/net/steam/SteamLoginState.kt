@@ -13,7 +13,7 @@ import java.util.Base64
  * app already installed on the device could capture a GENUINE, Valve-signed
  * OpenID assertion for the ATTACKER's own Steam account (by triggering its
  * own sign-in against this app's exact, non-per-attempt-unique `return_to`)
- * and replay it into SteamVault's intent-filter; `check_authentication`
+ * and replay it into SteamHangar's intent-filter; `check_authentication`
  * would legitimately return `is_valid:true` since it IS an unmodified Valve
  * assertion, just not the one THIS app's button press initiated.
  *

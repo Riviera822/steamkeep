@@ -31,7 +31,7 @@ dns/
 A single dnsmasq process, enabled via a Compose profile, that:
 
 - answers `*.steamcontent.com` (any subdomain, wildcard) with your
-  SteamVault cache server's IP address for **A** (IPv4) queries
+  SteamHangar cache server's IP address for **A** (IPv4) queries
 - answers **AAAA** queries for the same zone with **NODATA** (NOERROR, zero
   answers) -- not a real address, not NXDOMAIN, just "nothing here" --
   instead of forwarding them upstream (see the IPv6 section below for why
@@ -176,7 +176,7 @@ If you're still on Pi-hole v5, or you've deliberately set
 Settings -> Miscellaneous -> `misc.etc_dnsmasq_d`*) to keep using
 config-file drop-ins on v6:
 
-1. Create `/etc/dnsmasq.d/02-steamvault.conf` on the Pi-hole host:
+1. Create `/etc/dnsmasq.d/02-steamhangar.conf` on the Pi-hole host:
    ```
    address=/steamcontent.com/192.168.1.50
    local=/steamcontent.com/
@@ -325,7 +325,7 @@ the contract those wiring choices must satisfy:
 
 | Placeholder | Meaning | Required? | Documented default |
 |---|---|---|---|
-| `${CACHE_IP}` | IP address of the SteamVault cache server (vault-core) that `*.steamcontent.com` should resolve to | Required, no sensible default -- every deployment's cache IP is different | none -- WP 1.9's entrypoint should fail fast (like `api/.env.example`'s `VAULT_API_KEY` convention) if this is unset, rather than silently emitting a broken `address=/steamcontent.com/` line |
+| `${CACHE_IP}` | IP address of the SteamHangar cache server (vault-core) that `*.steamcontent.com` should resolve to | Required, no sensible default -- every deployment's cache IP is different | none -- WP 1.9's entrypoint should fail fast (like `api/.env.example`'s `VAULT_API_KEY` convention) if this is unset, rather than silently emitting a broken `address=/steamcontent.com/` line |
 | `${UPSTREAM_DNS_1}` | Primary upstream forwarder for everything outside `*.steamcontent.com` | Optional | `1.1.1.1` (Cloudflare) |
 | `${UPSTREAM_DNS_2}` | Secondary upstream forwarder | Optional | `8.8.8.8` (Google) |
 

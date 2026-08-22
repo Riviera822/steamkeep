@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Riviera822/steamvault/agent/report"
+	"github.com/Riviera822/steamhangar/agent/report"
 )
 
 // testBackoff keeps every retry test fast: base/max are tiny, so even a

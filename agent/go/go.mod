@@ -1,3 +1,3 @@
-module github.com/Riviera822/steamvault/agent
+module github.com/Riviera822/steamhangar/agent
 
 go 1.25.0

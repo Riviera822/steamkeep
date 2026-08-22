@@ -1179,7 +1179,7 @@ at 375px, nav height unchanged.
 
 Rail content, all three degrade states, live: `#rail-vault-name` /
 `#rail-cache` / `#rail-version` all render correctly in demo mode
-(`"steamvault-demo"`, `"Used 6054 GB" "Free 466 GB"`, `"v0.1.0"` — the last
+(`"steamhangar-demo"`, `"Used 6054 GB" "Free 466 GB"`, `"v0.1.0"` — the last
 one only after the demo fixture was extended with `server_version` for 1:1
 parity with the confirmed real shape); the cache-failure case is described
 above (byte-identical before/after a monkey-patched rejection). The

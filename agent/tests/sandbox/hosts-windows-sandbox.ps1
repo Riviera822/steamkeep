@@ -166,7 +166,7 @@ Check "the file was not modified" (Sha $f3) $sha3
 Write-Output "`n=== 4. corrupt markers ==="
 $f4 = Join-Path $LabDir "hosts-corrupt"
 WriteFixture $f4 ("127.0.0.1 localhost`r`n" +
-    "# BEGIN steamvault-agent (managed block - do not edit inside)`r`n1.2.3.4 $CacheHost`r`n")
+    "# BEGIN steamhangar-agent (managed block - do not edit inside)`r`n1.2.3.4 $CacheHost`r`n")
 $sha4 = Sha $f4
 $r = RunAgent hosts apply --cache-ip $CacheIP --hosts-path $f4
 Check "apply on corrupt markers exits 1" $r.Code 1

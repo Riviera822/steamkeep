@@ -19,7 +19,7 @@ set -u
 
 AGENT=/vault-agent
 HOSTS=/etc/hosts
-BACKUP=/etc/hosts.steamvault.bak
+BACKUP=/etc/hosts.steamhangar.bak
 CACHE_IP=192.168.1.50
 OTHER_IP=10.44.44.44
 CACHE_HOST=lancache.steamcontent.com

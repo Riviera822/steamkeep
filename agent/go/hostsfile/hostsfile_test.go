@@ -248,8 +248,8 @@ func TestVerify_MarkerCommentTextMayDrift(t *testing.T) {
 	// A block written by a hypothetical future/older version with a
 	// different parenthetical must still be recognized - otherwise Apply
 	// would append a SECOND block.
-	content := "# BEGIN steamvault-agent (some other wording)\n" +
-		testIP + " " + Hostname + "\n# END steamvault-agent v2\n"
+	content := "# BEGIN steamhangar-agent (some other wording)\n" +
+		testIP + " " + Hostname + "\n# END steamhangar-agent v2\n"
 	path := writeFixture(t, content)
 	st, err := Verify(path, testIP)
 	if err != nil {
@@ -258,6 +258,92 @@ func TestVerify_MarkerCommentTextMayDrift(t *testing.T) {
 	if st.State != StatePresentCorrect {
 		t.Fatalf("State = %q, want %q - marker detection must tolerate a reworded comment",
 			st.State, StatePresentCorrect)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Legacy markers (WP RN-1, product rename steamvault -> steamhangar).
+//
+// A block written by an OLDER vault-agent build, before the rename, uses
+// "# BEGIN steamvault-agent" / "# END steamvault-agent". Detection must
+// still find it (or Apply would append a SECOND block above/below the
+// unrecognized one, and Remove would leave it orphaned in the user's real
+// system hosts file forever). steamkeep-agent/steamsilo-agent are the two
+// other product names briefly considered the same day, recognized only
+// defensively - they were never committed to the default branch.
+// ---------------------------------------------------------------------------
+
+func TestVerify_LegacyMarkerIsDetected(t *testing.T) {
+	for _, legacyName := range []string{"steamvault-agent", "steamkeep-agent", "steamsilo-agent"} {
+		t.Run(legacyName, func(t *testing.T) {
+			content := "# BEGIN " + legacyName + " (managed block - do not edit inside)\n" +
+				testIP + " " + Hostname + "\n# END " + legacyName + "\n"
+			path := writeFixture(t, content)
+			st, err := Verify(path, testIP)
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			if st.State != StatePresentCorrect {
+				t.Fatalf("State = %q, want %q - a legacy %s block must still be recognized as present",
+					st.State, StatePresentCorrect, legacyName)
+			}
+			if !st.Present() {
+				t.Errorf("Present() = false for a legacy %s block", legacyName)
+			}
+		})
+	}
+}
+
+func TestApply_HealsLegacyMarkerToCurrentName(t *testing.T) {
+	content := "# BEGIN steamvault-agent (managed block - do not edit inside)\n" +
+		testIP + " " + Hostname + "\n# END steamvault-agent\n"
+	path := writeFixture(t, content)
+
+	res, err := Apply(path, testIP)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !res.Changed {
+		t.Fatal("Changed = false - a legacy-marker block must be rewritten to the current marker")
+	}
+
+	after := readFile(t, path)
+	if strings.Contains(after, "steamvault-agent") {
+		t.Errorf("legacy marker survived healing: %q", after)
+	}
+	if !strings.Contains(after, BeginMarker) || !strings.Contains(after, EndMarker) {
+		t.Errorf("healed file does not contain the current markers: %q", after)
+	}
+
+	// Healing must not duplicate the block - exactly one BEGIN/END pair.
+	if n := strings.Count(after, "# BEGIN"); n != 1 {
+		t.Errorf("found %d BEGIN markers after healing, want 1 (a second block would mean the "+
+			"legacy one was not recognized as ours): %q", n, after)
+	}
+}
+
+func TestRemove_RemovesLegacyMarkerBlockEntirely(t *testing.T) {
+	before := "127.0.0.1 localhost\n"
+	content := before +
+		"# BEGIN steamsilo-agent (managed block - do not edit inside)\n" +
+		testIP + " " + Hostname + "\n# END steamsilo-agent\n"
+	path := writeFixture(t, content)
+
+	res, err := Remove(path)
+	if err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if !res.Changed {
+		t.Fatal("Changed = false - a legacy-marker block must be removed")
+	}
+
+	after := readFile(t, path)
+	if after != before {
+		t.Errorf("after Remove = %q, want exactly %q (legacy block fully gone, rest untouched)",
+			after, before)
+	}
+	if strings.Contains(after, "steamsilo-agent") {
+		t.Errorf("legacy marker survived Remove: %q", after)
 	}
 }
 
@@ -834,7 +920,7 @@ func TestMutations_WriteABackupOfThePreMutationBytes(t *testing.T) {
 // setupBackupImpossible builds the configuration that separates "the backup
 // failed" from "everything failed": a hosts file that IS writable in place,
 // inside a directory that rejects NEW files. os.CreateTemp and the
-// <path>.steamvault.bak both need to create a file in that directory and
+// <path>.steamhangar.bak both need to create a file in that directory and
 // cannot; the hosts file itself can still be truncated and rewritten.
 //
 // Without mutate()'s abort-on-backup-failure, this is precisely the shape

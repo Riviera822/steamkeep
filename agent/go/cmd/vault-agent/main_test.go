@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Riviera822/steamvault/agent/agentconfig"
-	"github.com/Riviera822/steamvault/agent/client"
+	"github.com/Riviera822/steamhangar/agent/agentconfig"
+	"github.com/Riviera822/steamhangar/agent/client"
 )
 
 func TestRun_NoSubcommandIsUsageError(t *testing.T) {

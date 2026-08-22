@@ -1,17 +1,17 @@
-# SteamVault
+# SteamHangar
 
 A self-hosted, Docker-first Steam LAN download cache with **true per-game
 management** — see which game occupies how much space, and delete individual
 games from the cache. Built for homelab operators and LAN party organizers.
 
-> SteamVault is a community project and is not affiliated with Valve
+> SteamHangar is a community project and is not affiliated with Valve
 > Corporation. "Steam" is a trademark of Valve Corporation.
 
 ## Why not just use LanCache?
 
 [LanCache](https://lancache.net/) is the de-facto standard for LAN caching of
 game downloads across multiple services (Steam, Epic, Battle.net, ...), and
-it works well for that. SteamVault is not a replacement or a "LanCache
+it works well for that. SteamHangar is not a replacement or a "LanCache
 killer" — it is a **Steam-only, narrower alternative** that trades LanCache's
 multi-service breadth for one specific capability LanCache's design can't
 offer: because it stores cached files under a generic hashed cache key,
@@ -19,7 +19,7 @@ LanCache has no clean way to delete a single game from the cache. Community
 tools like `lancache-manager` work around this by parsing access logs after
 the fact.
 
-SteamVault inverts the approach. The Steam CDN already encodes the depot ID
+SteamHangar inverts the approach. The Steam CDN already encodes the depot ID
 in the URL (`/depot/<depotid>/chunk/<hash>`), so storing the cache
 **path-faithfully** (nginx `proxy_store` instead of `proxy_cache`) makes the
 game-to-file mapping part of the directory structure from day one. Deleting a
@@ -28,7 +28,7 @@ reconstruction, no heuristics.
 
 If you want to cache Epic, Battle.net, or Riot downloads too, use LanCache.
 If you only care about Steam and want per-game visibility and cleanup,
-SteamVault is built for exactly that.
+SteamHangar is built for exactly that.
 
 ## Architecture
 
@@ -84,8 +84,8 @@ Prerequisites:
 - Outbound internet access (the cache fetches from the Steam CDN on a miss)
 
 ```bash
-git clone <this-repo-url> steamvault
-cd steamvault/deploy
+git clone <this-repo-url> steamhangar
+cd steamhangar/deploy
 cp .env.example .env
 $EDITOR .env                      # set VAULT_API_KEY — the one mandatory value
 docker compose up -d --build
@@ -97,7 +97,7 @@ Check the stack came up (export the key you just set so the curls below can use 
 export VAULT_API_KEY=<the value you put in deploy/.env>
 
 curl http://<server>/health                     # -> ok                (vault-core)
-curl -I http://<server>/lancache-heartbeat       # -> X-LanCache-Processed-By: steamvault
+curl -I http://<server>/lancache-heartbeat       # -> X-LanCache-Processed-By: steamhangar
 curl http://<server>:8080/v1/health              # -> {"status":"ok"}  (vault-api)
 curl -H "X-Api-Key: $VAULT_API_KEY" http://<server>:8080/v1/games
 ```
@@ -166,7 +166,7 @@ itself) — only prefill jobs are blocked, with an actionable error message.
   full per-game breakdown.
 
 Full deployment reference — volumes, backup, log rotation, the port-80/
-dedicated-IP story, security posture, and a 62-check verification script —
+dedicated-IP story, security posture, and a 185-check verification script —
 lives in [`deploy/README.md`](deploy/README.md).
 
 ## FAQ
@@ -214,7 +214,7 @@ deleting anything requires the explicit opt-in `{"execute": true}`
 ([ADR-0007](docs/adr/0007-manifest-diff-gc.md)).
 
 **Is my Steam account safe?**
-SteamVault's own components never see your Steam password. The one-time
+SteamHangar's own components never see your Steam password. The one-time
 SteamPrefill login happens interactively in your own terminal; a future Web
 UI/app login uses Steam's own "Sign in with Steam" OpenID flow, so the
 credential never passes through anything in this repository

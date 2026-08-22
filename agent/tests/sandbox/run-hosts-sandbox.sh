@@ -5,7 +5,7 @@
 #
 # Why a container and not this machine: `vault-agent hosts` edits the system
 # hosts file. The dev machine's own hosts file is off limits (it holds a live
-# SteamVault entry added by hand during Phase 0), and so is WSL's. A container
+# SteamHangar entry added by hand during Phase 0), and so is WSL's. A container
 # gives us a genuine, kernel-visible /etc/hosts that the resolver really reads,
 # and throws it away afterwards.
 #
@@ -17,7 +17,7 @@
 # covered by the fixture tests (agent/go/hostsfile) instead.
 #
 # Usage (from anywhere):
-#   wsl -u root bash /mnt/c/claude-dev/SteamVault/agent/tests/sandbox/run-hosts-sandbox.sh
+#   wsl -u root bash /mnt/c/path/to/your/checkout/agent/tests/sandbox/run-hosts-sandbox.sh
 #
 # Requires: docker, and a Go toolchain for the cross-build (or pass a
 # pre-built linux/amd64 binary as $1).

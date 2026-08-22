@@ -1,6 +1,6 @@
 # vault-core (Phase 1, WP 1.1)
 
-Production nginx config for the SteamVault cache core. Derives from the
+Production nginx config for the SteamHangar cache core. Derives from the
 Phase-0 PoC (`poc/conf/nginx.conf`, frozen as evidence) plus the four
 binding production requirements discovered there and recorded in
 [`docs/adr/0001-proxy-store-feasibility.md`](../docs/adr/0001-proxy-store-feasibility.md).
@@ -578,7 +578,7 @@ process -- nothing here rotates them automatically, same as any nginx
 install.
 
 **In the container (WP 1.9): RESOLVED, and not with logrotate.** An earlier
-revision of this section sketched a `/etc/logrotate.d/steamvault-core` file
+revision of this section sketched a `/etc/logrotate.d/steamhangar-core` file
 plus `nginx -s reopen`. That was superseded during WP 1.9 by a simpler
 answer with strictly fewer moving parts: the container writes
 `access_log /dev/stdout` and `error_log /dev/stderr`, and **rotation is the
