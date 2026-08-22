@@ -25,7 +25,7 @@ FROM alpine:3.23.5@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952
 
 LABEL org.opencontainers.image.title="SteamHangar vault-proxy" \
       org.opencontainers.image.description="Allowlist-only forward proxy: the sole egress path for the egress-locked vault-api container" \
-      org.opencontainers.image.source="https://github.com/Riviera822/steamhangar" \
+      org.opencontainers.image.source="https://github.com/steamhangar/steamhangar" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="0.1.0"
 

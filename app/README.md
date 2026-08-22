@@ -2052,10 +2052,40 @@ agreement reserves for the user, same class of decision as WP 5.5's GitHub
 org move) or an F-Droid metadata/build-recipe submission (F-Droid's own
 reproducible-build requirements are a real, separate piece of work — a
 future WP once the app is otherwise stable, not a WP 4b.9 packaging
-after-thought). Distribution for now is: build the signed APK per the
-steps above, transfer it to a device (ADB, a file share, a self-hosted
-download link — the user's choice), and install with "install unknown
-apps" allowed for that source, the standard side-load flow for any
+after-thought).
+
+**Distribution (WP CI-3, `.github/workflows/publish.yml`): download the
+signed APK from the GitHub Release for the version tag, not a manual
+transfer.** The steps above (`assembleRelease` + `apksigner verify`) are
+what CI itself runs, driven by the same repository secrets an operator
+sets once: `ANDROID_KEYSTORE_B64` (base64 of the release `.jks` file's raw
+bytes), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and
+`ANDROID_KEY_PASSWORD` (the CI-side names for the same four values
+`storeFile`/`storePassword`/`keyAlias`/`keyPassword` above — see that
+workflow file's own comments for the exact env-var wiring). Pushing a git
+tag matching `v*` builds, signs, `apksigner`-verifies, and attaches
+`app-release.apk` to that tag's GitHub Release — a plain, no-account-needed
+download from the repository's Releases page. Running the workflow
+manually via `workflow_dispatch` performs the same build-sign-verify steps
+(useful for confirming the pipeline still works, or exercising a
+newly-set secret, without cutting a release) but deliberately does **not**
+attach anything anywhere: the workflow's own release-attach step guards on
+`github.event_name == 'push'` specifically, so a manual dispatch run never
+carries a release to attach to, even if it happens to target an existing
+tag ref. An operator expecting a new release asset from a manual dispatch
+alone will not get one — push a real tag for that. If `ANDROID_KEYSTORE_B64`
+is not configured, the job skips
+the build entirely (a documented, green skip, not a failure) rather than
+ever publishing an unsigned artefact; if it IS set but one of the other
+three secrets is missing or wrong, this project's own signing guard
+(`gradle.taskGraph.whenReady` above) turns that into a loud CI failure
+instead — the same `GradleException` a local build with an incomplete
+`keystore.properties` would hit, not a silent partial success. Side-loading
+(ADB, a file share) remains available for a
+locally-built APK — nothing above requires CI — but it is no longer the
+documented distribution path for a tagged release; "install unknown apps"
+still needs to be allowed for whichever source (a browser download, ADB)
+delivers the APK to the device, the standard side-load flow for any
 Android app outside a store.
 
 ### Carry-over cleanup (`docs/WORKPACKAGES.md` Phase 4b header)

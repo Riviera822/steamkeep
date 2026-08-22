@@ -1,0 +1,698 @@
+name: Publish
+
+# WP CI-3 (Phase 5 release track) -- the last CI building block ci.yml's own
+# header names by an earlier work-package number ("NO image publishing here
+# -- that is WP 5.5", docs/WORKPACKAGES.md's WP 5.5 entry, same package).
+# This is a DELIBERATELY SEPARATE workflow file from ci.yml, not a new job
+# bolted onto it -- read the reasoning below before adding a job here to
+# ci.yml instead.
+#
+# --- Why a second file, not a new job in ci.yml ------------------------------
+# ci.yml's own header states its two-tier design plainly: the six fast jobs
+# guard on `github.event_name == 'push' || 'pull_request' ||
+# 'workflow_dispatch'` against ONE shared, workflow-wide `on:` block whose
+# `push:` trigger is `branches: [main]` only -- it has no `tags:` filter.
+# Publishing needs a git-tag push to fire at all. The only way to make a tag
+# push visible to *any* job in that file is adding a `tags:` filter to that
+# same shared `push:` trigger -- and doing so would silently widen every one
+# of those six jobs' actual trigger surface too, even with their own `if:`
+# text left character-for-character unchanged, because none of those six
+# guards inspects `github.ref` -- only `github.event_name`. A tag push is
+# still `event_name == 'push'`, so all six would start firing on release
+# tags as an unintended side effect of a change made only for this job's
+# sake, which is exactly the "existing six fast jobs ... unaffected"
+# requirement this package was given. A second file with its OWN `on:`
+# block sidesteps the problem entirely: ci.yml is not touched at all, so
+# nothing about it can regress, and this file's `on:` names exactly the two
+# events that should ever build/push an image -- nothing else is even
+# capable of reaching the job below, so the job-level `if:` guard added
+# anyway is belt-and-suspenders (documented, matching the repo's habit of
+# stating intent even where the trigger already enforces it), not
+# load-bearing the way the fast-tier guards in ci.yml are (those ARE
+# load-bearing: their shared `on:` admits a fourth event, `schedule`, that
+# they must exclude; this file was never given that event at all).
+#
+# --- Trigger reasoning, event by event ---------------------------------------
+#   push (branch, e.g. main)   -> ref is refs/heads/main, matches neither
+#                                  this file's `tags:` filter -> the
+#                                  workflow does not even start. Same for
+#                                  any other branch push.
+#   pull_request (incl. forks) -> not a trigger in this file AT ALL -> a
+#                                  fork PR has no code path to a job that
+#                                  can push an image, by construction, not
+#                                  by a guard that could be misconfigured
+#                                  or bypassed.
+#   push (tag matching v*)     -> triggers; the publish job's `if:` below
+#                                  is also true -> builds and pushes.
+#   workflow_dispatch          -> triggers; same `if:` true -> a human can
+#                                  re-run a publish (e.g. to pick up a base
+#                                  image security fix) without cutting a
+#                                  new tag. Review round 2 (N2) correction:
+#                                  this is not always "off a branch" the
+#                                  way the sentence above used to imply --
+#                                  a manual dispatch CAN target an existing
+#                                  TAG ref too (the workflow_dispatch UI
+#                                  lets the operator pick any ref). In that
+#                                  case `github.ref_name` is that tag and
+#                                  `github.event_name` is still
+#                                  `workflow_dispatch`, not `push` -- the
+#                                  `android-release` job's release-attach
+#                                  step below deliberately guards on
+#                                  `github.event_name == 'push'`
+#                                  specifically, so a dispatch-on-a-tag run
+#                                  still builds/verifies the APK but does
+#                                  NOT attach it to that tag's release
+#                                  (only an actual tag push does). This is
+#                                  a real, intentional restriction, not an
+#                                  oversight -- broadening it is a
+#                                  follow-up if manually re-attaching to
+#                                  an existing release ever becomes a
+#                                  wanted operation.
+#   schedule                   -> not a trigger in this file; the nightly
+#                                  verify-stack cron stays exactly where it
+#                                  is, in ci.yml, untouched.
+#
+# --- Second deliverable in this same file: the signed Android release APK --
+# `android-release` (below, second job) builds, signs and verifies
+# `app/`'s release APK and attaches it to the GitHub Release for the same
+# tag the `publish` job above builds images for -- so an operator who pulls
+# a version gets matching images and app in one place. It shares this
+# file's `on:` (same tag-push/workflow_dispatch trigger, for the reason
+# already argued above) and needs its own, WIDER job-level `permissions:`
+# override (`contents: write`, to create/attach to the release -- every
+# other permission in this file, including the other job's, is read-only
+# except for the one `packages: write` the image push needs). See that
+# job's own comments for the full signing-secret and fail-closed reasoning
+# (app/README.md's "Release build, signing, distribution" section, WP
+# 4b.9, is the design this job must not weaken).
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Job-level `permissions:` below adds `packages: write` for the one job that
+# needs it; this top-level default stays read-only, matching ci.yml's own
+# "only the read access every job below actually needs" rule -- nothing
+# broadens the default for a job that never asks for it.
+permissions:
+  contents: read
+
+# Queue, don't cancel: unlike ci.yml's fast tier (where cancelling a stale
+# run on the same PR/branch is exactly what you want), cancelling a publish
+# mid-push risks leaving a partially-uploaded multi-arch manifest for a tag
+# someone may already be trying to pull. A second push to the SAME tag is an
+# unusual, deliberate action (re-running workflow_dispatch, or force-moving
+# a tag) -- let it queue behind the first instead of racing it.
+concurrency:
+  group: publish-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# Review round 2 (S6) -- CONFIRM BEFORE THE FIRST TAG, do not assume: a
+# package pushed to GHCR for the first time via `GITHUB_TOKEN` can land
+# PRIVATE by default (an org- or account-level GHCR setting, not anything
+# this workflow controls), independent of the repo's own public/private
+# status -- now specifically the (round 4: now-existing, transfer complete)
+# `steamhangar` ORG's own default. The recorded decision
+# (docs/WORKPACKAGES.md WP 5.5) says these images should be public. If the
+# org default is still "private" the first time this workflow runs,
+# `docker pull` 401s for every outside puller and reads exactly like a
+# broken auth setup rather than a visibility switch nobody flipped yet.
+# Check each package's visibility in the GitHub package settings UI after
+# the very first successful publish, before announcing anything
+# (docs/WORKPACKAGES.md WP 5.6 already gates announcement on other
+# conditions -- add this one). Not applicable to the `android-release` job
+# below: a GitHub Release asset on a public repo is public by construction,
+# with no separate per-package visibility switch to flip.
+jobs:
+  publish:
+    name: publish / ${{ matrix.image }} (ghcr.io)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      packages: write
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # vault-core: stock nginx:alpine base, nothing arch-specific in
+          # core/Dockerfile (verified by reading it in full) -- builds both.
+          - image: vault-core
+            context: core
+            dockerfile: core/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          # vault-api: NOT arm64-capable, and this is a Dockerfile fact, not
+          # a CI choice. api/Dockerfile's "fetch SteamPrefill" stage
+          # hardcodes STEAMPREFILL_ARCHIVE=SteamPrefill-3.7.1-linux-x64.zip
+          # (an x86_64 self-contained .NET build) with a SHA-256 pinned to
+          # exactly those bytes; upstream also publishes a linux-arm64.zip
+          # under the same release (api/Dockerfile's own comment names all
+          # four platform assets), but selecting it would need an
+          # ARG/TARGETARCH-driven URL+hash switch inside api/Dockerfile
+          # itself -- out of this package's .github/workflows/-only
+          # footprint (flagged in this package's own report as a follow-up
+          # for whoever owns api/Dockerfile next). Publishing this one image
+          # amd64-only, honestly, beats shipping a manifest whose arm64
+          # entry silently doesn't exist or silently runs the wrong bytes.
+          - image: vault-api
+            context: .
+            dockerfile: api/Dockerfile
+            platforms: linux/amd64
+          # vault-dns: plain Alpine + dnsmasq/gettext-envsubst apk packages,
+          # nothing arch-specific -- builds both.
+          - image: vault-dns
+            context: dns
+            dockerfile: dns/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          # vault-proxy: plain Alpine + tinyproxy apk package, nothing
+          # arch-specific -- builds both.
+          - image: vault-proxy
+            context: deploy/proxy
+            dockerfile: deploy/proxy/Dockerfile
+            platforms: linux/amd64,linux/arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # QEMU cross-build, not a native arm64 runner: GitHub-hosted Linux
+      # arm64 runners exist but are not available to every account tier for
+      # free, and this repo has no evidence of that entitlement -- QEMU
+      # emulation costs build minutes instead of money and needs no runner
+      # selection beyond `ubuntu-latest`, at the price of being slower per
+      # arm64 layer than a native runner would be. Only requested for images
+      # that actually declare an arm64 platform above -- vault-api's matrix
+      # entry has none, so this step (and its emulation-registration cost)
+      # is skipped for it entirely rather than run and do nothing.
+      - name: Set up QEMU (arm64 emulation for cross-building)
+        if: contains(matrix.platforms, 'arm64')
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Review round 3 -- B2 resolved, mechanism replaced. The operator's
+      # answer: a GitHub organisation named `steamhangar`, target
+      # `ghcr.io/steamhangar/<image>` (e.g. `ghcr.io/steamhangar/vault-core`).
+      # This IS the original 2026-08-09 decision (`ghcr.io/steamvault/*`,
+      # under a to-be-created org, docs/WORKPACKAGES.md WP 5.5) carried
+      # through the WP RN-1 product rename -- read the path below as that
+      # same decision under the new name, not as a second deviation from it.
+      #
+      # Round 2's `github.repository`-derived path is GONE, not merely
+      # adjusted: it was justified as surviving a future org move without
+      # needing this file edited, but it does not survive THIS move
+      # usefully -- and this is no longer a hypothetical. Round 4: the
+      # transfer has happened. Verified via the GitHub API (not asserted):
+      # this repository's `full_name` is `steamhangar/steamhangar`, its
+      # `owner` is `steamhangar` with `type: Organization`, public, default
+      # branch `main` -- the org and the repo carry the same word. So
+      # `github.repository` IS, today, `steamhangar/steamhangar`; lowercased
+      # and appended with `/<image>`, the derivation this file used to use
+      # WOULD publish to `ghcr.io/steamhangar/steamhangar/vault-core` --
+      # the doubled segment nobody would guess and nobody asked for, now a
+      # measured fact about this exact repository rather than a future risk.
+      # A derivation is the right tool when the target keeps moving in a
+      # way a formula can track; here the target was a DECIDED, fixed
+      # value from the moment the operator picked it, and the formula's own
+      # output diverged from that decision the instant the move it was
+      # built to survive actually happened. An explicit value is the right
+      # tool once the value itself is the decision -- which is exactly what
+      # `vars.GHCR_NAMESPACE`'s fallback below is set to.
+      #
+      # Mechanism: `vars.GHCR_NAMESPACE`, a repository (or org) Actions
+      # variable, with a literal fallback -- not a workflow `env:` constant,
+      # not a `workflow_dispatch` input:
+      #   - (a) the day the org is renamed again: the operator updates the
+      #     `GHCR_NAMESPACE` variable in GitHub's own Settings -> Secrets
+      #     and variables -> Actions -> Variables UI. No file edit, no PR,
+      #     no redeploy of this workflow -- the next tag push picks it up
+      #     automatically. A hardcoded `env:` constant would recreate this
+      #     exact package's own B2 finding in a new form: a literal that
+      #     silently drifts from reality until someone remembers this file
+      #     exists and edits it.
+      #   - a `workflow_dispatch` input was considered and rejected: it can
+      #     only affect a MANUAL run. This workflow's primary, load-bearing
+      #     trigger is a tag PUSH, which carries no dispatch input at all --
+      #     an input-only override would leave the actual release path with
+      #     no escape hatch, solving the wrong trigger.
+      #   - (b) a fork publishes under ITS OWN namespace by setting its own
+      #     `GHCR_NAMESPACE` repository variable -- zero changes to this
+      #     file. A fork that does NOT set it inherits the literal fallback
+      #     below (`ghcr.io/steamhangar`) and its push then fails with a
+      #     permission-denied response from GHCR (a fork has no
+      #     `packages: write` grant on the upstream org's namespace) --
+      #     diagnosable from the error text (it names the exact rejected
+      #     namespace), not a silent wrong-destination push and not a
+      #     mystery.
+      #
+      # Round 4: the transfer is DONE, not merely planned -- confirmed via
+      # the GitHub API immediately before this edit (see above: `full_name
+      # steamhangar/steamhangar`, `owner.type Organization`, public). This
+      # file's own remote (`git remote -v`) already resolves to
+      # `https://github.com/steamhangar/steamhangar.git`. What used to be a
+      # forward-looking "do not tag before the transfer completes" warning
+      # is retired -- that condition is already satisfied. Two things are
+      # still worth confirming before the FIRST tag, both already-diagnosable
+      # rather than silent if missed:
+      #   - the `steamhangar` org must permit GitHub Actions to run at all
+      #     (an org-level setting, checked once in the org's own Settings ->
+      #     Actions page) -- if disabled, this workflow simply never starts,
+      #     visibly, on the Actions tab, not a mid-job failure.
+      #   - the S6 note above this job already covers the other residual:
+      #     a package pushed to GHCR for the first time via `GITHUB_TOKEN`
+      #     may still need a one-time visibility flip from private to
+      #     public in the org's package settings -- unrelated to whether the
+      #     transfer itself succeeded, and unrelated to this namespace
+      #     mechanism specifically (it would apply the same way under the
+      #     old `github.repository`-derived path too).
+      #
+      # Parity, correctly this time: `deploy/compose.yaml` (WP RN-1, landed
+      # in `ffa4542`) resolves its own local build tags as
+      # `steamhangar/vault-core` etc. (`deploy/compose.yaml:125` and
+      # siblings, read directly from the current tree, not asserted in
+      # advance of it). Stripping the registry host `ghcr.io/` off the
+      # front of this job's own `ghcr.io/steamhangar/vault-core` reproduces
+      # that local tag exactly -- the property that makes the published
+      # path guessable from the compose file alone, now actually true
+      # rather than merely argued.
+      # Round 4 nitpick: normalised through `tr` rather than documented as
+      # "must be lowercase" -- GHCR rejects any uppercase byte in the image
+      # path, and an operator typing `ghcr.io/SteamHangar` into the
+      # Variables UI (a natural capitalisation, matching how the org's
+      # display name actually reads) would otherwise get a push REJECTION
+      # from GHCR with no normalisation anywhere in between, rather than
+      # the path they clearly intended. The literal fallback
+      # (`ghcr.io/steamhangar`) is already lowercase and passes through
+      # this unchanged either way.
+      - name: Resolve ghcr.io namespace
+        id: base
+        run: |
+          echo "base=$(printf '%s' '${{ vars.GHCR_NAMESPACE || 'ghcr.io/steamhangar' }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # type=sha always resolves (even on a workflow_dispatch run off a
+      # branch, where the two semver patterns below match nothing and are
+      # silently skipped) -- every build gets at least one tag regardless of
+      # trigger. The semver patterns only ever populate on an actual
+      # `vX.Y.Z` tag push, the one ref shape this file's own
+      # `on.push.tags` filter admits in the first place.
+      #
+      # `flavor: latest=false` is load-bearing, not decorative: this
+      # action's own default is `latest=auto` (pinned source at this SHA,
+      # `src/flavor.ts`'s `latest: 'auto'` default; `procSemver` sets
+      # `latest = true` for a non-prerelease semver ref; `generateTags`
+      # then emits `${prefix}latest`), so WITHOUT this line a `vX.Y.Z` tag
+      # push would silently also publish a floating `latest` tag for all
+      # four images -- review round 1 caught this by tracing the pinned
+      # source plus the pinned action's own README ("Latest tag" section,
+      # same conclusion from an independent source). With this line, no
+      # `latest` tag is emitted anywhere in this file: the two semver
+      # patterns below and the sha fallback are the only tags this job
+      # ever produces. Note `{{major}}.{{minor}}` is NOT itself immutable
+      # -- it is a deliberately moving alias (v1.2.3 then v1.2.4 both
+      # claim `1.2`), same as any project's "latest patch in this minor"
+      # convention; only `{{version}}` and the `sha-` tag are immutable.
+      # `flavor: latest=false` closes the one truly floating, no-version-
+      # information tag, not every tag that can ever repoint.
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.base.outputs.base }}/${{ matrix.image }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short,prefix=sha-
+
+      - name: Build and push ${{ matrix.image }}
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # Review round 2 (S3): a green build here proves buildx SUCCEEDED,
+      # not that what got pushed is what was declared -- exactly the gap
+      # the vault-api arm64 finding above lives in (that build also
+      # exits 0; the broken part is inside the image, invisible to
+      # buildx). Two independent, cheap checks, matching
+      # docs/LEARNINGS.md's WP 1.9 rule ("verified by inspection is not
+      # verified... every binary that ships in an image needs at least a
+      # credential-free smoke RUN"):
+      #   1. the pushed manifest list's own platform set, read back from
+      #      the registry (not from this job's memory of what it asked
+      #      for), must equal `matrix.platforms` exactly -- catches a
+      #      partial/dropped-platform push.
+      #   2. for vault-api specifically, actually EXECUTE the one
+      #      arch-sensitive binary this image ships (SteamPrefill) inside
+      #      the just-pushed image, per declared platform -- this is the
+      #      check that would have caught the finding above by construction
+      #      if it were still live, and keeps catching it if a future edit
+      #      ever re-adds arm64 to this image's platform list without also
+      #      fixing api/Dockerfile's hardcoded linux-x64 archive. Check 1
+      #      alone would NOT catch that regression -- buildx still writes a
+      #      correctly-labelled arm64 manifest entry even though the bytes
+      #      inside are amd64 (measured directly: this package extracted
+      #      and ran the arm64 build's copy of the binary, `file` reported
+      #      "ELF 64-bit LSB pie executable, x86-64", and executing it
+      #      under a real aarch64 container failed with `exec: no such
+      #      file or directory` -- NOT the more commonly quoted `Exec
+      #      format error`; a guard grepping for the latter would miss this
+      #      exact failure).
+      - name: Verify pushed manifest matches declared platforms
+        run: |
+          set -eu
+          REF="${{ steps.base.outputs.base }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}"
+          EXPECTED="$(printf '%s' '${{ matrix.platforms }}' | tr ',' '\n' | sort)"
+          # `select(.platform.os != "unknown")`: found and fixed during this
+          # package's own verification, before ever pushing anything for
+          # real -- build-push-action's default provenance attestation adds
+          # its OWN extra `.manifests[]` entry to the pushed index, carrying
+          # `platform: {"os":"unknown","architecture":"unknown"}` and a
+          # `vnd.docker.reference.type: attestation-manifest` annotation
+          # (confirmed against a synthetic fixture modelling that exact
+          # shape, and against docker/buildx's own issue tracker/docs for
+          # the convention). Without this filter, EVERY successful
+          # multi-platform publish would fail this check, because the raw
+          # manifest list always has one more entry than `matrix.platforms`
+          # lists -- this guard would have shipped permanently red. Round 4
+          # nitpick, confirmed by the reviewer's own throwaway-registry run:
+          # this holds even for vault-api's single-platform push -- ONE
+          # `unknown/unknown` attestation entry rides along regardless of
+          # how many real platforms are declared, so the filter is not a
+          # multi-arch-only concern.
+          #
+          # This whole check is COUPLED to `docker/build-push-action`'s
+          # default of attaching a provenance attestation (this file passes
+          # no `provenance:`/`sbom:` input, so that default applies). If a
+          # future edit adds `provenance: false` (e.g. chasing a smaller
+          # push or faster job, unrelated to this guard), the pushed
+          # single-platform ref stops being an index at all -- `.manifests`
+          # is then simply absent, and `jq`'s `.manifests[]` raises "Cannot
+          # iterate over null" instead of returning an empty/short list,
+          # which fails this step for a reason that has nothing to do with
+          # the platform check this step exists to make. Read that failure
+          # as "provenance got turned off," not as a platform mismatch, and
+          # either keep provenance on or rewrite this check's assumption
+          # about the raw manifest's shape to match.
+          ACTUAL="$(docker buildx imagetools inspect "$REF" --raw | jq -r '.manifests[] | select(.platform.os != "unknown") | .platform | "\(.os)/\(.architecture)"' | sort)"
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error::pushed manifest platforms [$ACTUAL] do not match declared matrix.platforms [$EXPECTED] for $REF" >&2
+            exit 1
+          fi
+          echo "Manifest platforms verified against the registry: $ACTUAL"
+
+      - name: Smoke-run SteamPrefill inside the pushed image (vault-api only)
+        if: matrix.image == 'vault-api'
+        run: |
+          set -eu
+          REF="${{ steps.base.outputs.base }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}"
+          for PLATFORM in $(printf '%s' "${{ matrix.platforms }}" | tr ',' ' '); do
+            echo "=== $PLATFORM ==="
+            docker run --rm --platform "$PLATFORM" --entrypoint /opt/steamprefill/SteamPrefill "$REF" --version
+          done
+
+      # Review round 2 (S5): softened. A digest is retrievable from the
+      # registry at any time (`docker buildx imagetools inspect`, or the
+      # GHCR web UI) regardless of whether this step exists -- this step
+      # only makes it CONVENIENT (one place, in the job summary, no extra
+      # command), it does not "let an operator pin past" anything that was
+      # otherwise unreachable. Threat-model §8's actual finding is about
+      # `deploy/compose.yaml`'s own `${VAULT_IMAGE_TAG:-0.1.0}` mutable
+      # tag, which this package correctly does not touch -- so §8 stays
+      # DOCUMENTED, not closed, by anything in this file. What this file
+      # DOES genuinely improve on §8, now that `flavor: latest=false`
+      # above is real rather than aspirational: every tag this job itself
+      # publishes is a real version or a commit-derived sha, never a
+      # no-information floating tag -- a narrower, but true, claim.
+      - name: Record published digest
+        run: |
+          {
+            echo "### ${{ matrix.image }} (${{ matrix.platforms }})"
+            echo ""
+            echo "- tags: \`${{ steps.meta.outputs.tags }}\`"
+            echo "- digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "- pin by digest: \`${{ steps.base.outputs.base }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --- Second deliverable: the signed Android release APK ---------------------
+  # See this file's header for why this job shares the `publish` job's file
+  # and trigger. app/README.md's "Release build, signing, distribution"
+  # section (WP 4b.9) is the design this job wires CI secrets into, not a
+  # design this job is free to reinterpret:
+  #   - app/app/build.gradle.kts reads four values, properties-file first,
+  #     then env-var fallback: storeFile/VAULT_RELEASE_STORE_FILE,
+  #     storePassword/VAULT_RELEASE_STORE_PASSWORD, keyAlias/
+  #     VAULT_RELEASE_KEY_ALIAS, keyPassword/VAULT_RELEASE_KEY_PASSWORD
+  #     (`releaseSigningValue`, same file). No `keystore.properties` exists
+  #     in this checkout (gitignored, never committed), so the env-var path
+  #     is the ONLY path a CI runner can use -- exactly the "CI-style
+  #     fallback" app/README.md documents this mechanism for.
+  #   - `gradle.taskGraph.whenReady` in that same file already refuses
+  #     `assembleRelease` (and the other release-packaging tasks) with a
+  #     `GradleException` when any of the four values is blank -- this job
+  #     deliberately leans on that EXISTING, already-reviewed guard instead
+  #     of re-implementing its four-way completeness check in YAML; see the
+  #     "Check for release signing secret" step below for exactly what this
+  #     job checks on its own (one secret, not four) and why that split is
+  #     still safe.
+  android-release:
+    name: android-release / signed APK -> GitHub Release
+    runs-on: ubuntu-latest
+    # Review round 2 (N1): this job's own header comment already claims
+    # "an operator who pulls a version gets matching images and app in one
+    # place" -- `needs: publish` makes that literally true instead of
+    # merely aspirational. Without it the two jobs would run independently
+    # off the same tag, so a release could end up carrying a signed APK
+    # with no matching images (or vice versa) if one job failed and the
+    # other didn't. `publish` uses `fail-fast: false` across its own
+    # four-image matrix, so this job only starts once EVERY image has
+    # either succeeded or the whole matrix has finished trying.
+    needs: publish
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # WIDER than every other permission in this file (the `publish` job
+    # above only ever adds `packages: write`) -- `contents: write` is what
+    # lets this job create/attach to a GitHub Release. Scoped to this job
+    # alone; the workflow's top-level `permissions:` stays `contents: read`,
+    # matching ci.yml's own "only the read access every job actually needs"
+    # rule for the default.
+    permissions:
+      contents: write
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Four repository secrets back the four build.gradle.kts env vars
+      # above (the operator creates these; this job only consumes them):
+      #   ANDROID_KEYSTORE_B64      -- base64 of the release .jks/.keystore
+      #                                file's raw bytes (there is no
+      #                                "keystore" env var in build.gradle.kts
+      #                                itself -- VAULT_RELEASE_STORE_FILE
+      #                                wants a FILE PATH, so this secret is
+      #                                decoded to a temp file below and that
+      #                                path, not a secret, becomes
+      #                                VAULT_RELEASE_STORE_FILE).
+      #   ANDROID_KEYSTORE_PASSWORD -> VAULT_RELEASE_STORE_PASSWORD
+      #   ANDROID_KEY_ALIAS         -> VAULT_RELEASE_KEY_ALIAS (this one
+      #                                is not actually confidential -- it
+      #                                ends up inside the APK's own
+      #                                certificate, readable by anyone who
+      #                                downloads the release -- but it is
+      #                                still a repository secret rather
+      #                                than a literal in this file, so
+      #                                nothing about which alias this
+      #                                project signs with is hardcoded here)
+      #   ANDROID_KEY_PASSWORD      -> VAULT_RELEASE_KEY_PASSWORD
+      #
+      # Gating mechanism, and why: GitHub Actions does not reliably permit
+      # the `secrets` context inside a job-level `if:` condition, and
+      # relying on it there would make this job's very existence depend on
+      # a context expression whose evaluability is not guaranteed across
+      # every plan/runner combination. Instead: one step maps the ONE
+      # secret that matters for "is this configured at all"
+      # (ANDROID_KEYSTORE_B64) into a plain env var, checks it in a normal
+      # `run:` shell conditional (no `secrets` context anywhere near an
+      # `if:`), and republishes the answer as a step OUTPUT
+      # (`$GITHUB_OUTPUT`, not a secret) that every later step's `if:`
+      # reads instead. Only ANDROID_KEYSTORE_B64 gates the skip decision,
+      # deliberately not all four: if it is absent, nothing has been set up
+      # yet and this is the ordinary, expected, GREEN skip below. If it is
+      # PRESENT but one of the other three is missing or wrong, that is a
+      # genuine misconfiguration, not "not set up" -- and the existing
+      # `gradle.taskGraph.whenReady` guard in app/app/build.gradle.kts
+      # already turns that into a loud, red `GradleException` failure on
+      # its own (its blank-value check runs on all four independently of
+      # anything this job does), so this job does not need to duplicate
+      # that four-way completeness check to get a fail-loud outcome either
+      # way -- it only needs to decide whether to attempt the build at all.
+      - name: Check for release signing secret
+        id: signing_check
+        env:
+          HAS_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_B64 != '' }}
+        run: |
+          echo "configured=$HAS_KEYSTORE" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_KEYSTORE" != "true" ]; then
+            {
+              echo "### Android release APK -- SKIPPED"
+              echo ""
+              echo "\`ANDROID_KEYSTORE_B64\` is not set on this repository, so"
+              echo "no release keystore is available. No APK was built, signed,"
+              echo "or attached to this release -- this is the intended"
+              echo "fail-closed behaviour (app/README.md, \"Release build,"
+              echo "signing, distribution\", WP 4b.9): an unsigned APK is never"
+              echo "published as a release asset."
+              echo ""
+              echo "To enable this job, set these four repository secrets:"
+              echo "\`ANDROID_KEYSTORE_B64\`, \`ANDROID_KEYSTORE_PASSWORD\`,"
+              echo "\`ANDROID_KEY_ALIAS\`, \`ANDROID_KEY_PASSWORD\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Set up JDK 17 (temurin)
+        if: steps.signing_check.outputs.configured == 'true'
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: "17"
+          # No `cache: gradle` here, unlike ci.yml's android-tests job:
+          # this job runs once per release tag, not on every push/PR, so
+          # the cache's main benefit (avoiding a cold dependency download
+          # on a hot path) does not apply the same way, and keeping this
+          # job's moving parts to a minimum matters more than shaving a
+          # release build's runtime. (It would not have been a secret-
+          # handling concern either way -- the decoded keystore below lives
+          # under $RUNNER_TEMP, which setup-java's cache never touches --
+          # this is a simplicity choice, not a safety one.)
+
+      # Decodes to $RUNNER_TEMP, never into the checked-out working tree
+      # (app/ or anywhere under $GITHUB_WORKSPACE): $RUNNER_TEMP is a
+      # per-job scratch directory outside the workspace, so the decoded
+      # keystore can never be picked up by a later `actions/upload-artifact`
+      # step scoped to the workspace (this job has none anyway -- the only
+      # thing it ever uploads is the one named APK path, via the release
+      # step below) and is never written under app/.gradle or ~/.gradle
+      # either, so it cannot end up in a Gradle build-cache entry. The
+      # secret is piped through `base64 -d` with no intermediate `echo` of
+      # its own value to stdout -- nothing about the keystore's bytes is
+      # ever written to a log, and GitHub's own log redaction would mask
+      # the exact secret string besides. No step in this job sets `set -x`
+      # or passes `--debug`/`--verbose` to anything that would echo it.
+      - name: Decode release keystore (to a temp path outside the workspace)
+        if: steps.signing_check.outputs.configured == 'true'
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          printf '%s' "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/vault-android-release.jks"
+
+      - name: gradlew assembleRelease (signed)
+        if: steps.signing_check.outputs.configured == 'true'
+        working-directory: app
+        env:
+          # The file PATH is not a secret -- only the bytes at that path
+          # are. The three values below ARE the repository secrets, mapped
+          # 1:1 onto the env-var names app/app/build.gradle.kts's
+          # `releaseSigningValue` already reads.
+          VAULT_RELEASE_STORE_FILE: ${{ runner.temp }}/vault-android-release.jks
+          VAULT_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          VAULT_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          VAULT_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        # bash, not `./gradlew` -- ci.yml's own android-tests job comment
+        # documents why: the checked-out gradlew file carries no executable
+        # bit (git blob mode 100644), so `./gradlew` alone fails with
+        # Permission denied on this Linux runner. No `--debug`/`--verbose`:
+        # Gradle's own debug logging can echo resolved property/env values,
+        # which is exactly the kind of incidental leak this step must not
+        # invite.
+        run: bash gradlew assembleRelease --console=plain
+
+      # `apksigner`, not `jarsigner` -- app/README.md's own verified note:
+      # this build produces no v1/JAR signature at all, only v2, so
+      # `jarsigner -verify` is the wrong tool for what this project ships.
+      # Resolves the build-tools directory by highest version present
+      # rather than hardcoding e.g. "35.0.0": ci.yml's android-tests job
+      # measured that version on the runner image as of its own writing,
+      # but a future runner-image bump could change it, and this step
+      # should not silently start looking in the wrong place when that
+      # happens.
+      - name: Verify APK signature (apksigner)
+        if: steps.signing_check.outputs.configured == 'true'
+        id: verify
+        run: |
+          set -eu
+          APK_PATH="app/app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            echo "::error::$APK_PATH does not exist -- assembleRelease did not produce the expected signed artefact." >&2
+            exit 1
+          fi
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          BUILD_TOOLS_DIR="$(find "$SDK_ROOT/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)"
+          APKSIGNER="$BUILD_TOOLS_DIR/apksigner"
+          TRANSCRIPT="$RUNNER_TEMP/apksigner-verify.txt"
+          "$APKSIGNER" verify --verbose "$APK_PATH" > "$TRANSCRIPT"
+          cat "$TRANSCRIPT"
+          if ! grep -qx 'Verifies' "$TRANSCRIPT"; then
+            echo "::error::apksigner did not report 'Verifies' -- refusing to publish this APK." >&2
+            exit 1
+          fi
+          if ! grep -qx 'Verified using v2 scheme (APK Signature Scheme v2): true' "$TRANSCRIPT"; then
+            echo "::error::apksigner did not confirm the v2 signing scheme -- refusing to publish this APK." >&2
+            exit 1
+          fi
+          {
+            echo "### Android release APK -- signed and verified"
+            echo ""
+            echo "- \`Verifies\`"
+            echo "- \`Verified using v2 scheme (APK Signature Scheme v2): true\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Review round 2 (N4) -- recorded as a follow-up, deliberately NOT
+      # built here: this job verifies the APK is SIGNED and verifies WHICH
+      # signing scheme, but nothing anywhere in this pipeline verifies
+      # WHICH CERTIFICATE signed it against a previously-published value.
+      # An accidental keystore swap between releases (wrong file decoded,
+      # wrong secret rotated in) would still pass every check above and
+      # produce a validly-signed APK that Android will refuse to install
+      # as an update over an existing install -- the one Android
+      # signing-related mistake that is unrecoverable for users already on
+      # a prior release (there is no "re-sign and everyone gets the fix"
+      # path once that happens). A future hardening step would extract the
+      # signing certificate's SHA-256 fingerprint from the verified APK
+      # (`apksigner verify --print-certs`) and compare it against a
+      # fingerprint pinned from the FIRST real release, failing loudly on
+      # a mismatch -- not implemented in this package, since there is no
+      # first real release yet to pin against.
+      #
+      # Only on an actual tag push (not a branch-ref workflow_dispatch run,
+      # which has no release tag to attach to). `github.ref_name` is the
+      # tag itself (e.g. "v1.2.3") on a `refs/tags/v1.2.3` push.
+      - name: Attach signed APK to the GitHub Release
+        if: steps.signing_check.outputs.configured == 'true' && github.event_name == 'push'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: app/app/build/outputs/apk/release/app-release.apk
+
+      # Runs on every outcome, including a failed verify/build step above
+      # (`if: always()`), so the decoded private keystore never survives
+      # past this job regardless of how it ends. `rm -f` on a path that was
+      # never created (the skipped-signing case) is a harmless no-op, not
+      # an error.
+      - name: Remove decoded keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/vault-android-release.jks"

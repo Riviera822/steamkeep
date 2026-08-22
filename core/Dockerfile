@@ -21,7 +21,7 @@ FROM nginx:1.29.8-alpine3.23@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e
 
 LABEL org.opencontainers.image.title="SteamHangar vault-core" \
       org.opencontainers.image.description="nginx proxy_store cache with path-faithful Steam depot storage" \
-      org.opencontainers.image.source="https://github.com/Riviera822/steamhangar" \
+      org.opencontainers.image.source="https://github.com/steamhangar/steamhangar" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="0.1.0"
 

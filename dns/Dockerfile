@@ -26,7 +26,7 @@ FROM alpine:3.23.5@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952
 
 LABEL org.opencontainers.image.title="SteamHangar vault-dns" \
       org.opencontainers.image.description="Optional dnsmasq that points *.steamcontent.com at vault-core and closes the AAAA bypass" \
-      org.opencontainers.image.source="https://github.com/Riviera822/steamhangar" \
+      org.opencontainers.image.source="https://github.com/steamhangar/steamhangar" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="0.1.0"
 

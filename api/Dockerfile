@@ -85,7 +85,7 @@ FROM python:3.13.14-slim-trixie@sha256:bf503bb2243c5aad0aa951544dd60d165f9926464
 # outside this pin's reach).
 LABEL org.opencontainers.image.title="SteamHangar vault-api" \
       org.opencontainers.image.description="FastAPI + SQLite control plane: prefill orchestration, per-game size and deletion" \
-      org.opencontainers.image.source="https://github.com/Riviera822/steamhangar" \
+      org.opencontainers.image.source="https://github.com/steamhangar/steamhangar" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="0.1.0"
 
