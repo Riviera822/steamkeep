@@ -610,3 +610,90 @@ These are not style preferences; each entry cost a review round to learn.
   order, so a hardcoded `eth0` inside a multi-network container may be the
   wrong interface (WP EG-1: picked the internal net with no gateway); find
   the gateway-bearing interface via /proc/net/route instead.
+
+## 2026-08-22 — the defaults-flip wave (SWEEP-1, APP-DEMO, 4d-web, AG-0, CI-3/AGENT-BIN)
+
+- A guarantee stated one notch stronger than its mechanism is this
+  project's most-repeated defect, and WP APP-DEMO hit it three times in
+  ONE package at increasing depth: a seven-literal denylist whose KDoc
+  claimed type-level impossibility (defeated through the project's own
+  net.steam package), its allowlist replacement claiming "fails closed BY
+  CONSTRUCTION" (defeated via the unwatched javax. prefix family), and
+  the structural ceiling itself — Kotlin's implicit imports make
+  ProcessBuilder/Runtime.getRuntime().exec usable with NO dotted name, so
+  no fully-qualified-name scan can ever see them. Rule: document the
+  ceiling instead of denying it; an identifier denylist to "close" it
+  would be the same defect a fourth time. Corollary proven the same day:
+  a test-driven production refactor can move a property from code the
+  file owns onto framework structure one level out (the banner into
+  ModalBottomSheet's own non-scrolling Column) — the review that
+  confirmed it disassembled the pinned material3 AAR rather than reading
+  docs, and the resulting guarantee is VERSION-COUPLED and must be
+  written down as such.
+- A UI sentence built from ONE API field over-claims unless that field
+  alone carries the meaning (WP 4d-web, both round-1 blockers).
+  last_sweep_targets=null has three server-documented meanings (never
+  ran / in flight / died mid-run — claim stamps the timestamp and NULLs
+  counters in one statement), so rendering it as "has not completed a
+  run yet" told a crashed vault's operator to debug the wrong thing
+  forever. sweep_cached_gc_risk is a pure configuration predicate, so
+  "cached games are being refreshed" asserted activity it cannot know.
+  Convergent proof: SWEEP-1 independently added "not a promise a sweep
+  is happening" to the same field's server docstring the same day.
+  Write state-only copy; when a second field separates the cases (here
+  last_sweep_at), branch on it.
+- compose `${VAR:-default}` substitutes on unset AND on explicitly-blank,
+  so "leave it empty to disable" documentation around a `:-` forwarding
+  is false — there is NO .env expression of disabled, and under
+  VAULT_SETTINGS_READONLY=1 no PATCH escape either (WP SWEEP-1 R2-B1,
+  measured). The no-colon form `${VAR-default}` distinguishes them:
+  unset -> default, blank -> "". Choose per variable and record why
+  (TZ deliberately stays `:-` because blank==UTC there, measured). Pin
+  the substitution FORM structurally and the blank case live.
+- A startup line that exists to make unattended behaviour visible must
+  (a) print the REQUESTED value next to the RESOLVED one — glibc
+  answers a typo'd IANA zone with a plausible POSIX fallback
+  ("Europe/Berlinn" -> "Europe (UTC+00:00)") and no error — and
+  (b) read the same effective-settings resolution the behaviour itself
+  uses, not the boot snapshot: with a db-stored window the boot-config
+  line announced "scheduler DISABLED" while unattended deletion was
+  scheduled (WP SWEEP-1 R2-B2, both directions measured in the image).
+- Text-scrape drift guards (asserting another language's constants) work
+  iff every failure message names which of two edits applies: VALUE
+  drift -> fix the fixture, GRAMMAR drift -> widen this regex. A guard
+  whose header forbids touching the regex while its most likely misfire
+  REQUIRES touching the regex gets deleted in irritation. After ANY
+  extractor widening, re-perturb for false passes (4d-web's survived 13
+  shapes; every silent path exact-match only). The 4d-web guard also
+  proved the design end-to-end: deliberately red in its own worktree
+  naming the stale sibling config, green on the post-merge run, both
+  for the stated reason.
+- Twin config files need twin pins: api/.env.example drifted into
+  actively setting AND arguing for pre-flip defaults precisely because
+  only deploy/.env.example had a config.DEFAULT_*-derived test. Fixing
+  the instance without the asymmetry invites the next drift.
+- A defaults flip must verify its ACTIVATION precondition ships: SWEEP-1
+  flipped "keep cached games current" on while no schedule window
+  shipped, so the growing half was inert out of the box while the
+  deleting half (auto-GC, queued by every prefill) went live — inverting
+  the pairing that justified the flip. The fix was the operator's call
+  (ship a window), not the packager's.
+- Windows: $env:COMPUTERNAME is the uppercased NetBIOS name; Go's
+  os.Hostname() returns the case-preserving DNS name. With a
+  case-sensitive persisted identity key, a preview printing the former
+  mints ghost identities (WP AG-0, measured DEMON vs Demon). Preview
+  from [System.Net.Dns]::GetHostName(), and pin with -clike/-ceq —
+  PowerShell's default comparisons are case-insensitive, so a
+  case-defect pin using -like passes either way.
+- Go vcs.revision stamping inside a linked worktree NESTED IN another
+  repo records the ENCLOSING repo's HEAD (root detection needs a .git
+  DIRECTORY, so the worktree's redirect file is skipped and the walk
+  lands above); a non-nested worktree yields NO stamp at all. The
+  orchestrator's first confident root cause here was wrong and survived
+  into a README draft — the round-2 report rule (no self-verified
+  commits after a fix round) is what caught it.
+- Between review rounds, a DROPPING test count is where lost coverage
+  hides: APP-DEMO's 612->611 merge of two pins silently stopped
+  requiring the banner call to be GUARDED — a bare DemoModeBanner()
+  (permanent banner for real users) built green. Diff the guarantees,
+  not the counts.

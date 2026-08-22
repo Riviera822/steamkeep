@@ -1061,7 +1061,17 @@ for the full argument.
       grammar; `GET /v1/schedule` reports the effective value additively,
       end-to-end-pinned through a real bare-boot lifespan + PATCH + a real
       background sweep (review-round should-fix S2, same shape as ADR-0009's
-      own B1 pin). The Phase 4a UI switch remains open)*
+      own B1 pin). The Phase 4a UI switch closed 2026-08-22 as WP 4d-web
+      (commit c825625): toggle + GC-risk warning + three-way last-sweep
+      status in the web Settings view, all read from served state, never
+      recomputed; review FAILed round 1 on two one-field-over-claim
+      blockers (a crashed sweep would have read "has not completed a run
+      yet" forever; the warning asserted activity a configuration
+      predicate cannot support) — both reworded to state-only copy. Also
+      closed the demo-fixture drift class: a text-scrape guard pins
+      web/js/demo-data.js's stated defaults to api/vault_api/config.py's
+      real ones, labelling VALUE vs GRAMMAR drift. The Android half of
+      the sweep surface is still open — see §11 item 4)*
 - [x] **Pair with auto-GC** (still open in Phase 3): every kept-current game
       adds fresh chunks while the old manifest's chunks become orphans. A
       vault that keeps itself current without collecting garbage keeps
@@ -1732,7 +1742,9 @@ D-4, D-11, D-12) for what each package diverges from the mockup and why.
       partial hand-edit across the three `image:` lines. `api/README.md`
       documents the field and states plainly that the number is
       hand-maintained and means "the code in this image", not a published
-      release (no release tags exist yet, WP 5.5 unstarted).
+      release (no release tags exist yet; the publish PATH is now built —
+      WP CI-3, 2026-08-22 — but has never executed, so "nothing published"
+      remains true until the first tag).
       **Opus review round 1: FAIL — one blocker (B1), two should-fixes,
       three nitpicks, all fixed same day.** B1: the first version's pin
       covered only `deploy/compose.yaml`, while THREE more hand-maintained
@@ -2076,8 +2088,31 @@ surface (playtime and last-played now flow through the API response).
       a separate package. See docs/adr/0013-product-rename-steamvault-to-
       steamhangar.md for the full change list, the wire-visible items, and
       the open follow-ups.
-- [ ] CI: GitHub Actions — lint, tests, multi-arch image build (amd64/arm64),
+- [x] CI: GitHub Actions — lint, tests, multi-arch image build (amd64/arm64),
       publish to ghcr.io with pinned version tags
+      *(BUILT, in four packages; the publish path itself has never
+      executed — no tag exists — so every "nothing is published yet"
+      statement elsewhere in this plan remains true until the first tag,
+      which is the user's click. WP CI-1, 2026-08-21, commit 72a0aeb: the
+      web suite (node --test) and the verify-stack integration suite join
+      CI — verify-stack nightly/manual only, isolated from the PR gate.
+      WP CI-2, 2026-08-21, commit e8a09ca: the Android Gradle suite joins
+      the PR gate (assembleDebug + both unit-test variants + lintDebug),
+      closing the last blind spot; known residual: a Gradle cache hit
+      skips distributionSha256Sum re-verification, recorded in the threat
+      model. WP CI-3, 2026-08-22, commit 3f5fd0e: publish.yml on v* tags
+      + workflow_dispatch — four images to ghcr (vars.GHCR_NAMESPACE,
+      flavor latest=false, unknown/unknown manifest guard, per-platform
+      SteamPrefill smoke), plus android-release (secrets-gated signed
+      APK, apksigner verify, if:always() keystore cleanup). WP AGENT-BIN,
+      2026-08-22, commit 29d875c: vault-agent binaries for the three
+      ADR-0005 targets + SHA256SUMS attached to the same release; static
+      CGO_ENABLED=0, per-target file-type guard, VERSION sanitized for
+      slashed refs (workflow_dispatch rehearsal), release notes generated
+      by exactly one job per tag. Known, commented: re-pushing the SAME
+      tag appends release notes a second time. First-tag advice recorded
+      by review: a throwaway v0.0.1-rc1 pre-release to exercise the
+      never-run path end to end.)*
       *(WP 5.1 done 2026-08-09 — the test/lint half: api pytest (Linux),
       agent go build/vet/test (Linux+Windows matrix), core `nginx -t`
       through the image's REAL entrypoint render path (pinned upstream
@@ -2380,8 +2415,9 @@ Phases 1–3 plus 4a shipped. Rewritten 2026-08-17 to reflect the real state.
    sweep mode (WP SWEEP-1, 2026-08-22, flipped it — and its auto-GC pair —
    from opt-in to the shipped default, docs/adr/0014-sweep-cached-and-auto-
    gc-default-on.md; its auto-GC prerequisite is shipped — see §7 Phase 3;
-   the sweep mode's own frontend surface in both UIs — now an OPT-OUT
-   control, not an opt-in one — is still open).
+   the sweep mode's own frontend surface: web DONE 2026-08-22 as WP 4d-web
+   (commit c825625, see §7 Phase 4d's closing note), Android still open —
+   the natural home is the AG-3 parity package in item 8 below).
 5. [x] **WP 5.3 docs half** — `SECURITY.md` + `docs/security/threat-model.md`,
    done 2026-08-18 (see §7 Phase 5). Round-2 review ran and FAILED (two
    blockers plus should-fixes, mostly citation drift from WP 4h.0 landing
@@ -2391,6 +2427,32 @@ Phases 1–3 plus 4a shipped. Rewritten 2026-08-17 to reflect the real state.
 6. [ ] **WP 5.3 review half, still open** — pre-release security review
    (Fable mandatory), after an api/core code freeze that has not happened
    yet.
-7. [ ] **User-gated:** WP 5.5 (GitHub org + `ghcr.io/steamhangar/*` publish)
-   and WP 5.6 (announcement, only after the user's own end-to-end test with
-   the Android app). Phase 6 integrations are deliberately post-release.
+7. [ ] **User-gated:** WP 5.5 — the machinery is no longer the gate. The
+   GitHub org exists, the repo lives at `steamhangar/steamhangar`, and the
+   full publish path is built and reviewed (WP CI-3 + WP AGENT-BIN, see §7
+   Phase 5's CI bullet): images, signed APK, agent binaries, checksums.
+   What remains is exactly one user action — pushing the first tag — and
+   review's standing advice is a throwaway `v0.0.1-rc1` pre-release first,
+   because the path has never executed and the release page is the only
+   place its end-to-end result can be seen (re-pushing the SAME tag
+   double-appends release notes; known, commented at the site). WP 5.6
+   (announcement) stays gated on the user's own end-to-end test with the
+   Android app. Phase 6 integrations are deliberately post-release.
+8. [ ] **The AG series — agents become first-class residents** (user's go
+   2026-08-22 for the full chain). AG-0 DONE 2026-08-22 (commit 74e7727):
+   client identity visible and attributed at startup (source + sanitize
+   note), install-time preview reading the same hostname source as Go
+   (the COMPUTERNAME case defect found in review would have minted ghost
+   identities), rename semantics documented honestly. AG-1 IN PROGRESS:
+   api exposes per-game installed-state with first-class freshness +
+   DELETE /v1/clients/{id} for ghost rows. AG-2 (web badge, "installed
+   but not cached") and AG-3 (Android parity, which also carries the
+   sweep opt-out surface from item 4) follow after AG-1 defines the
+   fields, in parallel.
+9. [x] **WP APP-DEMO** — Android demo mode, done 2026-08-22 (commit
+   bdb2c19): screenshot-grade fixtures behind the onboarding skip link,
+   no account, no vault, no network; six repository seams, compile-time
+   fixture/model coupling, DEMO MODE banner unscrollable on every
+   surface. Four review rounds; the durable outcome is recorded in
+   docs/LEARNINGS.md (the guarantee-vs-mechanism ceiling of name-based
+   isolation scans). Real-device residuals listed in app/README.md.
