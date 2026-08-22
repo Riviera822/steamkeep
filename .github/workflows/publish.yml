@@ -79,12 +79,36 @@ name: Publish
 # a version gets matching images and app in one place. It shares this
 # file's `on:` (same tag-push/workflow_dispatch trigger, for the reason
 # already argued above) and needs its own, WIDER job-level `permissions:`
-# override (`contents: write`, to create/attach to the release -- every
-# other permission in this file, including the other job's, is read-only
-# except for the one `packages: write` the image push needs). See that
-# job's own comments for the full signing-secret and fail-closed reasoning
+# override (`contents: write`, to create/attach to the release -- the
+# `publish` job's own permission grant, by contrast, is `packages: write`
+# only; `agent-binaries` below shares this exact same `contents: write`
+# override, for the same reason). See that job's own comments for the full
+# signing-secret and fail-closed reasoning
 # (app/README.md's "Release build, signing, distribution" section, WP
 # 4b.9, is the design this job must not weaken).
+#
+# --- Third deliverable: cross-compiled vault-agent binaries -----------------
+# `agent-binaries` (below, third job) is the one piece of this project that
+# runs on an end user's own gaming PC rather than in a container or on an
+# app store, and until this job existed it had NO downloadable artefact at
+# all -- agent/README.md's own build instructions assumed a Go toolchain and
+# a manual cross-compile. It cross-builds the three ADR-0005 targets
+# (windows/amd64, linux/amd64, linux/arm64), generates a SHA256SUMS file, and
+# attaches all of it to the SAME tag's GitHub Release that `android-release`
+# (below) also publishes to -- `publish`, above, pushes images to GHCR, a
+# different destination entirely; it never touches the Release object.
+# `needs: android-release` (not `publish` directly, though it
+# transitively requires `publish` to have succeeded via android-release's own
+# `needs:`): both this job and `android-release` attach assets to the SAME
+# release object via `softprops/action-gh-release`, and that action creates
+# the release on its FIRST invocation for a tag if none exists yet -- two
+# jobs racing to create the same release concurrently is exactly the kind of
+# problem that only shows up once, non-deterministically, on whichever tag
+# push loses the race. Chaining `needs:` serializes the two release-writing
+# jobs instead: android-release always runs (and either attaches the APK or
+# cleanly no-ops, per its own signing-secret gate) before agent-binaries ever
+# calls the same action, so exactly one of them ever creates the release, in
+# a fixed order, every time.
 on:
   push:
     tags:
@@ -121,9 +145,11 @@ concurrency:
 # Check each package's visibility in the GitHub package settings UI after
 # the very first successful publish, before announcing anything
 # (docs/WORKPACKAGES.md WP 5.6 already gates announcement on other
-# conditions -- add this one). Not applicable to the `android-release` job
-# below: a GitHub Release asset on a public repo is public by construction,
-# with no separate per-package visibility switch to flip.
+# conditions -- add this one). Not applicable to the `android-release` or
+# `agent-binaries` jobs below (this note predates `agent-binaries`, but the
+# same reasoning covers it unchanged): a GitHub Release asset on a public
+# repo is public by construction, with no separate per-package visibility
+# switch to flip.
 jobs:
   publish:
     name: publish / ${{ matrix.image }} (ghcr.io)
@@ -484,14 +510,25 @@ jobs:
     # either succeeded or the whole matrix has finished trying.
     needs: publish
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    # WIDER than every other permission in this file (the `publish` job
-    # above only ever adds `packages: write`) -- `contents: write` is what
-    # lets this job create/attach to a GitHub Release. Scoped to this job
-    # alone; the workflow's top-level `permissions:` stays `contents: read`,
-    # matching ci.yml's own "only the read access every job actually needs"
-    # rule for the default.
+    # WIDER than the `publish` job above (which only ever adds
+    # `packages: write`) -- `contents: write` is what lets this job
+    # create/attach to a GitHub Release. Scoped to this job alone; the
+    # workflow's top-level `permissions:` stays `contents: read`, matching
+    # ci.yml's own "only the read access every job actually needs" rule for
+    # the default. (`agent-binaries`, below, needs the identical override
+    # for the identical reason -- this is no longer the only job in the
+    # file that widens beyond `publish`'s grant, just the first of two.)
     permissions:
       contents: write
+    # Exposes whether a real (secret-backed) signed build ran, for
+    # `agent-binaries` to read via `needs.android-release.outputs.configured`
+    # -- see that job's own "Attach vault-agent binaries" step for why it
+    # needs to know this (S2 fix, reviewer round 1: avoids asking
+    # `softprops/action-gh-release` to `generate_release_notes` twice against
+    # an already-created release, which the action's own update path would
+    # otherwise append rather than skip).
+    outputs:
+      configured: ${{ steps.signing_check.outputs.configured }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -685,6 +722,20 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ github.ref_name }}
+          # Known follow-up, recorded rather than fixed here (out of scope
+          # for the package that added `agent-binaries` and its
+          # `needs.android-release.outputs.configured`-gated
+          # `generate_release_notes` below): this is unconditionally `true`,
+          # so RE-pushing the SAME tag while the signing secret is
+          # configured re-enters `softprops/action-gh-release`'s update
+          # path and appends freshly generated notes to the release body a
+          # second time, rather than leaving it alone. Harmless for a normal
+          # one-shot tag push, but a real risk the first time this workflow
+          # actually runs -- a throwaway rehearsal tag is exactly the kind
+          # of thing that gets re-pushed. Not a per-tag duplicate-job race
+          # (that invariant -- exactly one JOB generates notes per tag --
+          # still holds); this is the same job re-entering its own update
+          # path on a second run against an already-created release.
           generate_release_notes: true
           files: app/app/build/outputs/apk/release/app-release.apk
 
@@ -696,3 +747,206 @@ jobs:
       - name: Remove decoded keystore
         if: always()
         run: rm -f "$RUNNER_TEMP/vault-android-release.jks"
+
+  # --- Third deliverable: cross-compiled vault-agent binaries ------------------
+  # See this file's header ("Third deliverable") for why this job exists and
+  # why it depends on `android-release` rather than `publish` directly. The
+  # targets and the CGO_ENABLED=0 requirement both come from agent/README.md
+  # ("Go port (production)" -> "Cross-compile matrix") and ADR-0005 ("vault-
+  # agent ships as a Go binary"), not from anything invented in this file:
+  # windows/amd64 (the WP 2.6 Scheduled Task installer's target),
+  # linux/amd64 (Linux desktops and the Steam Deck -- see agent/README.md's
+  # "Steam Deck walkthrough", which explicitly calls the Deck x86_64, not
+  # ARM64), and linux/arm64 (ADR-0005's own text: "SteamOS devices ... ARM64"
+  # -- a general ARM64 SteamOS/Steam-Machine-class device, confirmed a real,
+  # already-built-and-documented target and not this package's invention).
+  agent-binaries:
+    name: agent-binaries / cross-compiled vault-agent -> GitHub Release
+    runs-on: ubuntu-latest
+    needs: android-release
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # WIDER than the default `contents: read` at the workflow level, scoped
+    # to this job alone -- same shape as `android-release`'s own override,
+    # for the same reason: attaching release assets needs `contents: write`.
+    permissions:
+      contents: write
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: agent/go/go.mod
+
+      # Reviewer round 1 (S4): `github.ref_name` is safe to use RAW only on
+      # an actual tag push -- this file's own `on.push.tags: ["v*"]` filter
+      # cannot match a ref containing "/", so a real release tag is always
+      # one clean path segment. `workflow_dispatch`, though, can run off any
+      # branch, and this job's own `if:` deliberately admits that event (the
+      # one rehearsal path available before a real tag exists) -- and a
+      # branch name containing "/" (e.g. this repo's own
+      # "claude/projekt-ueberblick-planung-b90aa8"-style names) turns
+      # "vault-agent-<ref>-linux-amd64" into a path with a subdirectory
+      # component. `go build -o` then silently CREATES that subdirectory
+      # instead of erroring, and the next step's `file` check fails on a
+      # path it can't open -- reported as "does not report the expected
+      # architecture", which looks like an S3-class arch mismatch and is
+      # actually a naming bug. Measured directly against a real slashed ref
+      # name (see this package's own report for the transcript); sanitized
+      # once here, in one step, rather than repeating the substitution in
+      # every later step that names a file.
+      - name: Compute release version (sanitized)
+        id: version
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME//\//-}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      # CGO_ENABLED=0 is REQUIRED, not cosmetic -- agent/README.md's own
+      # "Cross-compile matrix" section measured this directly (WP 2.2 review
+      # finding S3): building linux/amd64 *from* a linux/amd64 host without
+      # it silently produces a dynamically-linked binary (Go auto-enables
+      # cgo whenever GOOS/GOARCH match the build host and a C toolchain is
+      # present), which contradicts ADR-0005's "one static binary per
+      # target, no runtime dependencies" premise -- the whole point of
+      # shipping Go instead of a PyInstaller bundle for exactly this
+      # audience's machines. GitHub's `ubuntu-latest` runner has gcc
+      # preinstalled, so this is not a hypothetical here: this job's own
+      # runner is a linux/amd64 host, i.e. the one GOOS/GOARCH pair in this
+      # matrix where the silent-cgo trap can actually fire. Re-verified for
+      # this job specifically (not just trusted from the README) -- see
+      # this package's own report for the `ldd`/`file` transcript.
+      #
+      # Naming: `vault-agent-<version>-<os>-<arch>[.exe]`, e.g.
+      # `vault-agent-v1.2.3-windows-amd64.exe` or
+      # `vault-agent-v1.2.3-linux-arm64` -- a stranger maps a filename to a
+      # platform by reading the two tokens after the version literally as
+      # Go's own GOOS and GOARCH names (not a marketing name like "Deck" or
+      # "Windows 11"), with `.exe` as the one additional, Windows-only
+      # signal. `VERSION` is the sanitized tag from the step above (e.g.
+      # "v1.2.3", including the leading "v") -- deliberately NOT stripped of
+      # its "v" the way the `publish` job's semver-pattern image tags are:
+      # those tags exist to satisfy Docker tag conventions, this filename
+      # exists so a human can look at the GitHub Release page (whose own
+      # `tag_name` is also "v1.2.3", unstripped) and see the exact same
+      # string in both places.
+      - name: Cross-compile vault-agent (CGO_ENABLED=0, static binaries)
+        working-directory: agent/go
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          build() {
+            goos="$1"; goarch="$2"; ext="$3"
+            name="vault-agent-${VERSION}-${goos}-${goarch}${ext}"
+            echo "=== building ${name} (GOOS=${goos} GOARCH=${goarch}) ==="
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -o "$GITHUB_WORKSPACE/dist/${name}" ./cmd/vault-agent
+          }
+          build windows amd64 .exe
+          build linux   amd64 ""
+          build linux   arm64 ""
+          ls -l "$GITHUB_WORKSPACE/dist"
+
+      # The WP CI-3 lesson, applied in the direction this package was warned
+      # about ("do not repeat it in the other direction"): a green `go
+      # build` only proves the compiler accepted the GOOS/GOARCH pair, not
+      # that the bytes it produced actually match. `file`'s own architecture
+      # string is checked against each binary's name -- an amd64 binary
+      # (windows or linux) must report "x86-64", the arm64 one must report
+      # "ARM aarch64". Both substrings were confirmed by actually running
+      # `file` against this job's own build output before this check was
+      # written (see this package's report).
+      - name: Verify cross-compiled binary architectures (file)
+        working-directory: dist
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          check() {
+            path="$1"; expect="$2"
+            got="$(file -b "$path")"
+            echo "${path}: ${got}"
+            case "$got" in
+              *"$expect"*) ;;
+              *)
+                echo "::error::${path} does not report the expected architecture ('${expect}'); got: ${got}" >&2
+                exit 1
+                ;;
+            esac
+          }
+          check "vault-agent-${VERSION}-windows-amd64.exe" "x86-64"
+          check "vault-agent-${VERSION}-linux-amd64"       "x86-64"
+          check "vault-agent-${VERSION}-linux-arm64"       "ARM aarch64"
+
+      # Why checksums matter for THIS binary specifically, not as boilerplate:
+      # `hosts apply` edits the machine's hosts file and requires
+      # Administrator/root to do so (see agent/README.md's "Hosts-file mode"
+      # section). A user who is about to run something elevated, sight
+      # unseen, needs a way to confirm the bytes they downloaded are the
+      # bytes this workflow actually built -- without that, "download an
+      # .exe from the internet and run it as Administrator" is exactly the
+      # instruction every security guide tells people not to follow blindly.
+      # `sha256sum -c SHA256SUMS` (run from inside the same directory the
+      # binaries were downloaded into) is the whole verification story.
+      - name: Generate checksums (SHA256SUMS)
+        working-directory: dist
+        run: |
+          set -eu
+          sha256sum vault-agent-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Record build summary
+        working-directory: dist
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          {
+            echo "### vault-agent binaries (${VERSION})"
+            echo ""
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Same tag-push-only gate as `android-release`'s own APK-attach step
+      # above, and for the identical reason: a `workflow_dispatch` run off a
+      # branch ref has no release to attach to. `tag_name` deliberately uses
+      # the RAW `github.ref_name` here, not the sanitized `steps.version`
+      # output -- this field must equal the real tag exactly for
+      # `softprops/action-gh-release` to find/create the right release; the
+      # sanitization above exists only to keep filenames on the filesystem
+      # sane, never to change which tag this attaches to.
+      #
+      # `generate_release_notes` (S2 fix, reviewer round 1): reading the
+      # pinned action's own source, its update path is
+      # `body = workflowBody || existingReleaseBody`, and then -- when
+      # `generate_release_notes` is truthy and `body` is non-empty -- it
+      # APPENDS the generated notes to whatever body it just resolved. If
+      # `android-release` already created this release (the keystore-
+      # configured case) and this job unconditionally passed `true` too,
+      # the release would end up with the auto-generated notes duplicated.
+      # `needs.android-release.outputs.configured` (added to that job above)
+      # tells us which case we're in: pass `true` here only when
+      # android-release did NOT already create the release (`configured !=
+      # 'true'`), so exactly one of the two jobs ever generates notes for a
+      # given tag, matching the "exactly one of them ever creates the
+      # release" invariant `needs: android-release` already establishes.
+      #
+      # `fail_on_unmatched_files: true`: without it, a glob that stops
+      # matching anything (e.g. a future rename of the `dist/` naming
+      # convention that nobody updated here) attaches nothing and this step
+      # still reports success -- exactly the silent-success failure class
+      # this project's own review history keeps flagging elsewhere.
+      - name: Attach vault-agent binaries to the GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: ${{ needs.android-release.outputs.configured != 'true' }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/vault-agent-*
+            dist/SHA256SUMS

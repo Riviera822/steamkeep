@@ -151,6 +151,77 @@ without it links against `libc.so.6` per the paragraph above. Build output
 is never committed — `agent/go/*.exe`, `agent/go/vault-agent(.exe)` are
 gitignored.
 
+**You don't have to run these commands yourself.** Starting with WP
+AGENT-BIN, `.github/workflows/publish.yml`'s `agent-binaries` job runs
+exactly this cross-compile matrix on every `v*` tag and attaches the three
+binaries — named `vault-agent-<tag>-<os>-<arch>` (`.exe` on Windows), e.g.
+`vault-agent-v1.2.3-windows-amd64.exe` — plus a `SHA256SUMS` file to that
+tag's GitHub Release. Building it yourself from this section is only
+needed for a version that hasn't been tagged yet, or if you'd rather not
+trust a prebuilt binary. See "Windows Scheduled Task (WP 2.6)" below for
+what to do with the downloaded `.exe` (including the SmartScreen note).
+
+**No `--version` flag, but the binary is not entirely mute about where it
+came from (a real gap plus a real, if partial, mitigation):**
+`cmd/vault-agent` has no `-ldflags`-injected version variable, and running
+e.g. `vault-agent --version` or `-version` just prints the usual "unknown
+command" usage text and exits 2, the same as any other unrecognized
+subcommand — a `version` subcommand is a real follow-up package, not this
+one. **A follow-up implementing it must not register the flag without the
+variable it targets:** `-ldflags "-X main.version=…"` against a
+`main.version` that doesn't exist builds green and silently embeds
+nothing, so the flag and the variable have to land in the same change.
+What already exists, for free, from Go's own toolchain: `go build` run
+from inside an ordinary git checkout (a real `.git` **directory**) embeds
+a `vcs.revision` build-info stamp, readable with
+`strings -a <binary> | grep -o 'vcs\.revision=[0-9a-f]*'` (no Go toolchain
+needed to read it back) or `go version -m <binary>` (if one is
+available). This gives you the **commit** the checkout was at when the
+binary was built, not the tag. In an ordinary single checkout — which is
+what the release workflow uses (`actions/checkout` produces a real `.git`
+directory, not a linked worktree) — that commit is the one being built,
+so for a tag-triggered release build it is the commit the tag points to,
+and matching it against the release page's own commit reference closes
+the loop. This is the reasoned expectation for the actual release path,
+not yet a measurement: nobody has checked a real release binary's stamp
+against its tag's commit, because no tag has been pushed yet.
+
+**Measured, and root-caused, for a git worktree nested inside another
+repository:** Go's repository-root detection requires `.git` to be a
+**directory**; a linked worktree's `.git` is a **file** (a redirect,
+`gitdir: <path>/.git/worktrees/<name>`), so Go doesn't follow it at all —
+it simply doesn't recognize the worktree as a repository root and keeps
+walking up the filesystem looking for a real `.git` directory. Because
+this project's worktrees sit physically *inside* the main checkout (at
+`<mainrepo>/.claude/worktrees/<name>`), that walk lands on the **main
+repository's** `.git` directory and stamps *its* `HEAD` — not the
+worktree's checked-out commit, and not nothing. Confirmed directly
+against this exact package's own worktree: `git rev-parse HEAD` there
+reported one commit while the binary's stamped `vcs.revision` reported a
+different, earlier commit — the main repository's `HEAD`, byte-for-byte.
+The corroborating detail that pins the mechanism: the stamp also carried
+`vcs.modified=true`, which describes the *main repository's* working
+tree, not the worktree's — consistent with Go having stamped the
+enclosing repo the whole time, not the worktree at all. The **nesting is
+the precondition**, confirmed by the control case: a linked worktree
+created *outside* any enclosing repository (the ordinary
+`git worktree add ../feature-x` layout) produces **no `vcs` stamp at
+all** — the upward walk finds no `.git` directory anywhere and Go embeds
+nothing. So the one-command reproduction only shows a *disagreement* when
+the worktree is nested inside another repo that has since moved on
+(`git -C <worktree> rev-parse HEAD` vs.
+`strings -a <binary> | grep -o 'vcs\.revision=[0-9a-f]*'`); for a
+non-nested worktree, expect the `grep` to come back **empty**, not a
+mismatched value — that is the documented behavior in that layout, not a
+broken command. None of this applies to the release workflow's own
+checkout (`actions/checkout` produces an ordinary, non-worktree clone),
+but it does mean a binary built locally from a nested worktree may
+silently carry the wrong repository's revision, or a non-nested one may
+carry none at all. Until a real tag build's stamp has actually been
+checked against its commit, matching a binary's `SHA256SUMS` entry
+against the release page it was downloaded from remains the most direct
+check available today.
+
 **Live integration check (WP 2.2):** the real vault-api (loopback,
 throwaway SQLite DB) was started and the built Windows `vault-agent.exe`
 was run against the real `C:\steam` library (read-only): first run —
@@ -1204,6 +1275,44 @@ provides the timing" — see "vault-agent CLI (WP 2.2)"'s "One-shot is the
 PRIMARY mode" note), matching the systemd timer's role exactly. Everything
 this creates is per-user; no admin elevation is used or required anywhere
 in it.
+
+### Getting `vault-agent.exe`, and the SmartScreen warning you should expect
+
+Download `vault-agent-<tag>-windows-amd64.exe` from the release's assets
+(see "Cross-compile matrix" above), verify it against the release's
+`SHA256SUMS`, then rename it to `vault-agent.exe` (or point `-AgentPath` at
+it under its downloaded name — `install-task.ps1` doesn't care what you
+call it). **This binary is not code-signed.** There is no Authenticode
+certificate on it, so **the first time you run it yourself** — double-
+clicking it in File Explorer, or launching it from a terminal you typed
+the command into — Windows SmartScreen is expected to show an
+"unrecognized app" / "Windows protected your PC" warning tied to the
+downloaded file's mark-of-the-web. This is expected, not a sign anything
+is wrong, and it will keep happening on every machine you install it on
+until this project gets a code-signing certificate. It's called out here
+in advance specifically because this is a binary that goes on to request
+Administrator elevation for `hosts apply` (see "Hosts-file mode" above) —
+an *unexplained* SmartScreen prompt right before an elevation prompt is
+exactly the combination phishing malware tries to imitate, so knowing to
+expect it, and having verified the checksum first, is the whole mitigation
+available for now.
+
+**The scheduled run is a different launch path, and is *not* expected to
+show this warning:** `install-task.ps1`'s installed task runs
+`vault-agent.exe` via `run-vault-agent.ps1`'s PowerShell call operator
+(`& $AgentPath report`) — a direct process launch, not a shell/Explorer
+invocation. SmartScreen's app-reputation dialog is triggered by the
+shell-launch path (`ShellExecute` / Explorer's "Open File" verb acting on
+the mark-of-the-web), which a scheduled task's own process creation does
+not go through. This claim is stated as an **expectation from how the two
+launch paths differ, not something this package measured against a live
+prompt** — doing that would mean deliberately reproducing the exact
+warning this note exists to explain, on a real machine, which wasn't done
+here. The practical upshot either way: don't sit and wait for a
+SmartScreen prompt from the scheduled run that may simply never come —
+if a scheduled report silently isn't happening, check `vault-agent.log`
+and the Task Scheduler run history (see "Real-machine harness" below)
+instead of assuming a warning dialog is blocking it unattended.
 
 ### Why `-LogonType Interactive`, not S4U
 
