@@ -84,6 +84,19 @@ class OnboardingController(
      * first run has nothing to fall back to, so there is nothing to cancel INTO. */
     val canCancelWithoutFinishing: Boolean get() = mode == OnboardingMode.RECONNECT
 
+    /**
+     * WP APP-DEMO: "Skip for now — browse in demo mode" (web's own wording,
+     * `web/js/onboarding.js`'s `demoLink`), first-run only -- a reconnect
+     * already has a working connection to fall back to (or the user would
+     * not have reached Settings to trigger it), so offering demo mode there
+     * would silently discard that connection with no warning. Hidden on the
+     * [OnboardingStep.DONE] step too, same as the web port's
+     * `els.demoLink.style.display` rule: finishing is one tap away by then,
+     * skipping to demo instead would throw away a connection that just
+     * tested successfully.
+     */
+    val canSkipToDemo: Boolean get() = mode == OnboardingMode.FIRST_RUN && step != OnboardingStep.DONE
+
     /** Reset all fields and (re)enter the flow. Called once per `openOnboarding`-equivalent. */
     fun start(mode: OnboardingMode) {
         this.mode = mode

@@ -58,6 +58,7 @@ import dev.steamvault.app.repo.JobsRepository
 import dev.steamvault.app.repo.MappingRepository
 import dev.steamvault.app.repo.SteamIdentityRepository
 import dev.steamvault.app.storage.LibraryPreferences
+import dev.steamvault.app.ui.demo.DemoModeBanner
 import dev.steamvault.app.ui.detail.AndroidDetailStrings
 import dev.steamvault.app.ui.detail.DetailController
 import dev.steamvault.app.ui.detail.GameDetailSheet
@@ -98,6 +99,11 @@ import kotlinx.coroutines.launch
  *   live while Library, not Downloads, is the screen currently polling
  *   `GET /v1/jobs`. See `MainActivity.kt`'s kdoc for the honest scope
  *   limitation this implies.
+ * @param demoMode WP APP-DEMO: `true` when [gamesRepository] et al. are the
+ *   in-memory `dev.steamvault.app.demo` fixtures rather than real
+ *   `Vault*Repository` instances -- this screen never branches on it for
+ *   DATA (the repositories already differ upstream, `MainActivity.kt`'s
+ *   wiring), only to render [DemoModeBanner] (WP brief constraint 1).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -109,6 +115,7 @@ fun LibraryScreen(
     identityRepository: SteamIdentityRepository,
     libraryPreferences: LibraryPreferences,
     onJobsSnapshot: (List<JobSummary>) -> Unit = {},
+    demoMode: Boolean,
 ) {
     val scope = rememberCoroutineScope()
     val resources = LocalContext.current.resources
@@ -227,6 +234,7 @@ fun LibraryScreen(
         },
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+            if (demoMode) DemoModeBanner()
             LibraryToolbar(controller = controller)
             CheckAndUpdateRow(controller = controller, scope = scope)
             FilterChipsRow(counts = counts, selectedKey = controller.filterKey, onSelect = { controller.filterKey = it })
@@ -273,6 +281,7 @@ fun LibraryScreen(
                 scope.launch { controller.refreshGamesOnce() }
                 scope.launch { controller.refreshJobsOnce() }
             },
+            demoMode = demoMode,
         )
     }
 }

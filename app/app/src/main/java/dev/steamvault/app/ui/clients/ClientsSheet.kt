@@ -35,6 +35,7 @@ import dev.steamvault.app.R
 import dev.steamvault.app.ui.clients.logic.ClientRowModel
 import dev.steamvault.app.ui.clients.logic.buildClientRowModel
 import dev.steamvault.app.ui.clients.logic.partitionClients
+import dev.steamvault.app.ui.demo.DemoModeBanner
 import dev.steamvault.app.ui.library.logic.formatBytesGB
 import dev.steamvault.app.ui.status.StatusIcon
 import dev.steamvault.app.ui.status.StatusIconSize
@@ -56,7 +57,7 @@ import dev.steamvault.app.ui.status.StatusKind
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ClientsSheet(controller: ClientsController) {
+fun ClientsSheet(controller: ClientsController, demoMode: Boolean = false) {
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(lifecycleOwner, controller) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -69,6 +70,14 @@ fun ClientsSheet(controller: ClientsController) {
         onDismissRequest = { controller.close() },
         sheetState = sheetState,
     ) {
+        // WP APP-DEMO review round 3 (F2): called directly here, in THIS
+        // top-level public composable -- see GameDetailSheet.kt's identical
+        // fix and its kdoc for the full "why" (ModalBottomSheet's `content`
+        // lambda is already a non-scrolling ColumnScope, so no wrapper
+        // Column of this file's own is needed, and there is no helper
+        // function left for a "banner moved back inside the scrolling
+        // body" regression to hide behind).
+        if (demoMode) DemoModeBanner()
         ClientsSheetBody(controller)
     }
 }

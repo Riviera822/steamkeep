@@ -73,8 +73,30 @@ class OnboardingStepsTest {
     // ---- shouldShowOnboarding ------------------------------------------------
 
     @Test
-    fun `MUTATION PIN -- onboarding shows exactly when there is no vault connection`() {
-        assertTrue(shouldShowOnboarding(hasVaultConnection = false))
-        assertFalse(shouldShowOnboarding(hasVaultConnection = true))
+    fun `MUTATION PIN -- onboarding shows exactly when there is no vault connection and demo mode is off`() {
+        assertTrue(shouldShowOnboarding(hasVaultConnection = false, demoMode = false))
+        assertFalse(shouldShowOnboarding(hasVaultConnection = true, demoMode = false))
+    }
+
+    /** WP APP-DEMO: demo mode is itself an onboarding exit -- a fresh
+     * process that entered demo mode last time (were this ever persisted)
+     * must not reopen onboarding just because there is still no real vault
+     * connection. Mirrors the web port's own `demoMode` half of
+     * `shouldShowOnboarding`. */
+    @Test
+    fun `MUTATION PIN -- demo mode alone suppresses onboarding even with no vault connection`() {
+        assertFalse(shouldShowOnboarding(hasVaultConnection = false, demoMode = true))
+    }
+
+    /** A real connection always wins even if a stale demo flag were still
+     * set -- onboarding correctly stays hidden either way, but the more
+     * interesting direction (WP brief constraint 4, "leaving demo mode
+     * must be clean") is pinned at the `MainActivity` wiring level: finishing
+     * onboarding with a real connection always clears demo mode as part of
+     * the same rebuild, so the two flags are never BOTH true in practice. */
+    @Test
+    fun `MUTATION PIN -- a real vault connection suppresses onboarding regardless of the demo flag`() {
+        assertFalse(shouldShowOnboarding(hasVaultConnection = true, demoMode = true))
+        assertFalse(shouldShowOnboarding(hasVaultConnection = true, demoMode = false))
     }
 }

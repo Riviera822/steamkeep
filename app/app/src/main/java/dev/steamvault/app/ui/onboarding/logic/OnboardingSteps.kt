@@ -29,6 +29,13 @@ package dev.steamvault.app.ui.onboarding.logic
  *                     [dev.steamvault.app.storage.CredentialStore] and
  *                     shows the real app.
  *
+ * WP APP-DEMO adds one more exit besides finishing step 3: "Skip for now —
+ * browse in demo mode" (steps 1/2 only, mirroring the web port's own
+ * demo-skip link) leaves the flow without a vault-api connection at all,
+ * using [dev.steamvault.app.demo.DemoState] fixtures instead — see
+ * [shouldShowOnboarding]'s own kdoc for how that interacts with this
+ * module's original "first run only" rule.
+ *
  * Kept pure (no Android framework, no network) so the gating rule is
  * testable head-on, same reasoning as the web source: step 1 cannot be left
  * until [OnboardingController]'s connection test has actually succeeded
@@ -73,11 +80,13 @@ fun previousOnboardingStep(step: OnboardingStep): OnboardingStep {
 }
 
 /**
- * Should the onboarding flow be shown at all? First run only: no working
- * vault-api connection configured yet. Unlike the web port's
- * `shouldShowOnboarding`, there is no `demoMode` input -- this app has no
- * demo/offline browsing mode (every screen before a connection exists shows
- * an explicit not-connected placeholder instead, `MainActivity`'s existing
- * behaviour), so "has a connection" is the only signal.
+ * Should the onboarding flow be shown at all? Mirrors the web port's own
+ * `shouldShowOnboarding({hasApiKey, demoMode})` exactly (WP APP-DEMO):
+ * first run only -- no working vault-api connection configured yet AND
+ * demo mode has not already been chosen. [demoMode] is itself an
+ * onboarding EXIT (`MainActivity`'s "Skip for now -- browse in demo mode"
+ * action), not a state that reopens it, same as the web port's own
+ * "Skip for now" comment documents.
  */
-fun shouldShowOnboarding(hasVaultConnection: Boolean): Boolean = !hasVaultConnection
+fun shouldShowOnboarding(hasVaultConnection: Boolean, demoMode: Boolean): Boolean =
+    !hasVaultConnection && !demoMode

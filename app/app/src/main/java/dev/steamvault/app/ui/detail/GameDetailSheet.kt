@@ -42,6 +42,7 @@ import dev.steamvault.app.R
 import dev.steamvault.app.net.model.GameDetail
 import dev.steamvault.app.net.model.GameSummary
 import dev.steamvault.app.net.model.JobSummary
+import dev.steamvault.app.ui.demo.DemoModeBanner
 import dev.steamvault.app.ui.detail.logic.ConfirmedCurrentWording
 import dev.steamvault.app.ui.detail.logic.CoOwnerRow
 import dev.steamvault.app.ui.detail.logic.DepotPresentation
@@ -112,6 +113,7 @@ fun GameDetailSheet(
     jobs: List<JobSummary>,
     scope: CoroutineScope,
     onLibraryChanged: () -> Unit,
+    demoMode: Boolean,
 ) {
     val appid = controller.openAppid ?: return
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -120,6 +122,19 @@ fun GameDetailSheet(
         onDismissRequest = { controller.close() },
         sheetState = sheetState,
     ) {
+        // WP APP-DEMO review round 3 (F2): the banner is called directly
+        // here, in THIS top-level public composable, rather than delegated
+        // into GameDetailSheetBody -- ModalBottomSheet's `content` lambda
+        // is typed `ColumnScope.() -> Unit` (M3 already wraps it in a
+        // non-scrolling Column), so this banner call and the
+        // GameDetailSheetBody() call below are siblings in THAT Column,
+        // with no extra wrapper Column of this file's own needed. This
+        // also closes the "extract a tiny DemoBannerRow-style helper and
+        // call it from inside the scrolling body" regression the reviewer
+        // demonstrated against round 2's version: there is no helper for
+        // that refactor to hide behind, because the real call site IS the
+        // screen's own top-level function.
+        if (demoMode) DemoModeBanner()
         GameDetailSheetBody(
             controller = controller,
             appid = appid,
@@ -193,6 +208,12 @@ private fun GameDetailSheetBody(
         ?: controller.openName?.takeIf { it.isNotBlank() }
         ?: "App $appid"
 
+    // WP APP-DEMO review round 3 (F2): no wrapper Column of this file's
+    // own -- the banner (WP brief constraint 1) now lives one level up, in
+    // GameDetailSheet's own ModalBottomSheet content lambda, which is
+    // already a non-scrolling ColumnScope (see that call site's kdoc).
+    // This function stays exactly what it was before demo mode touched it:
+    // one scrolling Column.
     Column(
         modifier = Modifier
             .fillMaxWidth()

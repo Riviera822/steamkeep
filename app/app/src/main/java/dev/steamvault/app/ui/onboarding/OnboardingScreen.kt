@@ -60,6 +60,14 @@ import kotlinx.coroutines.launch
  * @param onCancelled called when a reconnect attempt is dismissed without
  *   finishing -- never called in first-run mode ([OnboardingController
  *   .canCancelWithoutFinishing] is `false` there, so the action is not shown).
+ * @param onDemoSkip WP APP-DEMO: called when "Skip for now — browse in demo
+ *   mode" is tapped ([OnboardingController.canSkipToDemo] gates when this is
+ *   even shown). The caller ([dev.steamvault.app.MainActivity]) enters demo
+ *   mode with a fresh [dev.steamvault.app.demo.DemoState] and dismisses this
+ *   screen -- nothing here is persisted to
+ *   [dev.steamvault.app.storage.CredentialStore], mirroring
+ *   [OnboardingController.finish]'s own "only Done finishes onboarding for
+ *   real" boundary.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -68,6 +76,7 @@ fun OnboardingScreen(
     onFinished: () -> Unit,
     onCancelled: () -> Unit,
     onLaunchSteamLogin: (String) -> Unit,
+    onDemoSkip: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
 
@@ -83,11 +92,18 @@ fun OnboardingScreen(
             )
         },
         bottomBar = {
-            OnboardingNav(
-                controller = controller,
-                scope = scope,
-                onFinished = onFinished,
-            )
+            Column {
+                OnboardingNav(
+                    controller = controller,
+                    scope = scope,
+                    onFinished = onFinished,
+                )
+                if (controller.canSkipToDemo) {
+                    TextButton(onClick = onDemoSkip, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.onboarding_demo_skip))
+                    }
+                }
+            }
         },
     ) { innerPadding ->
         Column(

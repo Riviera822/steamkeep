@@ -38,6 +38,7 @@ import dev.steamvault.app.R
 import dev.steamvault.app.net.model.SettingInfoOut
 import dev.steamvault.app.repo.SteamIdentityState
 import dev.steamvault.app.storage.ProfileKind
+import dev.steamvault.app.ui.demo.DemoModeBanner
 import dev.steamvault.app.ui.settings.logic.SettingDraft
 import dev.steamvault.app.ui.settings.logic.SettingsApplies
 import dev.steamvault.app.ui.settings.logic.SettingsSource
@@ -63,37 +64,48 @@ fun SettingsScreen(
     onDisconnected: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
     onOpenClientsClick: () -> Unit,
+    demoMode: Boolean,
 ) {
     val scope = rememberCoroutineScope()
     LaunchedEffect(controller) { controller.load() }
 
     Scaffold(topBar = { TopAppBar(title = { Text(stringResource(R.string.settings_title)) }) }) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            when {
-                controller.loading -> Text(stringResource(R.string.settings_loading))
-                controller.loadError != null ->
-                    Text(
-                        stringResource(R.string.settings_load_error, controller.loadError.orEmpty()),
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                else -> SettingsForm(controller, scope)
-            }
+        // WP APP-DEMO review round 2 (B2): the banner lives in this OUTER,
+        // non-scrolling Column -- a sibling of the scrolling Column below,
+        // never a child of it -- so it stays pinned on screen regardless of
+        // scroll offset. The original single-Column version put the banner
+        // INSIDE the `.verticalScroll(...)` Column as its first child, which
+        // scrolls it away with everything else the instant the user scrolls
+        // past the top; a screenshot taken anywhere but the very top of this
+        // screen would then carry no indicator at all.
+        Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+            if (demoMode) DemoModeBanner()
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                when {
+                    controller.loading -> Text(stringResource(R.string.settings_loading))
+                    controller.loadError != null ->
+                        Text(
+                            stringResource(R.string.settings_load_error, controller.loadError.orEmpty()),
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    else -> SettingsForm(controller, scope)
+                }
 
-            HorizontalDivider()
-            SteamIdentitySection(controller, scope, onSignInSteamClick)
-            HorizontalDivider()
-            NotificationsSection(onRequestNotificationPermission)
-            HorizontalDivider()
-            ClientsSection(onOpenClientsClick)
-            HorizontalDivider()
-            ConnectionSection(controller, onReconnectClick, onDisconnected)
+                HorizontalDivider()
+                SteamIdentitySection(controller, scope, onSignInSteamClick, demoMode)
+                HorizontalDivider()
+                NotificationsSection(onRequestNotificationPermission)
+                HorizontalDivider()
+                ClientsSection(onOpenClientsClick)
+                HorizontalDivider()
+                ConnectionSection(controller, onReconnectClick, onDisconnected, demoMode)
+            }
         }
     }
 }
@@ -381,13 +393,43 @@ private fun WebhookEventsField(
 // manage, see ADR-0004's second addendum)
 // ---------------------------------------------------------------------
 
+/**
+ * WP APP-DEMO review round 2 (S1): [demoMode] gates the whole body of this
+ * section, not just the sign-in BUTTON. `controller.identityState` reads
+ * `CredentialStore` directly, which is the REAL, on-device store, unmodified
+ * for demo mode (WP brief constraint 5) -- so a signed-in identity from a
+ * PRIOR real session, or one established mid-onboarding right before the
+ * user tapped "Skip for now" (Step 2's `identityRepository.completeLogin`
+ * persists `steamId64` immediately, not deferred to `finish()`), is a real
+ * value sitting in that store the instant this composable would otherwise
+ * read [SettingsController.identityState] and render it. Since this
+ * package's whole point is producing PUBLISHABLE screenshots, that render
+ * path must not exist at all while [demoMode] is true -- not be merely
+ * unlikely to be tapped. `demoMode` also disables the actions that WRITE
+ * to the real store from here (sign-out, the library check that reads a
+ * real steamid) for the same reason: none of them are legitimate while
+ * browsing fixtures, and offering them invites exactly the confusion
+ * constraint 1 already warns against, in the identity direction instead of
+ * the data direction.
+ */
 @Composable
 private fun SteamIdentitySection(
     controller: SettingsController,
     scope: kotlinx.coroutines.CoroutineScope,
     onSignInSteamClick: () -> Unit,
+    demoMode: Boolean,
 ) {
     Text(stringResource(R.string.settings_section_steam), style = MaterialTheme.typography.titleMedium)
+
+    if (demoMode) {
+        Text(
+            stringResource(R.string.settings_steam_unavailable_demo),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        return
+    }
+
     val identity: SteamIdentityState = controller.identityState
 
     if (!identity.isSignedIn) {
@@ -443,9 +485,26 @@ private fun ConnectionSection(
     controller: SettingsController,
     onReconnectClick: () -> Unit,
     onDisconnected: () -> Unit,
+    demoMode: Boolean,
 ) {
     var showDisconnectConfirm by remember { mutableStateOf(false) }
     Text(stringResource(R.string.settings_section_connection), style = MaterialTheme.typography.titleMedium)
+
+    // WP APP-DEMO: reuses the SAME Reconnect/Disconnect actions below rather
+    // than adding a dedicated "exit demo mode" control (WP brief constraint
+    // 6: prefer the existing seam over a screen special case) -- Reconnect
+    // opens onboarding where a real connection can be entered and tested,
+    // and MainActivity.refreshVaultApiClient() (run after either finishes)
+    // unconditionally clears demo state as part of the same rebuild, so
+    // either button already leaves demo mode cleanly (WP brief constraint
+    // 4). This one line is the only demo-aware text in this section.
+    if (demoMode) {
+        Text(
+            stringResource(R.string.settings_demo_mode_note),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
 
     val summary = controller.connectionSummary()
     if (summary.isConfigured) {
@@ -460,9 +519,23 @@ private fun ConnectionSection(
     Text(stringResource(R.string.settings_reconnect_desc), color = MaterialTheme.colorScheme.onSurfaceVariant)
     OutlinedButton(onClick = onReconnectClick) { Text(stringResource(R.string.settings_reconnect_button)) }
 
-    Text(stringResource(R.string.settings_disconnect_title), style = MaterialTheme.typography.titleSmall)
-    Text(stringResource(R.string.settings_disconnect_desc), color = MaterialTheme.colorScheme.onSurfaceVariant)
-    OutlinedButton(onClick = { showDisconnectConfirm = true }) { Text(stringResource(R.string.settings_disconnect_button)) }
+    // WP APP-DEMO review round 2 (S1): Disconnect calls
+    // CredentialStore.clear() -- the WHOLE store, including Steam identity.
+    // While demoMode is true there is nothing REAL for this screen to have
+    // connected (demo mode is only reachable with no working connection),
+    // but CredentialStore can still hold a real Steam identity persisted
+    // moments earlier (onboarding Step 2 persists on sign-in, before
+    // `finish()`) -- offering a destructive action over that store here
+    // would let a demo-mode tap silently wipe it. Reconnect above stays:
+    // it is the documented way to leave demo mode and never touches
+    // CredentialStore until a connection is actually verified and finished.
+    if (!demoMode) {
+        Text(stringResource(R.string.settings_disconnect_title), style = MaterialTheme.typography.titleSmall)
+        Text(stringResource(R.string.settings_disconnect_desc), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        OutlinedButton(onClick = { showDisconnectConfirm = true }) { Text(stringResource(R.string.settings_disconnect_button)) }
+    } else {
+        Text(stringResource(R.string.settings_disconnect_unavailable_demo), color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 
     if (showDisconnectConfirm) {
         AlertDialog(

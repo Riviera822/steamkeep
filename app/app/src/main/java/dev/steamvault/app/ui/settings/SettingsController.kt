@@ -3,9 +3,9 @@ package dev.steamvault.app.ui.settings
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import dev.steamvault.app.net.VaultApiClient
 import dev.steamvault.app.net.error.VaultApiError
 import dev.steamvault.app.net.model.SettingsOut
+import dev.steamvault.app.repo.SettingsRepository
 import dev.steamvault.app.repo.SteamIdentityRepository
 import dev.steamvault.app.repo.SteamLoginResult
 import dev.steamvault.app.storage.CredentialStore
@@ -51,11 +51,17 @@ data class ConnectionSummary(val profileKind: String?, val baseUrl: String?) {
  *    plain state-switched (`ui/nav/Destination.kt`), so a screen not
  *    currently composed has no `LaunchedEffect` alive to stop in the first
  *    place, and a stale [dev.steamvault.app.net.VaultApiClient] can no
- *    longer be reached (nothing keeps `MainActivity`'s [VaultApiClient]
+ *    longer be reached (nothing keeps `MainActivity`'s client
  *    reference around once it rebuilds from the now-cleared store).
+ *
+ * [settingsRepository] is a [SettingsRepository] rather than a raw
+ * `VaultApiClient` (WP APP-DEMO refactor) -- the same seam every other
+ * screen controller already has, so demo mode can hand this class an
+ * in-memory [dev.steamvault.app.demo.DemoSettingsRepository] instead of
+ * ever needing this class to know demo mode exists.
  */
 class SettingsController(
-    private val client: VaultApiClient,
+    private val settingsRepository: SettingsRepository,
     private val credentialStore: CredentialStore,
     private val identityRepository: SteamIdentityRepository,
     private val strings: SettingsStrings,
@@ -94,7 +100,7 @@ class SettingsController(
         loading = true
         loadError = null
         try {
-            settingsResponse = client.settings()
+            settingsResponse = settingsRepository.get()
         } catch (e: VaultApiError) {
             loadError = e.detail ?: strings.loadFailedFallback(e)
         } finally {
@@ -124,7 +130,7 @@ class SettingsController(
         saving = true
         saveError = null
         try {
-            settingsResponse = client.patchSettings(patch)
+            settingsResponse = settingsRepository.patch(patch)
             drafts = emptyMap()
             toast = strings.savedToast()
         } catch (e: VaultApiError) {

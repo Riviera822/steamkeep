@@ -27,6 +27,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
+import dev.steamvault.app.demo.DemoCacheRepository
+import dev.steamvault.app.demo.DemoClientsRepository
+import dev.steamvault.app.demo.DemoGamesRepository
+import dev.steamvault.app.demo.DemoJobsRepository
+import dev.steamvault.app.demo.DemoMappingRepository
+import dev.steamvault.app.demo.DemoSettingsRepository
+import dev.steamvault.app.demo.DemoState
 import dev.steamvault.app.net.VaultApiClient
 import dev.steamvault.app.net.model.JobSummary
 import dev.steamvault.app.net.profile.buildConnectivityProfile
@@ -39,6 +46,7 @@ import dev.steamvault.app.repo.VaultClientsRepository
 import dev.steamvault.app.repo.VaultGamesRepository
 import dev.steamvault.app.repo.VaultJobsRepository
 import dev.steamvault.app.repo.VaultMappingRepository
+import dev.steamvault.app.repo.VaultSettingsRepository
 import dev.steamvault.app.storage.EncryptedCredentialStore
 import dev.steamvault.app.storage.SharedPreferencesLibraryPreferences
 import dev.steamvault.app.ui.clients.AndroidClientsStrings
@@ -53,6 +61,7 @@ import dev.steamvault.app.ui.onboarding.AndroidOnboardingStrings
 import dev.steamvault.app.ui.onboarding.OnboardingController
 import dev.steamvault.app.ui.onboarding.OnboardingMode
 import dev.steamvault.app.ui.onboarding.OnboardingScreen
+import dev.steamvault.app.ui.onboarding.logic.shouldShowOnboarding
 import dev.steamvault.app.ui.settings.AndroidSettingsStrings
 import dev.steamvault.app.ui.settings.SettingsController
 import dev.steamvault.app.ui.settings.SettingsScreen
@@ -114,6 +123,27 @@ class MainActivity : ComponentActivity() {
      * class's kdoc. Rebuilt by [refreshVaultApiClient] whenever the
      * connection changes (onboarding finishes, Settings disconnects). */
     private var vaultApiClientState by mutableStateOf<VaultApiClient?>(null)
+
+    /**
+     * WP APP-DEMO: `null` unless the user tapped "Skip for now — browse in
+     * demo mode" during onboarding ([enterDemoMode], only reachable from
+     * [OnboardingMode.FIRST_RUN] per [OnboardingController.canSkipToDemo]).
+     * Deliberately NOT persisted anywhere (same category as [destination]/
+     * [showOnboarding] below -- a plain in-memory field, gone the moment
+     * this `Activity` instance is, which this class's own kdoc already
+     * documents as neither a regression nor an improvement, just where this
+     * kind of short-lived state lives in this codebase). Two consequences
+     * that are both intentional (WP brief constraints 4/5):
+     *  - [refreshVaultApiClient] clears this unconditionally, so finishing
+     *    onboarding with a REAL connection (or Settings' Disconnect) always
+     *    leaves demo mode cleanly -- there is exactly one place a real
+     *    connection gets built, and it is also the one place demo state
+     *    gets torn down.
+     *  - [enterDemoMode] builds a brand-new [DemoState.fresh] every time,
+     *    so re-entering demo mode never carries over a previous session's
+     *    mutations (deleted cache, finished jobs, settings overrides).
+     */
+    private var demoState by mutableStateOf<DemoState?>(null)
 
     /** Rebuilt alongside [vaultApiClientState] so it always reflects the
      * SAME client (and can be reached directly from `onNewIntent` -- unlike
@@ -180,8 +210,33 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // WP APP-DEMO review round 2 (S2): refreshVaultApiClient() FIRST,
+        // unconditionally, exactly as it always has -- it is the ONE place
+        // demoState gets cleared, and that invariant (WP brief constraint
+        // 4: "switching to a real connection must not leave demo state
+        // behind") must hold on every onCreate, rotation included, not only
+        // on a fresh process start. The demo-mode restore below runs ONLY
+        // AFTER this line, and ONLY if it did NOT itself produce a real
+        // connection -- a real connection found in CredentialStore always
+        // wins over a saved "was in demo mode" flag from before rotation.
         refreshVaultApiClient()
-        if (vaultApiClientState == null) openOnboarding(OnboardingMode.FIRST_RUN)
+        if (savedInstanceState?.getBoolean(KEY_WAS_IN_DEMO_MODE) == true && vaultApiClientState == null) {
+            // A configuration change (typically rotation) re-runs onCreate
+            // with no `android:configChanges` declared for this Activity,
+            // which -- before this fix -- silently dropped demoState (a
+            // plain in-memory field) and fell through to onboarding, even
+            // though nothing about the user's demo session actually ended.
+            // Re-entering builds a FRESH DemoState (`enterDemoMode()`'s own
+            // contract), which is the same "no stale state carried over"
+            // rule this WP already applies to every other way of entering
+            // demo mode -- there is no saved DemoState to restore even if
+            // Bundle-based Parcelable support were added, so this is not a
+            // shortcut, it is the correct behaviour either way.
+            enterDemoMode()
+        }
+        if (shouldShowOnboarding(hasVaultConnection = vaultApiClientState != null, demoMode = demoState != null)) {
+            openOnboarding(OnboardingMode.FIRST_RUN)
+        }
         handleIntent(intent)
 
         setContent {
@@ -195,6 +250,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onCancelled = { showOnboarding = false },
                         onLaunchSteamLogin = { url -> launchSteamLogin(url) },
+                        onDemoSkip = { enterDemoMode() },
                     )
                 } else {
                     val pendingJobsCount = countPending(pendingJobsSnapshot)
@@ -232,7 +288,7 @@ class MainActivity : ComponentActivity() {
                     // sheet is actually open.
                     clientsControllerState?.let { controller ->
                         if (controller.isOpen) {
-                            ClientsSheet(controller = controller)
+                            ClientsSheet(controller = controller, demoMode = demoState != null)
                         }
                     }
                 }
@@ -243,8 +299,17 @@ class MainActivity : ComponentActivity() {
     /** Recomputes [vaultApiClientState]/[settingsControllerState] from
      * whatever is currently in [credentialStore] -- call after anything
      * that writes the connection ([OnboardingController.finish] via
-     * `onFinished`, [SettingsController.disconnect] via `onDisconnected`). */
+     * `onFinished`, [SettingsController.disconnect] via `onDisconnected`).
+     *
+     * WP APP-DEMO: also the ONE place [demoState] is torn down. A real
+     * connection is only ever built here, so clearing demo state
+     * unconditionally at the top means "finish onboarding with a real
+     * vault" and "leave demo mode" are the same action by construction --
+     * there is no separate "exit demo mode" code path that could drift
+     * from this one (WP brief constraint 4: "switching to a real
+     * connection must not leave demo state behind"). */
     private fun refreshVaultApiClient() {
+        demoState = null
         val profile = buildConnectivityProfile(credentialStore)
         val hasApiKey = !credentialStore.getApiKey().isNullOrBlank()
         val client = if (profile != null && hasApiKey) {
@@ -261,7 +326,7 @@ class MainActivity : ComponentActivity() {
         }
         vaultApiClientState = client
         settingsControllerState = client?.let {
-            SettingsController(it, credentialStore, identityRepository, AndroidSettingsStrings(resources))
+            SettingsController(VaultSettingsRepository(it), credentialStore, identityRepository, AndroidSettingsStrings(resources))
         }
         clientsControllerState = client?.let {
             ClientsController(VaultClientsRepository(it), AndroidClientsStrings(resources))
@@ -273,6 +338,37 @@ class MainActivity : ComponentActivity() {
         pendingJobsSnapshot = emptyList()
     }
 
+    /**
+     * WP APP-DEMO: "Skip for now — browse in demo mode"
+     * ([dev.steamvault.app.ui.onboarding.OnboardingScreen]'s `onDemoSkip`).
+     * Only reachable from [OnboardingMode.FIRST_RUN]
+     * ([OnboardingController.canSkipToDemo]), so [vaultApiClientState] is
+     * always already `null` here -- nothing is persisted to
+     * [credentialStore] at all, matching [OnboardingController.finish]'s
+     * own "only Done finishes onboarding for real" boundary.
+     *
+     * [settingsControllerState]/[clientsControllerState] are rebuilt here
+     * exactly the way [refreshVaultApiClient] rebuilds them for a real
+     * connection -- `ui/settings/SettingsScreen.kt`/`ui/clients/ClientsSheet.kt`
+     * need no demo-mode branch of their own, they are simply handed a
+     * [SettingsController]/[ClientsController] backed by
+     * [DemoSettingsRepository]/[DemoClientsRepository] instead of the real
+     * `Vault*Repository`.
+     */
+    private fun enterDemoMode() {
+        val demo = DemoState.fresh()
+        demoState = demo
+        settingsControllerState = SettingsController(
+            DemoSettingsRepository(demo),
+            credentialStore,
+            identityRepository,
+            AndroidSettingsStrings(resources),
+        )
+        clientsControllerState = ClientsController(DemoClientsRepository(demo), AndroidClientsStrings(resources))
+        pendingJobsSnapshot = emptyList()
+        showOnboarding = false
+    }
+
     private fun openOnboarding(mode: OnboardingMode) {
         onboardingController.start(mode)
         onboardingMode = mode
@@ -281,6 +377,20 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun LibraryDestinationContent() {
+        val demo = demoState
+        if (demo != null) {
+            LibraryScreen(
+                gamesRepository = remember(demo) { DemoGamesRepository(demo) },
+                jobsRepository = remember(demo) { DemoJobsRepository(demo) },
+                mappingRepository = remember(demo) { DemoMappingRepository(demo) },
+                cacheRepository = remember(demo) { DemoCacheRepository(demo) },
+                identityRepository = identityRepository,
+                libraryPreferences = libraryPreferences,
+                onJobsSnapshot = { pendingJobsSnapshot = it },
+                demoMode = true,
+            )
+            return
+        }
         val client = vaultApiClientState
         if (client == null) {
             NotConnectedPlaceholder()
@@ -294,12 +404,23 @@ class MainActivity : ComponentActivity() {
             identityRepository = identityRepository,
             libraryPreferences = libraryPreferences,
             onJobsSnapshot = { pendingJobsSnapshot = it },
+            demoMode = false,
         )
     }
 
     /** WP 4b.5's screen (Downloads + job control). */
     @Composable
     private fun DownloadsDestinationContent() {
+        val demo = demoState
+        if (demo != null) {
+            DownloadsScreen(
+                jobsRepository = remember(demo) { DemoJobsRepository(demo) },
+                gamesRepository = remember(demo) { DemoGamesRepository(demo) },
+                onJobsSnapshot = { pendingJobsSnapshot = it },
+                demoMode = true,
+            )
+            return
+        }
         val client = vaultApiClientState
         if (client == null) {
             NotConnectedPlaceholder()
@@ -309,6 +430,7 @@ class MainActivity : ComponentActivity() {
             jobsRepository = remember(client) { VaultJobsRepository(client) },
             gamesRepository = remember(client) { VaultGamesRepository(client) },
             onJobsSnapshot = { pendingJobsSnapshot = it },
+            demoMode = false,
         )
     }
 
@@ -334,7 +456,17 @@ class MainActivity : ComponentActivity() {
             },
             onRequestNotificationPermission = { requestNotificationPermission() },
             onOpenClientsClick = { clientsControllerState?.open(lifecycleScope) },
+            demoMode = demoState != null,
         )
+    }
+
+    /** WP APP-DEMO review round 2 (S2): the ONE bit of state this Activity
+     * saves across a configuration change -- see [onCreate]'s restore
+     * logic for why a plain boolean (not the [DemoState] itself) is
+     * exactly the right amount of persistence here. */
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(KEY_WAS_IN_DEMO_MODE, demoState != null)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -360,7 +492,18 @@ class MainActivity : ComponentActivity() {
             val settings = settingsControllerState
             when {
                 showOnboarding -> onboardingController.completeSteamLogin(data)
-                settings != null -> settings.completeSteamLogin(data)
+                // WP APP-DEMO review round 2 (S1): a demo-backed
+                // SettingsController never shows Steam identity at all
+                // (SettingsScreen.kt's SteamIdentitySection is gated off
+                // entirely while demoMode is true) -- routing a completion
+                // into it would update state nothing on screen reads, and
+                // the ONLY way this callback can even arrive while
+                // `demoState != null` is the narrow race below, not a
+                // sign-in legitimately started from THIS (demo) screen,
+                // since that action is not offered here. Falls through to
+                // the same "unroutable" handling the pre-existing else
+                // branch already gives a dropped callback.
+                settings != null && demoState == null -> settings.completeSteamLogin(data)
                 else -> {
                     // Review fix (N2): neither screen is currently active to
                     // route this into (e.g. the connection was disconnected
@@ -372,6 +515,17 @@ class MainActivity : ComponentActivity() {
                     // what makes "single-use" literally true regardless of
                     // which screen happens to be showing when the redirect
                     // lands, not just when a controller is listening.
+                    //
+                    // WP APP-DEMO residual (S1, not fixed -- documented):
+                    // this still calls SteamIdentityRepository.completeLogin,
+                    // which persists steamId64 to CredentialStore on a VALID
+                    // completion regardless of caller -- unchanged, pre-
+                    // existing behaviour this WP does not touch (brief
+                    // constraint 5: no OpenID/identity code changes). The
+                    // narrow race this can combine with (a sign-in started
+                    // during onboarding, completed only AFTER the user
+                    // skipped to demo mid-flow) is not closed by this WP;
+                    // recorded here rather than silently.
                     identityRepository.completeLogin(data)
                 }
             }
@@ -429,6 +583,11 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 33) {
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
+    }
+
+    companion object {
+        /** WP APP-DEMO review round 2 (S2) -- see [onSaveInstanceState]/[onCreate]. */
+        private const val KEY_WAS_IN_DEMO_MODE = "dev.steamvault.app.WAS_IN_DEMO_MODE"
     }
 }
 

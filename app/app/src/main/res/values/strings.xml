@@ -155,6 +155,9 @@
     <string name="onboarding_back">Back</string>
     <string name="onboarding_finish">Go to library</string>
     <string name="onboarding_cancel">Cancel</string>
+    <!-- WP APP-DEMO: same wording as web/js/onboarding.js's own demoLink
+         label, first-run only (OnboardingController.canSkipToDemo). -->
+    <string name="onboarding_demo_skip">Skip for now — browse in demo mode</string>
 
     <string name="onboarding_summary_connection">Connection: %1$s</string>
     <string name="onboarding_summary_connection_verified">verified</string>
@@ -551,6 +554,25 @@
          detail to show; this button is the discoverable path for a user
          who reaches this screen without a notification at all). -->
     <string name="settings_section_clients">Clients</string>
+
+    <!-- Demo mode (WP APP-DEMO). demo_mode_banner is the persistent,
+         visible indicator shown on every screen while browsing sample
+         data (WP brief constraint 1: "impossible to confuse with a real
+         vault"), rendered by ui/demo/DemoModeBanner.kt on the Library,
+         Downloads, Settings and game-detail screens. -->
+    <string name="demo_mode_banner">DEMO MODE — sample data, no vault connected</string>
+    <string name="settings_demo_mode_note">You are browsing sample data. Nothing here is stored on a real vault. Use Reconnect below to connect a real vault — this replaces the demo data.</string>
+    <!-- WP APP-DEMO review round 2 (S1): shown instead of the real Steam
+         identity section while browsing demo data, see
+         SettingsScreen.kt's SteamIdentitySection kdoc for why this section
+         reads nothing from CredentialStore at all in demo mode. -->
+    <string name="settings_steam_unavailable_demo">Steam sign-in is not available while browsing demo data. Connect a real vault to sign in.</string>
+    <!-- WP APP-DEMO review round 2 (S1): Disconnect is hidden in demo mode
+         (nothing real to disconnect from, and it would wipe any REAL
+         connection/identity still sitting in CredentialStore from before
+         this demo session started); Reconnect stays, since it is the
+         documented way to leave demo mode. -->
+    <string name="settings_disconnect_unavailable_demo">Disconnect is not available while browsing demo data.</string>
     <string name="settings_clients_desc">See which machines have reported to this vault, and whether any of them appear to be bypassing the cache.</string>
     <string name="settings_clients_open_button">View clients</string>
 </resources>

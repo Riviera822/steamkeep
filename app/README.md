@@ -2824,3 +2824,645 @@ this report):
   remains sound hygiene for source-text pins whose subject is only
   incidentally a compile input — e.g. a token planted in a comment
   changes the text but not the compiled output.
+
+## Demo mode (WP APP-DEMO)
+
+Closes the gap `ui/onboarding/logic/OnboardingSteps.kt` used to state
+outright: before this WP the app had no way to be looked at, screenshotted,
+or reviewed (Play Store or otherwise) without a running vault-api
+deployment — every screen before a connection exists showed the connection
+dialog. The web frontend has had a demo mode since WP 4a.2; this WP is that
+same idea, native.
+
+### The seam (`demo/`, `ui/demo/`)
+
+```
+app/app/src/main/java/dev/steamvault/app/
+├── demo/
+│   ├── DemoState.kt          # the in-memory fixture store (games, jobs, clients, settings)
+│   ├── DemoModels.kt         # DemoGame/DemoJob/DemoDepot -- mutable, package-internal
+│   ├── DemoFixtures.kt       # the seed data (six fictional games, three jobs, two clients)
+│   └── DemoRepositories.kt   # Demo{Games,Jobs,Cache,Clients,Mapping,Settings}Repository
+├── repo/
+│   └── SettingsRepository.kt # NEW interface, extracted from SettingsController's former
+│                              # direct VaultApiClient dependency (VaultSettingsRepository
+│                              # is its real implementation) -- the same seam every other
+│                              # repository already had
+└── ui/demo/
+    └── DemoModeBanner.kt      # the persistent "DEMO MODE" indicator composable
+```
+
+**Every existing screen controller already took its data source as an
+injected repository interface** (`GamesRepository`/`JobsRepository`/
+`CacheRepository`/`ClientsRepository`/`MappingRepository`) — this WP's only
+structural change to the production code was adding the sixth
+(`SettingsRepository`, since `SettingsController` used to call
+`VaultApiClient` directly for `GET`/`PATCH /v1/settings`) and then writing
+one `Demo*Repository` per interface. No screen (`LibraryScreen.kt`,
+`DownloadsScreen.kt`, `SettingsScreen.kt`, `GameDetailSheet.kt`) branches on
+demo mode for DATA at all — `MainActivity.kt` decides which repository
+implementation to hand out, and the screen never knows the difference. The
+one thing every data-bearing screen (plus `ClientsSheet.kt`) DOES branch on
+is a `demoMode: Boolean` parameter used for exactly one thing: whether to
+render `DemoModeBanner()` (WP brief constraint 1).
+
+**Shapes match the real API 1:1 by construction, not by convention.** Every
+`Demo*Repository` method returns the SAME `@Serializable` data classes
+`net/model/*.kt` defines for the real endpoints — there is no separate
+"demo DTO" to drift from the real one; adding a field to (say)
+`GameSummary` fails to compile `DemoState.kt` until its constructor call
+sites are updated too. This is a stronger guarantee than the web fixture's
+own "matches the docs" claim, which needs a dedicated cross-check test
+(`web/tests/demo-data.test.js`) precisely because JS has no such compiler
+enforcement.
+
+### What demo mode does NOT touch (WP brief constraint 5)
+
+No Steam-identity/owned-games fixture exists at all. `SteamIdentityRepository`
+(OpenID sign-in, persona lookup) is handed to the demo screens completely
+unmodified — Settings' Steam identity section and Library's owned-games
+merge work exactly as they already did on a genuinely fresh install with no
+vault-api connection: `VaultRelayLibraryFetcher.requireClient()` throws
+`IllegalStateException` the instant anything calls it, because demo mode
+never constructs a `VaultApiClient` (`MainActivity.vaultApiClientState`
+stays `null` throughout a demo session — reachable only from
+`OnboardingMode.FIRST_RUN`, which by definition has no connection yet). This
+is reused fail-closed behaviour, not new code, and it is why this WP has no
+`OwnedGame`/`SteamPersona` fixture to keep in sync with ADR-0010's
+playtime/last-played default-off rule — there is no such fixture in this
+WP's scope, full stop, rather than one that happens to comply.
+
+### Entering and leaving demo mode
+
+`OnboardingScreen.kt`'s "Skip for now — browse in demo mode" (same wording
+as `web/js/onboarding.js`'s own link) is shown on Connect/Steam-identity
+steps, first-run only (`OnboardingController.canSkipToDemo`) — mirroring
+the web port's own "Reconnect's Skip just cancels, no demo" distinction.
+Tapping it calls `MainActivity.enterDemoMode()`, which builds a brand-new
+`DemoState.fresh()` and swaps `settingsControllerState`/
+`clientsControllerState` to demo-backed instances; nothing is written to
+`CredentialStore`.
+
+`MainActivity.refreshVaultApiClient()` — the ONE function that ever builds
+a real `VaultApiClient` from `CredentialStore` — unconditionally clears
+`demoState` as its first statement. Finishing onboarding with a real
+connection, or Settings' Disconnect, both call this function, so "a real
+connection now exists" and "demo mode is over" are the same event by
+construction; there is no second, independently-maintained "exit demo mode"
+code path that could drift from it. Re-entering demo mode always calls
+`DemoState.fresh()` again, so a previous session's deletions/settings
+overrides never leak into the next one — demo state is a plain in-memory
+field (the same category `destination`/`showOnboarding` already document:
+gone the moment the `Activity` instance is, by design, not persisted).
+
+### Fixtures
+
+Six fictional games (`DemoFixtures.kt`'s own kdoc has the full reasoning
+per game): a plain `done` game; an `idle`+`needs_force` game whose
+`last_manifest_check` survives a simulated cache deletion (the
+`CONFIRMED_BEFORE_CACHE_CLEARED` wording branch); a `running` game backed
+by a seed job that is already mid-flight; two `done` games sharing one
+depot (the `MultiPlan.kt` sharing arithmetic, deletable in either order);
+and an `error`+`needs_force` game with a non-zero GC dry-run result. Three
+seed jobs (one finished successfully, one finished with an error, one
+running) plus two synthetic clients (one flagged `bypass_suspected`).
+
+Jobs and GC runs advance by CALL COUNT (`DemoState.tick()`), never a timer
+— the same reasoning `web/js/demo-data.js`'s header gives ("demo mode needs
+no timers of its own"): every `GET /v1/jobs`-equivalent poll or
+`GET /v1/jobs/{id}`-equivalent GC poll ticks the clock forward by one, so a
+seed job or a freshly enqueued prefill/GC run reaches `done` after a small,
+deterministic number of polls with no `Thread.sleep`/coroutine delay
+involved on the fixture side.
+
+**Simplification, stated plainly:** cache deletion clears a game's OWN
+depot list unconditionally (mirroring api/README.md's "deletion clears
+cache content, not mapping rows"); a shared depot with another currently-
+cached owner is reported under `skipped_shared` (informational — bytes are
+not double-freed) rather than kept on the deleting game's own list. This
+reproduces the web fixture's documented "deleting either side of a shared
+pair skips it once, the sole-holder case fires on the second delete" shape,
+but does not attempt full ADR-0003 fidelity beyond that.
+
+### Settings fixture (ADR-0009 / ADR-0010)
+
+`DemoState`'s settings model mirrors `web/js/demo-data.js`'s own
+db-override-over-env-over-default precedence for the seven overridable
+keys (`vault_name`, `schedule_window`, `schedule_interval_minutes`,
+`schedule_client_stale_days`, `auto_gc`, `webhook_url`, `webhook_events`)
+plus every `settings_store.ENV_ONLY_INFO_KEYS` row the real `GET
+/v1/settings` carries, including ADR-0010's two relay-privacy keys
+(`relay_expose_playtime`/`relay_expose_last_played`) — both env-only,
+both defaulting `false`, pinned by a named mutation test. `PATCH` on an
+env-only key is rejected with the real `422` taxonomy
+(`VaultApiError.Validation`), same as the shipped server.
+
+### Structural pins
+
+Same source-text-scan technique `SteamKeyIsolationTest` already
+established, applied to three different guarantees this WP's brief asks
+for by name (`DemoModeNetworkIsolationTest.kt`, `DemoModeUiWiringTest.kt`):
+
+1. No file under `demo/` mentions a network-capable type
+   (`VaultApiClient`, `okhttp3`, `OkHttpClient`, `java.net.`,
+   `HttpURLConnection`, `URLConnection`, `Retrofit`) OUTSIDE a comment —
+   comments are stripped before the scan specifically so this class's own
+   KDoc can still document `VaultApiClient`'s deliberate absence by name.
+2. Every data-bearing screen (Library, Downloads, Settings, game detail,
+   the clients sheet) still contains the literal
+   `if (demoMode) DemoModeBanner()`.
+3. `MainActivity.refreshVaultApiClient()` still contains `demoState = null`.
+4. `MainActivity.enterDemoMode()` still calls `DemoState.fresh()`.
+
+### Tests
+
+28 new JVM unit tests (606 total with the prior WPs' 578), no
+Robolectric/emulator dependency — `DemoStateTest.kt` (21: fixture shape,
+job ticking, dedupe, job control, shared-depot deletion in both orders, GC
+dry-run/execute parsed by the REAL `parseGcLogSummary`, settings
+precedence/rejection, and the fresh()-independence pin), the two structural
+files above (5), and two new `OnboardingStepsTest.kt` cases for
+`shouldShowOnboarding`'s new `demoMode` parameter.
+
+Verified command + output tail:
+
+```
+$ ./gradlew.bat assembleDebug testDebugUnitTest testReleaseUnitTest lintDebug --console=plain
+...
+BUILD SUCCESSFUL in 19s
+74 actionable tasks: 15 executed, 59 up-to-date
+```
+
+`606/0/0` across both `testDebugUnitTest` and `testReleaseUnitTest` (summed
+from the XML reports' `tests=`/`failures=`/`errors=` attributes);
+`app/app/build/reports/lint-results-debug.txt`: "No issues found."
+
+Four mutations, each reverted immediately after observing the failure:
+
+- Leaked a `VaultApiClient` reference into `DemoRepositories.kt`:
+  `DemoModeNetworkIsolationTest > no CODE under demo ... mentions a
+  network-capable type FAILED` — `Hits: [DemoRepositories.kt:
+  VaultApiClient] expected:<[]> but was:<[DemoRepositories.kt:
+  VaultApiClient]>`.
+- Flipped `relay_expose_playtime`'s demo default to `true`: both
+  `DemoStateTest > MUTATION PIN -- the two ADR-0010 privacy keys are
+  env-only and default off` and the env-only-rejection test FAILED with
+  `expected:<false> but was:<true>`.
+- Removed `LibraryScreen.kt`'s `if (demoMode) DemoModeBanner()` line:
+  `DemoModeUiWiringTest > MUTATION PIN -- every data-bearing screen still
+  renders the demo mode banner ... FAILED` — `Missing: [Library
+  (src/main/java/dev/steamvault/app/ui/library/LibraryScreen.kt)]`.
+- Deleted `demoState = null` from `refreshVaultApiClient()`:
+  `DemoModeUiWiringTest > MUTATION PIN -- refreshVaultApiClient
+  unconditionally clears demoState FAILED` — the assertion message quotes
+  the mutated function body verbatim.
+
+### What this WP deliberately did NOT do
+
+- **No Steam-identity/owned-games demo fixture** — see "What demo mode
+  does NOT touch" above; this is a scope decision, not an oversight.
+- **No instrumented/visual verification** — no emulator or device is
+  available in this environment (unchanged constraint from every earlier
+  4b.x WP); the banner's placement, colour contrast, and the onboarding
+  skip-link's layout have not been seen on a real screen.
+- **No `compose-ui-test`/Robolectric coverage of the new Composables** —
+  `DemoModeBanner.kt`, the new banner call sites, and the demo-skip button
+  are covered only by the structural source-scan tests above, same
+  standing limitation the rest of this codebase's UI layer has.
+- **No atomic all-or-nothing validation for demo `PATCH /v1/settings`** —
+  the real server validates every key in a multi-key patch before applying
+  any of them; `DemoState.patchSettings` applies each key as it validates
+  it, so a patch with a valid key followed by an invalid one leaves the
+  valid one applied. Not exercised by any test, and not what the real
+  server does — noted here rather than silently.
+- **Clients sheet demo coverage is best-effort** — the WP brief names
+  Library/detail/Downloads/Settings explicitly; the clients sheet got the
+  same treatment (a `DemoClientsRepository`, a banner) for consistency and
+  to avoid a dead "Open Clients" button in demo mode, but it was not asked
+  for by name and has correspondingly less scrutiny than the four named
+  screens.
+
+### Review round 2 (Opus, FAIL — two blockers, both fixed; three should-fix items addressed)
+
+**B1 — the network-isolation pin was a denylist ("no file mentions these
+seven spellings"), not isolation.** The reviewer patched
+`DemoClientsRepository.list()` to call `SteamOpenIdClient().checkAuthentication(...)`
+(a real OkHttp POST to `steamcommunity.com`, fired every time the demo
+clients sheet opens) and the whole 606-test suite, plus the old
+`DemoModeNetworkIsolationTest`, stayed green — `net.steam.*` was never on
+the seven-item list. **Fixed by inverting the check to an allowlist**
+(`DemoModeImportAllowlistTest.kt`, replacing the old file outright): every
+qualified name `demo/` and `ui/demo/` reference at all — import line or
+inline fully-qualified reference — must fall inside a fixed
+`ALLOWED_PREFIXES` set (model/error DTOs, the repository interfaces,
+Compose/theme/resources, `kotlinx.serialization`, `java.time.Instant`);
+anything else fails closed by construction. Comments are stripped first
+(package declarations too, after an initial false-positive from the file's
+own `package dev.steamvault.app.demo` line) so KDoc can still name a
+forbidden class while explaining its absence.
+
+Re-verified by reproducing the reviewer's exact mutation (compiled and run,
+not just quoted): adding
+`import dev.steamvault.app.net.steam.SteamOpenIdClient` plus
+`runBlocking { SteamOpenIdClient().checkAuthentication(emptyMap()) }` inside
+`DemoClientsRepository.list()` —
+
+```
+DemoModeImportAllowlistTest > MUTATION PIN -- every qualified name demo code
+references, import or inline, falls inside the fixed allowlist FAILED
+```
+
+with the assertion message quoting
+`Hits: [DemoRepositories.kt: dev.steamvault.app.net.steam.SteamOpenIdClient]`
+— reverted immediately after.
+
+**B2 — the banner scrolled off screen on three of five surfaces.** On
+`SettingsScreen.kt`, `GameDetailSheet.kt`, and `ClientsSheet.kt`,
+`DemoModeBanner()` was the first child of the `Column` carrying
+`.verticalScroll(...)` in its own modifier chain, so it translated with the
+scroll offset — a screenshot taken anywhere but the very top of any of
+those three screens carried no indicator at all, the exact thing brief
+constraint 1 declares impossible. **Fixed** by hoisting the banner into a
+non-scrolling outer `Column` that wraps the scrolling one as a sibling, on
+all three files (`LibraryScreen.kt`/`DownloadsScreen.kt` were already
+correct — their content is `LazyColumn`/`LazyVerticalGrid`, never a
+scrolling `Column`). Pinned by a new
+`DemoModeUiWiringTest` case that takes the span from each file's nearest
+`@Composable` to its `DemoModeBanner()` call (comments stripped) and
+asserts it never contains `verticalScroll` — reproducing the ORIGINAL bug
+shape on `SettingsScreen.kt` (moving the banner back inside the scrolling
+`Column`) kills it:
+
+```
+DemoModeUiWiringTest > MUTATION PIN -- the demo mode banner is never inside
+a verticalScroll subtree FAILED
+```
+
+with `Violating files: [.../SettingsScreen.kt]` — reverted after.
+
+**S1 — a real Steam identity could render on, or be silently wiped by, a
+demo-mode Settings screenshot.** Investigated per the coordinator's ask:
+`enterDemoMode()` hands the demo `SettingsController` the REAL
+`CredentialStore`/`SteamIdentityRepository` (unmodified, brief constraint
+5) — and onboarding Step 2 persists `steamId64`/persona to that store
+IMMEDIATELY on a successful sign-in, not deferred to `finish()`. Since
+"Skip for now" is offered on Step 2 too, the reachable sequence is: sign in
+with a REAL Steam account during onboarding → tap Skip → land in demo mode
+with a real identity sitting in `CredentialStore` → open Settings. Before
+this fix, `SteamIdentitySection` would have read and rendered that real
+`steamId64`/persona name on screen. **What only a device could confirm has
+not changed: nobody has watched this render on a physical screen** — but
+the source-level answer to "can a demo screenshot display a real identity"
+was YES before this fix, traced through the exact code path above, not
+inferred.
+
+**Fixed**, without touching `CredentialStore` or the OpenID flow itself
+(brief constraint 5 stays intact — nothing about HOW sign-in works
+changed, only WHEN this screen is allowed to READ the result):
+- `SteamIdentitySection` now gates on `demoMode` and returns a static,
+  identity-free message BEFORE reading `controller.identityState` at all.
+- `ConnectionSection`'s Disconnect action (`CredentialStore.clear()` — the
+  WHOLE store) is hidden while `demoMode` is true, so a demo-mode tap
+  cannot wipe a real identity left over from before the session started.
+  Reconnect stays: it never touches `CredentialStore` until a connection
+  is tested and finished, and remains the documented way to leave demo
+  mode.
+- `MainActivity.handleIntent`'s Steam-OpenID-callback routing no longer
+  sends a completion into a demo-backed `SettingsController` (which cannot
+  show or act on it anyway); it falls through to the pre-existing
+  "unroutable callback" handling instead.
+- **Residual, recorded rather than silently left:** that fallback path
+  still calls `SteamIdentityRepository.completeLogin`, which persists a
+  VALID completion to `CredentialStore` regardless of caller — pre-existing
+  behaviour this WP does not touch. The narrow race this can combine with
+  (sign-in started during onboarding, completing only after the user
+  already skipped to demo mid-flow) is not closed. Judged out of scope
+  under brief constraint 5 rather than fixed by touching identity code.
+  **The write happens — but no demo surface can render the result.**
+  Traced end to end, because a residual is only worth recording if the
+  reader can tell whether it matters: there are exactly two places in this
+  app that ever render a Steam identity. `SteamIdentitySection` is one —
+  it now `return`s before its first read of `controller.identityState`
+  whenever `demoMode` is true (the gate this WP's fix adds), so the
+  freshly-written identity is never reached from there. The onboarding
+  Steam step is the other, and it is reachable, post-race, only through
+  Settings' Reconnect action — which opens `OnboardingScreen` as
+  `MainActivity`'s entire `setContent` body (`onboarding/OnboardingScreen.kt`'s
+  own "full-screen swap, not a modal overlay" kdoc), replacing the demo UI
+  outright rather than appending to it; nothing from the demo session is
+  still on screen once that happens. The Library screen's owned-games
+  merge cannot reach it either, for an unrelated, already-existing reason:
+  demo mode never holds a `VaultApiClient` (`vaultApiClientState` stays
+  `null` throughout a demo session), so
+  `VaultRelayLibraryFetcher.requireClient()` always throws
+  `IllegalStateException` first, `SteamIdentityRepositoryImpl.ownedGames()`
+  catches it and returns `Result.failure`, and `LibraryController
+  .refreshOwnedGamesOnce()` stores `null` — `mergeLibrary` then renders
+  fixtures only, the same "vault-only view stays fully functional" path a
+  real, never-connected install already takes. A stray write reaching
+  `CredentialStore` is real and unclosed; a demo screenshot displaying it
+  is not possible through any surface this app has today.
+
+Two new `DemoModeUiWiringTest` cases pin the UI-layer half; both reproduced
+and killed the corresponding mutation (gate removed; Disconnect gate
+removed) before being reverted, same as B1/B2 above.
+
+**S2 — a screen rotation ejected the user from demo mode into onboarding.**
+No `android:configChanges`, so rotation re-runs `onCreate`, which used to
+call `refreshVaultApiClient()` (clearing the plain in-memory `demoState`
+field) unconditionally and fall through to onboarding. **Fixed**: `onCreate`
+now saves/restores one boolean (`KEY_WAS_IN_DEMO_MODE`, via
+`onSaveInstanceState`) and re-enters demo mode with a FRESH `DemoState`
+(never a restored one — matching this WP's existing "no stale state
+carried over" rule) if that flag is set AND `refreshVaultApiClient()` did
+NOT itself produce a real connection. The ordering is load-bearing
+(`refreshVaultApiClient()` must run first, so a real connection always
+wins over a stale saved flag) and is pinned by a new
+`DemoModeUiWiringTest` case; reproduced by swapping the two calls'
+order —
+
+```
+DemoModeUiWiringTest > MUTATION PIN -- onCreate restores demo mode across
+rotation, but only AFTER refreshVaultApiClient runs FAILED
+```
+
+— and reverted. **What only a device could confirm: this has not been
+seen through an actual rotation on a real screen or emulator** — the fix
+and its pin are both source-level; no visual/behavioural confirmation
+exists for this WP as a whole (no emulator in this environment).
+
+**S3 — `demoMode: Boolean = false` defaulted the safety flag to the unsafe
+direction.** **Fixed**: the default is removed on the four named
+data-bearing screens (`LibraryScreen`, `DownloadsScreen`, `SettingsScreen`,
+`GameDetailSheet`, plus their two private Settings sub-composables) so the
+compiler enforces every call site choosing explicitly; every real call
+site in `MainActivity.kt` was updated accordingly (the two "real
+connection" branches for Library/Downloads previously relied on the
+default and now pass `demoMode = false` explicitly). `ClientsSheet`'s
+default was left as-is — it is the fifth, best-effort screen, not one of
+the four the brief names, and its one call site already passes the value
+explicitly.
+
+**Nitpicks addressed:**
+- `DemoState.controlJob` now refuses pause/resume/cancel against a job not
+  in the matching prior state (a `409`, matching the real server's job-
+  control refusal) — pinned by two new `DemoStateTest` cases.
+- The "raw internal string on a screenshot surface" nitpick
+  (`VaultRelayLibraryFetcher`'s `"no vault-api connection configured"`
+  reaching `settings_steam_library_error`) is moot after the S1 fix above:
+  the whole Steam identity section — including the library-check button
+  and its status text — no longer renders at all while `demoMode` is true.
+- Not addressed (unchanged from round 1, still noted rather than silently
+  skipped): demo mode's "Check & update" never reaches the
+  `Updated==0 && UpToDate>0` "confirmed current" outcome (realism-only;
+  errs conservative), and `DemoState.patchSettings` is not atomic
+  all-or-nothing across a multi-key patch.
+
+Why demo code ships in the RELEASE variant, not debug-only like the WP
+4b.1 gallery screen `app/README.md`'s "What WP 4b.1 deliberately did NOT
+do" section already documents: the gallery screen is a development
+artifact with no user-facing purpose ever, gated to `src/debug/` for
+exactly that reason. Demo mode is the opposite — its whole point is to be
+reachable by a real Play Store reviewer and to produce real store
+screenshots, both of which require it to exist in the shipped release
+build. The two are different in kind, not an inconsistency.
+
+Re-verified after all of the above: `assembleDebug`, `testDebugUnitTest`,
+`testReleaseUnitTest`, `lintDebug` —
+
+```
+$ ./gradlew.bat assembleDebug testDebugUnitTest testReleaseUnitTest lintDebug --console=plain
+...
+BUILD SUCCESSFUL in 27s
+74 actionable tasks: 20 executed, 54 up-to-date
+```
+
+`612/0/0` across both `testDebugUnitTest` and `testReleaseUnitTest` (606
+from round 1 plus 6 new: the B1 allowlist file replaces a 2-test file with
+another 2-test file net-even, `DemoModeUiWiringTest` gained 4, `DemoStateTest`
+gained 2); `app/app/build/reports/lint-results-debug.txt`: "No issues
+found."
+
+### Review round 3 (Opus, PASS — four should-fixes addressed, one nit recorded)
+
+**F1 — the allowlist itself was defeatable, one level up from B1.**
+`WATCHED_PREFIXES` omitted `javax.`/`android.`/`kotlin.`. The reviewer
+measured it: `javax.net.SocketFactory.getDefault().createSocket(...)` plus
+a real socket write, added to `DemoClientsRepository.list()`, built and ran
+clean at 612/612. **Fixed** by adding `"javax."` and `"android."` to
+`WATCHED_PREFIXES`, reproduced and killed with the reviewer's exact
+snippet —
+
+```
+DemoModeImportAllowlistTest > MUTATION PIN -- every qualified name demo
+code references, import or inline, falls inside the fixed allowlist FAILED
+```
+
+`Hits: [DemoRepositories.kt: javax.net.SocketFactory.getDefault]` —
+reverted after. **The class KDoc's overstated claim is also fixed**, not
+just the code: it no longer says the check "fails closed BY CONSTRUCTION...
+including a class this file's author has never heard of." It now states
+plainly what the test is — a fixed, enumerated set of watched prefix
+families crossed with an allowlist within each, a strong practical barrier
+against every network/platform-resource class this codebase and its
+dependencies expose TODAY, not a proof against an unlisted family. Second
+occurrence of the exact defect class in one package (round 2's B1 first);
+recorded as such rather than only fixed.
+
+**F2 — the banner pin caught the shape fixed, not the shape a future
+coder would write.** The reviewer restored the original bug twice, green
+both times against round 2's version: (1) extracting a
+`DemoBannerRow(demoMode: Boolean) { if (demoMode) DemoModeBanner() }`
+helper and calling it from inside the scrolling body — round 2's scan
+anchored on the nearest `@Composable`, which was the helper's own, a
+3-line window with no `verticalScroll` in it; (2) a
+`LazyColumn { item { ... } }` shape, where the window contains
+`LazyColumn`, not `verticalScroll`. **Fixed two ways.** First,
+`GameDetailSheet.kt`/`ClientsSheet.kt` were refactored so the banner is
+called directly in the screen's own top-level public composable (inside
+`ModalBottomSheet`'s `content` lambda, which M3 types as
+`ColumnScope.() -> Unit` — already a non-scrolling Column, so no wrapper
+`Column` of this file's own is needed any more, and no `*Body` helper
+sits between the top-level function and the banner call at all).
+Second, the pin itself (`DemoModeUiWiringTest`, one merged test replacing
+the two round-2 tests) now checks three things per screen: exactly one
+`DemoModeBanner()` call exists; its nearest enclosing `@Composable fun` is
+literally the screen's own top-level name (`LibraryScreen`,
+`DownloadsScreen`, `SettingsScreen`, `GameDetailSheet`, `ClientsSheet` —
+never a helper); and the span from that function's own `@Composable` to
+the banner call contains none of `verticalScroll`/`LazyColumn`/
+`LazyVerticalGrid`/`scrollable`. Reproduced and killed both counter-examples:
+
+```
+DemoModeUiWiringTest > MUTATION PIN -- the demo mode banner appears exactly
+once per screen, directly in the screen's own top-level composable, outside
+any scrolling container FAILED
+```
+
+- Extracted-helper mutation (on `SettingsScreen.kt`): `Violations:
+  [.../SettingsScreen.kt: banner's enclosing composable is 'DemoBannerRow',
+  expected the screen's own top-level 'SettingsScreen' -- a helper (e.g. an
+  extracted DemoBannerRow-style wrapper) is not an acceptable substitute]`
+- `LazyColumn { item { ... } }` mutation (on `LibraryScreen.kt`):
+  `Violations: [.../LibraryScreen.kt: banner's own top-level composable
+  contains [LazyColumn]...]`
+
+Both reverted after.
+
+**F3 — the S1 residual bullet stopped one sentence short of the answer
+that actually mattered.** The residual write (a completed OpenID callback
+during the narrow onboarding-then-skip race still reaches
+`CredentialStore` via the pre-existing "unroutable callback" fallback) was
+already recorded honestly, but the bullet did not say whether that write
+could ever be SEEN. **Fixed** by tracing and stating the conclusion: there
+are exactly two render paths for a Steam identity in this app, and neither
+can show it while browsing demo data — `SteamIdentitySection` returns
+before its first `identityState` read whenever `demoMode` is true (this
+WP's own gate), and the onboarding Steam step is reachable, post-race,
+only through Reconnect, which replaces the demo UI outright rather than
+appending to it. The Library merge cannot surface it either, for the
+existing structural reason this WP relies on throughout: no `VaultApiClient`
+in demo mode means `ownedGames()` always fails closed. The residual bullet
+in the S1 section above now ends with this traced conclusion instead of
+stopping at "the write happens."
+
+**F4 — cosmetic, fixed as a side effect of F2.** `ClientsSheetBody`'s
+stray-indented closing brace (an artifact of the now-removed extra wrapper
+`Column`) no longer exists — F2's refactor deleted that wrapper entirely
+rather than reindenting around it.
+
+**Nit recorded, not fixed (per the coordinator's own framing):**
+`DemoState.controlJob`'s `PAUSE` guard checks `job.status`, not
+`job.type` — it does not refuse `PAUSE` against a currently-running `gc`
+job, which the real server does (only `prefill` jobs are pausable/
+resumable). Unreachable through this app's own UI (job-control pause
+buttons are wired to prefill jobs only, `ui/detail/DetailController.kt`),
+so it is a fidelity gap in the demo model's direct-repository surface, not
+a UI-reachable bug — recorded beside the other documented gaps (the
+non-atomic settings patch, the "Check & update" outcome coverage) rather
+than silently.
+
+Re-verified after all of the above (`--rerun-tasks`, so every task
+actually re-executed rather than reporting a stale `UP-TO-DATE`):
+
+```
+$ ./gradlew.bat assembleDebug testDebugUnitTest testReleaseUnitTest lintDebug --console=plain --rerun-tasks
+...
+BUILD SUCCESSFUL in 2m 42s
+74 actionable tasks: 74 executed
+```
+
+`611/0/0` across both `testDebugUnitTest` and `testReleaseUnitTest` (612
+from round 2, minus 1: the two round-2 banner tests in `DemoModeUiWiringTest`
+were replaced by one stronger merged test); `assembleDebug` succeeded;
+`app/app/build/reports/lint-results-debug.txt`: "No issues found."
+
+**What only a device can settle, unchanged from every earlier round:** no
+emulator exists in this environment. Nothing in this WP — the banner's
+actual on-screen placement/contrast, the rotation fix's behaviour on a
+real configuration change, the onboarding skip-link's layout — has been
+seen rendered. Every claim in this file is a source-level, build-level, or
+test-level claim, stated as such.
+
+### Review round 4 (Opus, PASS — two fixes addressed, one limitation recorded)
+
+The reviewer disassembled the pinned `material3-android:1.3.1` AAR to check
+round 3's `ModalBottomSheet` refactor rather than take it on trust, and
+confirmed the mechanism directly: `ModalBottomSheet`'s content lambda runs
+inside Material3's own plain (non-scrolling) Column, with no
+`verticalScroll`/`scrollable`/`ScrollKt.*` anywhere in the whole
+`ModalBottomSheet*` class family, so the banner and each `*SheetBody()`
+call are genuine siblings in a non-scrolling parent. It also worked
+through nested scroll, drag-to-expand, and an oversized body case neither
+of us had named, and concluded round 3's refactor is not just passing its
+own pin but is a better design than round 2's (the framework's own
+non-scrolling scope, in the public composable, removing the helper hiding
+place — a case of the test shaping the code toward the property rather
+than merely checking for it after the fact).
+
+**Fix 1 — the merged banner pin had a real, if benign-direction, coverage
+gap.** It counted bare `DemoModeBanner()` occurrences; round 2's version
+had required the literal guarded form. Measured: replacing the guarded
+call in `DownloadsScreen.kt` with an unguarded `DemoModeBanner()` still
+built green, 611/611 — which would ship a permanent banner to a REAL
+connected user. **Fixed**: the pin now separately counts the GUARDED
+literal `if (demoMode) DemoModeBanner()` (must be exactly 1) alongside the
+raw count (also must be exactly 1, so the two must be the SAME call).
+Reproduced and killed the reviewer's exact mutation, then reverted:
+
+```
+DemoModeUiWiringTest > MUTATION PIN -- the demo mode banner appears exactly
+once, GUARDED, per screen, directly in the screen's own top-level
+composable, outside any scrolling container FAILED
+```
+
+`Violations: [.../DownloadsScreen.kt: expected the ONE DemoModeBanner()
+call to be guarded as 'if (demoMode) DemoModeBanner()', found 0 such
+guarded occurrence(s) against 1 total call(s) -- an unguarded
+DemoModeBanner() would render on a REAL connected user's screen]`.
+
+**Fix 2 — the allowlist's own KDoc attributed its residual to only ONE
+mechanism (unlisted prefix families), and the reviewer found a second,
+structurally different one.** `ProcessBuilder("/system/bin/ping", ...).start()`
+and `Runtime.getRuntime().exec(...)`, added to `DemoClientsRepository.list()`,
+both build and run clean — 611 tests, zero failures. Kotlin's implicit
+imports (`java.lang.*`, `kotlin.*`) make these reachable with NO dotted
+name at all, so `QUALIFIED_NAME`'s two-segment requirement never sees
+either: `ProcessBuilder(` is a bare constructor call, and `Runtime.getRuntime`
+is rooted at `Runtime`, not `java.`. This is the technique's structural
+ceiling, not a missing list entry — no amount of adding prefixes closes
+it, and an identifier denylist (`"ProcessBuilder"`, `"Runtime"`, ...) would
+only be a third instance of the exact defect class this file's own history
+already shows twice (round 2's seven-spelling denylist, round 3's missing
+`javax.`/`android.`). **Documented, not coded around**, per the
+coordinator's explicit instruction: the class KDoc now names implicit
+imports as a second, unfixable mechanism, with `ProcessBuilder`/
+`Runtime.getRuntime` as the concrete instances. Independently reproduced
+(not just quoted from the review) before writing the KDoc: added both
+lines to `DemoClientsRepository.list()`, ran the full debug suite —
+
+```
+$ ./gradlew.bat testDebugUnitTest
+...
+BUILD SUCCESSFUL
+```
+
+611 tests, 0 failures, 0 errors (summed from the XML reports) — matching
+the reviewer's own measurement exactly — then reverted.
+
+**Recorded, not fixed:** the reviewer's whole `ModalBottomSheet`
+non-scrolling-Column argument (F2's fix, round 3) is specific to the
+pinned `material3-android:1.3.1`. A future Compose Material3 version bump
+that made sheet content scrollable internally would silently reintroduce
+the exact defect B2 fixed, with no pin in this WP able to see it — the
+structural pin checks the SOURCE TEXT of this app's own files, not the
+library's behaviour, so a library-side regression is invisible to it by
+construction. Added beside the device-only items in the "what only a
+device can settle" note above: this is a version-coupled guarantee,
+undocumented until now, which is exactly how this class of defect returns
+in a year.
+
+Re-verified after both fixes (`--rerun-tasks`, all 74 tasks actually
+executed):
+
+```
+$ ./gradlew.bat assembleDebug testDebugUnitTest testReleaseUnitTest lintDebug --console=plain --rerun-tasks
+...
+BUILD SUCCESSFUL in 1m 35s
+74 actionable tasks: 74 executed
+```
+
+`611/0/0` across both `testDebugUnitTest` and `testReleaseUnitTest`
+(unchanged count from round 3 — Fix 1 strengthened an existing test in
+place rather than adding one; Fix 2 is KDoc-only); `assembleDebug`
+succeeded; `app/app/build/reports/lint-results-debug.txt`: "No issues
+found."
+
+**What only a device can settle, unchanged and now also covering one more
+claim:** no emulator exists in this environment, so the banner's actual
+on-screen placement — full-bleed across the sheet's width rather than
+inset, per the reviewer's own framing — the rotation fix's real-device
+behaviour, and every other visual claim in this WP remain unconfirmed by
+sight. Every claim in this file is a source-level, build-level, or
+test-level claim, stated as such, now including the Material3-version
+coupling immediately above.

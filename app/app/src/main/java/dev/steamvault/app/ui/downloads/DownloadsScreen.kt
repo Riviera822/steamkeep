@@ -40,6 +40,7 @@ import dev.steamvault.app.R
 import dev.steamvault.app.net.model.JobSummary
 import dev.steamvault.app.repo.GamesRepository
 import dev.steamvault.app.repo.JobsRepository
+import dev.steamvault.app.ui.demo.DemoModeBanner
 import dev.steamvault.app.ui.downloads.logic.ExcerptState
 import dev.steamvault.app.ui.downloads.logic.HistoryRowModel
 import dev.steamvault.app.ui.downloads.logic.JobCardModel
@@ -86,6 +87,7 @@ fun DownloadsScreen(
     jobsRepository: JobsRepository,
     gamesRepository: GamesRepository,
     onJobsSnapshot: (List<JobSummary>) -> Unit = {},
+    demoMode: Boolean,
 ) {
     val scope = rememberCoroutineScope()
     val resources = LocalContext.current.resources
@@ -148,6 +150,7 @@ fun DownloadsScreen(
         },
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+            if (demoMode) DemoModeBanner()
             controller.loadError?.let { error ->
                 Text(
                     text = stringResource(R.string.downloads_load_error, error),
