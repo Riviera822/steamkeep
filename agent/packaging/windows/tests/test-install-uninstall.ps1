@@ -138,15 +138,71 @@ try {
     Remove-Item $usageErrOut, $usageErrErr -Force -ErrorAction SilentlyContinue
 
     # ---- 2. -WhatIf leaves no trace -------------------------------------
-    & $installScript -AgentPath $AgentExe -ServerUrl $ServerUrl -ApiKeyFile $ApiKeyFilePath `
-        -ConfigDir $ConfigDir -TaskName $TaskName -IntervalMinutes 30 -WhatIf | Out-Null
+    #
+    # *>&1 merges Write-Host's Information-stream output into the success
+    # stream so it can be captured as text -- this is a PowerShell SCRIPT
+    # being invoked, not a native executable, so this does not hit the
+    # "2>&1 wraps native stderr in NativeCommandError" pitfall
+    # docs/LEARNINGS.md warns about (that is specific to native commands'
+    # own stderr; install-task.ps1's internal icacls call handles its own
+    # exit code, it does not rely on stream redirection).
+    $whatIfOutput = & $installScript -AgentPath $AgentExe -ServerUrl $ServerUrl -ApiKeyFile $ApiKeyFilePath `
+        -ConfigDir $ConfigDir -TaskName $TaskName -IntervalMinutes 30 -WhatIf *>&1 | Out-String
 
     CheckTrue "-WhatIf: no task registered" ((Get-TestTask) -eq $null)
     CheckTrue "-WhatIf: no env file written" (-not (Test-Path -LiteralPath (Join-Path $ConfigDir "env.txt")))
 
+    # ---- 2b. client-id preview when -ClientId is OMITTED (WP AG-0) --------
+    #
+    # No -ClientId was passed above -- the summary must plainly say a
+    # hostname-derived id will be used, name the real hostname, and point at
+    # -ClientId / the agent's own log as the ways to get the exact value.
+    # -WhatIf is enough for this: the summary block always prints,
+    # regardless of ShouldProcess (nothing here depends on a filesystem
+    # mutation), so this is $0 extra cost against the harness's TaskName.
+    #
+    # S2 (review round 1): the preview must read [System.Net.Dns]::
+    # GetHostName(), NOT $env:COMPUTERNAME -- Windows uppercases
+    # COMPUTERNAME, but go/agentconfig's os.Hostname() preserves real case,
+    # so a COMPUTERNAME-based preview can show a DIFFERENT string than the
+    # id vault-agent actually resolves. -like/-notlike are CASE-INSENSITIVE
+    # in PowerShell, so they cannot tell "DEMON" from "Demon" -- this
+    # regression needs -clike/-cnotlike (case-sensitive) or it silently
+    # passes either way, which is exactly how this defect shipped unnoticed
+    # in round 1.
+    $dnsHostName = [System.Net.Dns]::GetHostName()
+    CheckTrue "client-id preview shows the real hostname, EXACT case (S2 regression pin)" (
+        $whatIfOutput -clike "*$dnsHostName*"
+    )
+    CheckTrue "client-id preview says a name will be derived" ($whatIfOutput -like "*derive*")
+    CheckTrue "client-id preview names -ClientId as the override" ($whatIfOutput -like "*-ClientId*")
+    if ($env:COMPUTERNAME -cne $dnsHostName) {
+        # This host's COMPUTERNAME happens to differ in case from its DNS
+        # hostname right now -- a case-SENSITIVE check that the wrong
+        # (uppercased) form is absent is meaningful here. On a host where
+        # they already match, this assertion would prove nothing either
+        # way, so it is skipped rather than faked.
+        CheckTrue "client-id preview does NOT show the case-mismatched `$env:COMPUTERNAME form" (
+            $whatIfOutput -cnotlike "*$env:COMPUTERNAME*"
+        )
+    } else {
+        Pass "client-id preview case-mismatch pin skipped (COMPUTERNAME already matches DNS hostname case on this host)"
+    }
+
     # ---- 3. real install -------------------------------------------------
-    & $installScript -AgentPath $AgentExe -ServerUrl $ServerUrl -ApiKeyFile $ApiKeyFilePath `
-        -ClientId "wp26-harness" -ConfigDir $ConfigDir -TaskName $TaskName -IntervalMinutes 30 | Out-Null
+    $installOutput = & $installScript -AgentPath $AgentExe -ServerUrl $ServerUrl -ApiKeyFile $ApiKeyFilePath `
+        -ClientId "wp26-harness" -ConfigDir $ConfigDir -TaskName $TaskName -IntervalMinutes 30 *>&1 | Out-String
+
+    # ---- 3b. client-id preview when -ClientId is GIVEN (WP AG-0) ----------
+    CheckTrue "client-id preview shows the explicit value" ($installOutput -like "*wp26-harness*")
+    CheckTrue "client-id preview marks it explicit" ($installOutput -like "*explicit*")
+    # N2 (review round 1): the preview must say the explicit value becomes
+    # VAULT_AGENT_CLIENT_ID and that vault-agent's own log will therefore
+    # show client_id_source=env (never =flag), so the -ClientId parameter
+    # name and the agent's own log line don't read as contradicting each
+    # other.
+    CheckTrue "client-id preview says it becomes VAULT_AGENT_CLIENT_ID" ($installOutput -like "*VAULT_AGENT_CLIENT_ID*")
+    CheckTrue "client-id preview flags the resulting client_id_source=env" ($installOutput -like "*client_id_source=env*")
 
     $task = Get-TestTask
     CheckTrue "task exists after install" ($task -ne $null)

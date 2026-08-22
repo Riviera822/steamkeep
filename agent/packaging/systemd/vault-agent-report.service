@@ -41,6 +41,24 @@ Type=oneshot
 # construction, not by agentconfig's own validation as a second line of
 # defense.
 EnvironmentFile=%h/.config/vault-agent/env
+
+# WP AG-0: this machine's identity to vault-api (its "client id") defaults
+# to a sanitized version of the local hostname if never set — see
+# go/agentconfig's defaultClientID and agent/README.md's "Client identity
+# and renaming" section for exactly what that means and why renaming later
+# is not free (a new client id is a NEW identity server-side, and the OLD
+# one keeps showing up in GET /v1/clients forever — there is no delete
+# endpoint yet). Uncomment the line below, OR add the same key to
+# %h/.config/vault-agent/env instead — but not for the same reason as a
+# flag-vs-env choice on the agent's own command line: if BOTH set
+# VAULT_AGENT_CLIENT_ID, systemd.exec(5) is explicit that "settings from
+# these files [EnvironmentFile=] override settings made with
+# Environment=" regardless of which directive appears first in this unit
+# — so the env file always wins over this line, verified against
+# `man systemd.exec`. Pick exactly one of the two, or expect the env
+# file's value to be the one that actually applies:
+#Environment=VAULT_AGENT_CLIENT_ID=steam-deck-01
+
 ExecStart=%h/.local/bin/vault-agent report
 
 # Hardening notes (deliberately NOT more aggressive than this):

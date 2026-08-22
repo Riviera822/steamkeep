@@ -437,16 +437,64 @@ spending a round trip on the 422 the server would return anyway.
 **`--interval`** must be a positive Go duration (`"30m"`, `"1h"`, ...).
 
 **Default `--client-id`:** the local hostname (`os.Hostname()`), trimmed,
-with any control character replaced by `-`, truncated to 64 characters. If
+with any non-printable character replaced by `-`, truncated to 64
+characters. If
 `os.Hostname()` fails, or the sanitized result is empty / `.` / `..`,
 config parsing fails loudly with an actionable message rather than
 silently falling back to some placeholder value — set `--client-id`
 explicitly in that case.
 
+**The choice is visible, not silent (WP AG-0):** every `report` run logs
+one startup line naming the resolved `client_id` **and where it came
+from** — `client_id_source=flag`, `env`, or `derived-from-hostname` — plus
+a `client_id_note` field: for an explicit flag/env value, which one; for a
+derived value, a plain "override with `--client-id` or
+`VAULT_AGENT_CLIENT_ID`" hint; and if sanitizing actually changed the
+hostname (a non-printable character replaced, or truncation past 64
+characters), the original hostname and what it became. Before this, an
+install with no explicit client id silently committed a machine to a
+hostname-derived identity with no indication — at install time or in the
+log — that a name was even being picked, or that it could differ from the
+raw hostname. See "Windows Scheduled Task" and "systemd packaging" below
+for where each install path surfaces this same choice.
+
 **Missing/invalid configuration fails loudly** (`go/agentconfig`): every
 problem found (not just the first one) is collected into one error report,
 printed to stderr, and the process exits **2** without attempting any
 discovery or network call.
+
+### Client identity and renaming (WP AG-0)
+
+`client_id` is not a cosmetic label — vault-api treats it as a **persisted
+identity key**. `agent_reports` rows are keyed on it, and every later
+report is diffed against that same client's previous one (see
+`api/README.md`'s "Agent reports" section) to derive `added`/`removed`.
+That has a direct, honest consequence for renaming:
+
+- **Changing `client_id`** (via `--client-id`/`VAULT_AGENT_CLIENT_ID`, or
+  by letting the derived hostname change — e.g. renaming the PC) makes
+  vault-api see a **brand-new client**, not a renamed one. The new id
+  starts its own report history from scratch; it does not inherit
+  anything from the old one.
+- **The old id's row does not go away.** `GET /v1/clients` is read-only —
+  there is no delete/rename endpoint today — so the old client id keeps
+  appearing in that list indefinitely, showing whatever its last report
+  was.
+- **It does stop being acted on**, though: vault-api's scheduler excludes
+  a client from its prefill-target sweep once that client's newest report
+  is older than the configured staleness window
+  (`compute_targets` in `api/vault_api/scheduler.py`) — so a renamed-away
+  client's old identity stops influencing what gets prefilled. It simply
+  keeps being **listed** as a client that once existed, not acted on.
+
+**What this means in practice:** treat `client_id` as a name you set once
+and keep — a bare-metal reinstall of Windows/Steam is fine (games are
+rediscovered under the same library, same client id, same history), but
+renaming the client id on a whim leaves a ghost row behind that nothing in
+this project can currently clean up. Removing it is a known gap; a
+`DELETE` endpoint for stale client rows (touching `api/`) is the planned
+follow-up package — **AG-1** — not yet implemented as of this writing.
+Nothing here promises cleanup that does not exist.
 
 ### Exit codes
 
@@ -997,6 +1045,17 @@ chmod +x ~/.local/bin/vault-agent
 mkdir -p ~/.config/systemd/user
 cp agent/packaging/systemd/vault-agent-report.service ~/.config/systemd/user/
 cp agent/packaging/systemd/vault-agent-report.timer   ~/.config/systemd/user/
+#    vault-agent-report.service ships a commented-out
+#    "#Environment=VAULT_AGENT_CLIENT_ID=..." line (WP AG-0) right above
+#    ExecStart=, documenting this same choice at the same place as the
+#    example below: leave it commented to let vault-agent derive an id
+#    from this machine's hostname, or set VAULT_AGENT_CLIENT_ID in EXACTLY
+#    ONE place - either uncomment that line, or set it in step 3's env
+#    file below, not both: if both set it, the env file always wins
+#    (systemd.exec(5): EnvironmentFile= settings override Environment=,
+#    regardless of which appears first in the unit).
+#    See "Client identity and renaming" above for what changing it later
+#    does and does not do.
 
 # 3. Secret: the env file EnvironmentFile= points at, mode 600 (this is
 #    where VAULT_AGENT_API_KEY actually lives - NEVER in the unit file,
@@ -1430,6 +1489,18 @@ agent/packaging/windows/
 | `env.txt` | `VAULT_AGENT_SERVER_URL`/`VAULT_AGENT_API_KEY`/etc., owner-only ACL (see above) |
 | `run-vault-agent.ps1` | a deployed copy of the wrapper script, so the installed task does not depend on this repo checkout still existing at its original path |
 | `vault-agent.log` (created on first run) | appended stdout+stderr from every `report` invocation — Windows Scheduled Tasks have no built-in per-run log the way `journalctl --user -u ...` gives WP 2.5 for free |
+
+`install-task.ps1`'s summary output also always states the client id
+situation (WP AG-0): given `-ClientId`, it echoes that value back marked
+`(explicit -ClientId)`; omitted, it prints this machine's raw hostname and
+says plainly that vault-agent will derive an id from it, plus how to
+override that with `-ClientId`. This is a preview only — it deliberately
+does not re-implement `go/agentconfig`'s sanitizing rules in PowerShell
+(a second, drifting implementation could show a confidently wrong name);
+`vault-agent`'s own startup log line (captured into `-LogFile`, see
+"Configuration" above) is the authoritative source for the id actually in
+use. See "Client identity and renaming" above for what changing it later
+does and does not do.
 
 plus the Scheduled Task itself (`VaultAgentReport` by default): one
 `-Once` trigger with `-RepetitionInterval` = `-IntervalMinutes` (default

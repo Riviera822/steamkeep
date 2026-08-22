@@ -298,58 +298,218 @@ func TestConfig_RedactedNeverExposesAPIKey(t *testing.T) {
 
 func TestDefaultClientID_SanitizesAndTruncates(t *testing.T) {
 	longName := strings.Repeat("x", 100)
-	got, err := defaultClientID(func() (string, error) { return longName, nil })
+	got, note, err := defaultClientID(func() (string, error) { return longName, nil })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len([]rune(got)) != 64 {
 		t.Errorf("len(got) = %d, want truncated to 64", len([]rune(got)))
 	}
+	if note == "" {
+		t.Error("note = \"\", want a non-empty note when truncation changed the hostname")
+	}
+	if !strings.Contains(note, longName) || !strings.Contains(note, got) {
+		t.Errorf("note = %q, want it to mention both the original hostname and the truncated id", note)
+	}
 }
 
 func TestDefaultClientID_ReplacesControlCharacters(t *testing.T) {
-	got, err := defaultClientID(func() (string, error) { return "pc\nname", nil })
+	got, note, err := defaultClientID(func() (string, error) { return "pc\nname", nil })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if strings.ContainsRune(got, '\n') {
 		t.Errorf("got = %q, still contains a control character", got)
 	}
+	if note == "" {
+		t.Error("note = \"\", want a non-empty note when rune replacement changed the hostname")
+	}
 }
 
 func TestDefaultClientID_ReplacesInvisibleFormatCharacters(t *testing.T) {
 	// S1: unicode.IsPrint (not just IsControl) is required to catch these -
 	// a zero-width joiner is category Cf, not Cc.
-	got, err := defaultClientID(func() (string, error) { return "pc‍name", nil }) // ZWJ
+	got, note, err := defaultClientID(func() (string, error) { return "pc‍name", nil }) // ZWJ
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if strings.ContainsRune(got, '‍') {
 		t.Errorf("got = %q, still contains a zero-width joiner", got)
 	}
+	if note == "" {
+		t.Error("note = \"\", want a non-empty note when a ZWJ was replaced")
+	}
 }
 
 func TestDefaultClientID_TrimsWhitespace(t *testing.T) {
-	got, err := defaultClientID(func() (string, error) { return "  gaming-pc  ", nil })
+	got, note, err := defaultClientID(func() (string, error) { return "  gaming-pc  ", nil })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got != "gaming-pc" {
 		t.Errorf("got = %q, want trimmed", got)
 	}
+	// Plain surrounding whitespace is not the kind of change the note is
+	// for (no rune was replaced, nothing was truncated) - comparing against
+	// the ALREADY-TRIMMED hostname, not the raw one, is what keeps this
+	// case quiet. See TestDefaultClientID_SanitizedNote_EmptyWhenHostnameUnchanged.
+	if note != "" {
+		t.Errorf("note = %q, want empty for a hostname that only needed trimming", note)
+	}
 }
 
 func TestDefaultClientID_HostnameErrorIsPropagated(t *testing.T) {
-	_, err := defaultClientID(func() (string, error) { return "", errHostname })
+	_, _, err := defaultClientID(func() (string, error) { return "", errHostname })
 	if err == nil {
 		t.Fatal("expected an error when os.Hostname fails")
 	}
 }
 
 func TestDefaultClientID_EmptyAfterSanitizingIsAnError(t *testing.T) {
-	_, err := defaultClientID(func() (string, error) { return "   ", nil })
+	_, _, err := defaultClientID(func() (string, error) { return "   ", nil })
 	if err == nil {
 		t.Fatal("expected an error for a hostname that sanitizes to empty")
+	}
+}
+
+func TestDefaultClientID_SanitizedNote_EmptyWhenHostnameUnchanged(t *testing.T) {
+	got, note, err := defaultClientID(func() (string, error) { return "gaming-pc", nil })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "gaming-pc" {
+		t.Errorf("got = %q, want the hostname unchanged", got)
+	}
+	if note != "" {
+		t.Errorf("note = %q, want empty when nothing about the hostname needed changing", note)
+	}
+}
+
+// --- WP AG-0: client-id source attribution (flag vs env vs derived), and
+// the sanitization-changed-it case surfacing through Parse()/build() as
+// Config.ClientIDSource/Config.ClientIDNote - the path an actual operator
+// observes via cmd/vault-agent's startup log line, mirroring the
+// LibraryRootProbeNote tests above.
+
+func TestParse_ClientIDSource_ExplicitFlag(t *testing.T) {
+	cfg, err := parseDiscard([]string{
+		"--server-url", "http://h:1", "--api-key", "k", "--client-id", "gaming-pc",
+	}, emptyEnv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ClientIDSource != ClientIDSourceFlag {
+		t.Errorf("ClientIDSource = %q, want %q", cfg.ClientIDSource, ClientIDSourceFlag)
+	}
+	if !strings.Contains(cfg.ClientIDNote, "--client-id") {
+		t.Errorf("ClientIDNote = %q, want it to mention --client-id", cfg.ClientIDNote)
+	}
+}
+
+func TestParse_ClientIDSource_ExplicitEnv(t *testing.T) {
+	env := envMap(map[string]string{EnvClientID: "env-client"})
+	cfg, err := parseDiscard([]string{"--server-url", "http://h:1", "--api-key", "k"}, env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ClientID != "env-client" {
+		t.Fatalf("ClientID = %q, want the env value", cfg.ClientID)
+	}
+	if cfg.ClientIDSource != ClientIDSourceEnv {
+		t.Errorf("ClientIDSource = %q, want %q", cfg.ClientIDSource, ClientIDSourceEnv)
+	}
+	if !strings.Contains(cfg.ClientIDNote, EnvClientID) {
+		t.Errorf("ClientIDNote = %q, want it to mention %s", cfg.ClientIDNote, EnvClientID)
+	}
+}
+
+func TestParse_ClientIDSource_ExplicitFlagWinsOverEnv(t *testing.T) {
+	env := envMap(map[string]string{EnvClientID: "env-client"})
+	cfg, err := parseDiscard([]string{
+		"--server-url", "http://h:1", "--api-key", "k", "--client-id", "flag-client",
+	}, env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ClientID != "flag-client" {
+		t.Errorf("ClientID = %q, want the flag value to win", cfg.ClientID)
+	}
+	if cfg.ClientIDSource != ClientIDSourceFlag {
+		t.Errorf("ClientIDSource = %q, want %q", cfg.ClientIDSource, ClientIDSourceFlag)
+	}
+}
+
+func TestParse_ClientIDSource_Derived(t *testing.T) {
+	orig := hostnameFunc
+	hostnameFunc = func() (string, error) { return "test-host-01", nil }
+	defer func() { hostnameFunc = orig }()
+
+	cfg, err := parseDiscard([]string{"--server-url", "http://h:1", "--api-key", "k"}, emptyEnv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ClientIDSource != ClientIDSourceDerived {
+		t.Errorf("ClientIDSource = %q, want %q", cfg.ClientIDSource, ClientIDSourceDerived)
+	}
+	if !strings.Contains(cfg.ClientIDNote, "--client-id") || !strings.Contains(cfg.ClientIDNote, EnvClientID) {
+		t.Errorf("ClientIDNote = %q, want it to explain how to override the derived id", cfg.ClientIDNote)
+	}
+	if strings.Contains(cfg.ClientIDNote, "sanitized") {
+		t.Errorf("ClientIDNote = %q, want no sanitization mention for an already-clean hostname", cfg.ClientIDNote)
+	}
+}
+
+// TestParse_ClientIDSource_DerivedFromPaddedHostnameIsNotFlaggedSanitized
+// pins the "plain trim is not sanitizing" rule (see
+// TestDefaultClientID_TrimsWhitespace's unit-level version) at the layer an
+// operator actually observes it: Config.ClientIDNote via Parse(), not just
+// defaultClientID() in isolation. N3 (review round 1): this is exactly the
+// layer the WP AG-0 "changed-ness" comparison could regress at without a
+// unit test noticing, e.g. if build() ever grew its own second comparison
+// between the raw and derived values instead of using defaultClientID's
+// note verbatim.
+func TestParse_ClientIDSource_DerivedFromPaddedHostnameIsNotFlaggedSanitized(t *testing.T) {
+	orig := hostnameFunc
+	hostnameFunc = func() (string, error) { return "  padded  ", nil }
+	defer func() { hostnameFunc = orig }()
+
+	cfg, err := parseDiscard([]string{"--server-url", "http://h:1", "--api-key", "k"}, emptyEnv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ClientID != "padded" {
+		t.Fatalf("ClientID = %q, want the trimmed hostname", cfg.ClientID)
+	}
+	if cfg.ClientIDSource != ClientIDSourceDerived {
+		t.Errorf("ClientIDSource = %q, want %q", cfg.ClientIDSource, ClientIDSourceDerived)
+	}
+	if strings.Contains(cfg.ClientIDNote, "sanitized") {
+		t.Errorf("ClientIDNote = %q, want no sanitization mention for a hostname that only needed trimming", cfg.ClientIDNote)
+	}
+}
+
+func TestParse_ClientIDSource_DerivedAndSanitized(t *testing.T) {
+	orig := hostnameFunc
+	hostnameFunc = func() (string, error) { return "office\tpc", nil } // tab: non-printable, gets replaced
+	defer func() { hostnameFunc = orig }()
+
+	cfg, err := parseDiscard([]string{"--server-url", "http://h:1", "--api-key", "k"}, emptyEnv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ClientIDSource != ClientIDSourceDerived {
+		t.Errorf("ClientIDSource = %q, want %q", cfg.ClientIDSource, ClientIDSourceDerived)
+	}
+	// %q-escapes the tab (as \t) rather than embedding a literal one - check
+	// for the escaped form actually produced.
+	if !strings.Contains(cfg.ClientIDNote, `office\tpc`) {
+		t.Errorf("ClientIDNote = %q, want it to name the original hostname", cfg.ClientIDNote)
+	}
+	if !strings.Contains(cfg.ClientIDNote, cfg.ClientID) {
+		t.Errorf("ClientIDNote = %q, want it to name the resulting client id %q", cfg.ClientIDNote, cfg.ClientID)
+	}
+	if !strings.Contains(cfg.ClientIDNote, "--client-id") || !strings.Contains(cfg.ClientIDNote, EnvClientID) {
+		t.Errorf("ClientIDNote = %q, want it to still explain how to override", cfg.ClientIDNote)
 	}
 }
 

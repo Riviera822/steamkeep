@@ -118,8 +118,16 @@ func runReport(args []string, stdout, stderr io.Writer) int {
 	}
 
 	redacted := cfg.Redacted()
-	logger.Printf("vault-agent starting server_url=%q client_id=%q library_root=%q loop=%v report_interval=%s api_key=%s",
-		redacted.ServerURL, redacted.ClientID, redacted.LibraryRoot, redacted.Loop, redacted.ReportInterval, redacted.APIKey)
+	// client_id_source/client_id_note (WP AG-0) make the id's provenance
+	// visible on the SAME line as the id itself - "derived-from-hostname"
+	// plus a note telling the operator how to override it, or (when
+	// sanitizing actually changed the hostname) what it became and why -
+	// rather than a bare value that looks identical whether it was chosen
+	// or silently inherited. Both fields are built entirely in
+	// agentconfig.build()/defaultClientID(); nothing here re-derives them.
+	logger.Printf("vault-agent starting server_url=%q client_id=%q client_id_source=%s client_id_note=%q library_root=%q loop=%v report_interval=%s api_key=%s",
+		redacted.ServerURL, redacted.ClientID, redacted.ClientIDSource, redacted.ClientIDNote,
+		redacted.LibraryRoot, redacted.Loop, redacted.ReportInterval, redacted.APIKey)
 
 	// WP 2.5 S2 (review): LibraryRootProbeNote is only ever non-empty when
 	// LibraryRoot is an UNCONFIRMED Linux fallback guess (none of the

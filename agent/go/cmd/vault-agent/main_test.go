@@ -194,6 +194,73 @@ func TestRun_ConfigErrorDoesNotLeakAPIKey(t *testing.T) {
 	}
 }
 
+// --- WP AG-0: the startup log line must show client_id's PROVENANCE, not
+// just its value - an operator reading the log needs to see whether the
+// id was their explicit choice or a silently-inherited hostname default.
+
+func TestRun_StartupLogShowsExplicitClientIDSource(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"client_id":"test-pc","received":0,"added":[],"removed":[],"first_report":true}`))
+	}))
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"report",
+		"--server-url", srv.URL,
+		"--api-key", "test-key",
+		"--client-id", "test-pc",
+		"--library-root", t.TempDir(),
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0. stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "client_id_source=flag") {
+		t.Errorf("stderr = %q, want the startup line to show client_id_source=flag", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--client-id") {
+		t.Errorf("stderr = %q, want the startup line to name --client-id as the explicit source", stderr.String())
+	}
+}
+
+// TestRun_StartupLogShowsDerivedClientIDAndOverrideHint is the case the
+// whole WP exists for: no --client-id/VAULT_AGENT_CLIENT_ID given at all,
+// so vault-agent falls back to the sanitized local hostname. The log line
+// must say so AND say how to choose a different one - this is exactly the
+// invisibility the brief calls out ("nothing at install time or run time
+// tells the user what name this machine will report under").
+func TestRun_StartupLogShowsDerivedClientIDAndOverrideHint(t *testing.T) {
+	// Force the env var empty regardless of what the host running this test
+	// happens to have set - t.Setenv restores the prior value on cleanup.
+	t.Setenv(agentconfig.EnvClientID, "")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"client_id":"whatever","received":0,"added":[],"removed":[],"first_report":true}`))
+	}))
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"report",
+		"--server-url", srv.URL,
+		"--api-key", "test-key",
+		// no --client-id, no VAULT_AGENT_CLIENT_ID set: forces the
+		// hostname-derived path this test targets.
+		"--library-root", t.TempDir(),
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0. stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "client_id_source=derived-from-hostname") {
+		t.Errorf("stderr = %q, want the startup line to show client_id_source=derived-from-hostname", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--client-id") || !strings.Contains(stderr.String(), agentconfig.EnvClientID) {
+		t.Errorf("stderr = %q, want the startup line to say how to override the derived id", stderr.String())
+	}
+}
+
 func TestJitteredInterval_StaysWithinTenPercent(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	interval := 30 * time.Minute

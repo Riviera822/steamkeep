@@ -53,6 +53,63 @@
     is the secret content written  -  never a window where a default,
     possibly-inherited ACL exposes real content.
 
+    ### What this prints about the client id (WP AG-0)
+
+    vault-agent identifies this machine to vault-api with a "client id" that
+    is either given explicitly (-ClientId here, or --client-id/
+    VAULT_AGENT_CLIENT_ID on the agent itself) or, if nothing is given,
+    derived from the local hostname (go/agentconfig's defaultClientID,
+    sanitized and truncated to 64 characters). Before WP AG-0 this choice
+    was invisible: an install with no -ClientId silently committed the
+    machine to a hostname-derived identity with no install-time indication
+    that a name was even being picked, or that it could have been chosen
+    differently.
+
+    This script's summary output (bottom) now always states which case
+    applies:
+      - -ClientId given: the exact value, that it was explicit, and that it
+        is passed to the agent as VAULT_AGENT_CLIENT_ID (via the env file,
+        not the task's command line -- see "Where the API key lives"
+        above) -- so a look at vault-agent's own log afterward correctly
+        shows client_id_source=env, never =flag, even though this script's
+        own parameter is named -ClientId.
+      - -ClientId omitted: this machine's hostname from
+        [System.Net.Dns]::GetHostName() (NOT $env:COMPUTERNAME -- see the
+        case-sensitivity note below) plus a plain statement that
+        vault-agent will derive a (possibly sanitized) client id from it,
+        and how to override that with -ClientId.
+
+    This is a preview, not a guarantee of the final value: this script
+    deliberately does NOT re-implement go/agentconfig's sanitizing rules in
+    PowerShell (see -ClientId's own parameter doc for why -- a second,
+    drifting implementation could confidently show the WRONG name). For
+    almost every real hostname the shown value and the resolved one are
+    identical (sanitizing only touches non-printable characters or names
+    over 64 characters); vault-agent's own startup log line (captured by
+    run-vault-agent.ps1 into the -LogFile this script configures --
+    client_id=... client_id_source=... client_id_note=...) is the
+    authoritative source of truth for the exact value in use, unlike this
+    preview.
+
+    ### Case-sensitivity note (review round 1, WP AG-0)
+
+    This preview reads [System.Net.Dns]::GetHostName() deliberately, NOT
+    $env:COMPUTERNAME: Windows uppercases the NetBIOS-style COMPUTERNAME
+    variable (e.g. a machine actually named "Demon" reports COMPUTERNAME
+    as "DEMON"), while go/agentconfig reads os.Hostname(), which on
+    Windows resolves the DNS host name and preserves the real case exactly
+    like hostname.exe and GetHostName() do. Since client_id is a
+    CASE-SENSITIVE persisted identity key server-side (see "Client
+    identity and renaming" in agent/README.md), a preview that showed the
+    wrong case would not just look different -- an operator who read
+    "DEMON" here and later pinned -ClientId DEMON explicitly would create
+    a second identity and a ghost row, exactly the harm that section
+    warns about. Verified directly: on the machine used to build this
+    package, $env:COMPUTERNAME, hostname.exe, and
+    [System.Net.Dns]::GetHostName() disagreed in exactly the way described
+    above; only the last one matched a real cross-built vault-agent.exe's
+    own resolved client_id.
+
 .PARAMETER AgentPath
     Full path to vault-agent.exe.
 
@@ -74,7 +131,17 @@
 
 .PARAMETER ClientId
     Optional VAULT_AGENT_CLIENT_ID value. Omitted -> vault-agent defaults to
-    the sanitized local hostname (go/agentconfig).
+    the sanitized local hostname (go/agentconfig). Either way, this script's
+    summary output (below) says plainly which one will happen and how to
+    change it -- see "What this prints about the client id" below.
+
+    NOTE (WP AG-0): when omitted, this script does NOT attempt to replicate
+    go/agentconfig's hostname-sanitizing rules (rune replacement, 64-char
+    truncation) here in PowerShell -- a second implementation of that logic
+    would drift from the real one and could confidently print the WRONG
+    sanitized name. It prints the raw, unsanitized hostname instead and
+    points at vault-agent's own startup log line (which logs the value it
+    actually resolved, plus its source) as the authoritative answer.
 
 .PARAMETER LibraryRoot
     Optional VAULT_AGENT_LIBRARY_ROOT value. Omitted -> vault-agent's own
@@ -318,6 +385,36 @@ Write-Host "  Config dir      : $ConfigDir"
 Write-Host "  Secret env file : $envFilePath (owner-only ACL, contains VAULT_AGENT_API_KEY)"
 Write-Host "  Wrapper script  : $runnerDestPath"
 Write-Host "  Log file        : $LogFile"
+
+# ---- client id visibility (WP AG-0) --------------------------------------
+#
+# Deliberately does NOT re-derive vault-agent's sanitized hostname here --
+# see -ClientId's parameter doc for why a second, drifting implementation of
+# go/agentconfig's rules would be worse than not previewing at all. This
+# either states the explicit value given, or shows the raw hostname plus an
+# honest "this is a preview, the agent's own log is authoritative" caveat.
+#
+# [System.Net.Dns]::GetHostName() is used here deliberately, NOT
+# $env:COMPUTERNAME (review round 1, WP AG-0 S2): COMPUTERNAME is uppercased
+# by Windows (e.g. a machine named "Demon" reports "DEMON"), while
+# go/agentconfig reads os.Hostname(), which preserves real case on Windows
+# just like this call and hostname.exe do -- see -ClientId's parameter doc
+# for the measured proof and why case matters here (client_id is a
+# case-sensitive persisted identity key).
+if ($ClientId) {
+    Write-Host "  Client id       : $ClientId (explicit -ClientId, passed to the agent as"
+    Write-Host "                    VAULT_AGENT_CLIENT_ID -- so vault-agent's own log will show"
+    Write-Host "                    client_id_source=env, not =flag)"
+} else {
+    $hostnamePreview = [System.Net.Dns]::GetHostName()
+    Write-Host "  Client id       : not given -> vault-agent will derive one from this machine's"
+    Write-Host "                    hostname ('$hostnamePreview'), sanitized to fit its rules"
+    Write-Host "                    (non-printable characters replaced, truncated to 64 chars)."
+    Write-Host "                    Pass -ClientId to choose a different one explicitly, or check"
+    Write-Host "                    $LogFile after the first run for the exact value vault-agent"
+    Write-Host "                    resolved (it logs client_id / client_id_source / client_id_note)."
+}
+
 Write-Host ""
 Write-Host "Verify:  Get-ScheduledTask -TaskName '$TaskName' | Get-ScheduledTaskInfo"
 Write-Host "Run now: Start-ScheduledTask -TaskName '$TaskName'"

@@ -47,11 +47,48 @@ const (
 	EnvInterval    = "VAULT_AGENT_REPORT_INTERVAL"
 )
 
+// Config.ClientIDSource values (WP AG-0: the resolved client id's
+// provenance must be visible, not just its value - see Config.ClientIDSource
+// and Config.ClientIDNote's doc comments).
+const (
+	ClientIDSourceFlag    = "flag"                  // --client-id was given
+	ClientIDSourceEnv     = "env"                   // VAULT_AGENT_CLIENT_ID was set, --client-id was not
+	ClientIDSourceDerived = "derived-from-hostname" // neither was given; sanitized os.Hostname() was used
+)
+
 // Config is vault-agent's fully validated, ready-to-use configuration.
 type Config struct {
-	ServerURL   string // e.g. "http://100.x.y.z:8080", no trailing slash
-	APIKey      string // NEVER logged - see Redacted() and cmd/vault-agent's logger
-	ClientID    string
+	ServerURL string // e.g. "http://100.x.y.z:8080", no trailing slash
+	APIKey    string // NEVER logged - see Redacted() and cmd/vault-agent's logger
+	ClientID  string
+
+	// ClientIDSource is one of the ClientIDSource* constants above: WHERE
+	// ClientID came from. WP AG-0: the mechanism that picks a client id
+	// (an explicit flag/env value, or a sanitized-hostname fallback) was
+	// already sound, but invisible - nothing told an operator reading the
+	// log which of the two happened, or that a different name could have
+	// been chosen. cmd/vault-agent logs this alongside ClientID itself at
+	// startup.
+	ClientIDSource string
+
+	// ClientIDNote is a short, human-readable, ALWAYS non-empty (once a
+	// Config is successfully built) description of ClientIDSource's
+	// reasoning, meant to be logged on the SAME line as ClientID:
+	//   - flag/env sources: which flag/env var was the explicit choice.
+	//   - derived source: that it came from this machine's hostname, PLUS
+	//     how to override it (--client-id or VAULT_AGENT_CLIENT_ID) -
+	//     since a hostname-derived id is exactly the case where the
+	//     operator likely didn't know they had a choice.
+	//   - derived source, when defaultClientID's sanitizing actually
+	//     changed the hostname (non-printable runes replaced, or
+	//     truncated to report.MaxClientIDLength): names the original
+	//     hostname and what it became, so e.g. a machine named "Joerg-PC"
+	//     with an unusual character sees the substitution instead of
+	//     silently getting a different id than its own hostname.
+	// Never contains anything secret - built entirely from the hostname
+	// and fixed strings, never from APIKey.
+	ClientIDNote string
+
 	LibraryRoot string
 	// LibraryRootProbeNote is non-empty exactly when LibraryRoot came from
 	// the Linux none-of-the-candidates-exist fallback guess (WP 2.5's
@@ -186,11 +223,19 @@ func build(spec flagSpec, getenv Getenv) (Config, error) {
 	}
 
 	clientID := spec.clientID
-	if clientID == "" {
+	var clientIDSource, clientIDNote string
+	if clientID != "" {
+		clientIDSource = ClientIDSourceFlag
+		clientIDNote = "explicit via --client-id"
+	} else {
 		clientID = getenv(EnvClientID)
+		if clientID != "" {
+			clientIDSource = ClientIDSourceEnv
+			clientIDNote = fmt.Sprintf("explicit via %s", EnvClientID)
+		}
 	}
 	if clientID == "" {
-		derived, derr := defaultClientID(hostnameFunc)
+		derived, sanitizedNote, derr := defaultClientID(hostnameFunc)
 		if derr != nil {
 			errs = append(errs, fmt.Sprintf(
 				"client-id not given and could not be derived from the local hostname (%s); "+
@@ -198,6 +243,14 @@ func build(spec flagSpec, getenv Getenv) (Config, error) {
 			))
 		} else {
 			clientID = derived
+			clientIDSource = ClientIDSourceDerived
+			if sanitizedNote != "" {
+				clientIDNote = fmt.Sprintf("%s; override with --client-id or %s", sanitizedNote, EnvClientID)
+			} else {
+				clientIDNote = fmt.Sprintf(
+					"derived from this machine's hostname; override with --client-id or %s", EnvClientID,
+				)
+			}
 		}
 	}
 	if clientID != "" {
@@ -246,6 +299,8 @@ func build(spec flagSpec, getenv Getenv) (Config, error) {
 		ServerURL:            serverURL,
 		APIKey:               apiKey,
 		ClientID:             clientID,
+		ClientIDSource:       clientIDSource,
+		ClientIDNote:         clientIDNote,
 		LibraryRoot:          libraryRoot,
 		LibraryRootProbeNote: libraryRootProbeNote,
 		ReportInterval:       interval,
@@ -282,15 +337,23 @@ var hostnameFunc = os.Hostname
 // sanitizing (report.ValidateClientID would reject those verbatim - this
 // function does not disagree with it, it just gives a clearer error
 // attributing the cause to hostname derivation specifically).
-func defaultClientID(hostname func() (string, error)) (string, error) {
+//
+// sanitizedNote is empty when the returned id is exactly the (whitespace-
+// trimmed) hostname, and non-empty - naming both the original hostname and
+// the id it became - whenever rune-replacement or truncation actually
+// changed something (WP AG-0: this is the ONLY place that knows both
+// values, so build() logs this text verbatim rather than re-deriving "did
+// sanitizing change anything" from the two strings itself, which would be
+// a second, driftable implementation of the same comparison).
+func defaultClientID(hostname func() (string, error)) (clientID string, sanitizedNote string, err error) {
 	name, err := hostname()
 	if err != nil {
-		return "", fmt.Errorf("os.Hostname failed: %w", err)
+		return "", "", fmt.Errorf("os.Hostname failed: %w", err)
 	}
-	name = strings.TrimSpace(name)
+	trimmed := strings.TrimSpace(name)
 
 	var b strings.Builder
-	for _, r := range name {
+	for _, r := range trimmed {
 		if !unicode.IsPrint(r) {
 			b.WriteRune('-')
 			continue
@@ -308,9 +371,16 @@ func defaultClientID(hostname func() (string, error)) (string, error) {
 	sanitized = strings.TrimSpace(string(runes)) // truncation could re-expose trailing whitespace
 
 	if sanitized == "" || sanitized == "." || sanitized == ".." {
-		return "", fmt.Errorf("hostname %q sanitizes to an unusable client-id %q", name, sanitized)
+		return "", "", fmt.Errorf("hostname %q sanitizes to an unusable client-id %q", name, sanitized)
 	}
-	return sanitized, nil
+
+	if sanitized != trimmed {
+		sanitizedNote = fmt.Sprintf(
+			"hostname %q was sanitized to %q (non-printable characters replaced with \"-\" and/or truncated to %d characters)",
+			name, sanitized, report.MaxClientIDLength,
+		)
+	}
+	return sanitized, sanitizedNote, nil
 }
 
 // defaultLibraryRoot returns the Steam install directory to use when
