@@ -7,6 +7,7 @@ const ENTRIES = [
   { key: "schedule_window", effective: null, source: "default", applies: "next_sweep", env_only: false },
   { key: "schedule_interval_minutes", effective: 180, source: "default", applies: "next_sweep", env_only: false },
   { key: "auto_gc", effective: "off", source: "env", applies: "immediately", env_only: false },
+  { key: "sweep_include_cached", effective: true, source: "env", applies: "next_sweep", env_only: false },
   { key: "webhook_url", effective: "", source: "default", applies: "restart-required", env_only: false },
   {
     key: "webhook_events",
@@ -88,4 +89,20 @@ test("multiple touched fields: only the ones that actually changed are sent", ()
 
 test("empty drafts produce an empty body", () => {
   assert.deepEqual(buildSettingsPatch(ENTRIES, {}), {});
+});
+
+// WP 4d-web: sweep_include_cached is a real boolean setting whose segmented
+// toggle sends the STRING "true"/"false" (never a JSON boolean — the real
+// PATCH endpoint's Pydantic lax-mode trap, LEARNINGS "Parsers"), and whose
+// `effective` on GET is a real JS boolean, not a string — this pins that
+// the generic diff correctly compares a string draft against a boolean
+// effective value both ways (no-op AND real change).
+test("sweep_include_cached: a draft string equal to the current boolean effective value is a no-op", () => {
+  const body = buildSettingsPatch(ENTRIES, { sweep_include_cached: { value: "true" } }); // effective: true
+  assert.deepEqual(body, {});
+});
+
+test("sweep_include_cached: a draft string that flips the current boolean effective value is sent as that raw string", () => {
+  const body = buildSettingsPatch(ENTRIES, { sweep_include_cached: { value: "false" } });
+  assert.deepEqual(body, { sweep_include_cached: "false" });
 });

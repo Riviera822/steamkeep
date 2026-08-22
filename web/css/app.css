@@ -816,6 +816,25 @@ input.inp.txt:disabled{ opacity:.55; }
 .errline{ margin:8px 0 0; font-size:12px; line-height:1.5; color:var(--danger); }
 
 .foot-note{ font-size:11px; line-height:1.5; color:var(--dim-2); margin:6px 0 0; }
+
+/* WP 4d-web: the "keeping the cache current without collecting" risk note
+   (sweep_include_cached on, auto_gc not executing — GET /v1/schedule's
+   sweep_cached_gc_risk). Same left-accent note shape as `.holdnote`/
+   `.stopnote` (jobcard section above: "what pause/cancel actually cost the
+   queue — stated, not hidden"), but keyed to `--stale`, the hue
+   `.sic.k-warn`/`.toast.warn` already use for "not an error, but pay
+   attention" — this is a real, ongoing risk (unbounded disk growth), not
+   the neutral tone those two notes carry. The sweep is never refused and
+   GC is never turned on automatically (docs/PROJECT_PLAN.md Phase 3) — this
+   is a warning, not a gate, so it is plain text with no disabled control
+   and no dialog. Never `[hidden]`-toggled (the caller simply omits the node
+   when there is nothing to warn about), so it needs no `[hidden]` display
+   guard (css-hygiene.test.js's rule does not apply here). */
+.settings-warn{
+  margin:10px 0 0; padding:8px 0 8px 9px; border-left:2px solid var(--stale);
+  font-size:11.5px; line-height:1.5; color:var(--dim);
+}
+
 .bullets{ margin:0; padding-left:16px; }
 .bullets li{ font-size:12px; line-height:1.55; color:var(--dim); margin-bottom:6px; }
 .bullets b{ color:var(--text); font-weight:600; }

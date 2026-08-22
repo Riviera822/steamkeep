@@ -494,12 +494,34 @@ const AUTO_GC_MODES = Object.freeze(["off", "dry-run", "execute"]);
 // key -> {default, env}. `env` != `default` for vault_name/schedule_window
 // on purpose, so a fresh demo session shows a realistic mix of "default"
 // and "env" sourced rows, not everything defaulted.
+// **The `default`/`env` values below for `auto_gc`/`sweep_include_cached`
+// are NOT this file's own opinion — they must equal
+// `api/vault_api/config.py`'s `DEFAULT_AUTO_GC`/`DEFAULT_SWEEP_INCLUDE_CACHED`
+// constants, whatever those currently are (ADR-0014 flipped both to
+// `"execute"`/`true` together, 2026-08-22 — see that module's own comments
+// on `DEFAULT_AUTO_GC`/`DEFAULT_SWEEP_INCLUDE_CACHED` for the full "why",
+// and docs/adr/0014-sweep-cached-and-auto-gc-default-on.md). A demo fixture
+// asserting the WRONG default is worse than no fixture — it teaches the
+// reader something false on exactly the surface used for screenshots
+// (docs/LEARNINGS.md, "demo fixtures are a shipped surface"). This file has
+// no access to Python at test time, so it cannot import those constants —
+// `web/tests/demo-data-config-defaults.test.js` instead reads
+// `api/vault_api/config.py` as plain TEXT and regex-extracts the same
+// constants, asserting equality against the two literals below on every
+// suite run; if you change either default here, that test tells you within
+// the same `node --test` run whether it still agrees with config.py, and if
+// you change config.py's default, THAT test (not this comment) is what
+// catches a forgotten update here.
+export const CONFIG_DEFAULT_AUTO_GC = "execute";
+export const CONFIG_DEFAULT_SWEEP_INCLUDE_CACHED = true;
+
 const SETTINGS_BASE = {
   vault_name: { default: "", env: "steamhangar-demo" },
   schedule_window: { default: null, env: "22:00-06:00" },
   schedule_interval_minutes: { default: 180, env: 180 },
   schedule_client_stale_days: { default: 7, env: 7 },
-  auto_gc: { default: "off", env: "off" },
+  sweep_include_cached: { default: CONFIG_DEFAULT_SWEEP_INCLUDE_CACHED, env: CONFIG_DEFAULT_SWEEP_INCLUDE_CACHED },
+  auto_gc: { default: CONFIG_DEFAULT_AUTO_GC, env: CONFIG_DEFAULT_AUTO_GC },
   webhook_url: { default: "", env: "" },
   webhook_events: { default: [...WEBHOOK_EVENTS_ALL], env: [...WEBHOOK_EVENTS_ALL] },
 };
@@ -509,10 +531,17 @@ const SETTINGS_APPLIES = {
   schedule_window: "next_sweep",
   schedule_interval_minutes: "next_sweep",
   schedule_client_stale_days: "next_sweep",
+  sweep_include_cached: "next_sweep",
   auto_gc: "immediately",
   webhook_url: "restart-required",
   webhook_events: "restart-required",
 };
+
+// Same true/false spellings as api/vault_api/config.py's parse_strict_bool
+// (config.py's _BOOL_TRUE_VALUES/_BOOL_FALSE_VALUES) — the grammar
+// sweep_include_cached's real PATCH validation uses.
+const BOOL_TRUE_SPELLINGS = ["1", "true", "yes", "on"];
+const BOOL_FALSE_SPELLINGS = ["0", "false", "no", "off"];
 
 // WP 4h.2 fix (carried over BY NAME from the WP 4h.0 review — this module
 // diverged from the real API when 4h.0 landed api/-only, WP 4h.1 same):
@@ -583,6 +612,15 @@ function parseSettingValue(key, raw) {
       throw validationError(`'${key}' must be one of ${AUTO_GC_MODES.join(", ")}, got ${JSON.stringify(raw)}.`);
     }
     return text;
+  }
+  if (key === "sweep_include_cached") {
+    const text = raw.trim().toLowerCase();
+    if (BOOL_TRUE_SPELLINGS.includes(text)) return true;
+    if (BOOL_FALSE_SPELLINGS.includes(text)) return false;
+    throw validationError(
+      `'${key}' must be one of ${BOOL_TRUE_SPELLINGS.join(", ")} (true) or ` +
+        `${BOOL_FALSE_SPELLINGS.join(", ")} (false), case-insensitive. Got ${JSON.stringify(raw)}.`,
+    );
   }
   if (key === "webhook_url") {
     const text = raw.trim();
@@ -717,6 +755,58 @@ function handlePatchSettings(body) {
   for (const [key, raw] of toSet) settingsOverrides[key] = raw;
   for (const key of toClear) delete settingsOverrides[key];
   return handleGetSettings();
+}
+
+// ---------------------------------------------------------------------
+// /v1/schedule (WP 4d-web) — mirrors api/vault_api/routers/schedule.py's
+// `ScheduleOut` shape closely enough to exercise the Settings view's
+// sweep-status line and cached-GC-risk warning in demo mode.
+//
+// `last_sweep_*`/`next_eligible_at` are a static, plausible fixture — this
+// demo model has no real scheduler tick to derive them from, same posture
+// as `buildJobs()`'s hand-authored history above. `sweep_include_cached`/
+// `sweep_cached_gc_risk` are NOT static: both are derived from
+// `describeDemoSettings()`'s live result, so toggling "Include cached
+// games" or "Auto-GC" in the Settings view and re-fetching `/v1/schedule`
+// reflects the change immediately — the same "no restart needed for
+// `next_sweep`/`immediately` keys" property `settings_store.
+// effective_settings` gives the real endpoint. `sweep_cached_gc_risk` is
+// computed with the EXACT SAME formula as
+// `vault_api/scheduler.py::cached_sweep_gc_risk`
+// (`sweep_include_cached and auto_gc != "execute"`) — this is the one place
+// in this demo model allowed to restate that formula, mirroring the real
+// server's one place (`scheduler.py`); everything downstream (the Settings
+// view, `lib/schedule-presentation.js`) only ever reads the already-
+// computed field, never recomputes it (docs/LEARNINGS.md: "two call sites
+// computing the same domain predicate WILL diverge").
+// ---------------------------------------------------------------------
+
+const DEMO_LAST_SWEEP = Object.freeze({
+  at: isoAgo(42 * 60_000),
+  targets: 3,
+  enqueued: 1,
+});
+
+function handleGetSchedule() {
+  const infos = describeDemoSettings();
+  const effective = new Map(infos.map((i) => [i.key, i.effective]));
+  const window = effective.get("schedule_window");
+  const sweepIncludeCached = effective.get("sweep_include_cached") === true;
+  const autoGc = effective.get("auto_gc");
+  return {
+    enabled: typeof window === "string" && window.length > 0,
+    window: window ?? null,
+    overnight: false,
+    interval_minutes: effective.get("schedule_interval_minutes"),
+    client_stale_days: effective.get("schedule_client_stale_days"),
+    server_timezone: "UTC+00:00",
+    last_sweep_at: DEMO_LAST_SWEEP.at,
+    last_sweep_targets: DEMO_LAST_SWEEP.targets,
+    last_sweep_enqueued: DEMO_LAST_SWEEP.enqueued,
+    next_eligible_at: null,
+    sweep_include_cached: sweepIncludeCached,
+    sweep_cached_gc_risk: sweepIncludeCached && autoGc !== "execute",
+  };
 }
 
 // ---------------------------------------------------------------------
@@ -1495,6 +1585,9 @@ export async function demoRequest(method, path, { body, params } = {}) {
   }
   if (method === "PATCH" && path === "/v1/settings") {
     return handlePatchSettings(body);
+  }
+  if (method === "GET" && path === "/v1/schedule") {
+    return handleGetSchedule();
   }
 
   if (method === "GET" && path === "/v1/steam/key") {

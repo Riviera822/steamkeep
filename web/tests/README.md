@@ -2034,3 +2034,115 @@ inherently environment-dependent, same class of claim
 `docs/LEARNINGS.md`'s nginx event-log timing entry already names as
 real-but-non-deterministic) is not asserted here — this file pins the CSS
 mechanism and the JS reveal trigger structurally, not a live paint timing.
+
+### WP 4d-web — Sweep visibility and control (Phase 4d)
+
+Closes the "Phase 4a UI switch remains open" gap `docs/PROJECT_PLAN.md`'s
+Phase 4d entry names: `sweep_include_cached` becomes a real Settings toggle,
+and `GET /v1/schedule`'s `last_sweep_targets`/`sweep_cached_gc_risk` fields
+get their first UI consumer. Same posture as every prior Settings-adjacent
+WP: `web/js/views/settings.js` (the DOM-building view) is not unit-tested
+directly — the decision logic it leans on lives in a pure `web/js/lib/`
+module and is tested here.
+
+- `schedule-presentation.test.js` — `web/js/lib/schedule-presentation.js`:
+  `sweepTargetsMessage`'s THREE distinct states — review round 1 (Opus)
+  FAIL, blocker B1: the first version had only two, collapsing "never run"
+  (`last_sweep_at` also null) together with "a sweep started but has not
+  recorded a result" (`last_sweep_at` stamped, both counters still null —
+  `api/vault_api/scheduler.py::claim_sweep` stamps the timestamp and NULLs
+  both counters in ONE statement; `finish_sweep` fills them in only once
+  the sweep actually completes, so a crash mid-sweep leaves this state
+  PERMANENTLY). The fix branches on `last_sweep_at` and states both
+  remaining possibilities (still running / the process stopped before
+  finishing) rather than picking one; `0` targets ("ran, found nothing,"
+  offering possibilities to check rather than naming a cause — a sibling
+  package is about to make any single hardcoded cause wrong) and `>0`
+  targets (count + enqueued, singular/plural correct) are the other two.
+  Named mutation targets, each reverted-and-reconfirmed: a falsy check
+  (`!targets`) in place of the explicit `null`/`undefined` check collapses
+  `0` back into "never run" (kills 3 tests, including the one literally
+  named `MUTATION PIN`); `cachedSweepGcRiskWarning`'s strict
+  `sweep_cached_gc_risk !== true` loosened to a truthy check lets a stray
+  `1`/`"true"` show the warning (kills its own named `MUTATION PIN`).
+  Review round 1 blocker B2: `cachedSweepGcRiskWarning`'s first version
+  asserted present-tense ACTIVITY ("cached games ARE BEING refreshed...")
+  from a field that is a pure CONFIGURATION predicate
+  (`sweep_include_cached and not auto_gc_executes`, unconditional on
+  whether the scheduler is even enabled) — reworded to "is set to"/"would"
+  throughout, matching how `scheduler.py`'s own log line for the identical
+  condition is worded, never restated as present-tense fact.
+- `demo-data-schedule.test.js` extends `demo-data.js`'s coverage with the
+  new `GET /v1/schedule` route: the full `ScheduleOut` field set, that
+  `sweep_include_cached` mirrors the LIVE settings override (not a frozen
+  snapshot) via `describeDemoSettings()`, and — the load-bearing part —
+  `sweep_cached_gc_risk` follows the EXACT SAME formula as
+  `vault_api/scheduler.py::cached_sweep_gc_risk`
+  (`sweep_include_cached and auto_gc != "execute"`) across all six
+  on/off × off/dry-run/execute combinations, with a named mutation pin for
+  the case most likely to regress silently: dry-run counts as risky too,
+  not only `off` (review round 1 nitpick: the first version of this pin's
+  own description named the WRONG mutation — `auto_gc !== "off"` leaves it
+  green too, since dry-run is `!== "off"` regardless; the mutation that
+  actually kills it, reverted-and-reconfirmed, is checking EQUALITY to
+  `"off"` in place of INEQUALITY to `"execute"`, which silently lets
+  dry-run — a mode that reports without reclaiming — through clean).
+- `demo-data-config-defaults.test.js` — a cross-language drift guard, not a
+  behavioural test: `web/js/demo-data.js` cannot import
+  `api/vault_api/config.py`'s Python constants, but it can read that
+  module's source as plain text (the same "structural static analysis of
+  source text" `css-hygiene.test.js` already does for CSS/JS) and
+  regex-extract `DEFAULT_AUTO_GC`/`DEFAULT_SWEEP_INCLUDE_CACHED`, comparing
+  them against `demo-data.js`'s own exported
+  `CONFIG_DEFAULT_AUTO_GC`/`CONFIG_DEFAULT_SWEEP_INCLUDE_CACHED` — the
+  values `SETTINGS_BASE.auto_gc`/`.sweep_include_cached` are built from.
+  Exists because those two fixture rows shipped with the PRE-ADR-0014
+  defaults (`"off"`/`false`) for months without anyone noticing the drift
+  by hand. Distinguishes two failure modes explicitly, in both the
+  assertion messages and this file's own header (review round 1 S3: the
+  first version's blanket "never edit this file's regexes" advice was
+  itself wrong for a reformatting-shaped failure) — VALUE drift (the regex
+  still matches, but resolves to a different value: fix `demo-data.js`)
+  from GRAMMAR drift (the regex no longer matches `config.py` at all: fix
+  THIS file's regex, `demo-data.js` may be innocent). **Currently 2
+  intentional failures** (the `node --test` totals quoted in the coder's
+  report reflect this): this worktree's own `api/vault_api/config.py`
+  still carries the pre-ADR-0014 values — the sibling package that flips
+  them has not merged into this tree yet — and the guard is correctly
+  reporting that disagreement; it is expected to go green once that merge
+  lands, per the coordinator's stated merge order (sibling first, then
+  this package).
+
+**Not covered, by design:** everything below needs a real rendered page,
+which neither `node --test` nor a pure `lib/` module can exercise — checked
+instead in a live Browser-pane pass against a real `uvicorn` instance (see
+the coder's report for the exact steps and observed output): the toggle's
+pixel layout/label fit inside `.segs` at narrow widths; how visually
+prominent `.settings-warn` reads next to the rest of the Schedule section
+(a subjective design question, not a pass/fail one); a real screen reader's
+announcement of the `role="group"`/`aria-pressed` segmented-button pair
+(the DOM semantics were confirmed correct by inspection, same posture as WP
+4a.8's honest list, never that a real AT actually speaks them as intended);
+and the 422-rejection toast as a PAINTED thing (its wiring was confirmed
+structurally live — a simulated 422 left the save bar open and the draft
+un-cleared — but not its visual appearance/timing on screen).
+
+**Known residual, recorded rather than fixed (review round 2): a HANGING
+`/v1/schedule` still blocks first paint.** Moving the `schedule` fetch into
+`loadSettings()`'s `Promise.all` (S1, round 1) fixed the *rejecting* case —
+a `.catch(() => null)` on that one promise means a `404`/`5xx`/network error
+no longer turns into "Could not load settings" for the whole screen — but
+`Promise.all` still waits for every promise to SETTLE, so a request that
+never resolves at all (a stalled connection, a server that accepts the TCP
+connection and never answers) leaves the screen on the loading skeleton
+indefinitely, with no error shown. This is not a regression this package
+introduced: `api.getSettings()`/`api.getSteamKey()` were already awaited
+untimed in the same `Promise.all` before this WP touched the file, so a
+hanging `/v1/steam/key` had the identical effect beforehand, and `api.js`'s
+own module header already states there is no `AbortController`-based
+timeout anywhere in it, for any request. The same class applies to
+`saveDrafts()`'s post-save schedule refetch, for the same reason. A client
+timeout is a real, app-wide mechanism (every call site in `api.js` would
+need it, not just this screen's three) and is correctly out of scope for
+this package — noted here so it is found the next time a client timeout
+actually lands, rather than rediscovered from scratch.

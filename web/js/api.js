@@ -186,6 +186,18 @@ export async function request(method, path, { body, params, signal } = {}) {
  * shapes. `patchSettings` takes the body `web/js/lib/settings-diff.js`
  * builds (only the keys that actually changed) and returns straight through
  * to `PATCH /v1/settings`, which answers with the same shape `GET` does.
+ *
+ * `schedule` (WP 4d-web) wraps `GET /v1/schedule` — the one route the WP
+ * 4a.2 header above explicitly deferred ("Add them with the WP that first
+ * needs them"). The Settings view is the first real consumer: it reads
+ * `last_sweep_targets`/`last_sweep_at`/`last_sweep_enqueued` (the
+ * "did the schedule actually do anything" signal) and `sweep_cached_gc_risk`
+ * (the already-computed warning condition — see
+ * `api/vault_api/routers/schedule.py`'s own docstring on that field: "a UI
+ * can render this as a banner without re-deriving the two settings'
+ * interaction itself"). No caller re-derives that boolean from
+ * `sweep_include_cached`/`auto_gc` client-side; see
+ * `web/js/lib/schedule-presentation.js`'s header for why.
  */
 export const api = {
   health: () => request("GET", "/v1/health"),
@@ -205,6 +217,7 @@ export const api = {
   clients: () => request("GET", "/v1/clients"),
   getSettings: () => request("GET", "/v1/settings"),
   patchSettings: (body) => request("PATCH", "/v1/settings", { body }),
+  schedule: () => request("GET", "/v1/schedule"),
   getSteamKey: () => request("GET", "/v1/steam/key"),
   putSteamKey: (key) => request("PUT", "/v1/steam/key", { body: { key } }),
   deleteSteamKey: () => request("DELETE", "/v1/steam/key"),

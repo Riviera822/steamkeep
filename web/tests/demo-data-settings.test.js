@@ -15,6 +15,7 @@ test("GET /v1/settings returns every overridable key plus env-only informational
     "schedule_window",
     "schedule_interval_minutes",
     "schedule_client_stale_days",
+    "sweep_include_cached",
     "auto_gc",
     "webhook_url",
     "webhook_events",
@@ -57,7 +58,53 @@ test("PATCH with null clears an override back to env/default", async () => {
   const cleared = await demoRequest("PATCH", "/v1/settings", { body: { auto_gc: null } });
   const entry = cleared.settings.find((s) => s.key === "auto_gc");
   assert.notEqual(entry.source, "db");
-  assert.equal(entry.effective, "off"); // SETTINGS_BASE.auto_gc.env
+  // SETTINGS_BASE.auto_gc.env — ADR-0014 (2026-08-22) flipped the real
+  // api/vault_api/config.py default to "execute"; see
+  // web/tests/demo-data-config-defaults.test.js for the pin against that
+  // module's own source text, which is what actually keeps this literal
+  // honest going forward, not this comment.
+  assert.equal(entry.effective, "execute");
+});
+
+// WP 4d-web: sweep_include_cached now exists as a real overridable key
+// (previously only sweep_include_cached-adjacent scheduler fields did).
+test("sweep_include_cached is one of the overridable keys, and defaults to true (ADR-0014)", async () => {
+  const out = await demoRequest("GET", "/v1/settings");
+  const entry = out.settings.find((s) => s.key === "sweep_include_cached");
+  assert.ok(entry, "missing overridable key sweep_include_cached");
+  assert.equal(entry.effective, true);
+  assert.equal(entry.applies, "next_sweep");
+});
+
+test("PATCH sweep_include_cached accepts every real bool spelling, case-insensitively", async () => {
+  for (const [raw, expected] of [
+    ["true", true],
+    ["FALSE", false],
+    ["yes", true],
+    ["no", false],
+    ["1", true],
+    ["0", false],
+    ["on", true],
+    ["off", false],
+  ]) {
+    const out = await demoRequest("PATCH", "/v1/settings", { body: { sweep_include_cached: raw } });
+    const entry = out.settings.find((s) => s.key === "sweep_include_cached");
+    assert.equal(entry.effective, expected, `raw=${raw}`);
+  }
+});
+
+test("PATCH rejects a non-boolean-spelling string for sweep_include_cached", async () => {
+  await assert.rejects(
+    () => demoRequest("PATCH", "/v1/settings", { body: { sweep_include_cached: "maybe" } }),
+    (err) => err.status === 422,
+  );
+});
+
+test("PATCH rejects a JSON boolean literal for sweep_include_cached (same lax-mode trap as auto_gc)", async () => {
+  await assert.rejects(
+    () => demoRequest("PATCH", "/v1/settings", { body: { sweep_include_cached: true } }),
+    (err) => err.status === 422,
+  );
 });
 
 test("PATCH validates the WHOLE body before writing anything (all-or-nothing)", async () => {

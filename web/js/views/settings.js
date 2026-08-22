@@ -39,6 +39,7 @@ import { showToast } from "../components/toast.js";
 import { openOnboarding } from "../onboarding.js";
 import { buildSettingsPatch } from "../lib/settings-diff.js";
 import { appliesText, sourceLabel, canReset, effectiveAsInputValue } from "../lib/settings-presentation.js";
+import { sweepTargetsMessage, cachedSweepGcRiskWarning } from "../lib/schedule-presentation.js";
 import { validSteamId64 } from "../lib/steamid.js";
 import { submitSteamKey } from "../lib/steam-key-form.js";
 import { onViewChange } from "../router.js";
@@ -54,6 +55,19 @@ const AUTO_GC_OPTIONS = [
   ["off", "Off"],
   ["dry-run", "Dry run"],
   ["execute", "Execute"],
+];
+// WP 4d-web: sweep_include_cached is the first genuine boolean setting this
+// view surfaces. Reuses the exact `.segs`/`aria-pressed` segmented-button
+// idiom `auto_gc` above already established (and passed review) rather
+// than introducing the mockup's separate, never-yet-wired `.toggle` switch
+// vocabulary — one working idiom, not two. Draft/effective values travel
+// as the strings "true"/"false" (what `PATCH /v1/settings` expects for this
+// key, `config.parse_strict_bool`'s grammar) — never a JSON boolean, which
+// the real endpoint explicitly rejects (Pydantic lax-mode trap, LEARNINGS
+// "Parsers").
+const SWEEP_INCLUDE_CACHED_OPTIONS = [
+  ["false", "Off"],
+  ["true", "On"],
 ];
 
 function errorText(err) {
@@ -80,6 +94,12 @@ const state = {
   settingsResponse: null, // {readonly, settings: [...]}, last successful GET
   steamStatus: { configured: false, key_last4: null },
   lookup: null,
+  // WP 4d-web: last GET /v1/schedule response, or null before the first
+  // fetch / after a failed one. Best-effort on purpose (see loadSettings) —
+  // a schedule fetch failure must not block the rest of this screen from
+  // rendering; it only means the sweep-status line and the cached-GC-risk
+  // warning below have nothing to show.
+  schedule: null,
 };
 
 /** {[key]: {reset: true} | {value: string | string[]}} — only ever
@@ -126,6 +146,18 @@ async function saveDrafts() {
     state.settingsResponse = updated;
     drafts = {};
     showToast("Settings saved.");
+    // WP 4d-web: a saved PATCH can change sweep_include_cached/auto_gc,
+    // which changes sweep_cached_gc_risk server-side — re-fetch so the
+    // warning below reflects the just-saved values immediately rather than
+    // whatever GET /v1/schedule answered at page load. Best-effort, same
+    // reasoning as loadSettings(): a failed refetch must not undo the
+    // successful save or block the rest of this render.
+    try {
+      state.schedule = await api.schedule();
+    } catch {
+      // leave state.schedule as it was — stale is better than crashing a
+      // successful save.
+    }
     fullRender();
   } catch (err) {
     showToast(errorText(err), { warn: true });
@@ -236,6 +268,8 @@ function buildScheduleSection() {
     }),
   );
 
+  wrap.append(buildSweepIncludeCachedField());
+
   const autoGcEntry = entryByKey("auto_gc");
   const field = el("div", "field");
   const autoGcLabel = el("label", null, "Auto-GC after a prefill");
@@ -280,11 +314,99 @@ function buildScheduleSection() {
     field.appendChild(resetBtn);
   }
   wrap.append(field);
+
+  wrap.append(buildSweepStatusBlock());
   return wrap;
 }
 function labelFor(mode) {
   const found = AUTO_GC_OPTIONS.find(([m]) => m === mode);
   return found ? found[1] : mode;
+}
+
+/**
+ * The `sweep_include_cached` toggle — WP 4d-web. Structurally the same
+ * segmented-button group as `auto_gc` above (see `SWEEP_INCLUDE_CACHED_
+ * OPTIONS`'s comment for why this reuses that idiom rather than the
+ * mockup's separate, unwired `.toggle` switch), just with two options
+ * instead of three, and string values `"false"`/`"true"` instead of an
+ * enum's own words.
+ */
+function buildSweepIncludeCachedField() {
+  const entry = entryByKey("sweep_include_cached");
+  const field = el("div", "field");
+  const label = el("label", null, "Include cached games in the sweep");
+  label.id = "settings-sweep_include_cached-label";
+  field.append(label);
+  const segs = el("div", "segs");
+  segs.setAttribute("role", "group");
+  segs.setAttribute("aria-labelledby", label.id);
+  const current =
+    drafts.sweep_include_cached && "value" in drafts.sweep_include_cached
+      ? drafts.sweep_include_cached.value
+      : String(entry.effective);
+  const buttons = [];
+  for (const [value, label2] of SWEEP_INCLUDE_CACHED_OPTIONS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = label2;
+    btn.dataset.value = value;
+    btn.setAttribute("aria-pressed", String(value === current));
+    btn.addEventListener("click", () => {
+      drafts.sweep_include_cached = { value };
+      for (const other of buttons) other.setAttribute("aria-pressed", "false");
+      btn.setAttribute("aria-pressed", "true");
+      markDirty();
+    });
+    if (state.settingsResponse.readonly) btn.disabled = true;
+    buttons.push(btn);
+    segs.appendChild(btn);
+  }
+  field.appendChild(segs);
+  field.appendChild(
+    el("p", "foot-note", `${sourceLabel(entry.source)} · ${appliesText(entry.applies)}`),
+  );
+  field.appendChild(
+    el(
+      "p",
+      "foot-note",
+      "When on, the next sweep also refreshes every game that already has content on disk, not only games a PC agent reports as installed.",
+    ),
+  );
+  if (canReset(entry) && !state.settingsResponse.readonly) {
+    const resetBtn = el("button", "btn ghost sm", "Reset");
+    resetBtn.type = "button";
+    resetBtn.style.marginTop = "6px";
+    resetBtn.addEventListener("click", () => {
+      drafts.sweep_include_cached = { reset: true };
+      const fallbackStr = String(entry.fallback);
+      for (const btn of buttons) btn.setAttribute("aria-pressed", String(btn.dataset.value === fallbackStr));
+      markDirty();
+    });
+    field.appendChild(resetBtn);
+  }
+  return field;
+}
+
+/**
+ * The "did the last scheduled sweep actually do anything" line, plus the
+ * "keeping the cache current without collecting" warning when the server
+ * reports the risk condition — WP 4d-web. Both pieces of text come from
+ * `lib/schedule-presentation.js`, fed the server's own `GET /v1/schedule`
+ * response verbatim (`state.schedule`): neither is computed here from
+ * `sweep_include_cached`/`auto_gc` a second time (see that module's header
+ * for why re-deriving `sweep_cached_gc_risk` client-side would be exactly
+ * the two-copies-diverge mistake docs/LEARNINGS.md warns about). Renders
+ * nothing at all — not a placeholder — while `state.schedule` is still
+ * null (no fetch yet, or the fetch failed); this is a status readout, not
+ * a required part of the form.
+ */
+function buildSweepStatusBlock() {
+  const wrap = document.createDocumentFragment();
+  const statusText = sweepTargetsMessage(state.schedule);
+  if (statusText) wrap.append(el("p", "foot-note", statusText));
+  const riskText = cachedSweepGcRiskWarning(state.schedule);
+  if (riskText) wrap.append(el("p", "settings-warn", riskText));
+  return wrap;
 }
 
 // ---------------------------------------------------------------------
@@ -597,9 +719,29 @@ async function loadSettings() {
   state.loadError = null;
   fullRender();
   try {
-    const [settingsResponse, steamStatus] = await Promise.all([api.getSettings(), api.getSteamKey()]);
+    // WP 4d-web review fix (S1): GET /v1/schedule joins this SAME
+    // Promise.all with its own `.catch(() => null)`, rather than a second
+    // `await` chained after this whole block settles. Chaining it after
+    // used to gate first paint of the ENTIRE screen (including the readonly
+    // banner and even a "Could not load settings" error) on a THIRD round
+    // trip that api.js itself documents has no client-side timeout — a
+    // stalled /v1/schedule left the screen on the loading skeleton
+    // indefinitely, with no error at all, exactly the outcome this
+    // function's error handling exists to avoid. Catching it INSIDE the
+    // array (not letting it reject the whole Promise.all) keeps both the
+    // parallelism and the independent failure: a schedule failure still
+    // never turns into "Could not load settings" for the rest of the
+    // screen — it only means buildSweepStatusBlock() has nothing to show
+    // (sweepTargetsMessage/cachedSweepGcRiskWarning both already treat a
+    // null schedule as "print nothing").
+    const [settingsResponse, steamStatus, schedule] = await Promise.all([
+      api.getSettings(),
+      api.getSteamKey(),
+      api.schedule().catch(() => null),
+    ]);
     state.settingsResponse = settingsResponse;
     state.steamStatus = steamStatus;
+    state.schedule = schedule;
     state.loading = false;
   } catch (err) {
     state.loading = false;
