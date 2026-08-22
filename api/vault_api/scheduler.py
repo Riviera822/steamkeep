@@ -338,6 +338,95 @@ class TargetSet:
     cached_only_appids: tuple[int, ...] = ()
 
 
+@dataclass(frozen=True)
+class FreshClientSnapshot:
+    """One client's latest agent-report snapshot, having ALREADY passed the
+    same freshness gate ``compute_targets`` applies before trusting it for
+    sweep targeting (readable snapshot, parseable timestamp, not older than
+    ``stale_after_days``). See ``fresh_client_snapshots`` below."""
+
+    client_id: str
+    reported_at: str
+    appids: list[int]
+
+
+def fresh_client_snapshots(
+    conn: sqlite3.Connection, now: datetime, stale_after_days: int
+) -> tuple[list[FreshClientSnapshot], list[ExcludedClient]]:
+    """Every client's latest snapshot that passes the sweep's own freshness
+    gate, plus the ones that were excluded and why.
+
+    Extracted out of ``compute_targets`` (WP AG-1) so a SECOND caller —
+    ``routers/games.py``'s per-app ``installed_on`` field — asks the exact
+    same "is this client's claim fresh enough to trust" question through the
+    exact same code, not a hand-copied re-implementation of the three
+    exclusion checks. ``docs/LEARNINGS.md``'s "two call sites computing the
+    same predicate diverge" entry (WP 4f) is precisely the failure class this
+    avoids: a UI badge built from an independently-written staleness check
+    could disagree with the scheduler about which reports it trusts, and
+    "installed on Zeus" from a report the scheduler itself would refuse to
+    act on is the same dishonesty in a different place.
+
+    ``compute_targets`` is UNCHANGED in behaviour — it now builds its
+    ``appids``/``included_clients`` from this function's result instead of
+    running the loop itself, but the loop body is verbatim.
+    """
+    cutoff = now.astimezone(timezone.utc) - timedelta(days=stale_after_days)
+
+    client_rows = conn.execute(
+        "SELECT DISTINCT client_id FROM agent_reports ORDER BY client_id"
+    ).fetchall()
+
+    fresh: list[FreshClientSnapshot] = []
+    excluded: list[ExcludedClient] = []
+
+    for row in client_rows:
+        client_id = str(row["client_id"])
+        snapshot = agent_reports.latest_snapshot(conn, client_id)
+        # WP AG-1: no longer provably unreachable. Before ``DELETE
+        # /v1/clients/{client_id}`` existed, nothing could remove a client's
+        # LAST row between this DISTINCT query and the lookup above, so this
+        # was dead code. Now a DELETE committing in that exact window makes
+        # ``latest_snapshot`` return None for a client_id this loop just
+        # read — see ``agent_reports.delete_client``'s docstring and
+        # ``test_a_client_deleted_between_the_distinct_query_and_the_lookup_
+        # is_silently_skipped`` below, which exercises this line directly
+        # rather than relying on a real race to hit it.
+        if snapshot is None:
+            continue
+
+        if snapshot.appids is None:
+            excluded.append(
+                ExcludedClient(client_id, "unreadable-snapshot", snapshot.reported_at)
+            )
+            continue
+
+        reported_at = parse_utc_iso(snapshot.reported_at)
+        if reported_at is None:
+            excluded.append(
+                ExcludedClient(
+                    client_id, "unreadable-timestamp", snapshot.reported_at
+                )
+            )
+            continue
+
+        if reported_at < cutoff:
+            excluded.append(
+                ExcludedClient(client_id, "stale", snapshot.reported_at)
+            )
+            continue
+
+        fresh.append(
+            FreshClientSnapshot(
+                client_id=client_id,
+                reported_at=snapshot.reported_at,
+                appids=snapshot.appids,
+            )
+        )
+
+    return fresh, excluded
+
+
 def cached_appids(conn: sqlite3.Connection, cache_root: str) -> set[int]:
     """Every appid that currently holds cache content on disk — **exclusive
     OR last-cached-remnant** — right now.
@@ -497,44 +586,12 @@ def compute_targets(
     than silently returning an empty cached set — a caller (production or
     test) that forgot to pass it gets a loud failure, not a quiet no-op.
     """
-    cutoff = now.astimezone(timezone.utc) - timedelta(days=stale_after_days)
-
-    client_rows = conn.execute(
-        "SELECT DISTINCT client_id FROM agent_reports ORDER BY client_id"
-    ).fetchall()
+    fresh, excluded = fresh_client_snapshots(conn, now, stale_after_days)
 
     appids: set[int] = set()
     included: list[str] = []
-    excluded: list[ExcludedClient] = []
-
-    for row in client_rows:
-        client_id = str(row["client_id"])
-        snapshot = agent_reports.latest_snapshot(conn, client_id)
-        if snapshot is None:  # pragma: no cover - DISTINCT proves a row exists
-            continue
-
-        if snapshot.appids is None:
-            excluded.append(
-                ExcludedClient(client_id, "unreadable-snapshot", snapshot.reported_at)
-            )
-            continue
-
-        reported_at = parse_utc_iso(snapshot.reported_at)
-        if reported_at is None:
-            excluded.append(
-                ExcludedClient(
-                    client_id, "unreadable-timestamp", snapshot.reported_at
-                )
-            )
-            continue
-
-        if reported_at < cutoff:
-            excluded.append(
-                ExcludedClient(client_id, "stale", snapshot.reported_at)
-            )
-            continue
-
-        included.append(client_id)
+    for snapshot in fresh:
+        included.append(snapshot.client_id)
         appids.update(snapshot.appids)
 
     cached_only: tuple[int, ...] = ()

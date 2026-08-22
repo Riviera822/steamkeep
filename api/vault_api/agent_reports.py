@@ -358,7 +358,14 @@ def list_clients(conn: sqlite3.Connection) -> list[ClientSummary]:
     for row in rows:
         client_id = str(row["client_id"])
         latest = latest_snapshot(conn, client_id)
-        if latest is None:  # pragma: no cover - GROUP BY proves a row exists
+        # WP AG-1: no longer provably unreachable, same reasoning as
+        # ``scheduler.fresh_client_snapshots``'s identical guard —
+        # ``delete_client`` committing between the GROUP BY above and this
+        # lookup now makes ``latest_snapshot`` return None for a client_id
+        # this loop just read. Exercised directly by
+        # ``tests/test_clients_api.py::
+        # test_a_client_deleted_between_the_group_by_and_the_lookup_is_silently_skipped``.
+        if latest is None:
             continue
         summaries.append(
             ClientSummary(
@@ -370,6 +377,109 @@ def list_clients(conn: sqlite3.Connection) -> list[ClientSummary]:
             )
         )
     return summaries
+
+
+def delete_client(conn: sqlite3.Connection, client_id: str) -> bool:
+    """Remove every row keyed on this ``client_id`` (WP AG-1). Returns whether
+    the client existed.
+
+    **This is not a ban.** It clears the rename-cleanup ghost row
+    ``agent/README.md``'s "Client identity and renaming" section named as
+    AG-1's planned fix: a client that reports again after being deleted
+    simply starts a fresh diff chain, exactly like a brand-new machine — see
+    ``routers/clients.py`` / ``api/README.md`` for the operator-facing
+    wording.
+
+    **Tables touched — the full set keyed on ``client_id``, established by
+    reading ``db.py``'s DDL rather than assumed:**
+
+    * ``agent_reports`` — every retained snapshot for this client. This is
+      the table that makes a client "exist" at all (``list_clients`` groups
+      by it); deleting all of it is what makes the ghost row disappear from
+      ``GET /v1/clients``.
+    * ``client_bypass_state`` — the webhook feature's last-computed
+      ``bypass_suspected`` verdict for this client (WP 3.13). Deleted too, on
+      purpose: if this client_id starts reporting again, the webhook
+      transition-detector should establish a fresh baseline rather than
+      compare against a verdict computed for what is, semantically, a
+      different machine now.
+
+    **Tables deliberately NOT touched, and why nothing dangles:**
+
+    * ``client_cache_stats`` is keyed on ``client_addr`` (a network address),
+      not ``client_id`` — schema v9's bridge between the two is
+      ``agent_reports.source_addr``, a column on the table THIS function
+      does clear. Deleting the client's agent reports simply severs its
+      contribution to ``GET /v1/clients``' per-client totals (computed via
+      ``event_sweep.totals_for_addrs`` over ``source_addrs_for``, which now
+      returns nothing for this client_id); the address rows themselves are
+      cache-traffic history, not client identity, and outlive the client
+      exactly like they outlive an agent that simply stops reporting.
+    * ``depot_miss_stats`` / ``miss_trigger_state`` are keyed on ``depotid``/
+      ``appid`` — cache content, not client identity (plan §4: "cache
+      content is keyed by app, not client"). Nothing here references a
+      client_id at all, so deleting one leaves these completely untouched,
+      verified by reading their DDL rather than asserted.
+    * ``jobs`` / ``depot_app_map`` / ``apps`` / manifests / oracle tables:
+      none of these have a client_id column. A prefill job this client's
+      installed-list once caused to be enqueued is an app-keyed row with no
+      back-reference to the client that triggered it — there is nothing to
+      cascade.
+
+    **Concurrency (this project's established ``BEGIN IMMEDIATE`` idiom,
+    same as ``store_report``'s read-then-write above):** the existence check
+    and both deletes run inside ONE write-locked transaction, so no other
+    writer can insert a row for this client_id between "does it exist" and
+    "delete it". Two interleavings with a concurrent
+    ``POST /v1/agent/installed`` for the SAME client_id are both possible and
+    both acceptable (see ``api/README.md``'s "Deleting a client" section for
+    the full write-up):
+
+    1. **This DELETE's transaction commits first.** The report that was
+       waiting on the write lock then runs ``store_report`` against an empty
+       history: ``latest_snapshot`` returns ``None``, so it is treated as a
+       genuine first report (``first_report=True``, ``added`` = every
+       reported appid, nothing "removed"). Exactly the documented
+       reappearance behaviour — a fresh diff chain, as if the machine had
+       never reported before.
+    2. **The report's transaction commits first.** Its new snapshot (and any
+       pruned old rows) land, then this DELETE's transaction runs and removes
+       EVERYTHING for that client_id, including the report that just landed.
+       The operator's delete therefore wins the race and the just-arrived
+       install is gone too — a report that lands microseconds before an
+       explicit "remove this client" request is swept up in the same
+       operator intent, the same class of accepted race
+       ``DELETE /v1/cache/{appid}`` already documents against the scheduler
+       (a job enqueued microseconds after a guard check "refills what was
+       deleted" — here the operator can simply have the agent report again).
+
+    A read that is not inside either transaction (``GET /v1/clients``,
+    ``scheduler.fresh_client_snapshots``/``compute_targets`` mid-sweep) can
+    observe the client_id from a ``DISTINCT``/``GROUP BY`` query and then find
+    ``latest_snapshot`` return ``None`` for it a moment later, if this DELETE
+    's transaction commits in between the two reads. Both call sites already
+    handle that shape defensively (``if snapshot/latest is None: continue``)
+    — before this endpoint existed the branch was unreachable in practice
+    (nothing else could remove a client's LAST row), so this package makes it
+    reachable for the first time; the existing degrade-gracefully behaviour
+    (silently skip that client for this one read) is exactly correct, not a
+    new gap.
+    """
+    with immediate_transaction(conn):
+        exists = (
+            conn.execute(
+                "SELECT 1 FROM agent_reports WHERE client_id = ? LIMIT 1",
+                (client_id,),
+            ).fetchone()
+            is not None
+        )
+        if not exists:
+            return False
+        conn.execute("DELETE FROM agent_reports WHERE client_id = ?", (client_id,))
+        conn.execute(
+            "DELETE FROM client_bypass_state WHERE client_id = ?", (client_id,)
+        )
+    return True
 
 
 def source_addrs_for(conn: sqlite3.Connection, client_id: str) -> list[str]:

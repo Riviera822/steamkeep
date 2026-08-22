@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 
 from tests import stub_prefill
 from tests.conftest import TEST_API_KEY
+from vault_api import agent_reports
 from vault_api import jobs as jobs_queue
 from vault_api import scheduler as scheduler_module
 from vault_api import settings_store
@@ -327,6 +328,38 @@ def test_an_unreadable_timestamp_excludes_rather_than_assumes_fresh(
     ]
 
 
+def test_a_client_deleted_between_the_distinct_query_and_the_lookup_is_silently_skipped(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WP AG-1 review round 1, S2: ``DELETE /v1/clients/{client_id}`` made
+    the ``snapshot is None`` guard in ``fresh_client_snapshots`` reachable
+    for the first time (a DELETE committing between this function's
+    DISTINCT query and its per-client ``latest_snapshot`` lookup). The old
+    ``# pragma: no cover`` comment claimed the branch could never fire;
+    exercise it directly instead of hoping a real race lands in the window.
+    """
+    insert_report(conn, "gaming-pc", [440], utc_iso(9))
+    insert_report(conn, "steam-deck", [730], utc_iso(9))
+
+    real_latest_snapshot = agent_reports.latest_snapshot
+
+    def vanishing_for_gaming_pc(passed_conn, client_id):
+        if client_id == "gaming-pc":
+            return None  # simulates DELETE committing right here
+        return real_latest_snapshot(passed_conn, client_id)
+
+    monkeypatch.setattr(agent_reports, "latest_snapshot", vanishing_for_gaming_pc)
+
+    fresh, excluded = scheduler_module.fresh_client_snapshots(
+        conn, local(10), stale_after_days=7
+    )
+
+    # gaming-pc is silently skipped -- neither trusted nor reported as an
+    # exclusion reason (it simply no longer exists by the time this asks).
+    assert [snapshot.client_id for snapshot in fresh] == ["steam-deck"]
+    assert excluded == []
+
+
 def test_no_clients_means_no_targets(conn: sqlite3.Connection) -> None:
     result = compute_targets(conn, local(10), stale_after_days=7)
 
@@ -335,6 +368,76 @@ def test_no_clients_means_no_targets(conn: sqlite3.Connection) -> None:
         [],
         [],
     )
+
+
+# ==========================================================================
+# WP AG-1 review round 1, S1: ``compute_targets`` must be a THIN wrapper
+# around ``fresh_client_snapshots`` — a re-inlined verbatim copy of the loop
+# (the exact regression this extraction removed) would stay green on every
+# BEHAVIOURAL test above, because a hand-copied duplicate can agree with the
+# original on every fixture those tests happen to construct. The structural
+# pin: replace ``fresh_client_snapshots`` with a fake returning a
+# distinguishable sentinel, and assert ``compute_targets`` hands back EXACTLY
+# that result — not a superset, not a re-derived agreement (same technique
+# ``tests/test_wp4f_shared_cache_content_definition.py`` uses for the
+# analogous "which apps are cached" predicate).
+# ==========================================================================
+
+
+def test_compute_targets_returns_exactly_fresh_client_snapshots_result(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A sentinel appid/client_id pair that appears in NO real fixture in this
+    # file — if compute_targets derived its own answer instead of returning
+    # this fake's result verbatim, these values would never appear.
+    sentinel_snapshot = scheduler_module.FreshClientSnapshot(
+        client_id="sentinel-client",
+        reported_at="2026-01-01T00:00:00Z",
+        appids=[999_001, 999_002],
+    )
+    calls: list[tuple] = []
+
+    def fake_fresh_client_snapshots(passed_conn, now, stale_after_days):
+        assert passed_conn is conn
+        calls.append((now, stale_after_days))
+        return [sentinel_snapshot], []
+
+    monkeypatch.setattr(
+        scheduler_module, "fresh_client_snapshots", fake_fresh_client_snapshots
+    )
+
+    now = local(10)
+    result = compute_targets(conn, now, stale_after_days=7)
+
+    assert result.appids == [999_001, 999_002]
+    assert result.included_clients == ["sentinel-client"]
+    assert result.excluded_clients == []
+    # compute_targets called the shared function exactly once, with exactly
+    # the arguments it was given -- not a second, independent staleness pass.
+    assert calls == [(now, 7)]
+
+
+def test_compute_targets_reflects_an_exclusion_from_fresh_client_snapshots(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation-kill counterpart: if the shared function reports NOTHING
+    fresh, ``compute_targets`` must report nothing too -- proving there is no
+    second, independently-derived path it could fall back on."""
+    sentinel_excluded = scheduler_module.ExcludedClient(
+        "sentinel-client", "stale", "2020-01-01T00:00:00Z"
+    )
+
+    monkeypatch.setattr(
+        scheduler_module,
+        "fresh_client_snapshots",
+        lambda passed_conn, now, stale_after_days: ([], [sentinel_excluded]),
+    )
+
+    result = compute_targets(conn, local(10), stale_after_days=7)
+
+    assert result.appids == []
+    assert result.included_clients == []
+    assert result.excluded_clients == [sentinel_excluded]
 
 
 # ==========================================================================

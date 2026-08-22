@@ -65,7 +65,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from vault_api import agent_reports, event_sweep
@@ -153,3 +153,34 @@ def list_clients(
         )
         for summary in summaries
     ]
+
+
+@router.delete(
+    "/v1/clients/{client_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,
+)
+def delete_client(
+    client_id: str,
+    open_db: DbOpener = Depends(db_opener),
+) -> None:
+    """Remove one client's rows (WP AG-1 — see ``agent_reports.delete_client``
+    for the full table-by-table accounting and race analysis).
+
+    **Not a ban.** A client that reports again under this same ``client_id``
+    simply reappears with a fresh diff chain, as documented in
+    ``api/README.md``'s "Deleting a client" section — this exists for the
+    rename-cleanup case AG-0 introduced (an operator renamed a machine's
+    agent identity and the old name would otherwise sit in ``GET /v1/clients``
+    forever), not to block a machine from ever reporting again.
+
+    404 if the client_id has no rows at all — same "nothing to act on" shape
+    as ``DELETE /v1/mapping/{depotid}/{appid}``.
+    """
+    with open_db() as conn:
+        existed = agent_reports.delete_client(conn, client_id)
+    if not existed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown client_id {client_id!r}",
+        )

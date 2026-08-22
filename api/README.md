@@ -508,7 +508,7 @@ appid both saw "no row" and both inserted; the loser got
 is now `INSERT OR IGNORE` plus a conditional name `UPDATE`, pinned by
 `tests/test_mapping.py::test_concurrent_upsert_of_the_same_new_appid_does_not_500`.
 
-## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4 + 3.5 + 3.8 + 3.9 + 3.11 + 3.12 + 4a.6r + settings-API/ADR-0009 + 4h.1)
+## Endpoints (WP 1.3 + 1.4 + 1.5 + 1.6 + 2.4 + 3.5 + 3.8 + 3.9 + 3.11 + 3.12 + 4a.6r + settings-API/ADR-0009 + 4h.1 + AG-1)
 
 All routes below require `X-Api-Key` (see "Auth"). Full API table:
 `docs/PROJECT_PLAN.md` §6; the games, mapping, prefill, jobs, cache, agent,
@@ -516,8 +516,8 @@ clients, schedule and stats rows are implemented so far.
 
 | Method | Endpoint                          | Purpose |
 |--------|-------------------------------------|---------|
-| GET    | `/v1/games`                        | All tracked apps: `appid`, `name`, `status`, `last_prefill_at`, `last_manifest_check` (schema v4, WP 3.3; surfaced here WP 4c — the last run that CONFIRMED this app current, `null` until that exact outcome happens; **much narrower than "last time a job ran"**, see "Job outcome honesty" below; **and unlike `last_prefill_at`, survives `DELETE /v1/cache/{appid}`** — deletion nulls `last_prefill_at` but deliberately leaves this field, so a game with zero cached bytes can still show a past confirmation timestamp, see "Per-game deletion" below), `depot_count`, `size_bytes` (sum of the app's mapped depots' bytes on disk; `null` if unmapped or not yet cached — see "Per-game size calculation" below), `needs_force` (schema v5, WP 3.4 — whether the NEXT prefill will run with `--force`, see "needs_force" below), `manifest_change_frequency` (schema v14, WP 4h.1 — `null`/`"insufficient_data"`/`"stable"`/`"changed"`; **NOT a rate**, see "Change frequency" below), `manifest_observation_days` (days since the youngest-observed depot's first observation; `null` only alongside a `null` category), `manifest_days_since_last_change` (days since the most recently observed change; populated ONLY when the category is `"changed"`) |
-| GET    | `/v1/games/{appid}`                | Detail for one app: same fields plus `depots` (list of `{depotid, shared, size_bytes}`); `404` for an unknown `appid` |
+| GET    | `/v1/games`                        | All tracked apps: `appid`, `name`, `status`, `last_prefill_at`, `last_manifest_check` (schema v4, WP 3.3; surfaced here WP 4c — the last run that CONFIRMED this app current, `null` until that exact outcome happens; **much narrower than "last time a job ran"**, see "Job outcome honesty" below; **and unlike `last_prefill_at`, survives `DELETE /v1/cache/{appid}`** — deletion nulls `last_prefill_at` but deliberately leaves this field, so a game with zero cached bytes can still show a past confirmation timestamp, see "Per-game deletion" below), `depot_count`, `size_bytes` (sum of the app's mapped depots' bytes on disk; `null` if unmapped or not yet cached — see "Per-game size calculation" below), `needs_force` (schema v5, WP 3.4 — whether the NEXT prefill will run with `--force`, see "needs_force" below), `manifest_change_frequency` (schema v14, WP 4h.1 — `null`/`"insufficient_data"`/`"stable"`/`"changed"`; **NOT a rate**, see "Change frequency" below), `manifest_observation_days` (days since the youngest-observed depot's first observation; `null` only alongside a `null` category), `manifest_days_since_last_change` (days since the most recently observed change; populated ONLY when the category is `"changed"`), `installed_on` (WP AG-1 — list of `{client_id, reported_at}`, ALREADY filtered to fresh agent reports only; `[]` for an unmapped/never-installed app and for a vault with zero agents — see "Installed state per app" below) |
+| GET    | `/v1/games/{appid}`                | Detail for one app: same fields (incl. `installed_on`) plus `depots` (list of `{depotid, shared, size_bytes}`); `404` for an unknown `appid` |
 | PUT    | `/v1/mapping/{depotid}`            | Body `{"appid": int, "app_name": str \| null}` — **additively** upsert one depot→app mapping fact (manual fallback, see below); `422` for `depotid <= 0`, `appid <= 0`, or an unrecognized body field |
 | GET    | `/v1/mapping`                      | Full depot→app mapping table: list of `{depotid, appid}` |
 | DELETE | `/v1/mapping/{depotid}/{appid}`    | Remove one mapping pair (correction path for the additive `PUT`, see below); `204` on success, `404` if the pair doesn't exist, `422` for non-positive ids |
@@ -533,6 +533,7 @@ clients, schedule and stats rows are implemented so far.
 | GET    | `/v1/cache/summary`                | `total_bytes` (disk usage of `depot/`, each depot counted once), `top_consumers` (top 10 `{appid, name, size_bytes}`, largest first), `unmapped_depots` (`{count, size_bytes}` for depot dirs on disk with no mapping row for any app), `free_disk_bytes` (free space on the cache filesystem, `null` if undeterminable) |
 | POST   | `/v1/agent/installed`              | Body `{"client_id": str, "appids": [int, ...]}` — store one **full-list** snapshot of a client's installed games. `200` with `{client_id, received, added, removed, first_report}`; `422` for a bad `client_id` (empty, > 64 chars, control characters, surrounding whitespace, `.`/`..`), an appid `< 1` or a boolean, a missing/non-list `appids`, more than 10 000 ids, or an unrecognized body field. See "Agent reports" below |
 | GET    | `/v1/clients`                      | One row per reporting client, sorted by `client_id`: `{client_id, first_seen, last_reported_at, app_count}` (WP 2.4) plus `{source_addrs, cache_hits, cache_misses, bytes_served, last_seen_in_cache_log, bypass_suspected}` (WP 3.11, ADR-0008 — the hit statistics and bypass warnings plan §5/§6 promised). The cache fields are `0`/`null`/`false` when the event feed is off. See "Cache-event sweep → Bypass detection" |
+| DELETE | `/v1/clients/{client_id}`          | Remove one client's rows (WP AG-1 — the rename-cleanup path AG-0 named). `204` on success; `404` if the `client_id` has no rows at all. **Not a ban** — a client that reports again under the same id simply reappears with a fresh diff chain. See "Deleting a client" below |
 | GET    | `/v1/oracle/{appid}`               | Stored manifest-oracle view (WP 3.9): `{appid, enabled, checked_at, source, buildid, verdict, depots[]}`, each depot `{depotid, recorded_manifestid, oracle_manifestid, verdict, beta_branches[]}`. `verdict` is `current`/`stale`/`not_cached`/`unknown`. **No network, no `404`** — an app nobody asked about answers `checked_at: null`, and `enabled: false` when the oracle is off. `422` for `appid < 1` |
 | POST   | `/v1/oracle/{appid}/refresh`       | Ask the oracle now (WP 3.9). **This request leaves the LAN** when the oracle is enabled. Always `200`: `{appid, enabled, ok, error, checked_at, depot_count, branch_manifest_count, open_branches[], skipped_password_branches, warnings[]}` — an unreachable or garbage answer is `ok: false` with a reason, never a 5xx. `422` for `appid < 1` |
 | DELETE | `/v1/oracle/{appid}`               | Forget everything the oracle said about one app (WP 3.9). `204` whether or not anything was stored — idempotent, and the way to withdraw the extra GC keep-set protection oracle rows grant |
@@ -2297,6 +2298,190 @@ client that reads only the fields it knows keeps working.
   `latest_snapshot` lookup per client rather than a single `MAX(reported_at)`
   aggregate. The follow-up query runs once per gaming machine — a homelab has
   a handful.
+
+### Installed state per app (`installed_on`, WP AG-1)
+
+`GET /v1/games` / `GET /v1/games/{appid}` gained an additive field: which
+agents currently claim this app installed, and when.
+
+```json
+{"appid": 440, "name": "Team Fortress 2", "status": "idle",
+ "installed_on": [{"client_id": "gaming-pc", "reported_at": "2026-08-22T09:15:03Z"}]}
+```
+
+**Freshness is enforced before an entry exists, not left to the frontend to
+judge from a raw timestamp.** `installed_on` is built from
+`scheduler.fresh_client_snapshots` — **the exact same function**
+`compute_targets` calls before trusting a client's report for sweep
+targeting: readable snapshot, parseable `reported_at`, and no older than
+`schedule_client_stale_days` (default 7, `VAULT_SCHEDULE_CLIENT_STALE_DAYS`).
+A client whose latest report fails any of those checks simply has no entry
+here, in any game — the same way it would be excluded from a sweep. This was
+a deliberate choice between the two options on the table: expose the raw
+timestamp and let the frontend guess at staleness, or reuse the scheduler's
+own trust boundary. The second was chosen because a UI badge reading
+"installed on Zeus" from a report the scheduler itself refuses to act on
+would be the same dishonesty in a different place, and because
+`docs/LEARNINGS.md`'s "two call sites computing the same predicate diverge"
+entry (WP 4f) is exactly the failure mode a second, independently-written
+staleness check invites. `reported_at` is still returned on every surviving
+entry — it already passed the gate, but a frontend showing "as of 09:15" or
+sorting by recency needs the real value, not just a boolean.
+
+`compute_targets` itself is unchanged in behaviour: the loop that used to
+live inline now lives in `fresh_client_snapshots`, called once from
+`compute_targets` and once from `routers/games.py`'s
+`_installed_on_by_appid`/`_installed_on_for_appid` (via the shared
+`_fresh_snapshots_now` helper), so the two can never quietly disagree about
+which reports are trustworthy again — pinned structurally in
+`tests/test_scheduler.py` (a sentinel-returning fake swapped in for
+`fresh_client_snapshots`, asserting `compute_targets` returns exactly its
+result), not just behaviourally.
+
+**The staleness BOUND itself must be resolved live, not read from the boot
+snapshot (review round 1, blocker B1).** `schedule_client_stale_days` is
+overridable at runtime (`PATCH /v1/settings`, `applies: "next_sweep"`), and
+the scheduler's own tick already re-resolves it via
+`settings_store.effective_settings` on every tick. Round 1 fed
+`fresh_client_snapshots` from `app.state.settings` directly — the boot
+snapshot, set once and never mutated — so a `PATCH` that tightened the
+window took effect for the NEXT SWEEP but not for this endpoint: measured,
+a client 2 days quiet kept showing as `installed_on` here after a PATCH to
+`schedule_client_stale_days: 1` had already made the scheduler treat it as
+stale. `routers/games.py`'s `_fresh_snapshots_now` now resolves through
+`settings_store.effective_settings(conn, base_settings)` on every call —
+the exact one-line fix `routers/schedule.py`'s `GET /v1/schedule` already
+uses for the identical reason — and `base_settings`/`now` both come from
+`request.app.state.scheduler` (`.settings`, `.now()`), the same object and
+the same injectable clock the scheduler's tick itself uses, rather than a
+second, independent `datetime.now()` call in this file.
+`tests/test_games.py::test_installed_on_follows_a_runtime_override_of_the_stale_days_setting`
+pins this: PATCH the key, assert `installed_on` follows on the same request
+cycle; reverting the fix to read the boot snapshot makes that test fail.
+
+**Cost:** `GET /v1/games`' `_installed_on_by_appid` and `GET /v1/games/{appid}`'s
+`_installed_on_for_appid` both call the shared `_fresh_snapshots_now`, which
+runs the distinct-client query plus one indexed `latest_snapshot` lookup per
+client **once per request** (list endpoint) or once per detail request
+(review round 1 nitpick: the single-app endpoint no longer builds the
+whole-library dict just to read one key back out of it — same per-client
+scan, lighter re-keying). Cost scales with the number of *gaming machines*
+that have ever reported, not with the number of *apps* being listed; a
+vault with zero agents never executes the per-client branch (the
+distinct-client query returns no rows) and the field comes back `[]` for
+every game, cheaply.
+
+**Scope note:** an app only appears in `GET /v1/games` at all if it has an
+`apps` row (created by a mapping upsert — see "Depot→app mapping semantics"
+below). An agent reporting an appid nobody has ever mapped contributes
+nothing to `installed_on` for that reason, same as `size_bytes` already
+ignores an unmapped appid; nothing new here, just stated for completeness.
+
+**Decided resolution (review round 1, S4): "never installed anywhere" and
+"installed, but every reporting agent has gone quiet" are the SAME empty
+list at the per-app level, and that is being kept, deliberately.**
+`_fresh_snapshots_now` already computes the excluded clients (the
+`_excluded` return value of `fresh_client_snapshots`) and the router
+currently discards it — a game nobody has ever installed and a game
+Zeus reported two months ago (now past the stale window) both render
+`installed_on: []`, with nothing in the response distinguishing "no signal"
+from "stale signal". The field shape stays additive and app-scoped as
+shipped; the fix is NOT a bigger `installed_on` payload. AG-2's badge
+("installed but not cached") should build any global "an agent is present
+but quiet" indicator from `GET /v1/clients`' existing `last_reported_at`
+compared against the schedule's `client_stale_days`
+(`GET /v1/schedule`) — both already shipped, both already vault-wide rather
+than per-app, and exactly the information "is anything still reporting at
+all" needs. If a frontend package later demonstrates an actual per-app need
+to tell the two states apart (not merely that the distinction is
+theoretically visible), `installed_on_stale: list[InstalledOn]` alongside
+`installed_on` is an additive two-liner then — same shape, opposite filter,
+no schema change to the existing field. Not built speculatively now.
+
+### Deleting a client (`DELETE /v1/clients/{client_id}`, WP AG-1)
+
+WP AG-0 made a client's reported identity (`client_id`) a visible, operator-
+renameable choice — and a rename leaves the *old* name as a ghost row in
+`GET /v1/clients` forever, since nothing previously removed a client's rows.
+This endpoint is that cleanup path.
+
+```
+DELETE /v1/clients/gaming-pc
+204 No Content
+```
+
+`404` if `client_id` has no rows at all — repeating the call is not
+idempotent by design, same shape as `DELETE /v1/mapping/{depotid}/{appid}`.
+
+**Tables touched — established by reading `db.py`'s DDL, not assumed:**
+
+- `agent_reports` — every retained snapshot for this client. This is the
+  table that makes a client "exist" at all (`list_clients` groups by it).
+- `client_bypass_state` (WP 3.13) — the webhook feature's last-computed
+  bypass verdict for this client. Cleared too: if the same `client_id`
+  reports again, the transition detector should establish a fresh baseline
+  rather than compare against a verdict computed for what is, semantically,
+  a different machine now.
+
+**Tables deliberately left alone, and why nothing is left dangling:**
+
+- `client_cache_stats` is keyed on `client_addr` (a network address), not
+  `client_id` — schema v9's `agent_reports.source_addr` is the only bridge
+  between the two, and it lives on the table this endpoint DOES clear.
+  Deleting a client's agent reports simply removes its contribution to
+  `GET /v1/clients`' per-client totals on the next read; the address rows
+  themselves are cache-traffic history and outlive the client exactly like
+  they outlive an agent that just stops reporting on its own.
+- `depot_miss_stats` / `miss_trigger_state` are keyed on `depotid`/`appid` —
+  cache content, not client identity (plan §4: "cache content is keyed by
+  app, not client"). No column in either table references a `client_id`.
+- `jobs`, `depot_app_map`, `apps`, and every manifest/oracle table: none
+  carry a `client_id` column, so there is nothing to cascade.
+
+**Not a ban.** A client that reports again under the same `client_id` after
+being deleted is treated as a genuine first report — a fresh diff chain,
+`first_report: true`, nothing "removed" — exactly as if the machine had
+never reported before. This is the intended behaviour for the rename
+cleanup use case: delete the old name, let the agent's next scheduled report
+(now sent under the new name, or the same name if nothing else changed)
+start clean.
+
+**Concurrency.** The existence check and both deletes run inside one
+`BEGIN IMMEDIATE` transaction — this project's standing idiom for any
+check-then-act write (`jobs.immediate_transaction`, the same primitive
+`store_report`'s own read-previous/insert/prune sequence uses). A concurrent
+`POST /v1/agent/installed` for the *same* `client_id` therefore serializes
+against this DELETE rather than interleaving mid-write, and either order is
+accepted:
+
+1. **DELETE commits first.** The waiting report then runs against an empty
+   history — `latest_snapshot` returns `None`, so it is a genuine first
+   report. Exactly the reappearance behaviour above.
+2. **The report commits first.** Its new snapshot lands, then DELETE removes
+   *everything* for that `client_id`, including the report that just
+   arrived. The operator's delete wins the race — a report landing
+   microseconds before an explicit "remove this client" call is swept up in
+   the same intent, the same class of accepted race `DELETE /v1/cache/{appid}`
+   already documents against the scheduler (a job enqueued microseconds
+   after a guard check "refills what was deleted" — here the agent can
+   simply report again).
+
+A read that is not inside either transaction (`GET /v1/clients`, a sweep
+tick reading `scheduler.fresh_client_snapshots`) can observe the `client_id`
+from its own `DISTINCT`/`GROUP BY` query and then find `latest_snapshot`
+return `None` for it a moment later, if this DELETE's transaction commits in
+between. Both call sites already handle that shape defensively (skip the
+client for that one read) — before this endpoint existed the branch was
+unreachable in practice (nothing else could remove a client's *last* row);
+this package makes it reachable for the first time, and the existing
+degrade-gracefully behaviour is exactly correct, not a new gap.
+
+`tests/test_concurrency.py`'s mixed hammer (now 100 parallel requests) and a
+dedicated 15-iteration race test in `tests/test_clients_api.py` both drive
+this: the dedicated test interleaves a real `DELETE` and a real
+`POST /v1/agent/installed` for the same `client_id` across genuine
+`threading.Thread`s and asserts the on-disk result is always exactly one of
+the two outcomes above, never a partial or duplicated state.
 
 ## Manifest parsers (WP 3.1)
 
@@ -4757,12 +4942,15 @@ rerunning it each time (a route that deletes user data, or one that accepts
 writes from a machine on the tailnet, is exactly the one you do not want to add
 unauthenticated by accident).
 
-**Phase 6 obligation (recorded WP 4c-api):** the API key today is a single
-static all-or-nothing secret (plan §6: "Auth: static API key in a header").
-`POST /v1/prefill/cached` (see "Check & update all cached games" above) is
-new write-capable surface that can trigger real downloads for every cached
-app in one call — Phase 6's planned scoped API keys must cover it explicitly,
-not just the routes that existed when that phase was designed.
+**Phase 6 obligation (recorded WP 4c-api; extended WP AG-1):** the API key
+today is a single static all-or-nothing secret (plan §6: "Auth: static API
+key in a header"). `POST /v1/prefill/cached` (see "Check & update all cached
+games" above) is write-capable surface that can trigger real downloads for
+every cached app in one call, and `DELETE /v1/clients/{client_id}` (see
+"Deleting a client" above) is destructive write surface that permanently
+removes a client's report history — Phase 6's planned scoped API keys must
+cover both explicitly, not just the routes that existed when that phase was
+designed.
 
 **`GET /v1/ping` removed (WP 1.3).** It was WP 1.2's scaffold route,
 existing solely so the test suite had an authenticated endpoint to exercise

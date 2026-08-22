@@ -242,6 +242,7 @@ Steam-only, prefill-first design can solve better:
 | POST | /v1/oracle/{appid}/refresh | Explicitly re-query the manifest oracle for one app (never automatic; `ok:false` on oracle failure, never 5xx) |
 | DELETE | /v1/oracle/{appid} | Drop stored oracle data for one app |
 | GET | /v1/clients | Per-client hit stats incl. bypass warnings |
+| DELETE | /v1/clients/{client_id} | Remove a ghost client's rows after a rename (WP AG-1; not a ban — a client that reports again reappears) |
 | GET | /v1/stats | Cache-event sweep state: cursor, lines read/skipped, miss-trigger activity, unmapped depot misses (WP 3.11, ADR-0008) |
 | POST | /v1/agent/installed | PC agent reports installed app IDs |
 | PUT | /v1/mapping/{depotid} | Manual depot→app mapping fallback (additive, see ADR-0003) |
@@ -2443,7 +2444,7 @@ Phases 1–3 plus 4a shipped. Rewritten 2026-08-17 to reflect the real state.
    client identity visible and attributed at startup (source + sanitize
    note), install-time preview reading the same hostname source as Go
    (the COMPUTERNAME case defect found in review would have minted ghost
-   identities), rename semantics documented honestly. AG-1 IN PROGRESS:
+   identities), rename semantics documented honestly. AG-1 DONE 2026-08-22:
    api exposes per-game installed-state with first-class freshness +
    DELETE /v1/clients/{id} for ghost rows. AG-2 (web badge, "installed
    but not cached") and AG-3 (Android parity, which also carries the

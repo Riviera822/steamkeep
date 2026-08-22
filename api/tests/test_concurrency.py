@@ -109,6 +109,15 @@ def test_concurrent_mixed_requests_do_not_500(tmp_path) -> None:
                 response = await client.get("/v1/clients", headers=AUTH)
                 return response.status_code
 
+            async def client_delete(client_id: str) -> int:
+                # WP AG-1: joins the mix as another writer taking the same
+                # BEGIN IMMEDIATE lock agent_report()'s diff transaction uses,
+                # against the SAME client_ids agent_report() is writing --
+                # must come back 204 or 404, never a 500 from the delete
+                # racing the report's read-then-insert.
+                response = await client.delete(f"/v1/clients/{client_id}", headers=AUTH)
+                return response.status_code
+
             tasks = []
             for i in range(10):
                 tasks.append(games_list())
@@ -141,12 +150,13 @@ def test_concurrent_mixed_requests_do_not_500(tmp_path) -> None:
                 # the same table while those writes and prunes are in flight.
                 tasks.append(agent_report(i))
                 tasks.append(clients_list())
+                tasks.append(client_delete(f"client-{i % 2}"))
 
             return await asyncio.gather(*tasks)
 
     statuses = asyncio.run(run())
 
-    assert len(statuses) == 90
+    assert len(statuses) == 100
     assert all(status_code < 500 for status_code in statuses), statuses
 
 

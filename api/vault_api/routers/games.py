@@ -7,15 +7,119 @@ automatically.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import sqlite3
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
-from vault_api import depot_manifests
+from vault_api import depot_manifests, scheduler, settings_store
 from vault_api.auth import require_api_key
+from vault_api.config import Settings
 from vault_api.deps import DbOpener, db_opener, get_cache_root, get_size_cache
 from vault_api.sizes import SizeCache, app_size_bytes
 
 router = APIRouter(dependencies=[Depends(require_api_key)], tags=["games"])
+
+
+class InstalledOn(BaseModel):
+    """One client currently reporting this app installed (WP AG-1).
+
+    **Freshness is not implied, it is enforced before this entry ever
+    exists.** This list is built from ``scheduler.fresh_client_snapshots`` —
+    the SAME freshness gate ``compute_targets`` applies before trusting a
+    client's report for sweep targeting (readable snapshot, parseable
+    timestamp, newer than ``VAULT_SCHEDULE_CLIENT_STALE_DAYS``). A client
+    whose latest report is stale, corrupt, or unparseable simply does not
+    appear here — the same way it does not appear in a sweep's target set.
+    So "installed on Zeus" in this list is exactly as trustworthy as "the
+    scheduler would currently prefill this for Zeus", never a stale claim
+    presented as current (see the module the function lives in for the full
+    reasoning, and ``docs/LEARNINGS.md``'s "two call sites, same predicate"
+    entry for why this reuses that function instead of its own check).
+
+    ``reported_at`` is included even though every entry already passed the
+    freshness gate: a frontend that wants to say "as of 14:32" or sort by
+    recency needs the real timestamp, not just a yes/no.
+    """
+
+    client_id: str
+    reported_at: str
+
+
+def _fresh_snapshots_now(
+    conn: sqlite3.Connection, base_settings: Settings, now: datetime
+) -> list[scheduler.FreshClientSnapshot]:
+    """The freshness-gated snapshots ``installed_on`` is built from, resolved
+    against the SAME db>env>default settings the scheduler's own tick uses
+    (WP AG-1 review round 1, B1 blocker).
+
+    ``base_settings`` must be the boot snapshot (``request.app.state.
+    scheduler.settings``), NOT an already-resolved object -- resolution
+    happens HERE, on every call, through ``settings_store.
+    effective_settings(conn, base_settings)``. Reading a boot-time settings
+    object directly (what round 1 shipped) freezes
+    ``schedule_client_stale_days`` at whatever it was when the process
+    started: that key is overridable at runtime (``PATCH /v1/settings``,
+    ``applies: "next_sweep"``) and the scheduler tick already re-resolves it
+    on every tick (``vault_api/scheduler.py``'s own tick-time resolution) --
+    so a boot snapshot here would let this endpoint claim "installed on
+    zeus" for a report the scheduler, one PATCH later, has already started
+    refusing to trust. Same fix shape as ``routers/schedule.py``'s
+    ``GET /v1/schedule``, which resolves through this exact function for the
+    identical reason.
+
+    ``now`` is likewise the scheduler's OWN clock (``PrefillScheduler.now()``,
+    injectable in tests) rather than a fresh ``datetime.now()`` call here --
+    one clock, so a frozen-clock test can control both the sweep's staleness
+    decision and this endpoint's, instead of two clocks that could disagree
+    by however long the request took to reach this line.
+    """
+    settings = settings_store.effective_settings(conn, base_settings)
+    fresh, _excluded = scheduler.fresh_client_snapshots(
+        conn, now, settings.schedule_client_stale_days
+    )
+    return fresh
+
+
+def _installed_on_by_appid(
+    conn: sqlite3.Connection, base_settings: Settings, now: datetime
+) -> dict[int, list[InstalledOn]]:
+    """Every fresh client's latest snapshot, re-keyed by appid (WP AG-1).
+
+    One query for the distinct client list plus one indexed lookup per
+    client (``scheduler.fresh_client_snapshots`` -> ``agent_reports.
+    latest_snapshot``) -- cost scales with the number of GAMING MACHINES that
+    have ever reported, not with the number of tracked apps, so this stays
+    cheap next to a library of any size and adds no per-app query (the N+1
+    shape the work package flagged to avoid). A vault with zero agents never
+    executes the per-client branch at all: the distinct-client query returns
+    no rows and this function returns ``{}`` immediately.
+    """
+    fresh = _fresh_snapshots_now(conn, base_settings, now)
+    by_appid: dict[int, list[InstalledOn]] = {}
+    for snapshot in fresh:
+        entry = InstalledOn(client_id=snapshot.client_id, reported_at=snapshot.reported_at)
+        for appid in snapshot.appids:
+            by_appid.setdefault(appid, []).append(entry)
+    return by_appid
+
+
+def _installed_on_for_appid(
+    conn: sqlite3.Connection, base_settings: Settings, now: datetime, appid: int
+) -> list[InstalledOn]:
+    """Same freshness-gated source as ``_installed_on_by_appid``, filtered to
+    ONE app (review round 1 nitpick): ``GET /v1/games/{appid}`` has no reason
+    to build the whole-library dict just to read one key back out of it --
+    the per-client scan this still runs is the same cost either way, only
+    the re-keying step changes shape.
+    """
+    fresh = _fresh_snapshots_now(conn, base_settings, now)
+    return [
+        InstalledOn(client_id=snapshot.client_id, reported_at=snapshot.reported_at)
+        for snapshot in fresh
+        if appid in snapshot.appids
+    ]
 
 
 class GameSummary(BaseModel):
@@ -103,6 +207,10 @@ class GameSummary(BaseModel):
     # cadence is not (depot_manifests only ever stores the LATEST manifest
     # per depot, never a change history).
     manifest_days_since_last_change: int | None = None
+    # Which fresh agent reports currently claim this app installed (WP AG-1).
+    # See InstalledOn's docstring for the freshness rule. Empty (never null)
+    # when nothing claims it -- including every vault with zero agents.
+    installed_on: list[InstalledOn] = []
 
 
 class DepotEntry(BaseModel):
@@ -134,15 +242,26 @@ class GameDetail(BaseModel):
     manifest_change_frequency: str | None = None
     manifest_observation_days: int | None = None
     manifest_days_since_last_change: int | None = None
+    # See GameSummary.installed_on.
+    installed_on: list[InstalledOn] = []
 
 
 @router.get("/v1/games", response_model=list[GameSummary])
 def list_games(
+    request: Request,
     open_db: DbOpener = Depends(db_opener),
     size_cache: SizeCache = Depends(get_size_cache),
     cache_root: str = Depends(get_cache_root),
 ) -> list[GameSummary]:
     """All tracked apps with their depot count and size (plan §6)."""
+    # WP AG-1 review round 1, B1: the scheduler object, not app.state.settings
+    # directly -- .settings is the boot snapshot _fresh_snapshots_now resolves
+    # against the live DB override every call, and .now() is the SAME
+    # injectable clock the scheduler's own tick uses (see
+    # routers/schedule.py's identical pattern).
+    scheduler_obj = request.app.state.scheduler
+    base_settings = scheduler_obj.settings
+    now = scheduler_obj.now()
     with open_db() as conn:
         rows = conn.execute(
             """
@@ -163,6 +282,10 @@ def list_games(
         # avoid-the-N+1 shape as app_depotids/depot_bytes below, not a
         # per-app query in this loop.
         frequencies = depot_manifests.change_frequency_by_app(conn)
+        # Same avoid-the-N+1 shape again: one pass over the fresh clients
+        # (bounded by client count, not app count), re-keyed by appid, not a
+        # per-app query in the loop below.
+        installed_on = _installed_on_by_appid(conn, base_settings, now)
 
     app_depotids: dict[int, list[int]] = {}
     for row in depot_rows:
@@ -187,6 +310,7 @@ def list_games(
                 manifest_change_frequency=frequency.category,
                 manifest_observation_days=frequency.observation_days,
                 manifest_days_since_last_change=frequency.days_since_last_change,
+                installed_on=installed_on.get(row["appid"], []),
             )
         )
     return games
@@ -194,6 +318,7 @@ def list_games(
 
 @router.get("/v1/games/{appid}", response_model=GameDetail)
 def get_game(
+    request: Request,
     appid: int,
     open_db: DbOpener = Depends(db_opener),
     size_cache: SizeCache = Depends(get_size_cache),
@@ -205,6 +330,10 @@ def get_game(
     a mapping upsert, either from a prefill run or the manual fallback —
     an appid with no mapping activity yet simply doesn't exist here).
     """
+    # See list_games' identical comment (WP AG-1 review round 1, B1).
+    scheduler_obj = request.app.state.scheduler
+    base_settings = scheduler_obj.settings
+    now = scheduler_obj.now()
     with open_db() as conn:
         app_row = conn.execute(
             "SELECT appid, name, status, last_prefill_at, last_manifest_check, "
@@ -234,6 +363,7 @@ def get_game(
             (appid,),
         ).fetchall()
         frequency = depot_manifests.change_frequency_for_app(conn, appid)
+        installed_on = _installed_on_for_appid(conn, base_settings, now, appid)
 
     depot_bytes = size_cache.get(cache_root).depot_bytes
 
@@ -258,4 +388,5 @@ def get_game(
         manifest_change_frequency=frequency.category,
         manifest_observation_days=frequency.observation_days,
         manifest_days_since_last_change=frequency.days_since_last_change,
+        installed_on=installed_on,
     )
